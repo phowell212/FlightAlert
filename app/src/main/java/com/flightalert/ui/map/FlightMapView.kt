@@ -762,16 +762,17 @@ class FlightMapView(context: Context) : View(context), LocationListener {
                     selectedAircraftId?.let { selectedId ->
                         parsed.firstOrNull { it.icao24 == selectedId }?.let { selectedAircraftSnapshot = it }
                     }
-                    Log.d(TAG, "Aircraft feed ${result.source.displayName}: ${parsed.size} aircraft")
+                    val coverage = feedCoverageLabel(result.queryCount, result.partialCoverage)
+                    Log.d(TAG, "Aircraft feed ${result.source.displayName}: ${parsed.size} aircraft$coverage")
                     synchronized(aircraft) {
                         aircraft.clear()
                         aircraft.addAll(parsed)
                     }
                     lastAircraftDataEpochSec = result.epochSec
                     aircraftStatus = if (parsed.isEmpty()) {
-                        "No aircraft reported in current map area (${result.source.displayName})"
+                        "No aircraft reported in current map area (${result.source.displayName}$coverage)"
                     } else {
-                        "Live aircraft updated via ${result.source.displayName}"
+                        "Live aircraft updated via ${result.source.displayName}$coverage"
                     }
                 } else {
                     aircraftStatus = when {
@@ -795,6 +796,15 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         if (!aircraftRefreshWaitingForViewport || latestLocation == null || !hasUsableViewport()) return
         aircraftRefreshWaitingForViewport = false
         requestVisibleAircraftIfNeeded(force = true)
+    }
+
+    private fun feedCoverageLabel(queryCount: Int, partialCoverage: Boolean): String {
+        return when {
+            queryCount > 1 && partialCoverage -> " ($queryCount areas, partial wide-area coverage)"
+            queryCount > 1 -> " ($queryCount areas)"
+            partialCoverage -> " (partial wide-area coverage)"
+            else -> ""
+        }
     }
 
     private fun hasUsableViewport(): Boolean {
@@ -901,7 +911,8 @@ class FlightMapView(context: Context) : View(context), LocationListener {
 
     private fun drawAircraft(canvas: Canvas, viewport: Viewport) {
         val snapshot = visibleAircraftSnapshot()
-        val labeled = snapshot.take(labelAircraftCount()).toSet()
+        val markerBlend = aircraftMarkerDotBlend(snapshot.size, viewport)
+        val labeled = snapshot.take(labelAircraftCount(markerBlend)).toSet()
         val selectedId = selectedAircraftId
         for (item in snapshot) {
             val estimated = estimatedAircraftPosition(item)
@@ -909,43 +920,55 @@ class FlightMapView(context: Context) : View(context), LocationListener {
             val sx = (point.x - viewport.centerX + viewport.width / 2.0).toFloat()
             val sy = (point.y - viewport.centerY + viewport.height / 2.0).toFloat()
             if (sx < -dp(32) || sx > viewport.width + dp(32) || sy < -dp(32) || sy > viewport.height + dp(32)) continue
-            drawAircraftIcon(canvas, sx, sy, item, item.icao24 == selectedId)
+            drawAircraftIcon(canvas, sx, sy, item, item.icao24 == selectedId, markerBlend)
             if (labeled.contains(item)) {
                 drawAircraftLabel(canvas, sx, sy, item)
             }
         }
     }
 
-    private fun drawAircraftIcon(canvas: Canvas, x: Float, y: Float, aircraft: Aircraft, selected: Boolean) {
-        val iconScale = aircraftIconScale()
-        paint.style = Paint.Style.FILL
-        paint.color = Color.argb(74, 16, 23, 25)
-        canvas.drawCircle(x + dp(3) * iconScale, y + dp(4) * iconScale, dp(16) * iconScale, paint)
+    private fun drawAircraftIcon(canvas: Canvas, x: Float, y: Float, aircraft: Aircraft, selected: Boolean, markerBlend: Float) {
+        val blend = markerBlend.coerceIn(0f, 1f)
+        val symbolAlpha = ((1f - blend) * 255).toInt().coerceIn(0, 255)
+        val dotAlpha = (blend * 255).toInt().coerceIn(0, 255)
+        val iconScale = aircraftIconScale() * (1f - blend * 0.18f)
         val color = aircraftColor(aircraft)
-        if (selected) {
-            strokePaint.color = Color.argb(235, Color.red(ACCENT_GREEN), Color.green(ACCENT_GREEN), Color.blue(ACCENT_GREEN))
-            strokePaint.strokeWidth = dp(2.6f)
-            canvas.drawCircle(x, y, dp(24) * iconScale, strokePaint)
-        }
+        if (symbolAlpha > 4) {
+            paint.alpha = symbolAlpha
+            strokePaint.alpha = symbolAlpha
+            paint.style = Paint.Style.FILL
+            paint.color = Color.argb(74, 16, 23, 25)
+            canvas.drawCircle(x + dp(3) * iconScale, y + dp(4) * iconScale, dp(16) * iconScale, paint)
+            if (selected) {
+                strokePaint.color = Color.argb(235, Color.red(ACCENT_GREEN), Color.green(ACCENT_GREEN), Color.blue(ACCENT_GREEN))
+                strokePaint.strokeWidth = dp(2.6f)
+                canvas.drawCircle(x, y, dp(24) * iconScale, strokePaint)
+            }
 
-        canvas.save()
-        canvas.translate(x, y)
-        canvas.scale(iconScale, iconScale)
-        if (aircraft.trackDeg != null && aircraftSymbol(aircraft) != AircraftSymbol.SURFACE) {
-            canvas.rotate(aircraft.trackDeg.toFloat())
+            canvas.save()
+            canvas.translate(x, y)
+            canvas.scale(iconScale, iconScale)
+            if (aircraft.trackDeg != null && aircraftSymbol(aircraft) != AircraftSymbol.SURFACE) {
+                canvas.rotate(aircraft.trackDeg.toFloat())
+            }
+            paint.color = color
+            strokePaint.color = Color.argb(235, 20, 25, 27)
+            strokePaint.strokeWidth = dp(1.2f)
+            when (aircraftSymbol(aircraft)) {
+                AircraftSymbol.ROTORCRAFT -> drawRotorcraftSymbol(canvas)
+                AircraftSymbol.GLIDER -> drawGliderSymbol(canvas)
+                AircraftSymbol.UAV -> drawUavSymbol(canvas)
+                AircraftSymbol.SURFACE -> drawSurfaceSymbol(canvas)
+                AircraftSymbol.HEAVY -> drawHeavyJetSymbol(canvas)
+                AircraftSymbol.FIXED_WING -> drawFixedWingSymbol(canvas)
+            }
+            canvas.restore()
         }
-        paint.color = color
-        strokePaint.color = Color.argb(235, 20, 25, 27)
-        strokePaint.strokeWidth = dp(1.2f)
-        when (aircraftSymbol(aircraft)) {
-            AircraftSymbol.ROTORCRAFT -> drawRotorcraftSymbol(canvas)
-            AircraftSymbol.GLIDER -> drawGliderSymbol(canvas)
-            AircraftSymbol.UAV -> drawUavSymbol(canvas)
-            AircraftSymbol.SURFACE -> drawSurfaceSymbol(canvas)
-            AircraftSymbol.HEAVY -> drawHeavyJetSymbol(canvas)
-            AircraftSymbol.FIXED_WING -> drawFixedWingSymbol(canvas)
+        paint.alpha = 255
+        strokePaint.alpha = 255
+        if (dotAlpha > 4) {
+            drawAircraftDot(canvas, x, y, color, selected, dotAlpha, blend)
         }
-        canvas.restore()
     }
 
     private fun aircraftIconScale(): Float {
@@ -958,7 +981,32 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         }
     }
 
-    private fun labelAircraftCount(): Int {
+    private fun aircraftMarkerDotBlend(count: Int, viewport: Viewport): Float {
+        val zoomDotBlend = 1f - smoothStep(AIRCRAFT_DOT_ZOOM_FULL, AIRCRAFT_DOT_ZOOM_SYMBOL, zoom.toFloat())
+        val densityPerTenThousandPx = count / max(1f, viewport.width * viewport.height / 10000f)
+        val densityDotBlend = smoothStep(AIRCRAFT_DOT_DENSITY_START, AIRCRAFT_DOT_DENSITY_FULL, densityPerTenThousandPx)
+        return max(zoomDotBlend, densityDotBlend).coerceIn(0f, 1f)
+    }
+
+    private fun drawAircraftDot(canvas: Canvas, x: Float, y: Float, color: Int, selected: Boolean, alpha: Int, blend: Float) {
+        val radius = dp(2.6f + (1f - blend) * 3.4f)
+        paint.style = Paint.Style.FILL
+        paint.color = Color.argb((alpha * 0.42f).toInt().coerceIn(0, 255), 16, 23, 25)
+        canvas.drawCircle(x + dp(1.6f), y + dp(1.8f), radius + dp(1.2f), paint)
+        paint.color = withAlpha(color, alpha)
+        canvas.drawCircle(x, y, radius, paint)
+        strokePaint.color = Color.argb((alpha * 0.86f).toInt().coerceIn(0, 255), 20, 25, 27)
+        strokePaint.strokeWidth = if (selected) dp(1.5f) else dp(0.8f)
+        canvas.drawCircle(x, y, radius, strokePaint)
+        if (selected) {
+            strokePaint.color = Color.argb((alpha * 0.92f).toInt().coerceIn(0, 255), Color.red(ACCENT_GREEN), Color.green(ACCENT_GREEN), Color.blue(ACCENT_GREEN))
+            strokePaint.strokeWidth = dp(2f)
+            canvas.drawCircle(x, y, radius + dp(6), strokePaint)
+        }
+    }
+
+    private fun labelAircraftCount(markerBlend: Float): Int {
+        if (markerBlend > 0.35f) return 0
         return when {
             zoom < 11.0 -> 0
             zoom < 12.0 -> 1
@@ -3078,6 +3126,16 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         return value * metrics.density * resources.configuration.fontScale
     }
 
+    private fun smoothStep(edge0: Float, edge1: Float, value: Float): Float {
+        if (edge0 == edge1) return if (value >= edge1) 1f else 0f
+        val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
+    private fun withAlpha(color: Int, alpha: Int): Int {
+        return Color.argb(alpha.coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
+    }
+
     private data class GeoPoint(val lat: Double, val lon: Double)
 
     private data class ScreenPoint(val x: Float, val y: Float)
@@ -3192,6 +3250,10 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         const val AIRCRAFT_FORCE_REFRESH_MS = 5000L
         const val AIRCRAFT_TICKER_FETCH_MS = 1000L
         const val AIRCRAFT_BOUNDS_PADDING_PX = 96.0
+        const val AIRCRAFT_DOT_ZOOM_FULL = 6.8f
+        const val AIRCRAFT_DOT_ZOOM_SYMBOL = 9.2f
+        const val AIRCRAFT_DOT_DENSITY_START = 0.75f
+        const val AIRCRAFT_DOT_DENSITY_FULL = 2.4f
         const val PATH_FIT_CONTEXT_MULTIPLIER = 1.5
         const val PRIORITY_PANEL_ROWS = 5
         const val MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY = 4

@@ -6,8 +6,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import kotlin.math.atan2
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -73,18 +75,66 @@ class AircraftFeedClient(private val userAgent: String) {
     }
 
     private fun fetchAirplanesLive(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
+        val plan = airplanesLiveQueryPlan(bounds)
+        val merged = linkedMapOf<String, FeedAircraft>()
+        var latestEpochSec: Double? = null
+        var sawOk = false
+        var sawRateLimit = false
+        var lastHttpCode: Int? = null
+
+        for (query in plan.queries) {
+            val result = fetchAirplanesLivePoint(query, ownLat, ownLon)
+            latestEpochSec = maxOfEpoch(latestEpochSec, result.epochSec)
+            lastHttpCode = result.httpCode ?: lastHttpCode
+            when (result.status) {
+                FeedStatus.OK -> {
+                    sawOk = true
+                    result.aircraft.forEach { item ->
+                        val key = item.icao24.ifBlank { "${item.lat}:${item.lon}:${item.callsign}" }
+                        merged[key] = newerAircraft(merged[key], item)
+                    }
+                }
+                FeedStatus.RATE_LIMITED -> sawRateLimit = true
+                FeedStatus.UNAVAILABLE -> Unit
+            }
+        }
+
+        return when {
+            sawOk -> FeedResult(
+                status = FeedStatus.OK,
+                source = FeedSource.AIRPLANES_LIVE,
+                aircraft = merged.values.sortedBy { it.distanceM },
+                epochSec = latestEpochSec,
+                queryCount = plan.queries.size,
+                partialCoverage = plan.partialCoverage
+            )
+            sawRateLimit -> FeedResult(
+                status = FeedStatus.RATE_LIMITED,
+                source = FeedSource.AIRPLANES_LIVE,
+                httpCode = lastHttpCode,
+                queryCount = plan.queries.size,
+                partialCoverage = plan.partialCoverage
+            )
+            else -> FeedResult(
+                status = FeedStatus.UNAVAILABLE,
+                source = FeedSource.AIRPLANES_LIVE,
+                httpCode = lastHttpCode,
+                queryCount = plan.queries.size,
+                partialCoverage = plan.partialCoverage
+            )
+        }
+    }
+
+    private fun fetchAirplanesLivePoint(query: AirplanesLiveQuery, ownLat: Double, ownLon: Double): FeedResult {
         var connection: HttpURLConnection? = null
         return try {
-            val centerLat = (bounds.minLat + bounds.maxLat) / 2.0
-            val centerLon = (bounds.minLon + bounds.maxLon) / 2.0
-            val radiusNm = radiusNmFor(bounds, centerLat, centerLon).coerceIn(MIN_AIRPLANES_RADIUS_NM, MAX_AIRPLANES_RADIUS_NM)
             val url = URL(
                 String.format(
                     Locale.US,
                     "https://api.airplanes.live/v2/point/%.5f/%.5f/%.0f",
-                    centerLat,
-                    centerLon,
-                    radiusNm
+                    query.centerLat,
+                    query.centerLon,
+                    query.radiusNm
                 )
             )
             connection = openConnection(url)
@@ -96,21 +146,66 @@ class AircraftFeedClient(private val userAgent: String) {
                     status = FeedStatus.OK,
                     source = FeedSource.AIRPLANES_LIVE,
                     aircraft = parseAirplanesLiveAircraft(json, ownLat, ownLon),
-                    epochSec = json.optDoubleOrNull("now")?.let { normalizeEpochSeconds(it) }
+                    epochSec = json.optDoubleOrNull("now")?.let { normalizeEpochSeconds(it) },
+                    queryCount = 1
                 )
             } else {
                 connection.errorStream?.close()
                 FeedResult(
                     status = if (code == HTTP_TOO_MANY_REQUESTS) FeedStatus.RATE_LIMITED else FeedStatus.UNAVAILABLE,
                     source = FeedSource.AIRPLANES_LIVE,
-                    httpCode = code
+                    httpCode = code,
+                    queryCount = 1
                 )
             }
         } catch (_: Exception) {
-            FeedResult(FeedStatus.UNAVAILABLE, FeedSource.AIRPLANES_LIVE)
+            FeedResult(FeedStatus.UNAVAILABLE, FeedSource.AIRPLANES_LIVE, queryCount = 1)
         } finally {
             connection?.disconnect()
         }
+    }
+
+    private fun airplanesLiveQueryPlan(bounds: FeedBounds): AirplanesLiveQueryPlan {
+        val normalized = bounds.normalized()
+        val centerLat = (normalized.minLat + normalized.maxLat) / 2.0
+        val centerLon = (normalized.minLon + normalized.maxLon) / 2.0
+        val widthM = distanceMeters(centerLat, normalized.minLon, centerLat, normalized.maxLon)
+        val heightM = distanceMeters(normalized.minLat, centerLon, normalized.maxLat, centerLon)
+        val targetCellSpanM = MAX_AIRPLANES_RADIUS_NM * METERS_PER_NAUTICAL_MILE * AIRPLANES_GRID_CELL_RADIUS_FACTOR
+        var columns = ceil(widthM / targetCellSpanM).toInt().coerceAtLeast(1)
+        var rows = ceil(heightM / targetCellSpanM).toInt().coerceAtLeast(1)
+        val neededRows = rows
+        val neededColumns = columns
+        while (rows * columns > MAX_AIRPLANES_LIVE_QUERIES) {
+            if (columns >= rows && columns > 1) columns-- else if (rows > 1) rows-- else break
+        }
+
+        val queries = mutableListOf<AirplanesLiveQuery>()
+        for (row in 0 until rows) {
+            val minLat = lerp(normalized.minLat, normalized.maxLat, row.toDouble() / rows)
+            val maxLat = lerp(normalized.minLat, normalized.maxLat, (row + 1.0) / rows)
+            for (column in 0 until columns) {
+                val minLon = lerp(normalized.minLon, normalized.maxLon, column.toDouble() / columns)
+                val maxLon = lerp(normalized.minLon, normalized.maxLon, (column + 1.0) / columns)
+                val cell = FeedBounds(minLat, minLon, maxLat, maxLon)
+                val cellCenterLat = (minLat + maxLat) / 2.0
+                val cellCenterLon = (minLon + maxLon) / 2.0
+                queries += AirplanesLiveQuery(
+                    centerLat = cellCenterLat,
+                    centerLon = cellCenterLon,
+                    radiusNm = radiusNmFor(cell, cellCenterLat, cellCenterLon)
+                        .times(AIRPLANES_QUERY_RADIUS_PADDING)
+                        .coerceIn(MIN_AIRPLANES_RADIUS_NM, MAX_AIRPLANES_RADIUS_NM)
+                )
+            }
+        }
+
+        return AirplanesLiveQueryPlan(
+            queries = queries.ifEmpty {
+                listOf(AirplanesLiveQuery(centerLat, centerLon, MIN_AIRPLANES_RADIUS_NM))
+            },
+            partialCoverage = rows < neededRows || columns < neededColumns
+        )
     }
 
     private fun openConnection(url: URL): HttpURLConnection {
@@ -221,11 +316,33 @@ class AircraftFeedClient(private val userAgent: String) {
         return if (value > 10_000_000_000.0) value / 1000.0 else value
     }
 
+    private fun maxOfEpoch(first: Double?, second: Double?): Double? {
+        return when {
+            first == null -> second
+            second == null -> first
+            else -> max(first, second)
+        }
+    }
+
+    private fun newerAircraft(existing: FeedAircraft?, incoming: FeedAircraft): FeedAircraft {
+        if (existing == null) return incoming
+        val existingTime = existing.lastContactSec ?: existing.positionTimeSec ?: 0.0
+        val incomingTime = incoming.lastContactSec ?: incoming.positionTimeSec ?: 0.0
+        return if (incomingTime >= existingTime) incoming else existing
+    }
+
+    private fun lerp(start: Double, end: Double, amount: Double): Double {
+        return start + (end - start) * amount
+    }
+
     companion object {
         private const val HTTP_TOO_MANY_REQUESTS = 429
         private const val DEFAULT_OPENSKY_BACKOFF_SECONDS = 3600L
         private const val MIN_AIRPLANES_RADIUS_NM = 25.0
         private const val MAX_AIRPLANES_RADIUS_NM = 250.0
+        private const val MAX_AIRPLANES_LIVE_QUERIES = 12
+        private const val AIRPLANES_GRID_CELL_RADIUS_FACTOR = 1.45
+        private const val AIRPLANES_QUERY_RADIUS_PADDING = 1.08
         private const val METERS_PER_NAUTICAL_MILE = 1852.0
         private const val FEET_PER_METER = 3.28084
 
@@ -241,7 +358,9 @@ data class FeedResult(
     val source: FeedSource,
     val aircraft: List<FeedAircraft> = emptyList(),
     val epochSec: Double? = null,
-    val httpCode: Int? = null
+    val httpCode: Int? = null,
+    val queryCount: Int = 1,
+    val partialCoverage: Boolean = false
 )
 
 data class FeedAircraft(
@@ -272,6 +391,19 @@ enum class FeedStatus {
 enum class FeedSource(val displayName: String) {
     OPENSKY("OpenSky"),
     AIRPLANES_LIVE("Airplanes.Live")
+}
+
+private data class AirplanesLiveQuery(val centerLat: Double, val centerLon: Double, val radiusNm: Double)
+
+private data class AirplanesLiveQueryPlan(val queries: List<AirplanesLiveQuery>, val partialCoverage: Boolean)
+
+private fun FeedBounds.normalized(): FeedBounds {
+    return FeedBounds(
+        minLat = min(minLat, maxLat).coerceIn(-90.0, 90.0),
+        minLon = min(minLon, maxLon).coerceIn(-180.0, 180.0),
+        maxLat = max(minLat, maxLat).coerceIn(-90.0, 90.0),
+        maxLon = max(minLon, maxLon).coerceIn(-180.0, 180.0)
+    )
 }
 
 private fun JSONArray.optNullableDouble(index: Int): Double? {
