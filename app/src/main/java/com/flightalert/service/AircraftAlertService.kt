@@ -12,7 +12,9 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
 import com.flightalert.MainActivity
 import com.flightalert.data.AircraftFeedClient
@@ -22,6 +24,7 @@ import com.flightalert.data.FeedStatus
 import com.flightalert.settings.FlightAlertSettings
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 
@@ -29,18 +32,22 @@ import kotlin.math.max
 class AircraftAlertService : Service(), LocationListener {
     private val executor = Executors.newSingleThreadExecutor()
     private val aircraftFeedClient = AircraftFeedClient(USER_AGENT)
+    private val activeHazards = linkedMapOf<String, AlertAircraft>()
     private lateinit var locationManager: LocationManager
     private var latestLocation: Location? = null
     private var polling = false
     private var stopped = false
-    private var lastAlertMs = 0L
-    private var lastAlertIcao24: String? = null
+    private var eventSequence = 0
+    private var lastMonitoringBody = ""
 
     override fun onCreate() {
         super.onCreate()
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        ensureChannel()
-        startForeground(ONGOING_NOTIFICATION_ID, buildNotification("Monitoring aircraft hazards", "Flight Alert is watching live aircraft traffic."))
+        ensureChannels()
+        startForeground(
+            ONGOING_NOTIFICATION_ID,
+            buildNotification(MONITORING_CHANNEL_ID, "Monitoring aircraft hazards", "Flight Alert is watching live aircraft traffic.", true)
+        )
         startLocationUpdates()
         schedulePoll(1000L)
     }
@@ -71,7 +78,12 @@ class AircraftAlertService : Service(), LocationListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onLocationChanged(location: Location) {
-        latestLocation = location
+        val previous = latestLocation
+        latestLocation = if (!location.hasAltitude() && previous?.hasAltitude() == true && location.time - previous.time < OWN_ALTITUDE_MAX_AGE_MS) {
+            Location(location).apply { altitude = previous.altitude }
+        } else {
+            location
+        }
     }
 
     @Deprecated("Deprecated in Java")
@@ -86,7 +98,7 @@ class AircraftAlertService : Service(), LocationListener {
         try {
             locationManager.getProviders(true).forEach { provider ->
                 val last = locationManager.getLastKnownLocation(provider)
-                if (last != null && (latestLocation == null || last.time > (latestLocation?.time ?: 0L))) {
+                if (last != null && shouldUseLocation(last, latestLocation)) {
                     latestLocation = last
                 }
             }
@@ -100,9 +112,15 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
+    private fun shouldUseLocation(candidate: Location, current: Location?): Boolean {
+        if (current == null) return true
+        if (candidate.hasAltitude() && !current.hasAltitude()) return true
+        return candidate.time > current.time
+    }
+
     private fun schedulePoll(delayMs: Long) {
         if (stopped) return
-        android.os.Handler(mainLooper).postDelayed({ pollAircraft() }, delayMs)
+        Handler(mainLooper).postDelayed({ pollAircraft() }, delayMs)
     }
 
     private fun pollAircraft() {
@@ -113,6 +131,7 @@ class AircraftAlertService : Service(), LocationListener {
         }
         val location = latestLocation
         if (location == null) {
+            updateMonitoringNotification("Waiting for a current device location.")
             schedulePoll(POLL_MS)
             return
         }
@@ -120,12 +139,32 @@ class AircraftAlertService : Service(), LocationListener {
         polling = true
         executor.execute {
             try {
-                // Query around the device, then notify only when user-defined hazard thresholds are met.
-                val hazard = fetchAircraft(location).firstOrNull { it.isHazard }
-                if (hazard != null) {
-                    maybeNotify(hazard)
+                val poll = fetchAircraft(location)
+                if (!poll.feedAvailable) {
+                    updateMonitoringNotification("Aircraft feed unavailable; retaining last alert state.")
+                    return@execute
                 }
+
+                val currentHazards = poll.aircraft.filter { it.isHazard }.associateBy { it.icao24 }
+                val entered = currentHazards.filterKeys { it !in activeHazards.keys }.values
+                val left = activeHazards.filterKeys { it !in currentHazards.keys }.values
+
+                entered.forEach { notifyHazardEvent("Aircraft entered alert range", it) }
+                left.forEach { notifyHazardEvent("Aircraft left alert range", it) }
+
+                activeHazards.clear()
+                activeHazards.putAll(currentHazards)
+
+                val nearest = poll.aircraft.firstOrNull()
+                updateMonitoringNotification(
+                    when {
+                        currentHazards.isNotEmpty() -> "${currentHazards.size} aircraft inside alert range."
+                        nearest != null -> "No aircraft inside range. Nearest: ${formatSeparation(nearest)}."
+                        else -> "No aircraft reported inside the query area."
+                    }
+                )
             } catch (_: Exception) {
+                updateMonitoringNotification("Aircraft alert check failed; retaining last alert state.")
             } finally {
                 polling = false
                 schedulePoll(POLL_MS)
@@ -133,63 +172,94 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
-    private fun fetchAircraft(location: Location): List<AlertAircraft> {
+    private fun fetchAircraft(location: Location): AlertPoll {
         val prefs = FlightAlertSettings.prefs(this)
         val alertDistanceFeet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_DISTANCE_FEET, FlightAlertSettings.DEFAULT_ALERT_DISTANCE_FEET)
         val alertAltitudeFeet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, FlightAlertSettings.DEFAULT_ALERT_ALTITUDE_FEET)
+        val ownAltitudeFeet = if (location.hasAltitude()) metersToFeet(location.altitude) else null
         val radiusMeters = max(feetToMeters(alertDistanceFeet.toDouble()), feetToMeters(MIN_QUERY_RADIUS_FEET))
         val bounds = boundsAround(location, radiusMeters)
         val result = aircraftFeedClient.fetchAircraft(bounds.toFeedBounds(), location.latitude, location.longitude)
-        if (result.status != FeedStatus.OK) return emptyList()
-        return result.aircraft
-            .filter { it.onGround != true }
-            .mapNotNull { it.toAlertAircraft(alertDistanceFeet, alertAltitudeFeet) }
-            .sortedBy { it.distanceFeet }
+        if (result.status != FeedStatus.OK) return AlertPoll(emptyList(), feedAvailable = false)
+        return AlertPoll(
+            aircraft = result.aircraft
+                .filter { it.onGround != true }
+                .mapNotNull { it.toAlertAircraft(alertDistanceFeet, alertAltitudeFeet, ownAltitudeFeet) }
+                .sortedBy { it.distanceFeet },
+            feedAvailable = true
+        )
     }
 
-    private fun maybeNotify(aircraft: AlertAircraft) {
-        val now = System.currentTimeMillis()
-        if (aircraft.icao24 == lastAlertIcao24 && now - lastAlertMs < ALERT_COOLDOWN_MS) return
-        lastAlertIcao24 = aircraft.icao24
-        lastAlertMs = now
-
+    private fun notifyHazardEvent(title: String, aircraft: AlertAircraft) {
+        if (!hasNotificationPermission()) return
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(
-            HAZARD_NOTIFICATION_ID,
+            EVENT_NOTIFICATION_BASE_ID + (eventSequence++ % EVENT_NOTIFICATION_ID_WINDOW),
             buildNotification(
-                "Aircraft hazard: ${aircraft.callsign}",
-                String.format(Locale.US, "%.0f ft away, %.0f ft altitude", aircraft.distanceFeet, aircraft.altitudeFeet)
+                HAZARD_CHANNEL_ID,
+                "$title: ${aircraft.callsign}",
+                String.format(Locale.US, "%s, %.0f ft altitude", formatSeparation(aircraft), aircraft.altitudeFeet),
+                false
             )
         )
     }
 
-    private fun buildNotification(title: String, body: String): Notification {
+    private fun formatSeparation(aircraft: AlertAircraft): String {
+        return if (aircraft.verticalSeparationFeet == null) {
+            String.format(Locale.US, "%.0f ft horizontal, vertical unavailable", aircraft.distanceFeet)
+        } else {
+            String.format(Locale.US, "%.0f ft horizontal, %.0f ft vertical", aircraft.distanceFeet, aircraft.verticalSeparationFeet)
+        }
+    }
+
+    private fun updateMonitoringNotification(body: String) {
+        if (body == lastMonitoringBody) return
+        lastMonitoringBody = body
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(ONGOING_NOTIFICATION_ID, buildNotification(MONITORING_CHANNEL_ID, "Monitoring aircraft hazards", body, true))
+    }
+
+    private fun buildNotification(channelId: String, title: String, body: String, ongoing: Boolean): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag()
         )
-        return Notification.Builder(this, CHANNEL_ID)
+        return Notification.Builder(this, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle(title)
             .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
             .setContentIntent(pendingIntent)
-            .setOngoing(title.startsWith("Monitoring"))
-            .setAutoCancel(!title.startsWith("Monitoring"))
+            .setOnlyAlertOnce(ongoing)
+            .setOngoing(ongoing)
+            .setAutoCancel(!ongoing)
             .build()
     }
 
-    private fun ensureChannel() {
+    private fun ensureChannels() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(CHANNEL_ID, "Aircraft hazard alerts", NotificationManager.IMPORTANCE_HIGH)
-        channel.description = "Live aircraft proximity alerts for drone flying"
-        manager.createNotificationChannel(channel)
+        manager.createNotificationChannel(
+            NotificationChannel(MONITORING_CHANNEL_ID, "Aircraft monitoring status", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Ongoing status while Flight Alert is monitoring live aircraft traffic"
+            }
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(HAZARD_CHANNEL_ID, "Aircraft range entry and exit alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Aircraft entering or leaving the selected alert range"
+            }
+        )
     }
 
     private fun hasLocationPermission(): Boolean {
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun hasNotificationPermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun alertsEnabled(): Boolean {
@@ -212,16 +282,18 @@ class AircraftAlertService : Service(), LocationListener {
         return FeedBounds(minLat = minLat, minLon = minLon, maxLat = maxLat, maxLon = maxLon)
     }
 
-    private fun FeedAircraft.toAlertAircraft(alertDistanceFeet: Float, alertAltitudeFeet: Float): AlertAircraft? {
+    private fun FeedAircraft.toAlertAircraft(alertDistanceFeet: Float, alertAltitudeFeet: Float, ownAltitudeFeet: Double?): AlertAircraft? {
         val altitudeMeters = altitudeM ?: return null
         val distanceFeet = metersToFeet(distanceM)
         val altitudeFeet = metersToFeet(altitudeMeters)
+        val verticalSeparationFeet = ownAltitudeFeet?.let { abs(altitudeFeet - it) }
         return AlertAircraft(
             icao24 = icao24,
             callsign = callsign,
             distanceFeet = distanceFeet,
             altitudeFeet = altitudeFeet,
-            isHazard = distanceFeet <= alertDistanceFeet && altitudeFeet <= alertAltitudeFeet
+            verticalSeparationFeet = verticalSeparationFeet,
+            isHazard = distanceFeet <= alertDistanceFeet && (verticalSeparationFeet == null || verticalSeparationFeet <= alertAltitudeFeet)
         )
     }
 
@@ -229,27 +301,30 @@ class AircraftAlertService : Service(), LocationListener {
 
     private fun metersToFeet(meters: Double): Double = meters * 3.28084
 
-    private fun immutableFlag(): Int {
-        return PendingIntent.FLAG_IMMUTABLE
-    }
+    private fun immutableFlag(): Int = PendingIntent.FLAG_IMMUTABLE
 
     private data class Bounds(val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)
+
+    private data class AlertPoll(val aircraft: List<AlertAircraft>, val feedAvailable: Boolean)
 
     private data class AlertAircraft(
         val icao24: String,
         val callsign: String,
         val distanceFeet: Double,
         val altitudeFeet: Double,
+        val verticalSeparationFeet: Double?,
         val isHazard: Boolean
     )
 
     companion object {
-        const val CHANNEL_ID = "aircraft_hazard_alerts"
+        const val MONITORING_CHANNEL_ID = "aircraft_monitoring_status"
+        const val HAZARD_CHANNEL_ID = "aircraft_range_events"
         const val ONGOING_NOTIFICATION_ID = 2001
-        const val HAZARD_NOTIFICATION_ID = 2002
+        const val EVENT_NOTIFICATION_BASE_ID = 2100
+        const val EVENT_NOTIFICATION_ID_WINDOW = 200
         const val POLL_MS = 30000L
-        const val ALERT_COOLDOWN_MS = 60000L
         const val MIN_QUERY_RADIUS_FEET = 10000.0
+        const val OWN_ALTITUDE_MAX_AGE_MS = 120000L
         const val USER_AGENT = "FlightAlertPrototype/0.1"
 
         fun start(context: Context) {

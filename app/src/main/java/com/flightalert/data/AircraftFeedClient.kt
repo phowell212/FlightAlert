@@ -134,6 +134,9 @@ class AircraftFeedClient(private val userAgent: String) {
             parsed += FeedAircraft(
                 icao24 = icao24,
                 callsign = callsign,
+                registration = null,
+                typeCode = null,
+                dbFlags = null,
                 lat = lat,
                 lon = lon,
                 onGround = row.optNullableBoolean(8),
@@ -160,6 +163,7 @@ class AircraftFeedClient(private val userAgent: String) {
             val lon = item.optDoubleOrNull("lon") ?: item.optJSONObject("lastPosition")?.optDoubleOrNull("lon") ?: continue
             val icao24 = item.optString("hex").trim().trimStart('~').lowercase(Locale.US)
             val callsign = item.optString("flight").trim().ifEmpty { item.optString("r").trim().ifEmpty { icao24.ifEmpty { "Unknown" } } }
+            val typeCode = item.optString("t").trim().ifEmpty { null }
             val altitudeFeet = item.optAltitudeFeet("alt_baro") ?: item.optAltitudeFeet("alt_geom")
             val seenPositionSec = item.optDoubleOrNull("seen_pos")
             val seenMessageSec = item.optDoubleOrNull("seen")
@@ -168,6 +172,9 @@ class AircraftFeedClient(private val userAgent: String) {
             parsed += FeedAircraft(
                 icao24 = icao24,
                 callsign = callsign,
+                registration = item.optString("r").trim().ifEmpty { null },
+                typeCode = typeCode,
+                dbFlags = item.optIntOrNull("dbFlags"),
                 lat = lat,
                 lon = lon,
                 onGround = item.optString("alt_baro") == "ground",
@@ -239,6 +246,9 @@ data class FeedResult(
 data class FeedAircraft(
     val icao24: String,
     val callsign: String,
+    val registration: String?,
+    val typeCode: String?,
+    val dbFlags: Int?,
     val lat: Double,
     val lon: Double,
     val onGround: Boolean?,
@@ -285,6 +295,10 @@ private fun JSONArray.optNullableBoolean(index: Int): Boolean? {
 
 private fun JSONObject.optLongOrNull(key: String): Long? {
     return if (has(key) && !isNull(key)) optLong(key) else null
+}
+
+private fun JSONObject.optIntOrNull(key: String): Int? {
+    return if (has(key) && !isNull(key)) optInt(key) else null
 }
 
 private fun JSONObject.optDoubleOrNull(key: String): Double? {

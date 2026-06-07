@@ -62,10 +62,12 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    @Suppress("DEPRECATION")
     private fun configureSystemBars() {
         // The map view handles insets; opaque bars keep Android chrome from blending into app UI.
-        window.statusBarColor = Color.rgb(8, 17, 15)
-        window.navigationBarColor = Color.rgb(8, 17, 15)
+        val systemBarColor = Color.rgb(13, 29, 25)
+        window.statusBarColor = systemBarColor
+        window.navigationBarColor = systemBarColor
         window.isStatusBarContrastEnforced = false
         window.isNavigationBarContrastEnforced = false
     }

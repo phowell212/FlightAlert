@@ -26,6 +26,8 @@ import android.view.MotionEvent
 import android.view.WindowInsets
 import android.view.View
 import com.flightalert.data.AircraftFeedClient
+import com.flightalert.data.AircraftDetails
+import com.flightalert.data.AircraftDetailsClient
 import com.flightalert.data.FeedAircraft
 import com.flightalert.data.FeedBounds
 import com.flightalert.data.FeedStatus
@@ -35,9 +37,12 @@ import com.flightalert.service.AircraftAlertService
 import com.flightalert.settings.FlightAlertSettings
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.URLEncoder
 import java.net.URL
 import java.util.Locale
 import java.util.concurrent.Executors
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.asin
 import kotlin.math.atan
 import kotlin.math.atan2
@@ -45,6 +50,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.log2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -65,6 +71,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     private val aircraft = mutableListOf<Aircraft>()
     private val openSkyClient = OpenSkyClient(USER_AGENT)
     private val aircraftFeedClient = AircraftFeedClient(USER_AGENT)
+    private val aircraftDetailsClient = AircraftDetailsClient(USER_AGENT)
     private val flightPathRequests = mutableSetOf<String>()
 
     private var locationPermissionGranted = false
@@ -77,6 +84,12 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     private var alertDistanceFeet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_DISTANCE_FEET, FlightAlertSettings.DEFAULT_ALERT_DISTANCE_FEET)
     private var alertAltitudeFeet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, FlightAlertSettings.DEFAULT_ALERT_ALTITUDE_FEET)
     private var settingsOpen = false
+    private var detailsOpen = false
+    private var aircraftDetails: AircraftDetails? = null
+    private var aircraftDetailsStatus = "Select aircraft"
+    private var aircraftPhoto: Bitmap? = null
+    private var aircraftPhotoStatus = "Photo unavailable"
+    private var detailsRequestInFlight = false
     private var aircraftFetchInFlight = false
     private var lastAircraftFetchMs = 0L
     private var lastTickerFetchMs = 0L
@@ -92,6 +105,11 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     private var selectedFlightPath: List<TrackPoint>? = null
     private var selectedFlightPathVisible = false
     private var selectedPathFitRequested = false
+    private val pathConflictTracks = linkedMapOf<String, List<TrackPoint>>()
+    private val pathConflictRequests = mutableSetOf<String>()
+    private var pathConflictSelectedId: String? = null
+    private var pathConflictMatches = emptySet<String>()
+    private var pathConflictStatus = "Unavailable"
     private var downX = 0f
     private var downY = 0f
     private var dragStarted = false
@@ -159,6 +177,11 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     }
 
     fun handleBackPress(): Boolean {
+        if (detailsOpen) {
+            detailsOpen = false
+            invalidate()
+            return true
+        }
         if (!settingsOpen) return false
         settingsOpen = false
         invalidate()
@@ -168,6 +191,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     override fun onLocationChanged(location: Location) {
         latestLocation = location
         mapStatus = "Loading map"
+        applyInitialMavicRangeZoomIfNeeded()
         requestVisibleAircraftIfNeeded(force = true)
         invalidate()
     }
@@ -187,13 +211,14 @@ class FlightMapView(context: Context) : View(context), LocationListener {
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        applyInitialMavicRangeZoomIfNeeded()
         requestDeferredAircraftRefresh()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         paint.style = Paint.Style.FILL
-        paint.color = MAP_EMPTY
+        paint.color = PANEL
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
 
         // Draw and hit-test inside system-bar-safe content so Android chrome never covers controls.
@@ -204,6 +229,8 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         canvas.save()
         canvas.translate(safeInsetLeft, safeInsetTop)
         canvas.clipRect(0f, 0f, w, h)
+        paint.color = MAP_EMPTY
+        canvas.drawRect(0f, 0f, w, h, paint)
 
         if (location == null) {
             drawNoLocationState(canvas, w, h)
@@ -221,6 +248,9 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         drawSettingsButton(canvas, w, h)
         drawTrafficPanel(canvas, w, h)
 
+        if (detailsOpen) {
+            drawAircraftDetailsPanel(canvas, w, h)
+        }
         if (settingsOpen) {
             drawSettingsPanel(canvas, w, h)
         }
@@ -229,7 +259,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val x = contentX(event.x)
         val y = contentY(event.y)
-        if (!settingsOpen && event.pointerCount >= 2) {
+        if (!settingsOpen && !detailsOpen && event.pointerCount >= 2) {
             parent?.requestDisallowInterceptTouchEvent(true)
             when (event.actionMasked) {
                 MotionEvent.ACTION_POINTER_DOWN -> beginPinch(event)
@@ -258,7 +288,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!settingsOpen && !dragBlocked && dragStartCenter != null && latestLocation != null) {
+                if (!settingsOpen && !detailsOpen && !dragBlocked && dragStartCenter != null && latestLocation != null) {
                     val dx = x - downX
                     val dy = y - downY
                     if (!dragStarted && (abs(dx) > dp(8) || abs(dy) > dp(8))) {
@@ -301,7 +331,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         val isPointerScroll = event.action == MotionEvent.ACTION_SCROLL &&
             (event.source and InputDevice.SOURCE_CLASS_POINTER) != 0
-        if (!settingsOpen && isPointerScroll && latestLocation != null) {
+        if (!settingsOpen && !detailsOpen && isPointerScroll && latestLocation != null) {
             val scroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
             if (scroll != 0f) {
                 // Hardware wheels/trackpads zoom around the cursor, matching mouse use in the emulator.
@@ -317,7 +347,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (!settingsOpen && latestLocation != null) {
+        if (!settingsOpen && !detailsOpen && latestLocation != null) {
             val zoomStep = when (keyCode) {
                 KeyEvent.KEYCODE_EQUALS,
                 KeyEvent.KEYCODE_PLUS,
@@ -885,20 +915,76 @@ class FlightMapView(context: Context) : View(context), LocationListener {
 
     private fun visibleAircraftSnapshot(): List<Aircraft> {
         val snapshot = synchronized(aircraft) { aircraft.toList() }
-        if (!selectedFlightPathVisible) return snapshot
-        val selectedId = selectedAircraftId ?: return snapshot
-        val selected = snapshot.firstOrNull { it.icao24 == selectedId } ?: return snapshot
-        val selectedPosition = estimatedAircraftPosition(selected)
-        val limitMeters = feetToMeters(pathNearbyFeet.toDouble())
-        // When a path is shown, de-clutter to aircraft close enough to matter near that selected plane.
-        return snapshot.filter { item ->
-            if (item.icao24 == selectedId) {
-                true
-            } else {
-                val position = estimatedAircraftPosition(item)
-                distanceMeters(selectedPosition.lat, selectedPosition.lon, position.lat, position.lon) <= limitMeters
+        if (!selectedFlightPathVisible || !hasSelectedFlightPath()) return snapshot
+        val selectedId = selectedAircraftId?.lowercase(Locale.US) ?: return snapshot
+        requestPathConflictTracks(snapshot)
+        if (pathConflictStatus != "Verified") return snapshot
+        return snapshot.filter { it.icao24.lowercase(Locale.US) == selectedId || pathConflictMatches.contains(it.icao24.lowercase(Locale.US)) }
+    }
+
+    private fun requestPathConflictTracks(snapshot: List<Aircraft>) {
+        val selectedId = selectedAircraftId?.lowercase(Locale.US) ?: return
+        val selectedPath = selectedFlightPath?.takeIf { it.size >= 2 } ?: return
+        if (pathConflictSelectedId != selectedId) {
+            pathConflictSelectedId = selectedId
+            pathConflictTracks.clear()
+            pathConflictRequests.clear()
+            pathConflictMatches = emptySet()
+            pathConflictStatus = "Loading"
+        }
+
+        val candidates = snapshot
+            .map { it.icao24.lowercase(Locale.US) }
+            .filter { it != selectedId && it.isNotBlank() }
+            .take(MAX_CONFLICT_TRACKS)
+        val missing = candidates.filter { it !in pathConflictTracks.keys && it !in pathConflictRequests }
+        missing.forEach { requestConflictTrack(it) }
+        updatePathConflictMatches(selectedPath, candidates)
+    }
+
+    private fun requestConflictTrack(icao24: String) {
+        pathConflictRequests += icao24
+        executor.execute {
+            val points = try {
+                openSkyClient.fetchTrack(icao24).takeIf { it.size >= 2 }
+            } catch (_: Exception) {
+                null
+            }
+            post {
+                pathConflictRequests -= icao24
+                if (points != null) {
+                    pathConflictTracks[icao24] = points
+                }
+                val ids = synchronized(aircraft) { aircraft.map { item -> item.icao24.lowercase(Locale.US) } }
+                selectedFlightPath?.let { updatePathConflictMatches(it, ids) }
+                invalidate()
             }
         }
+    }
+
+    private fun updatePathConflictMatches(selectedPath: List<TrackPoint>, candidates: List<String>) {
+        val matches = candidates
+            .filter { id -> pathConflictTracks[id]?.let { hasPathConflict(selectedPath, it) } == true }
+            .toSet()
+        pathConflictMatches = matches
+        pathConflictStatus = when {
+            pathConflictRequests.isNotEmpty() -> "Loading"
+            candidates.isEmpty() -> "Verified"
+            pathConflictTracks.keys.containsAll(candidates) -> "Verified"
+            pathConflictTracks.isNotEmpty() -> "Partial"
+            else -> "Unverified"
+        }
+    }
+
+    private fun hasPathConflict(selectedPath: List<TrackPoint>, otherPath: List<TrackPoint>): Boolean {
+        val distanceLimit = feetToMeters(pathNearbyFeet.toDouble())
+        for (selected in selectedPath) {
+            for (other in otherPath) {
+                if (abs(selected.epochSec - other.epochSec) > PATH_CONFLICT_TIME_WINDOW_SEC) continue
+                if (distanceMeters(selected.lat, selected.lon, other.lat, other.lon) <= distanceLimit) return true
+            }
+        }
+        return false
     }
 
     private fun drawFixedWingSymbol(canvas: Canvas) {
@@ -1279,6 +1365,10 @@ class FlightMapView(context: Context) : View(context), LocationListener {
             y = drawTrafficDetailRow(canvas, rect, y, "Track", formatTrack(target.trackDeg))
             y = drawTrafficDetailRow(canvas, rect, y, "Vertical rate", formatVerticalRate(target.verticalRateMs))
             y = drawTrafficDetailRow(canvas, rect, y, "Last contact", formatAge(target))
+            y = drawTrafficDetailRow(canvas, rect, y, "Registration", target.registration ?: "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Type", target.typeCode ?: "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Military", if (target.isMilitary) "Tagged military" else "Not tagged")
+            y = drawTrafficDetailRow(canvas, rect, y, "Military base origin", "Unavailable")
             y = drawTrafficDetailRow(canvas, rect, y, "ICAO", target.icao24.uppercase(Locale.US))
             drawTrafficDetailRow(canvas, rect, y, "Position", formatPosition(target))
         } else {
@@ -1294,6 +1384,13 @@ class FlightMapView(context: Context) : View(context), LocationListener {
             y += dp(24)
             canvas.drawText(formatTrack(target.trackDeg), rect.left + dp(16), y, textPaint)
             canvas.drawText(formatVerticalRate(target.verticalRateMs), rect.left + rect.width() * 0.46f, y, textPaint)
+            if (target.isMilitary) {
+                y += dp(22)
+                textPaint.isFakeBoldText = true
+                textPaint.color = MILITARY_GRAY
+                canvas.drawText("Tagged military", rect.left + dp(16), y, textPaint)
+                textPaint.isFakeBoldText = false
+            }
         }
 
     }
@@ -1308,12 +1405,150 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         textPaint.isFakeBoldText = true
         textPaint.textSize = sp(13)
         textPaint.color = TEXT
-        canvas.drawText(value, rect.right - dp(16), y, textPaint)
+        drawFittedRightText(canvas, value, rect.right - dp(16), y, rect.width() * 0.56f, sp(13), sp(9))
         strokePaint.color = Color.argb(74, Color.red(PANEL_STROKE), Color.green(PANEL_STROKE), Color.blue(PANEL_STROKE))
         strokePaint.strokeWidth = dp(1)
         canvas.drawLine(rect.left + dp(16), y + dp(10), rect.right - dp(16), y + dp(10), strokePaint)
         textPaint.isFakeBoldText = false
         return y + dp(28)
+    }
+
+    private fun drawFittedRightText(canvas: Canvas, value: String, right: Float, y: Float, maxWidth: Float, startSize: Float, minSize: Float) {
+        textPaint.textSize = startSize
+        while (textPaint.textSize > minSize && textPaint.measureText(value) > maxWidth) {
+            textPaint.textSize -= dp(0.5f)
+        }
+        val display = if (textPaint.measureText(value) <= maxWidth) value else ellipsize(value, maxWidth)
+        canvas.drawText(display, right, y, textPaint)
+    }
+
+    private fun ellipsize(value: String, maxWidth: Float): String {
+        if (value.length <= 3) return value
+        var end = value.length
+        while (end > 3 && textPaint.measureText(value.substring(0, end) + "...") > maxWidth) {
+            end--
+        }
+        return value.substring(0, end) + "..."
+    }
+
+    private fun drawAircraftDetailsPanel(canvas: Canvas, w: Float, h: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = Color.argb(180, 3, 8, 9)
+        canvas.drawRect(0f, 0f, w, h, paint)
+
+        val rect = detailsPanelBounds(w, h)
+        paint.color = Color.rgb(16, 32, 29)
+        canvas.drawRoundRect(rect, dp(8), dp(8), paint)
+        strokePaint.strokeWidth = dp(1)
+        strokePaint.color = PANEL_STROKE
+        canvas.drawRoundRect(rect, dp(8), dp(8), strokePaint)
+        drawChoiceButton(canvas, detailsCloseButtonBounds(rect), "Close", false)
+
+        val aircraft = displayedTraffic().aircraft
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.isFakeBoldText = true
+        textPaint.textSize = sp(22)
+        textPaint.color = TEXT
+        canvas.drawText(aircraft?.callsign ?: "Aircraft details", rect.left + dp(18), rect.top + dp(38), textPaint)
+
+        textPaint.isFakeBoldText = false
+        textPaint.textSize = sp(12)
+        textPaint.color = MUTED
+        canvas.drawText(aircraftDetailsStatus, rect.left + dp(18), rect.top + dp(60), textPaint)
+
+        val photoBottom = rect.top + if (isWideLayout(w, h)) dp(204) else dp(236)
+        val photoRect = RectF(rect.left + dp(18), rect.top + dp(78), rect.right - dp(18), photoBottom)
+        paint.color = Color.rgb(22, 42, 38)
+        canvas.drawRoundRect(photoRect, dp(6), dp(6), paint)
+        val photo = aircraftPhoto
+        if (photo != null) {
+            val src = Rect(0, 0, photo.width, photo.height)
+            canvas.drawBitmap(photo, src, aspectFitRect(photo.width, photo.height, photoRect), paint)
+        } else {
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.textSize = sp(12)
+            textPaint.color = MUTED
+            canvas.drawText(aircraftPhotoStatus, photoRect.centerX(), photoRect.centerY(), textPaint)
+        }
+
+        val details = aircraftDetails
+        var y = photoRect.bottom + dp(30)
+        if (aircraft != null) {
+            y = drawTrafficDetailRow(canvas, rect, y, "ICAO", aircraft.icao24.uppercase(Locale.US))
+            y = drawTrafficDetailRow(canvas, rect, y, "Registration", details?.registration ?: aircraft.registration ?: "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Owner", details?.owner ?: "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Aircraft", formatAircraftType(details, aircraft))
+            y = drawTrafficDetailRow(canvas, rect, y, "MFR year", details?.manufacturedYear ?: "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Registry source", details?.registrySource ?: "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Military", if (aircraft.isMilitary) "Tagged military" else "Not tagged")
+            y = drawTrafficDetailRow(canvas, rect, y, "Military base origin", "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Route", details?.route ?: "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Destination", formatAirport(details?.destinationAirport))
+            y = drawTrafficDetailRow(canvas, rect, y, "Flight time", "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Flightpath complete", "Unavailable")
+            y = drawTrafficDetailRow(canvas, rect, y, "Observed path span", formatObservedPathSpan(aircraft))
+            drawTrafficDetailRow(canvas, rect, y, "Path conflict filter", formatPathConflictStatus())
+        }
+    }
+
+    private fun aspectFitRect(sourceWidth: Int, sourceHeight: Int, outer: RectF): RectF {
+        if (sourceWidth <= 0 || sourceHeight <= 0 || outer.width() <= 0f || outer.height() <= 0f) return RectF(outer)
+        val sourceRatio = sourceWidth.toFloat() / sourceHeight.toFloat()
+        val outerRatio = outer.width() / outer.height()
+        return if (sourceRatio > outerRatio) {
+            val fittedHeight = outer.width() / sourceRatio
+            val top = outer.centerY() - fittedHeight / 2f
+            RectF(outer.left, top, outer.right, top + fittedHeight)
+        } else {
+            val fittedWidth = outer.height() * sourceRatio
+            val left = outer.centerX() - fittedWidth / 2f
+            RectF(left, outer.top, left + fittedWidth, outer.bottom)
+        }
+    }
+
+    private fun detailsPanelBounds(w: Float, h: Float): RectF {
+        val margin = dp(14)
+        val width = if (isWideLayout(w, h)) min(dp(520), w - margin * 2f) else w - margin * 2f
+        val height = min(h - margin * 2f, dp(720))
+        return RectF((w - width) / 2f, (h - height) / 2f, (w + width) / 2f, (h + height) / 2f)
+    }
+
+    private fun detailsCloseButtonBounds(panel: RectF): RectF {
+        return RectF(panel.right - dp(112), panel.top + dp(14), panel.right - dp(18), panel.top + dp(48))
+    }
+
+    private fun formatAircraftType(details: AircraftDetails?, aircraft: Aircraft): String {
+        return listOfNotNull(details?.manufacturer, details?.type, details?.typeCode ?: aircraft.typeCode)
+            .distinct()
+            .joinToString(" ")
+            .ifEmpty { "Unavailable" }
+    }
+
+    private fun formatAirport(airport: com.flightalert.data.AirportDetails?): String {
+        return if (airport == null) {
+            "Unavailable"
+        } else {
+            listOfNotNull(airport.name, airport.icao, airport.iata).joinToString(" / ")
+        }
+    }
+
+    private fun formatObservedPathSpan(aircraft: Aircraft): String {
+        val id = aircraft.icao24.lowercase(Locale.US)
+        if (selectedFlightPathAircraftId != id) return "Unavailable"
+        val path = selectedFlightPath?.takeIf { it.size >= 2 } ?: return "Unavailable"
+        val start = path.minOf { it.epochSec }
+        val end = path.maxOf { it.epochSec }
+        val minutes = ((end - start) / 60.0).coerceAtLeast(0.0)
+        return String.format(Locale.US, "%.0f min", minutes)
+    }
+
+    private fun formatPathConflictStatus(): String {
+        return when (pathConflictStatus) {
+            "Verified" -> "${pathConflictMatches.size} matches within ${formatFeetSetting(pathNearbyFeet)} / ${PATH_CONFLICT_TIME_WINDOW_SEC}s"
+            "Loading" -> "Loading verified path data"
+            "Partial" -> "Partial path data; not filtering"
+            else -> "Unavailable; not filtering"
+        }
     }
 
     private fun drawNoAircraftPanel(canvas: Canvas, rect: RectF, y: Float) {
@@ -1368,7 +1603,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         drawAdjusterRow(canvas, rect, rect.top + dp(258), "Path nearby filter", formatFeetSetting(pathNearbyFeet), pathFilterMinusBounds(rect), pathFilterPlusBounds(rect))
         drawChoiceButton(canvas, alertsToggleBounds(rect), if (alertsEnabled) "Hazard alerts on" else "Hazard alerts off", alertsEnabled)
         drawAdjusterRow(canvas, rect, rect.top + dp(388), "Alert distance", formatFeetSetting(alertDistanceFeet), alertDistanceMinusBounds(rect), alertDistancePlusBounds(rect))
-        drawAdjusterRow(canvas, rect, rect.top + dp(478), "Alert altitude below", formatFeetSetting(alertAltitudeFeet), alertAltitudeMinusBounds(rect), alertAltitudePlusBounds(rect))
+        drawAdjusterRow(canvas, rect, rect.top + dp(478), "Alert vertical range", formatFeetSetting(alertAltitudeFeet), alertAltitudeMinusBounds(rect), alertAltitudePlusBounds(rect))
 
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.textSize = sp(11)
@@ -1410,6 +1645,14 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     }
 
     private fun handleTap(x: Float, y: Float) {
+        if (detailsOpen) {
+            if (detailsCloseButtonBounds(detailsPanelBounds(contentWidth(), contentHeight())).contains(x, y)) {
+                detailsOpen = false
+            }
+            invalidate()
+            return
+        }
+
         if (settingsOpen) {
             val panel = settingsPanelBounds(contentWidth(), contentHeight())
             when {
@@ -1437,6 +1680,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
             clearFlightPathButtonBounds(w, h).contains(x, y) && shouldShowClearPathButton() -> clearSelectedFlightPath()
             viewport != null && flightPathButtonBounds(w, h).contains(x, y) && shouldShowPathButton(viewport) -> showSelectedFlightPath()
             settingsButtonBounds(w, h).contains(x, y) -> settingsOpen = true
+            infoPanelBounds(w, h).contains(x, y) -> displayedTraffic().aircraft?.let { openAircraftDetails(it) }
             !isOverlayOrControlHit(x, y) -> selectAircraftAt(x, y)
         }
         invalidate()
@@ -1476,7 +1720,233 @@ class FlightMapView(context: Context) : View(context), LocationListener {
             selectedFlightPath = null
             selectedFlightPathVisible = false
             selectedPathFitRequested = false
+            resetPathConflictFilter()
             requestFlightPath(hit.icao24)
+        }
+    }
+
+    private fun openAircraftDetails(aircraft: Aircraft) {
+        detailsOpen = true
+        aircraftDetails = null
+        aircraftPhoto = null
+        aircraftDetailsStatus = "Loading live aircraft details"
+        aircraftPhotoStatus = "Loading exact-aircraft photo"
+        requestAircraftDetails(aircraft)
+    }
+
+    private fun requestAircraftDetails(aircraft: Aircraft) {
+        if (detailsRequestInFlight) return
+        detailsRequestInFlight = true
+        val requestedId = aircraft.icao24
+        executor.execute {
+            val details = aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration)
+            post {
+                if (displayedTraffic().aircraft?.icao24 == requestedId) {
+                    aircraftDetails = details
+                    aircraftDetailsStatus = if (details.owner == null && details.route == null && details.registration == null) {
+                        "Metadata unavailable from configured APIs"
+                    } else {
+                        "Metadata from ${details.registrySource ?: "configured APIs"}"
+                    }
+                    aircraftPhotoStatus = "Exact photo unavailable; trying representative make/model photo"
+                    invalidate()
+                }
+            }
+            val photo = fetchAircraftPhoto(aircraft, details)
+            post {
+                detailsRequestInFlight = false
+                if (displayedTraffic().aircraft?.icao24 != requestedId) return@post
+                when (photo) {
+                    is AircraftPhotoResult.Found -> {
+                        aircraftPhoto = photo.bitmap
+                        aircraftPhotoStatus = photo.note
+                    }
+                    is AircraftPhotoResult.Unavailable -> {
+                        aircraftPhoto = null
+                        aircraftPhotoStatus = photo.reason
+                    }
+                }
+                invalidate()
+            }
+        }
+    }
+
+    private fun fetchAircraftPhoto(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult {
+        val exactSources = listOfNotNull(
+            "https://api.planespotters.net/pub/photos/hex/${aircraft.icao24.trim()}",
+            details.registration?.let { "https://api.planespotters.net/pub/photos/reg/${it.trim()}" }
+        )
+        exactSources.forEach { apiUrl ->
+            fetchPlanespottersPhotoUrl(apiUrl)?.let { imageUrl ->
+                fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from PlaneSpotters") }
+            }
+        }
+        fetchBitmap("https://hexdb.io/hex-image-thumb?hex=${aircraft.icao24.trim()}")?.let {
+            return AircraftPhotoResult.Found(it, "Exact aircraft photo from HexDB")
+        }
+        return fetchRepresentativePhoto(details)
+            ?: AircraftPhotoResult.Unavailable("Exact and representative photos unavailable from configured APIs")
+    }
+
+    private fun fetchPlanespottersPhotoUrl(apiUrl: String): String? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 5000
+                readTimeout = 8000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", USER_AGENT)
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                connection.errorStream?.close()
+                return null
+            }
+            findFirstImageUrl(JSONObject(connection.inputStream.bufferedReader().use { it.readText() }))
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    private fun fetchRepresentativePhoto(details: AircraftDetails): AircraftPhotoResult.Found? {
+        val model = representativeModelName(details) ?: return null
+        val queries = representativePhotoQueries(details, model)
+        val url = queries.firstNotNullOfOrNull { query ->
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val apiUrl = "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=10&gsrsearch=$encoded&prop=imageinfo&iiprop=url|mime"
+            fetchWikimediaImageUrl(apiUrl)
+        } ?: return null
+        val bitmap = fetchBitmap(url) ?: return null
+        return AircraftPhotoResult.Found(bitmap, "Representative $model photo from Wikimedia Commons; not this exact aircraft")
+    }
+
+    private fun representativeModelName(details: AircraftDetails): String? {
+        val code = details.typeCode?.uppercase(Locale.US)?.trim()
+        val knownModel = when (code) {
+            "A19N" -> "Airbus A319neo"
+            "A20N" -> "Airbus A320neo"
+            "A21N" -> "Airbus A321neo"
+            "A319" -> "Airbus A319"
+            "A320" -> "Airbus A320"
+            "A321" -> "Airbus A321"
+            "B37M" -> "Boeing 737 MAX 7"
+            "B38M" -> "Boeing 737 MAX 8"
+            "B39M" -> "Boeing 737 MAX 9"
+            "B3XM" -> "Boeing 737 MAX 10"
+            "B737" -> "Boeing 737"
+            "B738" -> "Boeing 737-800"
+            "B739" -> "Boeing 737-900"
+            "B752" -> "Boeing 757-200"
+            "B763" -> "Boeing 767-300"
+            "B772" -> "Boeing 777-200"
+            "B77W" -> "Boeing 777-300ER"
+            "B788" -> "Boeing 787-8"
+            "B789" -> "Boeing 787-9"
+            "BCS1" -> "Airbus A220-100"
+            "BCS3" -> "Airbus A220-300"
+            "C172" -> "Cessna 172"
+            "C182" -> "Cessna 182"
+            "C208" -> "Cessna 208 Caravan"
+            "CRJ7" -> "Bombardier CRJ700"
+            "CRJ9" -> "Bombardier CRJ900"
+            "E170" -> "Embraer 170"
+            "E75L", "E75S" -> "Embraer 175"
+            "E190" -> "Embraer 190"
+            "E195" -> "Embraer 195"
+            "PA28" -> "Piper PA-28 Cherokee"
+            "SR20" -> "Cirrus SR20"
+            "SR22" -> "Cirrus SR22"
+            else -> null
+        }
+        if (knownModel != null) return knownModel
+        return listOfNotNull(details.manufacturer, details.type ?: details.typeCode)
+            .joinToString(" ")
+            .trim()
+            .ifEmpty { null }
+    }
+
+    private fun representativePhotoQueries(details: AircraftDetails, model: String): List<String> {
+        return listOfNotNull(
+            "\"$model\" aircraft",
+            "$model aircraft",
+            "\"$model\" airliner",
+            details.type?.let { "\"$it\" aircraft" },
+            details.typeCode?.let { "${details.manufacturer.orEmpty()} $it aircraft".trim() },
+            details.typeCode?.let { "$it aircraft" }
+        ).filter { it.isNotBlank() }.distinct()
+    }
+
+    private fun fetchWikimediaImageUrl(apiUrl: String): String? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 5000
+                readTimeout = 8000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", USER_AGENT)
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                connection.errorStream?.close()
+                return null
+            }
+            val pages = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+                .optJSONObject("query")
+                ?.optJSONObject("pages")
+                ?: return null
+            val keys = pages.keys()
+            while (keys.hasNext()) {
+                val info = pages.optJSONObject(keys.next())?.optJSONArray("imageinfo")?.optJSONObject(0) ?: continue
+                val mime = info.optString("mime")
+                val url = info.optString("url")
+                if (mime.startsWith("image/") && IMAGE_URL_PATTERN.containsMatchIn(url)) return url
+            }
+            null
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    private fun fetchBitmap(url: String): Bitmap? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 5000
+                readTimeout = 8000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", USER_AGENT)
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                connection.errorStream?.close()
+                return null
+            }
+            BitmapFactory.decodeStream(connection.inputStream)
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    private fun findFirstImageUrl(value: Any?): String? {
+        return when (value) {
+            is JSONObject -> {
+                val keys = value.keys()
+                while (keys.hasNext()) {
+                    findFirstImageUrl(value.opt(keys.next()))?.let { return it }
+                }
+                null
+            }
+            is JSONArray -> {
+                for (index in 0 until value.length()) {
+                    findFirstImageUrl(value.opt(index))?.let { return it }
+                }
+                null
+            }
+            is String -> value.takeIf { it.startsWith("http", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(it) }
+            else -> null
         }
     }
 
@@ -1491,6 +1961,15 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         selectedFlightPath = null
         selectedFlightPathVisible = false
         selectedPathFitRequested = false
+        resetPathConflictFilter()
+    }
+
+    private fun resetPathConflictFilter() {
+        pathConflictSelectedId = null
+        pathConflictTracks.clear()
+        pathConflictRequests.clear()
+        pathConflictMatches = emptySet()
+        pathConflictStatus = "Unavailable"
     }
 
     private fun fitSelectedFlightPath() {
@@ -1570,7 +2049,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     }
 
     private fun isOverlayOrControlHit(x: Float, y: Float): Boolean {
-        if (settingsOpen) return true
+        if (settingsOpen || detailsOpen) return true
         val w = contentWidth()
         val h = contentHeight()
         return (!followingLocation && recenterButtonBounds(w, h).contains(x, y)) ||
@@ -1619,6 +2098,18 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     private fun setAlertAltitudeFeet(next: Float) {
         alertAltitudeFeet = next.coerceIn(100f, 10000f)
         prefs.edit().putFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, alertAltitudeFeet).apply()
+    }
+
+    private fun applyInitialMavicRangeZoomIfNeeded() {
+        if (prefs.contains(FlightAlertSettings.KEY_ZOOM) || width <= 0 || height <= 0) return
+        val focusArea = largestUnblockedMapRect(contentWidth(), contentHeight()).insetBy(dp(12))
+        val targetSpanMeters = DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M * INITIAL_RANGE_MULTIPLIER
+        val availablePixels = min(focusArea.width(), focusArea.height()).coerceAtLeast(dp(120)).toDouble()
+        val metersPerPixel = targetSpanMeters / availablePixels
+        val latitude = latestLocation?.latitude ?: 0.0
+        zoom = log2((cos(Math.toRadians(latitude)) * EARTH_CIRCUMFERENCE_M) / (TILE_SIZE * metersPerPixel))
+            .coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
+        prefs.edit().putFloat(FlightAlertSettings.KEY_ZOOM, zoom.toFloat()).apply()
     }
 
     private fun readStoredZoom(): Double {
@@ -1942,6 +2433,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     }
 
     private fun aircraftColor(aircraft: Aircraft): Int {
+        if (aircraft.isMilitary) return MILITARY_GRAY
         val altitude = aircraft.altitudeM
         return when {
             altitude == null -> ACCENT_BLUE
@@ -1989,6 +2481,9 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         return Aircraft(
             icao24 = icao24,
             callsign = callsign,
+            registration = registration,
+            typeCode = typeCode,
+            isMilitary = dbFlags?.let { it and DB_FLAG_MILITARY != 0 } == true,
             lat = lat,
             lon = lon,
             onGround = onGround,
@@ -2036,9 +2531,17 @@ class FlightMapView(context: Context) : View(context), LocationListener {
 
     private data class AircraftHit(val aircraft: Aircraft, val distanceSquared: Float)
 
+    private sealed class AircraftPhotoResult {
+        data class Found(val bitmap: Bitmap, val note: String) : AircraftPhotoResult()
+        data class Unavailable(val reason: String) : AircraftPhotoResult()
+    }
+
     private data class Aircraft(
         val icao24: String,
         val callsign: String,
+        val registration: String?,
+        val typeCode: String?,
+        val isMilitary: Boolean,
         val lat: Double,
         val lon: Double,
         val onGround: Boolean?,
@@ -2111,10 +2614,16 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         const val AIRCRAFT_TICKER_FETCH_MS = 1000L
         const val AIRCRAFT_BOUNDS_PADDING_PX = 96.0
         const val PATH_FIT_CONTEXT_MULTIPLIER = 1.5
+        const val PATH_CONFLICT_TIME_WINDOW_SEC = 180L
+        const val MAX_CONFLICT_TRACKS = 12
         const val AIRCRAFT_TAP_RADIUS_DP = 34
         const val HOLE_PUNCH_MAX_SIZE_DP = 72
+        const val DB_FLAG_MILITARY = 1
         const val MAX_ESTIMATION_SECONDS = 75.0
         const val EARTH_RADIUS_M = 6371000.0
+        const val EARTH_CIRCUMFERENCE_M = 40075016.686
+        const val DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M = 30000.0
+        const val INITIAL_RANGE_MULTIPLIER = 1.25
         const val TILE_CACHE_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
         const val USER_AGENT = "FlightAlertPrototype/0.1"
         const val TAG = "FlightAlert"
@@ -2130,5 +2639,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
         val ACCENT_YELLOW: Int = Color.rgb(255, 213, 77)
         val ACCENT_ORANGE: Int = Color.rgb(255, 144, 82)
         val ACCENT_PINK: Int = Color.rgb(244, 115, 164)
+        val MILITARY_GRAY: Int = Color.rgb(156, 165, 163)
+        val IMAGE_URL_PATTERN = Regex("\\.(jpg|jpeg|png|webp)(\\?|$)", RegexOption.IGNORE_CASE)
     }
 }
