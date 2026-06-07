@@ -89,6 +89,13 @@ Flight Alert requests:
 - Foreground service location, so monitoring can continue while another app is in front.
 - Internet, for map tiles, traffic feeds, tracks, metadata, and photos.
 
+## Security And Privacy
+
+- Android app backup is disabled so local settings and cached app data are not copied through platform backup.
+- Cleartext network traffic is disabled at the manifest level; image downloads are also rejected unless they use HTTPS.
+- Lock-screen notification surfaces use a generic public version instead of exposing nearby aircraft details before unlock.
+- `local.properties` and root-level screenshots are ignored because they are local machine/test artifacts rather than project source.
+
 ## Safety Note
 
 Use Flight Alert as supplemental situational awareness only. Drone pilots remain responsible for visual line of sight, regulatory compliance, and yielding to crewed aircraft.

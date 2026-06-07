@@ -20,10 +20,7 @@ android {
 
     sourceSets {
         getByName("main") {
-            manifest.srcFile("app/src/main/AndroidManifest.xml")
-            java.srcDirs("app/src/main/java")
-            kotlin.srcDirs("app/src/main/java")
-            res.srcDirs("app/src/main/res")
+            setRoot("app/src/main")
         }
     }
 
@@ -42,7 +39,5 @@ android {
 }
 
 dependencies {
-    implementation(libs.androidx.appcompat)
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.material)
+    implementation(libs.androidx.activity)
 }

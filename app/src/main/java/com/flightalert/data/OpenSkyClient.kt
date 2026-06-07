@@ -19,6 +19,7 @@ class OpenSkyClient(private val userAgent: String) {
 
     private fun fetchOpenSkyTrack(cleanIcao: String): List<TrackPoint> {
         val url = URL("https://opensky-network.org/api/tracks/all?icao24=$cleanIcao&time=0")
+        if (!url.protocol.equals("https", ignoreCase = true)) return emptyList()
         val connection = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 9000
             readTimeout = 12000
@@ -39,6 +40,7 @@ class OpenSkyClient(private val userAgent: String) {
         val folder = cleanIcao.takeLast(2)
         val traceName = if (fullTrace) "trace_full_$cleanIcao.json" else "trace_recent_$cleanIcao.json"
         val url = URL("https://adsb.lol/data/traces/$folder/$traceName")
+        if (!url.protocol.equals("https", ignoreCase = true)) return emptyList()
         val connection = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 9000
             readTimeout = 16000

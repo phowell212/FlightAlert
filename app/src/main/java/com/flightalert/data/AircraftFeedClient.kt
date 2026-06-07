@@ -114,6 +114,7 @@ class AircraftFeedClient(private val userAgent: String) {
     }
 
     private fun openConnection(url: URL): HttpURLConnection {
+        require(url.protocol.equals("https", ignoreCase = true)) { "Only HTTPS aircraft feeds are allowed" }
         return (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 4000
             readTimeout = 6000

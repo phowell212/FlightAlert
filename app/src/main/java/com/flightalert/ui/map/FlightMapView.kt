@@ -695,7 +695,10 @@ class FlightMapView(context: Context) : View(context), LocationListener {
             var connection: HttpURLConnection? = null
             try {
                 // TileSource is the only map switch; every background tile comes from a live public source.
-                val url = URL(mapSource.tileUrl(z, x, y))
+                val url = httpsUrl(mapSource.tileUrl(z, x, y)) ?: run {
+                    mapStatus = "Map tiles unavailable"
+                    return@execute
+                }
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 8000
                     readTimeout = 10000
@@ -2078,9 +2081,10 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     }
 
     private fun fetchPlanespottersPhotoUrl(apiUrl: String): String? {
+        val safeUrl = httpsUrl(apiUrl) ?: return null
         var connection: HttpURLConnection? = null
         return try {
-            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+            connection = (safeUrl.openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5000
                 readTimeout = 8000
                 requestMethod = "GET"
@@ -2280,7 +2284,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
                 val info = pages.optJSONObject(keys.next())?.optJSONArray("imageinfo")?.optJSONObject(0) ?: continue
                 val mime = info.optString("mime")
                 val url = info.optString("url")
-                if (mime.startsWith("image/") && IMAGE_URL_PATTERN.containsMatchIn(url)) urls += url
+                if (mime.startsWith("image/") && isAllowedHttpsImageUrl(url)) urls += url
             }
             urls
         } catch (_: Exception) {
@@ -2314,8 +2318,7 @@ class FlightMapView(context: Context) : View(context), LocationListener {
                 val url = item.optString("url").trim()
                 val title = item.optString("title").lowercase(Locale.US)
                 if (
-                    url.startsWith("http", ignoreCase = true) &&
-                    IMAGE_URL_PATTERN.containsMatchIn(url) &&
+                    isAllowedHttpsImageUrl(url) &&
                     !title.contains("logo") &&
                     !title.contains("diagram")
                 ) {
@@ -2345,16 +2348,17 @@ class FlightMapView(context: Context) : View(context), LocationListener {
                 page.optJSONObject("original")?.optString("source"),
                 page.optJSONObject("thumbnail")?.optString("source")
             ).forEach { url ->
-                if (url.startsWith("https://", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(url)) urls += url
+                if (isAllowedHttpsImageUrl(url)) urls += url
             }
         }
         return urls.distinct()
     }
 
     private fun fetchJsonObject(url: String): JSONObject? {
+        val safeUrl = httpsUrl(url) ?: return null
         var connection: HttpURLConnection? = null
         return try {
-            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connection = (safeUrl.openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5000
                 readTimeout = 9000
                 requestMethod = "GET"
@@ -2373,9 +2377,11 @@ class FlightMapView(context: Context) : View(context), LocationListener {
     }
 
     private fun fetchBitmap(url: String): Bitmap? {
+        if (!isAllowedHttpsImageUrl(url)) return null
+        val safeUrl = httpsUrl(url) ?: return null
         var connection: HttpURLConnection? = null
         return try {
-            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connection = (safeUrl.openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5000
                 readTimeout = 8000
                 requestMethod = "GET"
@@ -2408,8 +2414,21 @@ class FlightMapView(context: Context) : View(context), LocationListener {
                 }
                 null
             }
-            is String -> value.takeIf { it.startsWith("http", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(it) }
+            is String -> value.takeIf { isAllowedHttpsImageUrl(it) }
             else -> null
+        }
+    }
+
+    private fun isAllowedHttpsImageUrl(value: String?): Boolean {
+        val url = value?.trim() ?: return false
+        return url.startsWith("https://", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(url)
+    }
+
+    private fun httpsUrl(value: String): URL? {
+        return try {
+            URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }
+        } catch (_: Exception) {
+            null
         }
     }
 

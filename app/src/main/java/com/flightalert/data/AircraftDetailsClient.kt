@@ -110,9 +110,10 @@ class AircraftDetailsClient(private val userAgent: String) {
     }
 
     private fun fetchText(url: String): String? {
+        val safeUrl = httpsUrl(url) ?: return null
         var connection: HttpURLConnection? = null
         return try {
-            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connection = (safeUrl.openConnection() as HttpURLConnection).apply {
                 connectTimeout = 4000
                 readTimeout = 6000
                 requestMethod = "GET"
@@ -127,6 +128,14 @@ class AircraftDetailsClient(private val userAgent: String) {
             null
         } finally {
             connection?.disconnect()
+        }
+    }
+
+    private fun httpsUrl(value: String): URL? {
+        return try {
+            URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }
+        } catch (_: Exception) {
+            null
         }
     }
 }

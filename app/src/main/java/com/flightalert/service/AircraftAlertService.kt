@@ -148,6 +148,7 @@ class AircraftAlertService : Service(), LocationListener {
         }
         val location = latestLocation
         if (location == null) {
+            startLocationUpdates()
             updateMonitoringNotification("Waiting for a current device location.")
             schedulePoll(POLL_MS)
             return
@@ -293,6 +294,19 @@ class AircraftAlertService : Service(), LocationListener {
             .setStyle(Notification.BigTextStyle().bigText(body))
             .setContentIntent(pendingIntent)
             .setOnlyAlertOnce(ongoing)
+            .setOngoing(ongoing)
+            .setAutoCancel(!ongoing)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(buildPublicNotification(channelId, title, ongoing))
+            .build()
+    }
+
+    private fun buildPublicNotification(channelId: String, title: String, ongoing: Boolean): Notification {
+        return Notification.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle(title)
+            .setContentText("Flight Alert is monitoring live aircraft traffic.")
+            .setOnlyAlertOnce(true)
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
             .build()
