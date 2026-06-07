@@ -14,14 +14,19 @@ class AircraftDetailsClient(private val userAgent: String) {
         val aircraft = fetchJson("https://hexdb.io/api/v1/aircraft/$normalizedHex")
         val registration = aircraft?.optStringOrNull("Registration") ?: registrationHint?.trim()?.ifEmpty { null }
         val faa = registration?.takeIf { it.startsWith("N", ignoreCase = true) }?.let { fetchFaaRegistry(it) }
+        val adsbRoute = if (cleanCallsign.isNotEmpty() && cleanCallsign.lowercase(Locale.US) != normalizedHex) {
+            fetchAdsbDbRoute(cleanCallsign)
+        } else {
+            null
+        }
         val route = if (cleanCallsign.isNotEmpty() && cleanCallsign.lowercase(Locale.US) != normalizedHex) {
             fetchJson("https://hexdb.io/api/v1/route/icao/$cleanCallsign")
         } else {
             null
         }
         val routeCodes = route?.optStringOrNull("route")?.split("-")?.takeIf { it.size >= 2 }
-        val origin = routeCodes?.firstOrNull()?.let { fetchAirport(it) }
-        val destination = routeCodes?.lastOrNull()?.let { fetchAirport(it) }
+        val origin = adsbRoute?.origin ?: routeCodes?.firstOrNull()?.let { fetchAirport(it) }
+        val destination = adsbRoute?.destination ?: routeCodes?.lastOrNull()?.let { fetchAirport(it) }
 
         return AircraftDetails(
             icao24 = normalizedHex,
@@ -33,7 +38,7 @@ class AircraftDetailsClient(private val userAgent: String) {
             manufacturedYear = faa?.manufacturedYear,
             registrySource = faa?.sourceName ?: "HexDB",
             operatorCode = aircraft?.optStringOrNull("OperatorFlagCode"),
-            route = route?.optStringOrNull("route"),
+            route = adsbRoute?.route ?: route?.optStringOrNull("route"),
             routeUpdatedEpochSec = route?.optLongOrNull("updatetime"),
             originAirport = origin,
             destinationAirport = destination
@@ -77,6 +82,22 @@ class AircraftDetailsClient(private val userAgent: String) {
             latitude = json.optDoubleOrNull("latitude"),
             longitude = json.optDoubleOrNull("longitude")
         )
+    }
+
+    private fun fetchAdsbDbRoute(callsign: String): RouteLookup? {
+        val encoded = URLEncoder.encode(callsign.trim(), "UTF-8")
+        val route = fetchJson("https://api.adsbdb.com/v0/callsign/$encoded")
+            ?.optJSONObject("response")
+            ?.optJSONObject("flightroute")
+            ?: return null
+        val origin = route.optJSONObject("origin")?.toAdsbDbAirport()
+        val destination = route.optJSONObject("destination")?.toAdsbDbAirport()
+        if (origin == null && destination == null) return null
+        val routeLabel = listOfNotNull(
+            origin?.icao ?: origin?.iata,
+            destination?.icao ?: destination?.iata
+        ).joinToString("-").ifEmpty { null }
+        return RouteLookup(routeLabel, origin, destination)
     }
 
     private fun fetchJson(url: String): JSONObject? {
@@ -149,6 +170,24 @@ data class AirportDetails(
     val latitude: Double?,
     val longitude: Double?
 )
+
+private data class RouteLookup(
+    val route: String?,
+    val origin: AirportDetails?,
+    val destination: AirportDetails?
+)
+
+private fun JSONObject.toAdsbDbAirport(): AirportDetails {
+    return AirportDetails(
+        icao = optStringOrNull("icao_code") ?: optStringOrNull("icao") ?: "Unavailable",
+        iata = optStringOrNull("iata_code") ?: optStringOrNull("iata"),
+        name = optStringOrNull("name"),
+        countryCode = optStringOrNull("country_iso_name") ?: optStringOrNull("country_iso"),
+        regionName = optStringOrNull("municipality"),
+        latitude = optDoubleOrNull("latitude"),
+        longitude = optDoubleOrNull("longitude")
+    )
+}
 
 private fun JSONObject.optStringOrNull(key: String): String? {
     if (!has(key) || isNull(key)) return null

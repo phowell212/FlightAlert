@@ -99,7 +99,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateAlertService() {
-        val enabled = FlightAlertSettings.prefs(this).getBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true)
+        val prefs = FlightAlertSettings.prefs(this)
+        val enabled = prefs.getBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true) ||
+            prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
         if (enabled && hasLocationPermission()) {
             AircraftAlertService.start(this)
         } else {
