@@ -14,8 +14,8 @@ android {
         applicationId = "com.flightalert"
         minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     sourceSets {
@@ -40,4 +40,5 @@ android {
 
 dependencies {
     implementation(libs.androidx.activity)
+    implementation(libs.androidx.core.ktx)
 }

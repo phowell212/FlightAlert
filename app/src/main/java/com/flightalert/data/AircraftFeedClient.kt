@@ -5,6 +5,9 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -18,7 +21,11 @@ class AircraftFeedClient(private val userAgent: String) {
 
     fun fetchAircraft(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
         val now = System.currentTimeMillis()
-        val airplanesResult = fetchAirplanesLive(bounds, ownLat, ownLon)
+        val airplanesResult = if (now >= airplanesLiveRetryAfterMs) {
+            fetchAirplanesLive(bounds, ownLat, ownLon)
+        } else {
+            FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, httpCode = HTTP_TOO_MANY_REQUESTS)
+        }
         if (airplanesResult.status == FeedStatus.OK && airplanesResult.aircraft.isNotEmpty()) return airplanesResult
 
         val openSkyResult = if (now >= openSkyRetryAfterMs) fetchOpenSky(bounds, ownLat, ownLon) else null
@@ -44,8 +51,7 @@ class AircraftFeedClient(private val userAgent: String) {
                 )
             )
             connection = openConnection(url)
-            val code = connection.responseCode
-            when (code) {
+            when (val code = connection.responseCode) {
                 HttpURLConnection.HTTP_OK -> {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
                     val json = JSONObject(body)
@@ -81,9 +87,10 @@ class AircraftFeedClient(private val userAgent: String) {
         var sawOk = false
         var sawRateLimit = false
         var lastHttpCode: Int? = null
+        val queryResults = fetchAirplanesLivePoints(plan.queries, ownLat, ownLon)
+        val timedOut = queryResults.size < plan.queries.size
 
-        for (query in plan.queries) {
-            val result = fetchAirplanesLivePoint(query, ownLat, ownLon)
+        for (result in queryResults) {
             latestEpochSec = maxOfEpoch(latestEpochSec, result.epochSec)
             lastHttpCode = result.httpCode ?: lastHttpCode
             when (result.status) {
@@ -94,7 +101,10 @@ class AircraftFeedClient(private val userAgent: String) {
                         merged[key] = newerAircraft(merged[key], item)
                     }
                 }
-                FeedStatus.RATE_LIMITED -> sawRateLimit = true
+                FeedStatus.RATE_LIMITED -> {
+                    sawRateLimit = true
+                    lastHttpCode = result.httpCode ?: HTTP_TOO_MANY_REQUESTS
+                }
                 FeedStatus.UNAVAILABLE -> Unit
             }
         }
@@ -106,7 +116,7 @@ class AircraftFeedClient(private val userAgent: String) {
                 aircraft = merged.values.sortedBy { it.distanceM },
                 epochSec = latestEpochSec,
                 queryCount = plan.queries.size,
-                partialCoverage = plan.partialCoverage
+                partialCoverage = plan.partialCoverage || timedOut
             )
             sawRateLimit -> FeedResult(
                 status = FeedStatus.RATE_LIMITED,
@@ -120,8 +130,33 @@ class AircraftFeedClient(private val userAgent: String) {
                 source = FeedSource.AIRPLANES_LIVE,
                 httpCode = lastHttpCode,
                 queryCount = plan.queries.size,
-                partialCoverage = plan.partialCoverage
+                partialCoverage = plan.partialCoverage || timedOut
             )
+        }
+    }
+
+    private fun fetchAirplanesLivePoints(
+        queries: List<AirplanesLiveQuery>,
+        ownLat: Double,
+        ownLon: Double
+    ): List<FeedResult> {
+        if (queries.isEmpty()) return emptyList()
+        if (queries.size == 1) return listOf(fetchAirplanesLivePoint(queries.first(), ownLat, ownLon))
+        val pool = Executors.newFixedThreadPool(min(AIRPLANES_LIVE_PARALLELISM, queries.size))
+        return try {
+            val tasks = queries.map { query ->
+                Callable { fetchAirplanesLivePoint(query, ownLat, ownLon) }
+            }
+            pool.invokeAll(tasks, AIRPLANES_LIVE_BATCH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .mapNotNull { future ->
+                    runCatching {
+                        if (future.isDone && !future.isCancelled) future.get() else null
+                    }.getOrNull()
+                }
+        } catch (_: Exception) {
+            emptyList()
+        } finally {
+            pool.shutdownNow()
         }
     }
 
@@ -150,6 +185,11 @@ class AircraftFeedClient(private val userAgent: String) {
                     queryCount = 1
                 )
             } else {
+                if (code == HTTP_TOO_MANY_REQUESTS) {
+                    val retrySeconds = connection.getHeaderField("Retry-After")?.toLongOrNull()
+                        ?: DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS
+                    airplanesLiveRetryAfterMs = System.currentTimeMillis() + retrySeconds * 1000L
+                }
                 connection.errorStream?.close()
                 FeedResult(
                     status = if (code == HTTP_TOO_MANY_REQUESTS) FeedStatus.RATE_LIMITED else FeedStatus.UNAVAILABLE,
@@ -338,9 +378,12 @@ class AircraftFeedClient(private val userAgent: String) {
     companion object {
         private const val HTTP_TOO_MANY_REQUESTS = 429
         private const val DEFAULT_OPENSKY_BACKOFF_SECONDS = 3600L
+        private const val DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS = 120L
         private const val MIN_AIRPLANES_RADIUS_NM = 25.0
         private const val MAX_AIRPLANES_RADIUS_NM = 250.0
         private const val MAX_AIRPLANES_LIVE_QUERIES = 12
+        private const val AIRPLANES_LIVE_PARALLELISM = 4
+        private const val AIRPLANES_LIVE_BATCH_TIMEOUT_SECONDS = 9L
         private const val AIRPLANES_GRID_CELL_RADIUS_FACTOR = 1.45
         private const val AIRPLANES_QUERY_RADIUS_PADDING = 1.08
         private const val METERS_PER_NAUTICAL_MILE = 1852.0
@@ -348,6 +391,9 @@ class AircraftFeedClient(private val userAgent: String) {
 
         @Volatile
         private var openSkyRetryAfterMs = 0L
+
+        @Volatile
+        private var airplanesLiveRetryAfterMs = 0L
     }
 }
 
@@ -411,11 +457,6 @@ private fun JSONArray.optNullableDouble(index: Int): Double? {
     return optDouble(index)
 }
 
-private fun JSONArray.optNullableLong(index: Int): Long? {
-    if (index >= length() || isNull(index)) return null
-    return optLong(index)
-}
-
 private fun JSONArray.optNullableInt(index: Int): Int? {
     if (index >= length() || isNull(index)) return null
     return optInt(index)
@@ -424,10 +465,6 @@ private fun JSONArray.optNullableInt(index: Int): Int? {
 private fun JSONArray.optNullableBoolean(index: Int): Boolean? {
     if (index >= length() || isNull(index)) return null
     return optBoolean(index)
-}
-
-private fun JSONObject.optLongOrNull(key: String): Long? {
-    return if (has(key) && !isNull(key)) optLong(key) else null
 }
 
 private fun JSONObject.optIntOrNull(key: String): Int? {
@@ -440,8 +477,7 @@ private fun JSONObject.optDoubleOrNull(key: String): Double? {
 
 private fun JSONObject.optAltitudeFeet(key: String): Double? {
     if (!has(key) || isNull(key)) return null
-    val raw = opt(key)
-    return when (raw) {
+    return when (val raw = opt(key)) {
         is Number -> raw.toDouble()
         is String -> raw.toDoubleOrNull()
         else -> null
