@@ -50,23 +50,27 @@ class AircraftDetailsClient(private val userAgent: String) {
         if (nNumber.isEmpty()) return null
         val encoded = URLEncoder.encode(nNumber, "UTF-8")
         val html = fetchText("https://registry.faa.gov/AircraftInquiry/Search/NNumberResult?nNumberTxt=$encoded") ?: return null
-        val text = html
-            .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("<[^>]+>"), " ")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-        if (!text.contains("N${nNumber.uppercase(Locale.US)} is Assigned", ignoreCase = true)) return null
-        val ownerRaw = valueBetween(text, "Registered Owner", "Airworthiness")
-        val privateOwner = ownerRaw?.contains("requested to keep this data private", ignoreCase = true) == true
+        val resultHtml = html.substringAfter("<div id=\"mainDiv\"", html)
+        val resultText = stripHtml(resultHtml)
+        val normalizedRegistration = "N${nNumber.uppercase(Locale.US)}"
+        if (!resultText.contains("$normalizedRegistration is Assigned", ignoreCase = true)) return null
+
+        val ownerSection = tableSection(resultHtml, "Registered Owner")
+        val privateOwner = ownerSection
+            ?.let(::stripHtml)
+            ?.contains("requested to keep this data private", ignoreCase = true) == true
+        val ownerName = if (privateOwner) {
+            "Private under 49 USC 44114"
+        } else {
+            ownerSection?.let { valueFromDataLabel(it, "Name") }
+        }
+
         return FaaRegistryRecord(
-            registration = "N${nNumber.uppercase(Locale.US)}",
-            manufacturer = valueBetween(text, "Manufacturer Name", "Certificate Issue Date"),
-            model = valueBetween(text, "Model", "Expiration Date"),
-            manufacturedYear = valueBetween(text, "MFR Year", "Mode S Code")?.take(4),
-            registeredOwner = if (privateOwner) "Private under 49 USC 44114" else valueBetween(ownerRaw ?: "", "Name", "Street"),
+            registration = normalizedRegistration,
+            manufacturer = valueFromDataLabel(resultHtml, "Manufacturer Name"),
+            model = valueFromDataLabel(resultHtml, "Model"),
+            manufacturedYear = valueFromDataLabel(resultHtml, "Mfr Year")?.take(4),
+            registeredOwner = ownerName,
             sourceName = "FAA Registry"
         )
     }
@@ -140,9 +144,41 @@ class AircraftDetailsClient(private val userAgent: String) {
     }
 }
 
-private fun valueBetween(text: String, start: String, end: String): String? {
-    val regex = Regex("${Regex.escape(start)}\\s+(.*?)\\s+${Regex.escape(end)}", RegexOption.IGNORE_CASE)
-    return regex.find(text)?.groupValues?.getOrNull(1)?.trim()?.ifEmpty { null }
+private fun tableSection(html: String, caption: String): String? {
+    val captionRegex = Regex("<caption[^>]*>\\s*${Regex.escape(caption)}\\s*</caption>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    val start = captionRegex.find(html)?.range?.first ?: return null
+    val end = html.indexOf("</table>", start, ignoreCase = true).takeIf { it >= 0 } ?: return null
+    return html.substring(start, end)
+}
+
+private fun valueFromDataLabel(html: String, label: String): String? {
+    val regex = Regex("<td[^>]*data-label=[\"']${Regex.escape(label)}[\"'][^>]*>([\\s\\S]*?)</td>", RegexOption.IGNORE_CASE)
+    return regex.find(html)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.let(::stripHtml)
+        ?.let(::cleanRegistryValue)
+}
+
+private fun stripHtml(html: String): String {
+    return html
+        .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("<[^>]+>"), " ")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&#39;", "'")
+        .replace("&quot;", "\"")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
+private fun cleanRegistryValue(value: String): String? {
+    val cleaned = value.trim().trim('-').trim()
+    if (cleaned.isEmpty() || cleaned.equals("none", ignoreCase = true)) return null
+    val pageChromeTerms = listOf("Lookup Aircraft By", "N-Number Availability", "Aircraft Inquiry Search")
+    if (pageChromeTerms.any { cleaned.contains(it, ignoreCase = true) }) return null
+    return cleaned
 }
 
 data class FaaRegistryRecord(

@@ -2,7 +2,6 @@ package com.flightalert
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -46,12 +45,14 @@ class MainActivity : ComponentActivity() {
         view.keepScreenOn = true
         flightMapView = view
         setContentView(view)
+        view.requestFocus()
         requestLocationPermissionIfNeeded()
         requestNotificationPermissionIfNeeded()
     }
 
     override fun onResume() {
         super.onResume()
+        configureSystemBars()
         requestLocationPermissionIfNeeded()
         flightMapView?.start()
         updateAlertService()
@@ -65,7 +66,7 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     private fun configureSystemBars() {
         // The map view handles insets; opaque bars keep Android chrome from blending into app UI.
-        val systemBarColor = Color.rgb(13, 29, 25)
+        val systemBarColor = FlightAlertSettings.readVisualTheme(this).colors.systemBar
         window.statusBarColor = systemBarColor
         window.navigationBarColor = systemBarColor
         window.isStatusBarContrastEnforced = false

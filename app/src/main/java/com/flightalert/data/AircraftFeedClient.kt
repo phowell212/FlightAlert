@@ -26,15 +26,41 @@ class AircraftFeedClient(private val userAgent: String) {
         } else {
             FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, httpCode = HTTP_TOO_MANY_REQUESTS)
         }
-        if (airplanesResult.status == FeedStatus.OK && airplanesResult.aircraft.isNotEmpty()) return airplanesResult
+        if (airplanesResult.status == FeedStatus.OK && airplanesResult.aircraft.isNotEmpty() && !airplanesResult.partialCoverage) {
+            return airplanesResult
+        }
 
         val openSkyResult = if (now >= openSkyRetryAfterMs) fetchOpenSky(bounds, ownLat, ownLon) else null
-        if (openSkyResult?.status == FeedStatus.OK && openSkyResult.aircraft.isNotEmpty()) return openSkyResult
+        if (openSkyResult?.status == FeedStatus.OK) {
+            return if (airplanesResult.status == FeedStatus.OK && airplanesResult.aircraft.isNotEmpty()) {
+                mergeCompleteCoverageWithDetail(openSkyResult, airplanesResult)
+            } else {
+                openSkyResult
+            }
+        }
 
         if (airplanesResult.status == FeedStatus.OK) return airplanesResult
-        if (openSkyResult?.status == FeedStatus.OK) return openSkyResult
 
         return openSkyResult ?: airplanesResult
+    }
+
+    private fun mergeCompleteCoverageWithDetail(complete: FeedResult, detail: FeedResult): FeedResult {
+        val merged = linkedMapOf<String, FeedAircraft>()
+        complete.aircraft.forEach { item ->
+            merged[item.feedKey()] = item
+        }
+        detail.aircraft.forEach { item ->
+            val key = item.feedKey()
+            merged[key] = newerAircraft(merged[key], item)
+        }
+        return FeedResult(
+            status = FeedStatus.OK,
+            source = FeedSource.COMBINED,
+            aircraft = merged.values.sortedBy { it.distanceM },
+            epochSec = maxOfEpoch(complete.epochSec, detail.epochSec),
+            queryCount = complete.queryCount + detail.queryCount,
+            partialCoverage = false
+        )
     }
 
     private fun fetchOpenSky(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
@@ -97,7 +123,7 @@ class AircraftFeedClient(private val userAgent: String) {
                 FeedStatus.OK -> {
                     sawOk = true
                     result.aircraft.forEach { item ->
-                        val key = item.icao24.ifBlank { "${item.lat}:${item.lon}:${item.callsign}" }
+                        val key = item.feedKey()
                         merged[key] = newerAircraft(merged[key], item)
                     }
                 }
@@ -381,9 +407,9 @@ class AircraftFeedClient(private val userAgent: String) {
         private const val DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS = 120L
         private const val MIN_AIRPLANES_RADIUS_NM = 25.0
         private const val MAX_AIRPLANES_RADIUS_NM = 250.0
-        private const val MAX_AIRPLANES_LIVE_QUERIES = 12
-        private const val AIRPLANES_LIVE_PARALLELISM = 4
-        private const val AIRPLANES_LIVE_BATCH_TIMEOUT_SECONDS = 9L
+        private const val MAX_AIRPLANES_LIVE_QUERIES = 36
+        private const val AIRPLANES_LIVE_PARALLELISM = 6
+        private const val AIRPLANES_LIVE_BATCH_TIMEOUT_SECONDS = 12L
         private const val AIRPLANES_GRID_CELL_RADIUS_FACTOR = 1.45
         private const val AIRPLANES_QUERY_RADIUS_PADDING = 1.08
         private const val METERS_PER_NAUTICAL_MILE = 1852.0
@@ -436,12 +462,17 @@ enum class FeedStatus {
 
 enum class FeedSource(val displayName: String) {
     OPENSKY("OpenSky"),
-    AIRPLANES_LIVE("Airplanes.Live")
+    AIRPLANES_LIVE("Airplanes.Live"),
+    COMBINED("OpenSky + Airplanes.Live")
 }
 
 private data class AirplanesLiveQuery(val centerLat: Double, val centerLon: Double, val radiusNm: Double)
 
 private data class AirplanesLiveQueryPlan(val queries: List<AirplanesLiveQuery>, val partialCoverage: Boolean)
+
+private fun FeedAircraft.feedKey(): String {
+    return icao24.ifBlank { "${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}:$callsign" }
+}
 
 private fun FeedBounds.normalized(): FeedBounds {
     return FeedBounds(

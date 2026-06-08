@@ -60,7 +60,7 @@ class AircraftAlertService : Service(), LocationListener {
         ensureChannels()
         startForeground(
             ONGOING_NOTIFICATION_ID,
-            buildNotification(MONITORING_CHANNEL_ID, "Monitoring aircraft hazards", "Flight Alert is watching live aircraft traffic.", true)
+            buildNotification(MONITORING_CHANNEL_ID, "Flight Alert active", "Background traffic monitoring is running.", true)
         )
         startLocationUpdates()
         schedulePoll(1000L)
@@ -104,8 +104,6 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) = Unit
 
     override fun onProviderEnabled(provider: String) = startLocationUpdates()
 
@@ -180,7 +178,7 @@ class AircraftAlertService : Service(), LocationListener {
 
                 activeHazards.clear()
                 activeHazards.putAll(currentHazards)
-                val extremePriority = poll.aircraft.filter { it.isExtremePriority }
+                val extremePriority = if (alertsEnabled()) poll.aircraft.filter { it.isExtremePriority } else emptyList()
                 updatePriorityNotification(extremePriority)
                 nextPollDelayMs = nextPollDelayFor(poll.aircraft, currentHazards.isNotEmpty(), extremePriority.isNotEmpty())
 
@@ -203,10 +201,13 @@ class AircraftAlertService : Service(), LocationListener {
     }
 
     private fun nextPollDelayFor(aircraft: List<AlertAircraft>, hasHazard: Boolean, hasExtremePriority: Boolean): Long {
+        val extremeAircraft = aircraft.filter { it.isExtremePriority }
+        val hazardAircraft = aircraft.filter { it.isHazard }
         val priorityAircraft = aircraft.filter { it.isPriorityRangeAircraft }
         return when {
-            hasExtremePriority -> delayUntilStale(priorityAircraft.filter { it.isExtremePriority }, EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS)
-            hasHazard || priorityAircraft.isNotEmpty() -> delayUntilStale(priorityAircraft, PRIORITY_CONTACT_MAX_AGE_SECONDS)
+            hasExtremePriority -> delayUntilStale(extremeAircraft, EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS)
+            hasHazard -> delayUntilStale(hazardAircraft, PRIORITY_CONTACT_MAX_AGE_SECONDS)
+            priorityAircraft.isNotEmpty() -> delayUntilStale(priorityAircraft, PRIORITY_CONTACT_MAX_AGE_SECONDS)
             else -> POLL_MS
         }
     }
@@ -226,7 +227,6 @@ class AircraftAlertService : Service(), LocationListener {
         val alertAltitudeFeet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, FlightAlertSettings.DEFAULT_ALERT_ALTITUDE_FEET)
         val priorityEnabled = prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
         val priorityRangeFeet = prefs.getFloat(FlightAlertSettings.KEY_PRIORITY_RANGE_FEET, FlightAlertSettings.DEFAULT_PRIORITY_RANGE_FEET)
-        val priorityAltitudeBelowFeet = prefs.getFloat(FlightAlertSettings.KEY_PRIORITY_ALTITUDE_BELOW_FEET, FlightAlertSettings.DEFAULT_PRIORITY_ALTITUDE_BELOW_FEET)
         val ownAltitudeFeet = if (location.hasAltitude()) metersToFeet(location.altitude) else null
         val radiusFeet = max(alertDistanceFeet.toDouble(), if (priorityEnabled) priorityRangeFeet.toDouble() else MIN_QUERY_RADIUS_FEET)
         val radiusMeters = max(feetToMeters(radiusFeet), feetToMeters(MIN_QUERY_RADIUS_FEET))
@@ -242,8 +242,7 @@ class AircraftAlertService : Service(), LocationListener {
                         alertAltitudeFeet = alertAltitudeFeet,
                         ownAltitudeFeet = ownAltitudeFeet,
                         priorityEnabled = priorityEnabled,
-                        priorityRangeFeet = priorityRangeFeet,
-                        priorityAltitudeBelowFeet = priorityAltitudeBelowFeet
+                        priorityRangeFeet = priorityRangeFeet
                     )
                 }
                 .sortedBy { it.distanceFeet },
@@ -277,7 +276,7 @@ class AircraftAlertService : Service(), LocationListener {
         if (body == lastMonitoringBody) return
         lastMonitoringBody = body
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(ONGOING_NOTIFICATION_ID, buildNotification(MONITORING_CHANNEL_ID, "Monitoring aircraft hazards", body, true))
+        manager.notify(ONGOING_NOTIFICATION_ID, buildNotification(MONITORING_CHANNEL_ID, "Flight Alert active", body, true))
     }
 
     private fun updatePriorityNotification(priorityAircraft: List<AlertAircraft>) {
@@ -351,7 +350,7 @@ class AircraftAlertService : Service(), LocationListener {
         )
         manager.createNotificationChannel(
             NotificationChannel(PRIORITY_CHANNEL_ID, "Extreme priority aircraft", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Persistent list of aircraft below the selected altitude inside the priority tracking range"
+                description = "Persistent list of priority-tracked aircraft inside the selected alert range"
             }
         )
     }
@@ -399,14 +398,16 @@ class AircraftAlertService : Service(), LocationListener {
         alertAltitudeFeet: Float,
         ownAltitudeFeet: Double?,
         priorityEnabled: Boolean,
-        priorityRangeFeet: Float,
-        priorityAltitudeBelowFeet: Float
+        priorityRangeFeet: Float
     ): AlertAircraft? {
         val altitudeMeters = altitudeM ?: return null
         val distanceFeet = metersToFeet(distanceM)
         val altitudeFeet = metersToFeet(altitudeMeters)
         val verticalSeparationFeet = ownAltitudeFeet?.let { abs(altitudeFeet - it) }
         val contactAgeSeconds = contactAgeSeconds()
+        val isInsideAlertRange = distanceFeet <= alertDistanceFeet &&
+            verticalSeparationFeet != null &&
+            verticalSeparationFeet <= alertAltitudeFeet
         return AlertAircraft(
             icao24 = icao24,
             callsign = callsign,
@@ -415,11 +416,9 @@ class AircraftAlertService : Service(), LocationListener {
             altitudeFeet = altitudeFeet,
             verticalSeparationFeet = verticalSeparationFeet,
             contactAgeSeconds = contactAgeSeconds,
-            isHazard = distanceFeet <= alertDistanceFeet &&
-                verticalSeparationFeet != null &&
-                verticalSeparationFeet <= alertAltitudeFeet,
+            isHazard = isInsideAlertRange,
             isPriorityRangeAircraft = priorityEnabled && distanceFeet <= priorityRangeFeet,
-            isExtremePriority = priorityEnabled && distanceFeet <= priorityRangeFeet && altitudeFeet <= priorityAltitudeBelowFeet
+            isExtremePriority = priorityEnabled && isInsideAlertRange
         )
     }
 
@@ -471,8 +470,7 @@ class AircraftAlertService : Service(), LocationListener {
             FlightAlertSettings.KEY_ALERT_DISTANCE_FEET,
             FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET,
             FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED,
-            FlightAlertSettings.KEY_PRIORITY_RANGE_FEET,
-            FlightAlertSettings.KEY_PRIORITY_ALTITUDE_BELOW_FEET
+            FlightAlertSettings.KEY_PRIORITY_RANGE_FEET
         )
 
         fun start(context: Context) {
