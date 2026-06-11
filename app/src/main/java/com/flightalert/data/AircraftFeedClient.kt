@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -19,7 +20,13 @@ import kotlin.math.sqrt
 
 class AircraftFeedClient(private val userAgent: String) {
 
-    fun fetchAircraft(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
+    fun fetchAircraft(bounds: FeedBounds, ownLat: Double, ownLon: Double, exactSearch: String? = null): FeedResult {
+        val viewportResult = fetchViewportAircraft(bounds, ownLat, ownLon)
+        val searchResult = fetchAirplanesLiveExactSearch(exactSearch, ownLat, ownLon)
+        return mergeViewportAndSearch(viewportResult, searchResult)
+    }
+
+    private fun fetchViewportAircraft(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
         val now = System.currentTimeMillis()
         val airplanesResult = if (now >= airplanesLiveRetryAfterMs) {
             fetchAirplanesLive(bounds, ownLat, ownLon)
@@ -42,6 +49,14 @@ class AircraftFeedClient(private val userAgent: String) {
         if (airplanesResult.status == FeedStatus.OK) return airplanesResult
 
         return openSkyResult ?: airplanesResult
+    }
+
+    private fun mergeViewportAndSearch(viewport: FeedResult, search: FeedResult?): FeedResult {
+        if (search == null) return viewport
+        if (search.status != FeedStatus.OK) return viewport
+        if (viewport.status != FeedStatus.OK) return search
+        if (search.aircraft.isEmpty()) return viewport.copy(queryCount = viewport.queryCount + search.queryCount)
+        return mergeCompleteCoverageWithDetail(viewport, search)
     }
 
     private fun mergeCompleteCoverageWithDetail(complete: FeedResult, detail: FeedResult): FeedResult {
@@ -187,17 +202,28 @@ class AircraftFeedClient(private val userAgent: String) {
     }
 
     private fun fetchAirplanesLivePoint(query: AirplanesLiveQuery, ownLat: Double, ownLon: Double): FeedResult {
+        val path = String.format(
+            Locale.US,
+            "point/%.5f/%.5f/%.0f",
+            query.centerLat,
+            query.centerLon,
+            query.radiusNm
+        )
+        return fetchAirplanesLivePath(path, ownLat, ownLon)
+    }
+
+    private fun fetchAirplanesLiveExactSearch(search: String?, ownLat: Double, ownLon: Double): FeedResult? {
+        val path = airplanesLiveSearchPath(search) ?: return null
+        if (System.currentTimeMillis() < airplanesLiveRetryAfterMs) {
+            return FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, httpCode = HTTP_TOO_MANY_REQUESTS)
+        }
+        return fetchAirplanesLivePath(path, ownLat, ownLon)
+    }
+
+    private fun fetchAirplanesLivePath(path: String, ownLat: Double, ownLon: Double): FeedResult {
         var connection: HttpURLConnection? = null
         return try {
-            val url = URL(
-                String.format(
-                    Locale.US,
-                    "https://api.airplanes.live/v2/point/%.5f/%.5f/%.0f",
-                    query.centerLat,
-                    query.centerLon,
-                    query.radiusNm
-                )
-            )
+            val url = URL("https://api.airplanes.live/v2/$path")
             connection = openConnection(url)
             val code = connection.responseCode
             if (code == HttpURLConnection.HTTP_OK) {
@@ -230,6 +256,26 @@ class AircraftFeedClient(private val userAgent: String) {
             connection?.disconnect()
         }
     }
+
+    private fun airplanesLiveSearchPath(search: String?): String? {
+        val raw = search?.trim().orEmpty()
+        if (raw.length < 2) return null
+        val compact = raw.replace("\\s+".toRegex(), "").take(MAX_EXACT_SEARCH_CHARS)
+        if (!EXACT_SEARCH_ALLOWED.matches(compact)) return null
+        val upper = compact.uppercase(Locale.US)
+        return when {
+            MODE_S_HEX.matches(upper) -> "hex/${upper.lowercase(Locale.US)}"
+            looksLikeRegistrationSearch(upper) -> "reg/${urlEncode(upper)}"
+            CALLSIGN_SEARCH.matches(upper) -> "callsign/${urlEncode(upper)}"
+            else -> null
+        }
+    }
+
+    private fun looksLikeRegistrationSearch(upper: String): Boolean {
+        return upper.startsWith("N") || upper.contains("-")
+    }
+
+    private fun urlEncode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private fun airplanesLiveQueryPlan(bounds: FeedBounds): AirplanesLiveQueryPlan {
         val normalized = bounds.normalized()
@@ -414,6 +460,10 @@ class AircraftFeedClient(private val userAgent: String) {
         private const val AIRPLANES_QUERY_RADIUS_PADDING = 1.08
         private const val METERS_PER_NAUTICAL_MILE = 1852.0
         private const val FEET_PER_METER = 3.28084
+        private const val MAX_EXACT_SEARCH_CHARS = 18
+        private val EXACT_SEARCH_ALLOWED = Regex("^[A-Za-z0-9-]+$")
+        private val MODE_S_HEX = Regex("^[0-9A-F]{6}$")
+        private val CALLSIGN_SEARCH = Regex("^[A-Z0-9]{2,12}$")
 
         @Volatile
         private var openSkyRetryAfterMs = 0L

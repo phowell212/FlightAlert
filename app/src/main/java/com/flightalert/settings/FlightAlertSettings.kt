@@ -15,12 +15,21 @@ object FlightAlertSettings {
     const val KEY_PRIORITY_RANGE_FEET = "priority_range_feet"
     const val KEY_PRIORITY_RANGE_CIRCLE_VISIBLE = "priority_range_circle_visible"
     const val KEY_MAP_SOURCE = "map_source"
+    const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
     const val KEY_VISUAL_THEME = "visual_theme"
+    const val KEY_FILTER_SEARCH_QUERY = "filter_search_query"
+    const val KEY_FILTER_AIRCRAFT_TYPE = "filter_aircraft_type"
+    const val KEY_FILTER_ALTITUDE = "filter_altitude"
+    const val KEY_FILTER_DISTANCE = "filter_distance"
+    const val KEY_FILTER_FLIGHT_STATUS = "filter_flight_status"
+    const val KEY_FILTER_REPORT_AGE = "filter_report_age"
+    const val KEY_FILTER_ALERT_VOLUME = "filter_alert_volume"
 
     const val DEFAULT_ALERT_DISTANCE_FEET = 5000f
     const val DEFAULT_ALERT_ALTITUDE_FEET = 1000f
     const val DEFAULT_PRIORITY_RANGE_FEET = 52800f
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
+    const val DEFAULT_MAP_LABELS_ENABLED = true
 
     fun prefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

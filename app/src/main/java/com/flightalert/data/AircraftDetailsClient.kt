@@ -1,4 +1,4 @@
-package com.flightalert.data
+﻿package com.flightalert.data
 
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -11,8 +11,16 @@ class AircraftDetailsClient(private val userAgent: String) {
     fun fetchDetails(hex: String, callsign: String, registrationHint: String? = null): AircraftDetails {
         val normalizedHex = hex.trim().trimStart('~').lowercase(Locale.US)
         val cleanCallsign = callsign.trim().replace(" ", "")
+        val feedRegistration = normalizedRegistration(registrationHint)
+        val decodedUsRegistration = decodeUsNNumber(normalizedHex)
+        val adsbAircraft = fetchAdsbDbAircraft(normalizedHex, feedRegistration ?: decodedUsRegistration)
         val aircraft = fetchJson("https://hexdb.io/api/v1/aircraft/$normalizedHex")
-        val registration = aircraft?.optStringOrNull("Registration") ?: registrationHint?.trim()?.ifEmpty { null }
+        val registration = firstPresent(
+            adsbAircraft?.registration,
+            aircraft?.optStringOrNull("Registration")?.let(::normalizedRegistration),
+            feedRegistration,
+            decodedUsRegistration
+        )
         val faa = registration?.takeIf { it.startsWith("N", ignoreCase = true) }?.let { fetchFaaRegistry(it) }
         val adsbRoute = if (cleanCallsign.isNotEmpty() && cleanCallsign.lowercase(Locale.US) != normalizedHex) {
             fetchAdsbDbRoute(cleanCallsign)
@@ -27,17 +35,23 @@ class AircraftDetailsClient(private val userAgent: String) {
         val routeCodes = route?.optStringOrNull("route")?.split("-")?.takeIf { it.size >= 2 }
         val origin = adsbRoute?.origin ?: routeCodes?.firstOrNull()?.let { fetchAirport(it) }
         val destination = adsbRoute?.destination ?: routeCodes?.lastOrNull()?.let { fetchAirport(it) }
+        val metadataSources = mutableListOf<String>()
+        if (faa != null) metadataSources += faa.sourceName
+        if (adsbAircraft != null) metadataSources += "ADSBdb"
+        if (aircraft != null) metadataSources += "HexDB"
+        if (metadataSources.isEmpty() && registration != null && registration == feedRegistration) metadataSources += "Aircraft feed"
+        if (metadataSources.isEmpty() && registration != null && registration == decodedUsRegistration) metadataSources += "Mode S N-number decode"
 
         return AircraftDetails(
             icao24 = normalizedHex,
             registration = faa?.registration ?: registration,
-            manufacturer = faa?.manufacturer ?: aircraft?.optStringOrNull("Manufacturer"),
-            type = faa?.model ?: aircraft?.optStringOrNull("Type"),
-            typeCode = aircraft?.optStringOrNull("ICAOTypeCode"),
-            owner = faa?.registeredOwner ?: aircraft?.optStringOrNull("RegisteredOwners"),
+            manufacturer = faa?.manufacturer ?: adsbAircraft?.manufacturer ?: aircraft?.optStringOrNull("Manufacturer"),
+            type = faa?.model ?: adsbAircraft?.type ?: aircraft?.optStringOrNull("Type"),
+            typeCode = adsbAircraft?.icaoType ?: aircraft?.optStringOrNull("ICAOTypeCode"),
+            owner = faa?.registeredOwner ?: adsbAircraft?.registeredOwner ?: aircraft?.optStringOrNull("RegisteredOwners"),
             manufacturedYear = faa?.manufacturedYear,
-            registrySource = faa?.sourceName ?: "HexDB",
-            operatorCode = aircraft?.optStringOrNull("OperatorFlagCode"),
+            registrySource = metadataSources.distinct().joinToString(" + ").ifEmpty { null },
+            operatorCode = adsbAircraft?.operatorCode ?: aircraft?.optStringOrNull("OperatorFlagCode"),
             route = adsbRoute?.route ?: route?.optStringOrNull("route"),
             routeUpdatedEpochSec = route?.optLongOrNull("updatetime"),
             originAirport = origin,
@@ -55,7 +69,7 @@ class AircraftDetailsClient(private val userAgent: String) {
         val normalizedRegistration = "N${nNumber.uppercase(Locale.US)}"
         if (!resultText.contains("$normalizedRegistration is Assigned", ignoreCase = true)) return null
 
-        val ownerSection = tableSection(resultHtml, "Registered Owner")
+        val ownerSection = registeredOwnerTableSection(resultHtml)
         val privateOwner = ownerSection
             ?.let(::stripHtml)
             ?.contains("requested to keep this data private", ignoreCase = true) == true
@@ -75,11 +89,43 @@ class AircraftDetailsClient(private val userAgent: String) {
         )
     }
 
+    private fun fetchAdsbDbAircraft(hex: String, registration: String?): AdsbDbAircraftRecord? {
+        val keys = listOfNotNull(hex.takeIf { it.isNotBlank() }, registration)
+            .distinctBy { it.uppercase(Locale.US) }
+        for (key in keys) {
+            val encoded = URLEncoder.encode(key, "UTF-8")
+            val aircraft = fetchJson("https://api.adsbdb.com/v0/aircraft/$encoded")
+                ?.optJSONObject("response")
+                ?.optJSONObject("aircraft")
+                ?: continue
+            val modeS = aircraft.optStringOrNull("mode_s")?.trim()?.trimStart('~')?.lowercase(Locale.US)
+            if (key.equals(hex, ignoreCase = true) && modeS != null && modeS != hex) continue
+            val foundRegistration = normalizedRegistration(aircraft.optStringOrNull("registration"))
+            if (
+                registration != null &&
+                key.equals(registration, ignoreCase = true) &&
+                foundRegistration != null &&
+                foundRegistration != registration
+            ) {
+                continue
+            }
+            return AdsbDbAircraftRecord(
+                registration = foundRegistration,
+                manufacturer = aircraft.optStringOrNull("manufacturer"),
+                type = aircraft.optStringOrNull("type"),
+                icaoType = aircraft.optStringOrNull("icao_type"),
+                registeredOwner = aircraft.optStringOrNull("registered_owner"),
+                operatorCode = aircraft.optStringOrNull("registered_owner_operator_flag_code")
+            )
+        }
+        return null
+    }
+
     private fun fetchAirport(icao: String): AirportDetails? {
         val json = fetchJson("https://hexdb.io/api/v1/airport/icao/${icao.trim()}") ?: return null
         return AirportDetails(
             icao = json.optStringOrNull("icao") ?: icao,
-            iata = json.optStringOrNull("iata"),
+            iata = json.optStringOrNull("iata_code") ?: json.optStringOrNull("iata"),
             name = json.optStringOrNull("airport"),
             countryCode = json.optStringOrNull("country_code"),
             regionName = json.optStringOrNull("region_name"),
@@ -144,8 +190,8 @@ class AircraftDetailsClient(private val userAgent: String) {
     }
 }
 
-private fun tableSection(html: String, caption: String): String? {
-    val captionRegex = Regex("<caption[^>]*>\\s*${Regex.escape(caption)}\\s*</caption>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+private fun registeredOwnerTableSection(html: String): String? {
+    val captionRegex = Regex("<caption[^>]*>\\s*Registered Owner\\s*</caption>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
     val start = captionRegex.find(html)?.range?.first ?: return null
     val end = html.indexOf("</table>", start, ignoreCase = true).takeIf { it >= 0 } ?: return null
     return html.substring(start, end)
@@ -181,6 +227,71 @@ private fun cleanRegistryValue(value: String): String? {
     return cleaned
 }
 
+private fun normalizedRegistration(value: String?): String? {
+    return value
+        ?.uppercase(Locale.US)
+        ?.replace(Regex("[^A-Z0-9-]"), "")
+        ?.trim('-')
+        ?.takeIf { it.isNotBlank() && it != "NA" }
+}
+
+private fun firstPresent(vararg values: String?): String? {
+    return values.firstOrNull { !it.isNullOrBlank() }
+}
+
+private fun decodeUsNNumber(hex: String): String? {
+    val value = hex.toLongOrNull(16) ?: return null
+    if (value !in US_N_NUMBER_ICAO_START..US_N_NUMBER_ICAO_END) return null
+
+    var offset = (value - US_N_NUMBER_ICAO_START).toInt()
+    val registration = StringBuilder("N")
+    registration.append(offset / FIRST_N_NUMBER_STRIDE + 1)
+    offset %= FIRST_N_NUMBER_STRIDE
+    appendNNumberSuffix(offset, registration)?.let { return it }
+
+    offset -= N_NUMBER_SUFFIX_COUNT
+    if (offset < 0) return null
+    registration.append(offset / SECOND_N_NUMBER_STRIDE)
+    offset %= SECOND_N_NUMBER_STRIDE
+    appendNNumberSuffix(offset, registration)?.let { return it }
+
+    offset -= N_NUMBER_SUFFIX_COUNT
+    if (offset < 0) return null
+    registration.append(offset / THIRD_N_NUMBER_STRIDE)
+    offset %= THIRD_N_NUMBER_STRIDE
+    appendNNumberSuffix(offset, registration)?.let { return it }
+
+    offset -= N_NUMBER_SUFFIX_COUNT
+    if (offset < 0) return null
+    registration.append(offset / FOURTH_N_NUMBER_STRIDE)
+    offset %= FOURTH_N_NUMBER_STRIDE
+    if (offset <= N_NUMBER_ALPHABET.length) {
+        return registration.append(nNumberSingleSuffix(offset)).toString()
+    }
+
+    val lastDigit = offset - N_NUMBER_ALPHABET.length - 1
+    return registration.append(lastDigit).toString()
+}
+
+private fun appendNNumberSuffix(offset: Int, registration: StringBuilder): String? {
+    if (offset > MAX_TWO_LETTER_SUFFIX_OFFSET) return null
+    return registration.append(nNumberSuffix(offset)).toString()
+}
+
+private fun nNumberSuffix(offset: Int): String {
+    if (offset <= 0) return ""
+    val index = offset - 1
+    if (index < N_NUMBER_ALPHABET.length) return N_NUMBER_ALPHABET[index].toString()
+    val doubleIndex = index - N_NUMBER_ALPHABET.length
+    val first = doubleIndex / N_NUMBER_ALPHABET.length
+    val second = doubleIndex % N_NUMBER_ALPHABET.length
+    return "${N_NUMBER_ALPHABET[first]}${N_NUMBER_ALPHABET[second]}"
+}
+
+private fun nNumberSingleSuffix(offset: Int): String {
+    return if (offset <= 0) "" else N_NUMBER_ALPHABET[offset - 1].toString()
+}
+
 data class FaaRegistryRecord(
     val registration: String,
     val manufacturer: String?,
@@ -188,6 +299,15 @@ data class FaaRegistryRecord(
     val manufacturedYear: String?,
     val registeredOwner: String?,
     val sourceName: String
+)
+
+private data class AdsbDbAircraftRecord(
+    val registration: String?,
+    val manufacturer: String?,
+    val type: String?,
+    val icaoType: String?,
+    val registeredOwner: String?,
+    val operatorCode: String?
 )
 
 data class AircraftDetails(
@@ -246,3 +366,13 @@ private fun JSONObject.optLongOrNull(key: String): Long? {
 private fun JSONObject.optDoubleOrNull(key: String): Double? {
     return if (has(key) && !isNull(key)) optDouble(key) else null
 }
+
+private const val US_N_NUMBER_ICAO_START = 0xA00001L
+private const val US_N_NUMBER_ICAO_END = 0xADF7C7L
+private const val FIRST_N_NUMBER_STRIDE = 101711
+private const val SECOND_N_NUMBER_STRIDE = 10111
+private const val THIRD_N_NUMBER_STRIDE = 951
+private const val FOURTH_N_NUMBER_STRIDE = 35
+private const val N_NUMBER_SUFFIX_COUNT = 601
+private const val MAX_TWO_LETTER_SUFFIX_OFFSET = N_NUMBER_SUFFIX_COUNT - 1
+private const val N_NUMBER_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ"
