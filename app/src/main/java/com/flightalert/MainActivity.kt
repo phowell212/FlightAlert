@@ -4,9 +4,12 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import com.flightalert.data.GlobeWebAircraftSource
 import com.flightalert.service.AircraftAlertService
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.FlightMapView
@@ -14,6 +17,7 @@ import com.flightalert.ui.map.FlightMapView
 // Activity stays intentionally thin: permissions, lifecycle, and the single custom map surface.
 class MainActivity : ComponentActivity() {
     private var flightMapView: FlightMapView? = null
+    private var globeWebAircraftSource: GlobeWebAircraftSource? = null
     private val locationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
@@ -41,10 +45,25 @@ class MainActivity : ComponentActivity() {
             }
         )
 
-        val view = FlightMapView(this)
+        val globeSource = GlobeWebAircraftSource(this, APP_USER_AGENT)
+        globeSource.setEnabled(
+            FlightAlertSettings.prefs(this).getBoolean(
+                FlightAlertSettings.KEY_GLOBE_WEB_SOURCE_ENABLED,
+                FlightAlertSettings.DEFAULT_GLOBE_WEB_SOURCE_ENABLED
+            )
+        )
+        globeWebAircraftSource = globeSource
+        val view = FlightMapView(this, globeSource)
         view.keepScreenOn = true
         flightMapView = view
-        setContentView(view)
+        val root = FrameLayout(this).apply {
+            addView(
+                globeSource.webView,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+            addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        setContentView(root)
         view.requestFocus()
         requestLocationPermissionIfNeeded()
         requestNotificationPermissionIfNeeded()
@@ -54,13 +73,21 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         configureSystemBars()
         requestLocationPermissionIfNeeded()
+        globeWebAircraftSource?.start()
         flightMapView?.start()
         updateAlertService()
     }
 
     override fun onPause() {
         flightMapView?.stop()
+        globeWebAircraftSource?.stop()
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        globeWebAircraftSource?.destroy()
+        globeWebAircraftSource = null
+        super.onDestroy()
     }
 
     @Suppress("DEPRECATION")
@@ -108,5 +135,9 @@ class MainActivity : ComponentActivity() {
         } else {
             AircraftAlertService.stop(this)
         }
+    }
+
+    private companion object {
+        const val APP_USER_AGENT = "FlightAlertPrototype/0.1"
     }
 }

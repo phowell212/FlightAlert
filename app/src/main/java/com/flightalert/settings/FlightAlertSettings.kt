@@ -16,6 +16,11 @@ object FlightAlertSettings {
     const val KEY_PRIORITY_RANGE_CIRCLE_VISIBLE = "priority_range_circle_visible"
     const val KEY_MAP_SOURCE = "map_source"
     const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
+    const val KEY_GLOBE_WEB_SOURCE_ENABLED = "globe_web_source_enabled"
+    const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
+    const val KEY_LAYER_RESTRICTED_AIRSPACES_ENABLED = "layer_restricted_airspaces_enabled"
+    const val KEY_LAYER_OCEANIC_TRACKS_ENABLED = "layer_oceanic_tracks_enabled"
+    const val KEY_LAYER_AIRPORT_LABELS_ENABLED = "layer_airport_labels_enabled"
     const val KEY_VISUAL_THEME = "visual_theme"
     const val KEY_FILTER_SEARCH_QUERY = "filter_search_query"
     const val KEY_FILTER_AIRCRAFT_TYPE = "filter_aircraft_type"
@@ -30,6 +35,11 @@ object FlightAlertSettings {
     const val DEFAULT_PRIORITY_RANGE_FEET = 52800f
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
     const val DEFAULT_MAP_LABELS_ENABLED = true
+    const val DEFAULT_GLOBE_WEB_SOURCE_ENABLED = true
+    const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
+    const val DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED = false
+    const val DEFAULT_LAYER_OCEANIC_TRACKS_ENABLED = false
+    const val DEFAULT_LAYER_AIRPORT_LABELS_ENABLED = false
 
     fun prefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

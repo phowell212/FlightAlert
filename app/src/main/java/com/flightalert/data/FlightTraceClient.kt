@@ -23,21 +23,29 @@ class FlightTraceClient(private val userAgent: String) {
         val cleanIcao = icao24.trim().lowercase(Locale.US)
         if (cleanIcao.isEmpty()) return null
 
-        val fullJson = fetchAdsbTrace(cleanIcao, "full") ?: return null
-        val recentJson = runCatching { fetchAdsbTrace(cleanIcao, "recent") }.getOrNull()
-        val trace = parseAdsbTrace(listOfNotNull(fullJson, recentJson), livePoint, typeCode, category)
+        val source = fetchTraceSource(cleanIcao) ?: return null
+        val trace = parseAdsbTrace(source.name, listOfNotNull(source.fullJson, source.recentJson), livePoint, typeCode)
         return trace.takeIf { it.pointCount >= MIN_TRACE_POINTS }
     }
 
-    private fun fetchAdsbTrace(cleanIcao: String, kind: String): JSONObject? {
+    private fun fetchTraceSource(cleanIcao: String): TraceSource? {
+        for (provider in TRACE_PROVIDERS) {
+            val fullJson = fetchTrace(provider, cleanIcao, "full") ?: continue
+            val recentJson = runCatching { fetchTrace(provider, cleanIcao, "recent") }.getOrNull()
+            return TraceSource(provider.name, fullJson, recentJson)
+        }
+        return null
+    }
+
+    private fun fetchTrace(provider: TraceProvider, cleanIcao: String, kind: String): JSONObject? {
         val folder = cleanIcao.takeLast(2)
-        val url = URL("https://adsb.lol/data/traces/$folder/trace_${kind}_$cleanIcao.json")
+        val url = URL("${provider.baseUrl}/data/traces/$folder/trace_${kind}_$cleanIcao.json")
         if (!url.protocol.equals("https", ignoreCase = true)) return null
         val connection = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 9000
             readTimeout = 16000
             requestMethod = "GET"
-            setRequestProperty("User-Agent", userAgent)
+            AirplanesLiveHttp.applyBrowserHeaders(this, userAgent, provider.referer)
         }
 
         return try {
@@ -49,19 +57,21 @@ class FlightTraceClient(private val userAgent: String) {
     }
 
     private fun parseAdsbTrace(
+        sourceName: String,
         jsons: List<JSONObject>,
         livePoint: TrackPoint?,
-        typeCode: String?,
-        category: Int?
+        typeCode: String?
     ): FlightTrace {
         if (jsons.isEmpty()) return FlightTrace.empty()
         val metadata = jsons.first()
         val traceTypeCode = metadata.optString("t").trim().ifEmpty { null }
         val effectiveTypeCode = typeCode?.trim()?.ifEmpty { null } ?: traceTypeCode
         val allPoints = normalized(jsons.flatMap { parseTracePoints(it) })
-        val currentLeg = currentFlightLeg(allPoints, effectiveTypeCode, category)
+        val currentLeg = currentFlightLeg(allPoints)
         val segments = traceSegments(currentLeg).toMutableList()
-        val previousSegments = previousFlightSegments(allPoints, currentLeg)
+        val currentStartSec = segments.firstOrNull()?.points?.firstOrNull()?.epochSec
+            ?: currentLeg.firstOrNull()?.point?.epochSec
+        val previousSegments = previousFlightSegments(allPoints, currentStartSec)
         val liveState = appendLivePointIfCurrent(segments, livePoint)
 
         if (livePoint != null && liveState == LiveTraceState.STALE_OR_DISCONNECTED && !sourceTraceIsCurrent(segments)) {
@@ -76,7 +86,7 @@ class FlightTraceClient(private val userAgent: String) {
             return FlightTrace.empty()
         }
 
-        val sourceParts = mutableListOf("ADSB.lol trace_full")
+        val sourceParts = mutableListOf("$sourceName trace_full")
         if (jsons.size > 1) sourceParts += "trace_recent"
         if (liveState == LiveTraceState.APPENDED) sourceParts += "live ADS-B"
 
@@ -151,9 +161,9 @@ class FlightTraceClient(private val userAgent: String) {
 
     private fun previousFlightSegments(
         points: List<TracePointWithFlags>,
-        currentLeg: List<TracePointWithFlags>
+        currentStartSec: Long?
     ): List<TraceSegment> {
-        val currentStartSec = currentLeg.firstOrNull()?.point?.epochSec ?: return emptyList()
+        currentStartSec ?: return emptyList()
         val historicalPoints = points.takeWhile { it.point.epochSec < currentStartSec }
         if (historicalPoints.size < MIN_SEGMENT_POINTS) return emptyList()
         return traceSegments(historicalPoints)
@@ -183,13 +193,11 @@ class FlightTraceClient(private val userAgent: String) {
         return distance
     }
 
-    private fun currentFlightLeg(points: List<TracePointWithFlags>, typeCode: String?, category: Int?): List<TracePointWithFlags> {
+    private fun currentFlightLeg(points: List<TracePointWithFlags>): List<TracePointWithFlags> {
         if (points.isEmpty()) return emptyList()
-        val latestTakeoffIndex = latestTakeoffIndex(points)
-        if (shouldUseAirportStopSelection(typeCode, category)) {
-            airportStopAwareLeg(points, latestTakeoffIndex, typeCode, category)?.let { return it }
-        }
-        return latestMovingLeg(points, latestTakeoffIndex)
+        // tar1090/readsb traces mark new legs at the source; prefer that boundary over app-side trip stitching.
+        if (points.any { it.startsNewLeg }) return latestSourceLeg(points)
+        return latestMovingLeg(points)
     }
 
     private fun latestMovingLeg(points: List<TracePointWithFlags>, latestTakeoffIndex: Int? = latestTakeoffIndex(points)): List<TracePointWithFlags> {
@@ -207,145 +215,6 @@ class FlightTraceClient(private val userAgent: String) {
             }
         }
         return takeoffIndex
-    }
-
-    private fun airportStopAwareLeg(
-        points: List<TracePointWithFlags>,
-        latestTakeoffIndex: Int?,
-        typeCode: String?,
-        category: Int?
-    ): List<TracePointWithFlags>? {
-        val lastMovingIndex = points.indexOfLast { it.isMovingFlightPoint() }
-        if (lastMovingIndex <= 0) return null
-        val refuelSeconds = maxRefuelStopSeconds(typeCode, category)
-        var bridgedRefuelStop = false
-        for (index in lastMovingIndex downTo 1) {
-            val stop = airportStopBoundaryAt(points, index) ?: continue
-            val bridgesPreviousLeg = isShortRefuelStop(stop.durationSeconds, refuelSeconds) &&
-                isRefuelContinuation(points, stop)
-            if (!bridgesPreviousLeg) {
-                return points.drop(departureContextStart(points, stop.departureIndex))
-            }
-            bridgedRefuelStop = true
-        }
-        if (bridgedRefuelStop) return points
-        return latestMovingLeg(points, latestTakeoffIndex)
-    }
-
-    private fun airportStopBoundaryAt(points: List<TracePointWithFlags>, departureIndex: Int): AirportStopBoundary? {
-        if (departureIndex <= 0 || !points[departureIndex].isMovingFlightPoint()) return null
-        val previous = points[departureIndex - 1]
-        val departure = points[departureIndex]
-        if (!previous.isMovingFlightPoint()) {
-            val stopStart = stopClusterStart(points, departureIndex - 1)
-            val stopPoints = points.subList(stopStart, departureIndex)
-            val durationSeconds = departure.point.epochSec - stopPoints.first().point.epochSec
-            if (durationSeconds >= MIN_AIRPORT_STOP_SECONDS && isAirportStopCluster(stopPoints, departure)) {
-                return AirportStopBoundary(departureIndex, stopStart, durationSeconds)
-            }
-        }
-
-        val gapSeconds = departure.point.epochSec - previous.point.epochSec
-        if ((departure.startsNewLeg || gapSeconds > MAX_TRACE_GAP_SECONDS) &&
-            gapSeconds >= MIN_AIRPORT_STOP_SECONDS &&
-            isAirportStopGap(previous, departure)
-        ) {
-            return AirportStopBoundary(departureIndex, departureIndex - 1, gapSeconds)
-        }
-        return null
-    }
-
-    private fun stopClusterStart(points: List<TracePointWithFlags>, stopEndIndex: Int): Int {
-        var start = stopEndIndex
-        for (index in stopEndIndex - 1 downTo 0) {
-            if (points[index].isMovingFlightPoint() || points[index + 1].startsNewLeg) break
-            start = index
-        }
-        return start
-    }
-
-    private fun isAirportStopCluster(stopPoints: List<TracePointWithFlags>, departure: TracePointWithFlags): Boolean {
-        if (stopPoints.isEmpty() || !departure.isLowAirportContext()) return false
-        val anchor = stopPoints.last().point
-        val allNear = stopPoints.all { point ->
-            distanceMeters(anchor.lat, anchor.lon, point.point.lat, point.point.lon) <= AIRPORT_STOP_CLUSTER_RADIUS_M
-        }
-        if (!allNear) return false
-        val distanceToDeparture = distanceMeters(anchor.lat, anchor.lon, departure.point.lat, departure.point.lon)
-        return distanceToDeparture <= AIRPORT_DEPARTURE_CONTEXT_RADIUS_M && stopPoints.any { it.isLowAirportContext() }
-    }
-
-    private fun isAirportStopGap(previous: TracePointWithFlags, departure: TracePointWithFlags): Boolean {
-        if (!previous.isLowAirportContext() || !departure.isLowAirportContext()) return false
-        val distanceMeters = distanceMeters(previous.point.lat, previous.point.lon, departure.point.lat, departure.point.lon)
-        return distanceMeters <= AIRPORT_STOP_GAP_RADIUS_M
-    }
-
-    private fun shouldUseAirportStopSelection(typeCode: String?, category: Int?): Boolean {
-        if (category == ROTORCRAFT_CATEGORY || category == UAV_CATEGORY) return false
-        val code = typeCode?.uppercase(Locale.US)?.trim() ?: return true
-        return !(
-            ROTORCRAFT_TYPE_PREFIXES.any { code.startsWith(it) } ||
-                UAV_TYPE_PREFIXES.any { code.startsWith(it) }
-            )
-    }
-
-    private fun maxRefuelStopSeconds(typeCode: String?, category: Int?): Long {
-        val code = typeCode?.uppercase(Locale.US)?.trim().orEmpty()
-        return when {
-            isLongRangeHeavyType(code) -> HEAVY_REFUEL_STOP_SECONDS
-            category in 4..6 || isAirlinerType(code) -> AIRLINER_REFUEL_STOP_SECONDS
-            isRegionalOrTurbopropType(code) -> REGIONAL_REFUEL_STOP_SECONDS
-            else -> GENERAL_AVIATION_REFUEL_STOP_SECONDS
-        }
-    }
-
-    private fun isShortRefuelStop(durationSeconds: Long, maxRefuelSeconds: Long): Boolean {
-        return durationSeconds in MIN_REFUEL_STOP_SECONDS..maxRefuelSeconds
-    }
-
-    private fun isRefuelContinuation(points: List<TracePointWithFlags>, stop: AirportStopBoundary): Boolean {
-        val incoming = previousMovingPoint(points, stop.stopStartIndex) ?: return false
-        val stopAnchor = points.getOrNull(stop.stopStartIndex)?.point ?: return false
-        val departure = points.getOrNull(stop.departureIndex)?.point ?: return false
-        val outbound = nextMovingPointAfterDeparture(points, stop.departureIndex) ?: return false
-        val inboundDistance = distanceMeters(incoming.point.lat, incoming.point.lon, stopAnchor.lat, stopAnchor.lon)
-        val outboundDistance = distanceMeters(departure.lat, departure.lon, outbound.point.lat, outbound.point.lon)
-        if (inboundDistance < MIN_REFUEL_COURSE_DISTANCE_M || outboundDistance < MIN_REFUEL_COURSE_DISTANCE_M) return false
-        val inboundBearing = bearingDegrees(incoming.point.lat, incoming.point.lon, stopAnchor.lat, stopAnchor.lon)
-        val outboundBearing = bearingDegrees(departure.lat, departure.lon, outbound.point.lat, outbound.point.lon)
-        return angleDifferenceDegrees(inboundBearing, outboundBearing) <= MAX_REFUEL_COURSE_CHANGE_DEG
-    }
-
-    private fun previousMovingPoint(points: List<TracePointWithFlags>, beforeIndex: Int): TracePointWithFlags? {
-        for (index in beforeIndex - 1 downTo 0) {
-            val candidate = points[index]
-            if (candidate.isMovingFlightPoint()) return candidate
-        }
-        return null
-    }
-
-    private fun nextMovingPointAfterDeparture(points: List<TracePointWithFlags>, departureIndex: Int): TracePointWithFlags? {
-        val departure = points.getOrNull(departureIndex)?.point ?: return null
-        for (index in departureIndex + 1 until points.size) {
-            val candidate = points[index]
-            if (!candidate.isMovingFlightPoint()) continue
-            val distance = distanceMeters(departure.lat, departure.lon, candidate.point.lat, candidate.point.lon)
-            if (distance >= MIN_REFUEL_COURSE_DISTANCE_M) return candidate
-        }
-        return null
-    }
-
-    private fun isLongRangeHeavyType(code: String): Boolean {
-        return HEAVY_TYPE_PREFIXES.any { code.startsWith(it) }
-    }
-
-    private fun isAirlinerType(code: String): Boolean {
-        return AIRLINER_TYPE_PREFIXES.any { code.startsWith(it) }
-    }
-
-    private fun isRegionalOrTurbopropType(code: String): Boolean {
-        return REGIONAL_TYPE_PREFIXES.any { code.startsWith(it) }
     }
 
     private fun departureContextStart(points: List<TracePointWithFlags>, takeoffIndex: Int): Int {
@@ -368,14 +237,6 @@ class FlightTraceClient(private val userAgent: String) {
         groundSpeedKt?.let { return it >= MIN_MOVING_FLIGHT_SPEED_KT }
         val altitudeFeet = point.altitudeM?.times(FEET_PER_METER)
         return altitudeFeet == null || altitudeFeet >= MIN_MOVING_FLIGHT_ALTITUDE_FT
-    }
-
-    private fun TracePointWithFlags.isLowAirportContext(): Boolean {
-        if (point.onGround == true) return true
-        val altitudeFeet = point.altitudeM?.times(FEET_PER_METER)
-        val speed = groundSpeedKt
-        if (speed != null && speed <= AIRPORT_CONTEXT_MAX_SPEED_KT) return altitudeFeet == null || altitudeFeet <= AIRPORT_CONTEXT_MAX_ALTITUDE_FT
-        return altitudeFeet != null && altitudeFeet <= AIRPORT_CONTEXT_LOW_ALTITUDE_FT
     }
 
     private fun continuousSegments(points: List<TracePointWithFlags>): List<List<TracePointWithFlags>> {
@@ -427,20 +288,6 @@ class FlightTraceClient(private val userAgent: String) {
         return distanceMeters(a.lat, a.lon, b.lat, b.lon) / METERS_PER_NAUTICAL_MILE / (seconds / 3600.0)
     }
 
-    private fun bearingDegrees(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val lat1Rad = Math.toRadians(lat1)
-        val lat2Rad = Math.toRadians(lat2)
-        val deltaLon = Math.toRadians(lon2 - lon1)
-        val y = sin(deltaLon) * cos(lat2Rad)
-        val x = cos(lat1Rad) * sin(lat2Rad) - sin(lat1Rad) * cos(lat2Rad) * cos(deltaLon)
-        return (Math.toDegrees(atan2(y, x)) + 360.0) % 360.0
-    }
-
-    private fun angleDifferenceDegrees(a: Double, b: Double): Double {
-        val difference = kotlin.math.abs(((a - b + 540.0) % 360.0) - 180.0)
-        return difference.coerceIn(0.0, 180.0)
-    }
-
     private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val lat1Rad = Math.toRadians(lat1)
         val lat2Rad = Math.toRadians(lat2)
@@ -457,11 +304,31 @@ class FlightTraceClient(private val userAgent: String) {
         val groundSpeedKt: Double?
     )
 
-    private data class AirportStopBoundary(
-        val departureIndex: Int,
-        val stopStartIndex: Int,
-        val durationSeconds: Long
+    private data class TraceProvider(
+        val name: String,
+        val baseUrl: String,
+        val referer: String? = null
     )
+
+    private data class TraceSource(
+        val name: String,
+        val fullJson: JSONObject,
+        val recentJson: JSONObject?
+    )
+
+    private companion object {
+        val TRACE_PROVIDERS = listOf(
+            TraceProvider(
+                name = "Airplanes.Live",
+                baseUrl = AirplanesLiveHttp.GLOBE_BASE_URL,
+                referer = "${AirplanesLiveHttp.GLOBE_BASE_URL}/"
+            ),
+            TraceProvider(
+                name = "ADSB.lol",
+                baseUrl = "https://adsb.lol"
+            )
+        )
+    }
 
     private enum class LiveTraceState {
         NOT_PROVIDED,
@@ -538,28 +405,6 @@ private const val MIN_MOVING_FLIGHT_SPEED_KT = 70.0
 private const val MIN_MOVING_FLIGHT_ALTITUDE_FT = 850.0
 private const val MAX_DEPARTURE_CONTEXT_SECONDS = 1200L
 private const val MAX_DEPARTURE_CONTEXT_DISTANCE_M = 15000.0
-private const val MIN_AIRPORT_STOP_SECONDS = 300L
-private const val MIN_REFUEL_STOP_SECONDS = 600L
-private const val MIN_REFUEL_COURSE_DISTANCE_M = 25000.0
-private const val MAX_REFUEL_COURSE_CHANGE_DEG = 105.0
 private const val MIN_PREVIOUS_FLIGHT_DISTANCE_M = 5000.0
 private const val MIN_PREVIOUS_FLIGHT_ALTITUDE_FT = 450.0
 private const val MAX_PREVIOUS_FLIGHT_SEGMENTS = 8
-private const val GENERAL_AVIATION_REFUEL_STOP_SECONDS = 2700L
-private const val REGIONAL_REFUEL_STOP_SECONDS = 3600L
-private const val AIRLINER_REFUEL_STOP_SECONDS = 5400L
-private const val HEAVY_REFUEL_STOP_SECONDS = 7200L
-private const val AIRPORT_STOP_CLUSTER_RADIUS_M = 2500.0
-private const val AIRPORT_DEPARTURE_CONTEXT_RADIUS_M = 12000.0
-private const val AIRPORT_STOP_GAP_RADIUS_M = 30000.0
-private const val AIRPORT_CONTEXT_MAX_SPEED_KT = 90.0
-private const val AIRPORT_CONTEXT_MAX_ALTITUDE_FT = 3500.0
-private const val AIRPORT_CONTEXT_LOW_ALTITUDE_FT = 1800.0
-private const val ROTORCRAFT_CATEGORY = 8
-private const val UAV_CATEGORY = 14
-
-private val ROTORCRAFT_TYPE_PREFIXES = listOf("H", "R", "A109", "AS", "B06", "B47", "B407", "B429", "EC", "EN28", "S55", "S58", "S61", "S64", "S76", "S92")
-private val UAV_TYPE_PREFIXES = listOf("UAV", "DRON")
-private val HEAVY_TYPE_PREFIXES = listOf("A34", "A35", "A38", "B74", "B77", "B78", "C5", "C17", "DC10", "MD11")
-private val AIRLINER_TYPE_PREFIXES = listOf("A19", "A20", "A21", "A30", "A31", "A32", "A33", "A34", "A35", "A38", "B37", "B38", "B39", "B70", "B71", "B72", "B73", "B74", "B75", "B76", "B77", "B78", "BCS", "CRJ", "E17", "E19", "E70", "E75", "MD8", "MD9")
-private val REGIONAL_TYPE_PREFIXES = listOf("AT4", "AT7", "BE1", "BE2", "C30", "C40", "C42", "C68", "DH8", "E12", "E13", "E14", "E45", "E50", "E55", "F50", "JS3", "PC12", "SF34")

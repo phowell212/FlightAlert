@@ -6,9 +6,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
-import java.util.concurrent.Callable
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -33,20 +30,12 @@ class AircraftFeedClient(private val userAgent: String) {
         } else {
             FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, httpCode = HTTP_TOO_MANY_REQUESTS)
         }
-        if (airplanesResult.status == FeedStatus.OK && airplanesResult.aircraft.isNotEmpty() && !airplanesResult.partialCoverage) {
+        if (airplanesResult.status == FeedStatus.OK) {
             return airplanesResult
         }
 
         val openSkyResult = if (now >= openSkyRetryAfterMs) fetchOpenSky(bounds, ownLat, ownLon) else null
-        if (openSkyResult?.status == FeedStatus.OK) {
-            return if (airplanesResult.status == FeedStatus.OK && airplanesResult.aircraft.isNotEmpty()) {
-                mergeCompleteCoverageWithDetail(openSkyResult, airplanesResult)
-            } else {
-                openSkyResult
-            }
-        }
-
-        if (airplanesResult.status == FeedStatus.OK) return airplanesResult
+        if (openSkyResult?.status == FeedStatus.OK) return openSkyResult
 
         return openSkyResult ?: airplanesResult
     }
@@ -70,7 +59,7 @@ class AircraftFeedClient(private val userAgent: String) {
         }
         return FeedResult(
             status = FeedStatus.OK,
-            source = FeedSource.COMBINED,
+            source = mergedSource(complete.source, detail.source),
             aircraft = merged.values.sortedBy { it.distanceM },
             epochSec = maxOfEpoch(complete.epochSec, detail.epochSec),
             queryCount = complete.queryCount + detail.queryCount,
@@ -181,24 +170,7 @@ class AircraftFeedClient(private val userAgent: String) {
         ownLat: Double,
         ownLon: Double
     ): List<FeedResult> {
-        if (queries.isEmpty()) return emptyList()
-        if (queries.size == 1) return listOf(fetchAirplanesLivePoint(queries.first(), ownLat, ownLon))
-        val pool = Executors.newFixedThreadPool(min(AIRPLANES_LIVE_PARALLELISM, queries.size))
-        return try {
-            val tasks = queries.map { query ->
-                Callable { fetchAirplanesLivePoint(query, ownLat, ownLon) }
-            }
-            pool.invokeAll(tasks, AIRPLANES_LIVE_BATCH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                .mapNotNull { future ->
-                    runCatching {
-                        if (future.isDone && !future.isCancelled) future.get() else null
-                    }.getOrNull()
-                }
-        } catch (_: Exception) {
-            emptyList()
-        } finally {
-            pool.shutdownNow()
-        }
+        return queries.map { query -> fetchAirplanesLivePoint(query, ownLat, ownLon) }
     }
 
     private fun fetchAirplanesLivePoint(query: AirplanesLiveQuery, ownLat: Double, ownLon: Double): FeedResult {
@@ -223,7 +195,8 @@ class AircraftFeedClient(private val userAgent: String) {
     private fun fetchAirplanesLivePath(path: String, ownLat: Double, ownLon: Double): FeedResult {
         var connection: HttpURLConnection? = null
         return try {
-            val url = URL("https://api.airplanes.live/v2/$path")
+            AirplanesLiveHttp.waitForRestApiSlot()
+            val url = URL("${AirplanesLiveHttp.API_BASE_URL}/$path")
             connection = openConnection(url)
             val code = connection.responseCode
             if (code == HttpURLConnection.HTTP_OK) {
@@ -240,6 +213,7 @@ class AircraftFeedClient(private val userAgent: String) {
                 if (code == HTTP_TOO_MANY_REQUESTS) {
                     val retrySeconds = connection.getHeaderField("Retry-After")?.toLongOrNull()
                         ?: DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS
+                    AirplanesLiveHttp.backOffRestApi(retrySeconds)
                     airplanesLiveRetryAfterMs = System.currentTimeMillis() + retrySeconds * 1000L
                 }
                 connection.errorStream?.close()
@@ -326,7 +300,12 @@ class AircraftFeedClient(private val userAgent: String) {
             connectTimeout = 4000
             readTimeout = 6000
             requestMethod = "GET"
-            setRequestProperty("User-Agent", userAgent)
+            if (url.host.equals("api.airplanes.live", ignoreCase = true)) {
+                AirplanesLiveHttp.applyBrowserHeaders(this, userAgent)
+            } else {
+                setRequestProperty("User-Agent", userAgent)
+                setRequestProperty("Accept", "application/json")
+            }
         }
     }
 
@@ -447,15 +426,17 @@ class AircraftFeedClient(private val userAgent: String) {
         return start + (end - start) * amount
     }
 
+    private fun mergedSource(first: FeedSource, second: FeedSource): FeedSource {
+        return if (first == second) first else FeedSource.COMBINED
+    }
+
     companion object {
         private const val HTTP_TOO_MANY_REQUESTS = 429
         private const val DEFAULT_OPENSKY_BACKOFF_SECONDS = 3600L
         private const val DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS = 120L
         private const val MIN_AIRPLANES_RADIUS_NM = 25.0
         private const val MAX_AIRPLANES_RADIUS_NM = 250.0
-        private const val MAX_AIRPLANES_LIVE_QUERIES = 36
-        private const val AIRPLANES_LIVE_PARALLELISM = 6
-        private const val AIRPLANES_LIVE_BATCH_TIMEOUT_SECONDS = 12L
+        private const val MAX_AIRPLANES_LIVE_QUERIES = 1
         private const val AIRPLANES_GRID_CELL_RADIUS_FACTOR = 1.45
         private const val AIRPLANES_QUERY_RADIUS_PADDING = 1.08
         private const val METERS_PER_NAUTICAL_MILE = 1852.0
@@ -513,6 +494,7 @@ enum class FeedStatus {
 enum class FeedSource(val displayName: String) {
     OPENSKY("OpenSky"),
     AIRPLANES_LIVE("Airplanes.Live"),
+    AIRPLANES_LIVE_GLOBE("Airplanes.Live globe web source"),
     COMBINED("OpenSky + Airplanes.Live")
 }
 

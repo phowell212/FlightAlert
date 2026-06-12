@@ -11,11 +11,14 @@ class AircraftDetailsClient(private val userAgent: String) {
     fun fetchDetails(hex: String, callsign: String, registrationHint: String? = null): AircraftDetails {
         val normalizedHex = hex.trim().trimStart('~').lowercase(Locale.US)
         val cleanCallsign = callsign.trim().replace(" ", "")
+        val airplanesLive = fetchAirplanesLiveMetadata(normalizedHex)
         val feedRegistration = normalizedRegistration(registrationHint)
         val decodedUsRegistration = decodeUsNNumber(normalizedHex)
-        val adsbAircraft = fetchAdsbDbAircraft(normalizedHex, feedRegistration ?: decodedUsRegistration)
+        val airplanesRegistration = normalizedRegistration(airplanesLive?.registration)
+        val adsbAircraft = fetchAdsbDbAircraft(normalizedHex, airplanesRegistration ?: feedRegistration ?: decodedUsRegistration)
         val aircraft = fetchJson("https://hexdb.io/api/v1/aircraft/$normalizedHex")
         val registration = firstPresent(
+            airplanesRegistration,
             adsbAircraft?.registration,
             aircraft?.optStringOrNull("Registration")?.let(::normalizedRegistration),
             feedRegistration,
@@ -35,28 +38,116 @@ class AircraftDetailsClient(private val userAgent: String) {
         val routeCodes = route?.optStringOrNull("route")?.split("-")?.takeIf { it.size >= 2 }
         val origin = adsbRoute?.origin ?: routeCodes?.firstOrNull()?.let { fetchAirport(it) }
         val destination = adsbRoute?.destination ?: routeCodes?.lastOrNull()?.let { fetchAirport(it) }
+        val feedType = airplanesLive?.description
+        val apiManufacturer = faa?.manufacturer ?: adsbAircraft?.manufacturer ?: aircraft?.optStringOrNull("Manufacturer")
+        val apiType = faa?.model ?: adsbAircraft?.type ?: aircraft?.optStringOrNull("Type")
+        val apiTypeCode = airplanesLive?.typeCode ?: adsbAircraft?.icaoType ?: aircraft?.optStringOrNull("ICAOTypeCode")
+        val internet = if (feedType == null && apiType == null) {
+            fetchInternetAircraftMetadata(apiManufacturer, feedType ?: apiType, apiTypeCode)
+        } else {
+            null
+        }
+        val manufacturer = apiManufacturer ?: internet?.manufacturer
+        val type = feedType ?: apiType ?: internet?.model
+        val owner = faa?.registeredOwner ?: adsbAircraft?.registeredOwner ?: aircraft?.optStringOrNull("RegisteredOwners") ?: airplanesLive?.ownerOperator
+
         val metadataSources = mutableListOf<String>()
+        if (airplanesLive?.hasMetadata == true) metadataSources += airplanesLive.sourceName
         if (faa != null) metadataSources += faa.sourceName
         if (adsbAircraft != null) metadataSources += "ADSBdb"
         if (aircraft != null) metadataSources += "HexDB"
+        if (internet?.model != null && internet.model == type) metadataSources += internet.sourceName
         if (metadataSources.isEmpty() && registration != null && registration == feedRegistration) metadataSources += "Aircraft feed"
         if (metadataSources.isEmpty() && registration != null && registration == decodedUsRegistration) metadataSources += "Mode S N-number decode"
 
         return AircraftDetails(
             icao24 = normalizedHex,
             registration = faa?.registration ?: registration,
-            manufacturer = faa?.manufacturer ?: adsbAircraft?.manufacturer ?: aircraft?.optStringOrNull("Manufacturer"),
-            type = faa?.model ?: adsbAircraft?.type ?: aircraft?.optStringOrNull("Type"),
-            typeCode = adsbAircraft?.icaoType ?: aircraft?.optStringOrNull("ICAOTypeCode"),
-            owner = faa?.registeredOwner ?: adsbAircraft?.registeredOwner ?: aircraft?.optStringOrNull("RegisteredOwners"),
-            manufacturedYear = faa?.manufacturedYear,
+            manufacturer = manufacturer,
+            type = type,
+            typeCode = apiTypeCode,
+            owner = owner,
+            manufacturedYear = faa?.manufacturedYear ?: airplanesLive?.year,
             registrySource = metadataSources.distinct().joinToString(" + ").ifEmpty { null },
-            operatorCode = adsbAircraft?.operatorCode ?: aircraft?.optStringOrNull("OperatorFlagCode"),
+            operatorCode = adsbAircraft?.operatorCode ?: aircraft?.optStringOrNull("OperatorFlagCode") ?: airplanesLive?.operatorCode,
             route = adsbRoute?.route ?: route?.optStringOrNull("route"),
             routeUpdatedEpochSec = route?.optLongOrNull("updatetime"),
             originAirport = origin,
             destinationAirport = destination
         )
+    }
+
+    private fun fetchInternetAircraftMetadata(
+        manufacturer: String?,
+        model: String?,
+        typeCode: String?
+    ): InternetAircraftMetadata? {
+        val queries = listOfNotNull(
+            listOfNotNull(manufacturer, model).joinToString(" ").takeIf { it.isNotBlank() }?.let { "$it aircraft" },
+            typeCode?.takeIf { it.length >= 3 }?.let { "$it aircraft" },
+            model?.takeIf { it.length >= 3 }?.let { "$it aircraft" }
+        ).distinctBy { it.uppercase(Locale.US) }
+        for (query in queries) {
+            fetchWikipediaAircraftMetadata(query)?.let { return it }
+        }
+        return null
+    }
+
+    private fun fetchWikipediaAircraftMetadata(query: String): InternetAircraftMetadata? {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val search = fetchJson("https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srlimit=3&srsearch=$encoded")
+            ?.optJSONObject("query")
+            ?.optJSONArray("search")
+            ?: return null
+        for (index in 0 until search.length()) {
+            val result = search.optJSONObject(index) ?: continue
+            val title = result.optStringOrNull("title") ?: continue
+            val snippet = stripHtml(result.optStringOrNull("snippet").orEmpty())
+            if (!looksLikeAircraftPage(title, snippet)) continue
+            val summary = fetchWikipediaSummary(title) ?: continue
+            if (!looksLikeAircraftPage(summary.title, summary.extract)) continue
+            return InternetAircraftMetadata(
+                manufacturer = manufacturerFromWikipediaTitle(summary.title),
+                model = summary.title,
+                sourceName = "Wikipedia summary"
+            )
+        }
+        return null
+    }
+
+    private fun fetchWikipediaSummary(title: String): WikipediaSummary? {
+        val encodedTitle = URLEncoder.encode(title.replace(' ', '_'), "UTF-8").replace("+", "%20")
+        val json = fetchJson("https://en.wikipedia.org/api/rest_v1/page/summary/$encodedTitle") ?: return null
+        val extract = json.optStringOrNull("extract") ?: return null
+        return WikipediaSummary(
+            title = json.optStringOrNull("title") ?: title,
+            extract = extract
+        )
+    }
+
+    private fun fetchAirplanesLiveMetadata(hex: String): AirplanesLiveMetadata? {
+        if (hex.isBlank()) return null
+        fetchAirplanesLiveTraceMetadata(hex)?.let { return it }
+        return fetchAirplanesLiveRestMetadata(hex)
+    }
+
+    private fun fetchAirplanesLiveTraceMetadata(hex: String): AirplanesLiveMetadata? {
+        val folder = hex.takeLast(2)
+        val json = fetchJson("${AirplanesLiveHttp.GLOBE_BASE_URL}/data/traces/$folder/trace_full_$hex.json", browserHeaders = true)
+            ?: return null
+        return json.toAirplanesLiveMetadata("Airplanes.Live trace")
+    }
+
+    private fun fetchAirplanesLiveRestMetadata(hex: String): AirplanesLiveMetadata? {
+        AirplanesLiveHttp.waitForRestApiSlot()
+        val json = fetchJson("${AirplanesLiveHttp.API_BASE_URL}/hex/$hex", browserHeaders = true) ?: return null
+        val aircraft = json.optJSONArray("aircraft") ?: return null
+        for (index in 0 until aircraft.length()) {
+            val item = aircraft.optJSONObject(index) ?: continue
+            val itemHex = item.optStringOrNull("hex")?.trim()?.trimStart('~')?.lowercase(Locale.US)
+            if (itemHex == hex) return item.toAirplanesLiveMetadata("Airplanes.Live")
+        }
+        return null
     }
 
     private fun fetchFaaRegistry(registration: String): FaaRegistryRecord? {
@@ -150,8 +241,8 @@ class AircraftDetailsClient(private val userAgent: String) {
         return RouteLookup(routeLabel, origin, destination)
     }
 
-    private fun fetchJson(url: String): JSONObject? {
-        val body = fetchText(url) ?: return null
+    private fun fetchJson(url: String, browserHeaders: Boolean = false): JSONObject? {
+        val body = fetchText(url, browserHeaders) ?: return null
         return try {
             JSONObject(body).takeUnless { it.optStringOrNull("status") == "404" }
         } catch (_: Exception) {
@@ -159,7 +250,7 @@ class AircraftDetailsClient(private val userAgent: String) {
         }
     }
 
-    private fun fetchText(url: String): String? {
+    private fun fetchText(url: String, browserHeaders: Boolean = false): String? {
         val safeUrl = httpsUrl(url) ?: return null
         var connection: HttpURLConnection? = null
         return try {
@@ -167,9 +258,17 @@ class AircraftDetailsClient(private val userAgent: String) {
                 connectTimeout = 4000
                 readTimeout = 6000
                 requestMethod = "GET"
-                setRequestProperty("User-Agent", userAgent)
+                if (browserHeaders) {
+                    AirplanesLiveHttp.applyBrowserHeaders(this, userAgent)
+                } else {
+                    setRequestProperty("User-Agent", userAgent)
+                    setRequestProperty("Accept", "application/json,text/plain,*/*")
+                }
             }
             if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                if (connection.responseCode == HTTP_TOO_MANY_REQUESTS && safeUrl.host.equals("api.airplanes.live", ignoreCase = true)) {
+                    AirplanesLiveHttp.backOffRestApi(connection.getHeaderField("Retry-After")?.toLongOrNull())
+                }
                 connection.errorStream?.close()
                 return null
             }
@@ -195,6 +294,51 @@ private fun registeredOwnerTableSection(html: String): String? {
     val start = captionRegex.find(html)?.range?.first ?: return null
     val end = html.indexOf("</table>", start, ignoreCase = true).takeIf { it >= 0 } ?: return null
     return html.substring(start, end)
+}
+
+private fun looksLikeAircraftPage(title: String, text: String): Boolean {
+    val combined = "$title $text".uppercase(Locale.US)
+    val aircraftTerms = listOf(
+        "AIRCRAFT",
+        "AIRPLANE",
+        "AEROPLANE",
+        "HELICOPTER",
+        "ROTORCRAFT",
+        "JET",
+        "TURBOPROP",
+        "PISTON",
+        "GLIDER",
+        "UAV",
+        "DRONE"
+    )
+    val rejectedTopics = listOf(
+        "AIRPORT",
+        "AIRLINE",
+        "AIRWAYS",
+        "ACCIDENT",
+        "INCIDENT",
+        "CRASH",
+        "HIJACKING"
+    )
+    return aircraftTerms.any { combined.contains(it) } &&
+        rejectedTopics.none { combined.contains(it) }
+}
+
+private fun manufacturerFromWikipediaTitle(@Suppress("UNUSED_PARAMETER") title: String): String? {
+    // Wikipedia titles are useful model hints, but the title alone is not a structured manufacturer field.
+    return null
+}
+
+private fun JSONObject.toAirplanesLiveMetadata(sourceName: String): AirplanesLiveMetadata {
+    return AirplanesLiveMetadata(
+        sourceName = sourceName,
+        registration = optStringOrNull("r"),
+        typeCode = optStringOrNull("t"),
+        description = optStringOrNull("desc"),
+        ownerOperator = optStringOrNull("ownOp"),
+        operatorCode = optStringOrNull("ownOpCode"),
+        year = optStringOrNull("year")?.take(4)
+    )
 }
 
 private fun valueFromDataLabel(html: String, label: String): String? {
@@ -310,6 +454,30 @@ private data class AdsbDbAircraftRecord(
     val operatorCode: String?
 )
 
+private data class AirplanesLiveMetadata(
+    val sourceName: String,
+    val registration: String?,
+    val typeCode: String?,
+    val description: String?,
+    val ownerOperator: String?,
+    val operatorCode: String?,
+    val year: String?
+) {
+    val hasMetadata: Boolean
+        get() = listOf(registration, typeCode, description, ownerOperator, operatorCode, year).any { !it.isNullOrBlank() }
+}
+
+private data class InternetAircraftMetadata(
+    val manufacturer: String?,
+    val model: String?,
+    val sourceName: String
+)
+
+private data class WikipediaSummary(
+    val title: String,
+    val extract: String
+)
+
 data class AircraftDetails(
     val icao24: String,
     val registration: String?,
@@ -368,6 +536,7 @@ private fun JSONObject.optDoubleOrNull(key: String): Double? {
 }
 
 private const val US_N_NUMBER_ICAO_START = 0xA00001L
+private const val HTTP_TOO_MANY_REQUESTS = 429
 private const val US_N_NUMBER_ICAO_END = 0xADF7C7L
 private const val FIRST_N_NUMBER_STRIDE = 101711
 private const val SECOND_N_NUMBER_STRIDE = 10111

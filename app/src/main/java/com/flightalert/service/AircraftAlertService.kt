@@ -48,8 +48,7 @@ class AircraftAlertService : Service(), LocationListener {
     private var latestLocation: Location? = null
     private var polling = false
     private var stopped = false
-    private var eventSequence = 0
-    private var lastMonitoringBody = ""
+    private var foregroundActive = false
     private var nextPollDelayMs = POLL_MS
 
     override fun onCreate() {
@@ -58,10 +57,7 @@ class AircraftAlertService : Service(), LocationListener {
         prefs = FlightAlertSettings.prefs(this)
         prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
         ensureChannels()
-        startForeground(
-            ONGOING_NOTIFICATION_ID,
-            buildNotification(MONITORING_CHANNEL_ID, "Flight Alert active", "Background traffic monitoring is running.", true)
-        )
+        clearLegacyNotifications()
         startLocationUpdates()
         schedulePoll(1000L)
     }
@@ -79,7 +75,8 @@ class AircraftAlertService : Service(), LocationListener {
         if (::prefs.isInitialized) {
             prefs.unregisterOnSharedPreferenceChangeListener(preferenceListener)
         }
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(PRIORITY_NOTIFICATION_ID)
+        clearLegacyNotifications()
+        leaveForeground()
         try {
             locationManager.removeUpdates(this)
         } catch (_: SecurityException) {
@@ -148,7 +145,7 @@ class AircraftAlertService : Service(), LocationListener {
         val location = latestLocation
         if (location == null) {
             startLocationUpdates()
-            updateMonitoringNotification("Waiting for a current device location.")
+            updatePriorityNotification(emptyList())
             nextPollDelayMs = POLL_MS
             schedulePoll(nextPollDelayMs)
             return
@@ -160,7 +157,6 @@ class AircraftAlertService : Service(), LocationListener {
                 val poll = fetchAircraft(location)
                 if (!poll.feedAvailable) {
                     updatePriorityNotification(emptyList())
-                    updateMonitoringNotification("Aircraft feed unavailable; retaining last hazard state.")
                     nextPollDelayMs = POLL_MS
                     return@execute
                 }
@@ -170,28 +166,13 @@ class AircraftAlertService : Service(), LocationListener {
                 } else {
                     emptyMap()
                 }
-                val entered = currentHazards.filterKeys { it !in activeHazards.keys }.values
-                val left = activeHazards.filterKeys { it !in currentHazards.keys }.values
-
-                entered.forEach { notifyHazardEvent("Aircraft entered alert range", it) }
-                left.forEach { notifyHazardEvent("Aircraft left alert range", it) }
-
                 activeHazards.clear()
                 activeHazards.putAll(currentHazards)
                 val extremePriority = if (alertsEnabled()) poll.aircraft.filter { it.isExtremePriority } else emptyList()
                 updatePriorityNotification(extremePriority)
                 nextPollDelayMs = nextPollDelayFor(poll.aircraft, currentHazards.isNotEmpty(), extremePriority.isNotEmpty())
-
-                val nearest = poll.aircraft.firstOrNull()
-                updateMonitoringNotification(
-                    when {
-                        currentHazards.isNotEmpty() -> "${currentHazards.size} aircraft inside alert range."
-                        nearest != null -> "No aircraft inside range. Nearest: ${formatSeparation(nearest)}."
-                        else -> "No aircraft reported inside the query area."
-                    }
-                )
             } catch (_: Exception) {
-                updateMonitoringNotification("Aircraft alert check failed; retaining last alert state.")
+                updatePriorityNotification(emptyList())
                 nextPollDelayMs = POLL_MS
             } finally {
                 polling = false
@@ -233,9 +214,10 @@ class AircraftAlertService : Service(), LocationListener {
         val bounds = boundsAround(location, radiusMeters)
         val result = aircraftFeedClient.fetchAircraft(bounds.toFeedBounds(), location.latitude, location.longitude)
         if (result.status != FeedStatus.OK) return AlertPoll(emptyList(), feedAvailable = false)
+        val airborneAircraft = result.aircraft.filter { it.onGround != true }
+        val unsupportedAltitudeCount = airborneAircraft.count { it.altitudeM == null }
         return AlertPoll(
-            aircraft = result.aircraft
-                .filter { it.onGround != true }
+            aircraft = airborneAircraft
                 .mapNotNull {
                     it.toAlertAircraft(
                         alertDistanceFeet = alertDistanceFeet,
@@ -246,21 +228,8 @@ class AircraftAlertService : Service(), LocationListener {
                     )
                 }
                 .sortedBy { it.distanceFeet },
-            feedAvailable = true
-        )
-    }
-
-    private fun notifyHazardEvent(title: String, aircraft: AlertAircraft) {
-        if (!hasNotificationPermission()) return
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(
-            EVENT_NOTIFICATION_BASE_ID + (eventSequence++ % EVENT_NOTIFICATION_ID_WINDOW),
-            buildNotification(
-                HAZARD_CHANNEL_ID,
-                "$title: ${aircraft.callsign}",
-                String.format(Locale.US, "%s, %.0f ft altitude", formatSeparation(aircraft), aircraft.altitudeFeet),
-                false
-            )
+            feedAvailable = true,
+            unsupportedAltitudeCount = unsupportedAltitudeCount
         )
     }
 
@@ -272,17 +241,11 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
-    private fun updateMonitoringNotification(body: String) {
-        if (body == lastMonitoringBody) return
-        lastMonitoringBody = body
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(ONGOING_NOTIFICATION_ID, buildNotification(MONITORING_CHANNEL_ID, "Flight Alert active", body, true))
-    }
-
     private fun updatePriorityNotification(priorityAircraft: List<AlertAircraft>) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (!priorityTrackingEnabled() || priorityAircraft.isEmpty() || !hasNotificationPermission()) {
             manager.cancel(PRIORITY_NOTIFICATION_ID)
+            leaveForeground()
             return
         }
         val body = priorityAircraft
@@ -293,15 +256,18 @@ class AircraftAlertService : Service(), LocationListener {
                 String.format(Locale.US, "%s %.0f ft", registration, aircraft.altitudeFeet)
             }
         val suffix = if (priorityAircraft.size > 4) " +${priorityAircraft.size - 4} more" else ""
-        manager.notify(
-            PRIORITY_NOTIFICATION_ID,
-            buildNotification(
-                PRIORITY_CHANNEL_ID,
-                "Extreme priority aircraft",
-                "$body$suffix",
-                true
-            )
+        val notification = buildNotification(
+            PRIORITY_CHANNEL_ID,
+            "Extreme priority aircraft",
+            "$body$suffix",
+            true
         )
+        try {
+            startForeground(PRIORITY_NOTIFICATION_ID, notification)
+            foregroundActive = true
+        } catch (_: Exception) {
+            manager.notify(PRIORITY_NOTIFICATION_ID, notification)
+        }
     }
 
     private fun buildNotification(channelId: String, title: String, body: String, ongoing: Boolean): Notification {
@@ -339,20 +305,50 @@ class AircraftAlertService : Service(), LocationListener {
     private fun ensureChannels() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(
-            NotificationChannel(MONITORING_CHANNEL_ID, "Aircraft monitoring status", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Ongoing status while Flight Alert is monitoring live aircraft traffic"
-            }
-        )
-        manager.createNotificationChannel(
-            NotificationChannel(HAZARD_CHANNEL_ID, "Aircraft range entry and exit alerts", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Aircraft entering or leaving the selected alert range"
-            }
-        )
-        manager.createNotificationChannel(
             NotificationChannel(PRIORITY_CHANNEL_ID, "Extreme priority aircraft", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Persistent list of priority-tracked aircraft inside the selected alert range"
             }
         )
+    }
+
+    private fun clearLegacyNotifications() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (manager.activeNotifications.any { it.id == ONGOING_NOTIFICATION_ID }) {
+            takeOverLegacyForegroundNotification()
+        }
+        removeForegroundNotification()
+        manager.cancel(ONGOING_NOTIFICATION_ID)
+        manager.cancel(PRIORITY_NOTIFICATION_ID)
+        repeat(EVENT_NOTIFICATION_ID_WINDOW) { offset ->
+            manager.cancel(EVENT_NOTIFICATION_BASE_ID + offset)
+        }
+    }
+
+    private fun takeOverLegacyForegroundNotification() {
+        if (!hasNotificationPermission()) return
+        try {
+            startForeground(
+                ONGOING_NOTIFICATION_ID,
+                buildNotification(PRIORITY_CHANNEL_ID, "Flight Alert", "Updating alert notifications.", true)
+            )
+            foregroundActive = true
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun leaveForeground() {
+        if (!foregroundActive) return
+        removeForegroundNotification()
+    }
+
+    private fun removeForegroundNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        foregroundActive = false
     }
 
     private fun hasLocationPermission(): Boolean {
@@ -435,7 +431,11 @@ class AircraftAlertService : Service(), LocationListener {
 
     private data class Bounds(val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)
 
-    private data class AlertPoll(val aircraft: List<AlertAircraft>, val feedAvailable: Boolean)
+    private data class AlertPoll(
+        val aircraft: List<AlertAircraft>,
+        val feedAvailable: Boolean,
+        val unsupportedAltitudeCount: Int = 0
+    )
 
     private data class AlertAircraft(
         val icao24: String,
@@ -474,7 +474,7 @@ class AircraftAlertService : Service(), LocationListener {
         )
 
         fun start(context: Context) {
-            context.startForegroundService(Intent(context, AircraftAlertService::class.java))
+            context.startService(Intent(context, AircraftAlertService::class.java))
         }
 
         fun stop(context: Context) {
