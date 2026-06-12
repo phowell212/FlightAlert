@@ -47,10 +47,7 @@ class MainActivity : ComponentActivity() {
 
         val globeSource = GlobeWebAircraftSource(this, APP_USER_AGENT)
         globeSource.setEnabled(
-            FlightAlertSettings.prefs(this).getBoolean(
-                FlightAlertSettings.KEY_GLOBE_WEB_SOURCE_ENABLED,
-                FlightAlertSettings.DEFAULT_GLOBE_WEB_SOURCE_ENABLED
-            )
+            FlightAlertSettings.readAircraftFeedMode(this).usesGlobe
         )
         globeWebAircraftSource = globeSource
         val view = FlightMapView(this, globeSource)

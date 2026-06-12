@@ -54,6 +54,8 @@ import com.flightalert.data.AviationLayerStatus
 import com.flightalert.data.AviationOceanicTrack
 import com.flightalert.data.FeedAircraft
 import com.flightalert.data.FeedBounds
+import com.flightalert.data.FeedResult
+import com.flightalert.data.FeedSource
 import com.flightalert.data.FeedStatus
 import com.flightalert.data.FlightTrace
 import com.flightalert.data.FlightTraceClient
@@ -76,6 +78,8 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.asin
@@ -143,7 +147,8 @@ class FlightMapView(
     private var units = UnitSystem.valueOf(prefs.getString(FlightAlertSettings.KEY_UNITS, UnitSystem.IMPERIAL.name) ?: UnitSystem.IMPERIAL.name)
     private var mapSource = readMapSource()
     private var mapLabelsEnabled = prefs.getBoolean(FlightAlertSettings.KEY_MAP_LABELS_ENABLED, FlightAlertSettings.DEFAULT_MAP_LABELS_ENABLED)
-    private var globeWebSourceEnabled = prefs.getBoolean(FlightAlertSettings.KEY_GLOBE_WEB_SOURCE_ENABLED, FlightAlertSettings.DEFAULT_GLOBE_WEB_SOURCE_ENABLED)
+    private var aircraftFeedMode = FlightAlertSettings.readAircraftFeedMode(prefs)
+    private var globeWebSourceEnabled = aircraftFeedMode.usesGlobe
     private var atcBoundariesLayerEnabled = prefs.getBoolean(FlightAlertSettings.KEY_LAYER_ATC_BOUNDARIES_ENABLED, FlightAlertSettings.DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED)
     private var restrictedAirspacesLayerEnabled = prefs.getBoolean(FlightAlertSettings.KEY_LAYER_RESTRICTED_AIRSPACES_ENABLED, FlightAlertSettings.DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED)
     private var oceanicTracksLayerEnabled = prefs.getBoolean(FlightAlertSettings.KEY_LAYER_OCEANIC_TRACKS_ENABLED, FlightAlertSettings.DEFAULT_LAYER_OCEANIC_TRACKS_ENABLED)
@@ -173,15 +178,18 @@ class FlightMapView(
     private var impactMethodologyOpen = false
     private var aircraftDetails: AircraftDetails? = null
     private var aircraftDetailsStatus = "Select aircraft"
+    private var aircraftDetailsLoading = false
     private var aircraftPhoto: Bitmap? = null
     private var aircraftPhotoStatus = "Photo unavailable"
     private var aircraftPhotoEvidence: PhotoEvidence? = null
+    private var aircraftPhotoQuality: PhotoQuality? = null
     private var photoEvidenceOpen = false
     private var detailsRequestToken = 0L
     private var aircraftFetchInFlight = false
     private var aircraftRefreshScheduled = false
     private var scheduledAircraftRefreshForce = false
     private var lastAircraftFetchMs = 0L
+    private var aircraftFetchToken = 0L
     private var aviationLayerSnapshot: AviationLayerSnapshot? = null
     private var aviationLayerFetchInFlight = false
     private var lastAviationLayerFetchMs = 0L
@@ -509,6 +517,7 @@ class FlightMapView(
                     return true
                 }
                 if (abs(x - downX) > dp(12) || abs(y - downY) > dp(12)) return true
+                if (event.eventTime - event.downTime >= PHOTO_LONG_PRESS_MS && handleLongPress(x, y)) return true
                 performClick()
                 handleTap(x, y)
                 return true
@@ -1472,47 +1481,136 @@ class FlightMapView(
 
         val bounds = aircraftBoundsForCurrentViewport(location)
         val feedBounds = bounds.toFeedBounds()
-        val globeSource = globeWebAircraftSource?.takeIf { globeWebSourceEnabled }
+        val feedMode = aircraftFeedMode
+        val fetchToken = ++aircraftFetchToken
+        val globeSource = globeWebAircraftSource?.takeIf { feedMode.usesGlobe }
         globeSource?.updateViewport(feedBounds, viewportCenterLat(location), viewportCenterLon(location), zoom)
         val exactSearch = filterSearchQuery.takeIf { it.isNotBlank() }
         executor.execute {
             try {
-                val globeResult = globeSource?.latestSnapshot(feedBounds, location.latitude, location.longitude, exactSearch)
-                val result = globeResult ?: aircraftFeedClient.fetchAircraft(feedBounds, location.latitude, location.longitude, exactSearch)
-                if (result.status == FeedStatus.OK) {
-                    val parsed = result.aircraft.map { it.toMapAircraft() }
-                    updateAircraftAppearances(parsed)
-                    selectedAircraftId?.let { selectedId ->
-                        parsed.firstOrNull { it.icao24 == selectedId }?.let { selectedAircraftSnapshot = it }
+                when (feedMode) {
+                    FlightAlertSettings.AircraftFeedMode.WEB -> {
+                        val globeResult = globeSource?.latestSnapshot(feedBounds, location.latitude, location.longitude, exactSearch)
+                        val result = globeResult ?: aircraftFeedClient.fetchAircraft(feedBounds, location.latitude, location.longitude, exactSearch)
+                        applyAircraftFeedResult(result, fetchToken)
                     }
-                    pruneSelectionForFilters()
-                    val coverage = feedCoverageLabel(result.queryCount, result.partialCoverage)
-                    Log.d(TAG, "Aircraft feed ${result.source.displayName}: ${parsed.size} aircraft$coverage")
-                    synchronized(aircraft) {
-                        aircraft.clear()
-                        aircraft.addAll(parsed)
+                    FlightAlertSettings.AircraftFeedMode.API -> {
+                        applyAircraftFeedResult(
+                            aircraftFeedClient.fetchAircraft(feedBounds, location.latitude, location.longitude, exactSearch),
+                            fetchToken
+                        )
                     }
-                    lastAircraftDataEpochSec = result.epochSec
-                    aircraftStatus = if (parsed.isEmpty()) {
-                        "No aircraft reported in current map area (${result.source.displayName}$coverage)"
-                    } else {
-                        "Live aircraft updated via ${result.source.displayName}$coverage"
+                    FlightAlertSettings.AircraftFeedMode.HYBRID -> {
+                        val apiResult = aircraftFeedClient.fetchAircraft(feedBounds, location.latitude, location.longitude, exactSearch)
+                        if (apiResult.status == FeedStatus.OK) {
+                            applyAircraftFeedResult(apiResult, fetchToken)
+                        }
+                        val globeResult = globeSource?.latestSnapshot(feedBounds, location.latitude, location.longitude, exactSearch)
+                        when {
+                            apiResult.status == FeedStatus.OK && globeResult?.status == FeedStatus.OK -> {
+                                applyAircraftFeedResult(mergeHybridAircraftFeeds(apiResult, globeResult), fetchToken)
+                            }
+                            apiResult.status != FeedStatus.OK && globeResult?.status == FeedStatus.OK -> {
+                                applyAircraftFeedResult(globeResult, fetchToken)
+                            }
+                            apiResult.status != FeedStatus.OK -> {
+                                applyAircraftFeedResult(apiResult, fetchToken)
+                            }
+                            else -> Unit
+                        }
                     }
-                } else {
-                    aircraftStatus = when {
-                        result.httpCode != null -> "Aircraft feed unavailable: HTTP ${result.httpCode}"
-                        result.status == FeedStatus.RATE_LIMITED -> "Aircraft feed rate limited"
-                        else -> "Aircraft feed unavailable"
-                    }
-                    Log.d(TAG, "Aircraft feed ${result.source.displayName}: ${result.status} http=${result.httpCode ?: "none"}")
                 }
             } catch (_: Exception) {
-                aircraftStatus = "Aircraft feed unavailable"
-                Log.d(TAG, "Aircraft feed request failed")
+                if (aircraftFetchToken == fetchToken) {
+                    aircraftStatus = "Aircraft feed unavailable"
+                    Log.d(TAG, "Aircraft feed request failed")
+                }
             } finally {
-                aircraftFetchInFlight = false
-                postInvalidateOnAnimation()
+                if (aircraftFetchToken == fetchToken) {
+                    aircraftFetchInFlight = false
+                    postInvalidateOnAnimation()
+                }
             }
+        }
+    }
+
+    private fun applyAircraftFeedResult(result: FeedResult, fetchToken: Long): Boolean {
+        if (aircraftFetchToken != fetchToken) return false
+        if (result.status == FeedStatus.OK) {
+            val parsed = result.aircraft.map { it.toMapAircraft() }
+            updateAircraftAppearances(parsed)
+            selectedAircraftId?.let { selectedId ->
+                parsed.firstOrNull { it.icao24 == selectedId }?.let { selectedAircraftSnapshot = it }
+            }
+            pruneSelectionForFilters()
+            val coverage = feedCoverageLabel(result.queryCount, result.partialCoverage)
+            Log.d(TAG, "Aircraft feed ${result.source.displayName}: ${parsed.size} aircraft$coverage")
+            synchronized(aircraft) {
+                aircraft.clear()
+                aircraft.addAll(parsed)
+            }
+            lastAircraftDataEpochSec = result.epochSec
+            aircraftStatus = if (parsed.isEmpty()) {
+                "No aircraft reported in current map area (${result.source.displayName}$coverage)"
+            } else {
+                "Live aircraft updated via ${result.source.displayName}$coverage"
+            }
+            postInvalidateOnAnimation()
+            return true
+        }
+
+        aircraftStatus = when {
+            result.httpCode != null -> "Aircraft feed unavailable: HTTP ${result.httpCode}"
+            result.status == FeedStatus.RATE_LIMITED -> "Aircraft feed rate limited"
+            else -> "Aircraft feed unavailable"
+        }
+        Log.d(TAG, "Aircraft feed ${result.source.displayName}: ${result.status} http=${result.httpCode ?: "none"}")
+        postInvalidateOnAnimation()
+        return false
+    }
+
+    private fun mergeHybridAircraftFeeds(apiResult: FeedResult, globeResult: FeedResult): FeedResult {
+        val merged = linkedMapOf<String, FeedAircraft>()
+        apiResult.aircraft.forEach { item ->
+            merged[item.hybridFeedKey()] = item
+        }
+        globeResult.aircraft.forEach { webItem ->
+            val key = webItem.hybridFeedKey()
+            val apiItem = merged[key]
+            merged[key] = if (apiItem == null) {
+                webItem
+            } else {
+                apiItem.copy(
+                    registration = apiItem.registration ?: webItem.registration,
+                    typeCode = apiItem.typeCode ?: webItem.typeCode,
+                    metadata = apiItem.metadata ?: webItem.metadata,
+                    dbFlags = apiItem.dbFlags ?: webItem.dbFlags,
+                    category = apiItem.category ?: webItem.category
+                )
+            }
+        }
+        return FeedResult(
+            status = FeedStatus.OK,
+            source = FeedSource.HYBRID,
+            aircraft = merged.values.sortedBy { it.distanceM },
+            epochSec = maxEpoch(apiResult.epochSec, globeResult.epochSec),
+            queryCount = apiResult.queryCount + globeResult.queryCount,
+            partialCoverage = apiResult.partialCoverage || globeResult.partialCoverage
+        )
+    }
+
+    private fun FeedAircraft.hybridFeedKey(): String {
+        val hex = icao24.trim().trimStart('~').lowercase(Locale.US)
+        if (hex.isNotBlank()) return "hex:$hex"
+        registration?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { return "reg:$it" }
+        return "pos:${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}:${callsign.trim().uppercase(Locale.US)}"
+    }
+
+    private fun maxEpoch(first: Double?, second: Double?): Double? {
+        return when {
+            first == null -> second
+            second == null -> first
+            else -> max(first, second)
         }
     }
 
@@ -3363,8 +3461,7 @@ class FlightMapView(
     private fun isDetailsLoadingFor(aircraft: Aircraft): Boolean {
         return detailsOpen &&
             selectedAircraftId == aircraft.icao24 &&
-            aircraftDetails == null &&
-            aircraftDetailsStatus.startsWith("Loading", ignoreCase = true)
+            aircraftDetailsLoading
     }
 
     private fun isFlightPathLoading(aircraft: Aircraft): Boolean {
@@ -4036,7 +4133,7 @@ class FlightMapView(
         drawSettingsSectionLabel(canvas, rect.left + dp(18), rect.top + dp(230), "Map")
         drawChoiceButton(canvas, mapSourceButtonBounds(rect), if (mapSource == TileSource.SATELLITE) "Satellite map" else "Street map", mapSource == TileSource.SATELLITE)
         drawChoiceButton(canvas, mapLabelsButtonBounds(rect), if (mapLabelsEnabled) "Street labels on" else "Street labels off", mapLabelsEnabled)
-        drawChoiceButton(canvas, globeWebSourceButtonBounds(rect), if (globeWebSourceEnabled) "Globe web feed on" else "Globe web feed off", globeWebSourceEnabled)
+        drawChoiceButton(canvas, globeWebSourceButtonBounds(rect), aircraftFeedMode.displayName, true)
         drawChoiceButton(canvas, aviationLayersButtonBounds(rect), "Aviation layers", hasAviationLayersEnabled())
 
         drawSettingsSectionLabel(canvas, rect.left + dp(18), rect.top + dp(438), "Safety")
@@ -4078,7 +4175,7 @@ class FlightMapView(
         drawSettingsSectionLabel(canvas, left.left, rect.top + dp(174), "Map")
         drawChoiceButton(canvas, mapSourceButtonBounds(rect), if (mapSource == TileSource.SATELLITE) "Satellite" else "Street", mapSource == TileSource.SATELLITE)
         drawChoiceButton(canvas, mapLabelsButtonBounds(rect), if (mapLabelsEnabled) "Labels on" else "Labels off", mapLabelsEnabled)
-        drawChoiceButton(canvas, globeWebSourceButtonBounds(rect), if (globeWebSourceEnabled) "Globe feed on" else "Globe feed off", globeWebSourceEnabled)
+        drawChoiceButton(canvas, globeWebSourceButtonBounds(rect), aircraftFeedMode.compactName, true)
         drawChoiceButton(canvas, aviationLayersButtonBounds(rect), "Layers", hasAviationLayersEnabled())
 
         drawSettingsSectionLabel(canvas, right.left, rect.top + dp(58), "Safety")
@@ -4482,6 +4579,16 @@ class FlightMapView(
         textPaint.textAlign = previousAlign
     }
 
+    private fun handleLongPress(x: Float, y: Float): Boolean {
+        if (!detailsOpen || usageOpen || environmentalImpactOpen || photoEvidenceOpen) return false
+        val aircraft = displayedTraffic().aircraft ?: return false
+        val details = aircraftDetails ?: return false
+        val panel = detailsPanelBounds(contentWidth(), contentHeight())
+        if (!currentDetailsPhotoBounds(panel, contentWidth(), contentHeight()).contains(x, y)) return false
+        requestPhotoImprovement(aircraft, details)
+        return true
+    }
+
     private fun handleTap(x: Float, y: Float) {
         if (filtersOpen) {
             val panel = settingsPanelBounds(contentWidth(), contentHeight())
@@ -4538,6 +4645,7 @@ class FlightMapView(
                 photoEvidenceOpen -> Unit
                 detailsCloseButtonBounds(panel).contains(x, y) -> {
                     detailsOpen = false
+                    aircraftDetailsLoading = false
                     photoEvidenceOpen = false
                     usageOpen = false
                     environmentalImpactOpen = false
@@ -4597,7 +4705,7 @@ class FlightMapView(
                 metricButtonBounds(panel).contains(x, y) -> setUnits(UnitSystem.METRIC)
                 mapSourceButtonBounds(panel).contains(x, y) -> toggleMapSource()
                 mapLabelsButtonBounds(panel).contains(x, y) -> mapLabelsOpen = true
-                globeWebSourceButtonBounds(panel).contains(x, y) -> setGlobeWebSourceEnabled(!globeWebSourceEnabled)
+                globeWebSourceButtonBounds(panel).contains(x, y) -> setAircraftFeedMode(aircraftFeedMode.next())
                 aviationLayersButtonBounds(panel).contains(x, y) -> aviationLayersOpen = true
                 themeButtonBounds(panel).contains(x, y) -> setVisualTheme(nextVisualTheme())
                 alertsToggleBounds(panel).contains(x, y) -> setAlertsEnabled(!alertsEnabled)
@@ -4679,8 +4787,10 @@ class FlightMapView(
         detailsScrollY = 0f
         detailsMaxScrollY = 0f
         aircraftDetails = null
+        aircraftDetailsLoading = true
         aircraftPhoto = null
         aircraftPhotoEvidence = null
+        aircraftPhotoQuality = null
         aircraftDetailsStatus = "Loading live aircraft details"
         aircraftPhotoStatus = "Loading exact-aircraft photo"
         requestAircraftDetails(aircraft)
@@ -4728,39 +4838,30 @@ class FlightMapView(
         requestFlightPath(aircraft.icao24)
     }
 
-    private fun requestAircraftDetails(aircraft: Aircraft) {
+    private fun requestPhotoImprovement(aircraft: Aircraft, details: AircraftDetails) {
         val requestedId = aircraft.icao24
-        val requestToken = ++detailsRequestToken
+        val requestToken = detailsRequestToken
+        val previousStatus = aircraftPhotoStatus
+        val previousQuality = aircraftPhotoQuality
+        aircraftPhotoStatus = "Checking for improved photo"
+        invalidate()
         executor.execute {
-            val seed = aircraft.metadataSeed.takeIf { globeWebSourceEnabled }
-            val fastDetails = seed?.let {
-                aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration, it)
-            }
-            fastDetails?.let { details ->
-                post { postAircraftDetails(requestedId, requestToken, details) }
-            }
-            val networkDetails = if (fastDetails == null || shouldEnrichSeedDetails(fastDetails)) {
-                aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration)
-            } else {
-                fastDetails
-            }
-            val details = fastDetails?.let { mergeAircraftDetails(it, networkDetails) } ?: networkDetails
-            post {
-                postAircraftDetails(requestedId, requestToken, details)
-            }
-            val photo = fetchAircraftPhoto(aircraft, details)
+            val result = fetchAircraftPhoto(aircraft, details)
             post {
                 if (!isCurrentDetailsRequest(requestedId, requestToken)) return@post
-                when (photo) {
+                when (result) {
                     is AircraftPhotoResult.Found -> {
-                        aircraftPhoto = photo.bitmap
-                        aircraftPhotoStatus = photo.note
-                        aircraftPhotoEvidence = photo.evidence
+                        if (previousQuality == null || result.quality.rank > previousQuality.rank) {
+                            aircraftPhoto = result.bitmap
+                            aircraftPhotoStatus = result.note
+                            aircraftPhotoEvidence = result.evidence
+                            aircraftPhotoQuality = result.quality
+                        } else {
+                            aircraftPhotoStatus = previousStatus
+                        }
                     }
                     is AircraftPhotoResult.Unavailable -> {
-                        aircraftPhoto = null
-                        aircraftPhotoStatus = photo.reason
-                        aircraftPhotoEvidence = null
+                        aircraftPhotoStatus = previousStatus
                     }
                 }
                 invalidate()
@@ -4768,25 +4869,205 @@ class FlightMapView(
         }
     }
 
-    private fun postAircraftDetails(requestedId: String, requestToken: Long, details: AircraftDetails) {
+    private fun requestAircraftDetails(aircraft: Aircraft) {
+        val requestedId = aircraft.icao24
+        val requestToken = ++detailsRequestToken
+        val detailMode = aircraftFeedMode
+        val lookup = webDetailLookupContext()
+        val candidates = detailCandidatesForAircraft(aircraft, detailMode, lookup)
+        val remaining = AtomicInteger(candidates.size)
+        val photoInFlight = AtomicInteger(0)
+        val photoFound = AtomicBoolean(false)
+        val detailLock = Any()
+        val photoKeys = mutableSetOf<String>()
+        var mergedDetails: AircraftDetails? = null
+
+        fun maybePostFinalPhotoUnavailable() {
+            if (remaining.get() != 0 || photoInFlight.get() != 0 || photoFound.get()) return
+            post {
+                if (!isCurrentDetailsRequest(requestedId, requestToken) || aircraftPhoto != null) return@post
+                aircraftPhoto = null
+                aircraftPhotoStatus = "Exact, representative, and search photos unavailable"
+                aircraftPhotoEvidence = null
+                aircraftPhotoQuality = null
+                invalidate()
+            }
+        }
+
+        fun lookupPhoto(details: AircraftDetails) {
+            if (photoFound.get()) return
+            val key = photoLookupKey(aircraft, details)
+            val shouldRun = synchronized(photoKeys) { photoKeys.add(key) }
+            if (!shouldRun) {
+                maybePostFinalPhotoUnavailable()
+                return
+            }
+            photoInFlight.incrementAndGet()
+            val photo = fetchAircraftPhoto(aircraft, details)
+            photoInFlight.decrementAndGet()
+            when (photo) {
+                is AircraftPhotoResult.Found -> {
+                    if (photoFound.compareAndSet(false, true)) {
+                        post { postAircraftPhoto(requestedId, requestToken, photo, allowReplace = false) }
+                    }
+                }
+                is AircraftPhotoResult.Unavailable -> maybePostFinalPhotoUnavailable()
+            }
+        }
+
+        candidates.forEach { candidate ->
+            executor.execute {
+                val details = runCatching { candidate.fetch() }.getOrNull()
+                val merged = synchronized(detailLock) {
+                    if (details != null) {
+                        mergedDetails = mergedDetails?.let { mergeAircraftDetails(it, details) } ?: details
+                    }
+                    mergedDetails
+                }
+                val stillLoading = remaining.decrementAndGet() > 0
+                if (merged != null) {
+                    post { postAircraftDetails(requestedId, requestToken, merged, stillLoading) }
+                    lookupPhoto(merged)
+                } else if (!stillLoading) {
+                    post { postAircraftDetailsUnavailable(requestedId, requestToken) }
+                    maybePostFinalPhotoUnavailable()
+                }
+            }
+        }
+    }
+
+    private fun postAircraftDetails(requestedId: String, requestToken: Long, details: AircraftDetails, stillLoading: Boolean) {
         if (!isCurrentDetailsRequest(requestedId, requestToken)) return
         aircraftDetails = details
-        aircraftDetailsStatus = if (!hasAircraftMetadata(details)) {
-            "Metadata unavailable from configured APIs"
-        } else {
-            "Metadata from ${details.registrySource ?: "configured APIs"}"
+        aircraftDetailsLoading = stillLoading
+        aircraftDetailsStatus = when {
+            stillLoading && !hasAircraftMetadata(details) -> "Loading aircraft details from remaining feed sources"
+            stillLoading -> "Metadata from ${details.registrySource ?: "configured sources"}; checking remaining feed sources"
+            !hasAircraftMetadata(details) -> "Metadata unavailable from configured sources"
+            else -> "Metadata from ${details.registrySource ?: "configured sources"}"
         }
-        aircraftPhotoStatus = "Searching real photo sources"
+        if (aircraftPhoto == null) {
+            aircraftPhotoStatus = "Searching real photo sources"
+        }
         invalidate()
     }
 
-    private fun shouldEnrichSeedDetails(details: AircraftDetails): Boolean {
-        return details.owner == null ||
-            details.manufacturer == null ||
-            details.manufacturedYear == null ||
-            details.route == null ||
-            details.originAirport == null ||
-            details.destinationAirport == null
+    private fun postAircraftDetailsUnavailable(requestedId: String, requestToken: Long) {
+        if (!isCurrentDetailsRequest(requestedId, requestToken)) return
+        aircraftDetailsLoading = false
+        if (aircraftDetails == null) {
+            aircraftDetailsStatus = "Metadata unavailable from configured sources"
+        }
+        invalidate()
+    }
+
+    private fun detailCandidatesForAircraft(
+        aircraft: Aircraft,
+        mode: FlightAlertSettings.AircraftFeedMode,
+        lookup: WebDetailLookupContext?
+    ): List<AircraftDetailCandidate> {
+        val api = AircraftDetailCandidate("API feed") {
+            aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration)
+        }
+        val web = AircraftDetailCandidate("Web feed") {
+            fetchWebFeedDetails(aircraft, lookup)
+        }
+        return when (mode) {
+            FlightAlertSettings.AircraftFeedMode.API -> listOf(api)
+            FlightAlertSettings.AircraftFeedMode.WEB -> listOf(web, api)
+            FlightAlertSettings.AircraftFeedMode.HYBRID -> listOf(api, web)
+        }
+    }
+
+    private fun fetchWebFeedDetails(aircraft: Aircraft, lookup: WebDetailLookupContext?): AircraftDetails? {
+        val deadline = SystemClock.elapsedRealtime() + WEB_DETAIL_WAIT_MS
+        while (SystemClock.elapsedRealtime() <= deadline) {
+            val seed = findWebMetadataSeed(aircraft, lookup)
+            if (seed != null) {
+                return aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration, seed)
+            }
+            Thread.sleep(WEB_DETAIL_POLL_MS)
+        }
+        return null
+    }
+
+    private fun findWebMetadataSeed(aircraft: Aircraft, lookup: WebDetailLookupContext?): AircraftMetadataSeed? {
+        aircraft.metadataSeed?.takeIf { it.hasDetails }?.let { return it }
+        val source = globeWebAircraftSource?.takeIf { globeWebSourceEnabled } ?: return null
+        val context = lookup ?: return null
+        val searches = listOfNotNull(
+            aircraft.icao24.takeIf { it.isNotBlank() },
+            aircraft.registration?.takeIf { it.isNotBlank() },
+            aircraft.callsign.takeIf { it.isNotBlank() }
+        ).distinct()
+        searches.forEach { search ->
+            source.latestSnapshot(context.bounds, context.ownLat, context.ownLon, search)
+                ?.aircraft
+                ?.firstOrNull { it.matchesAircraft(aircraft) }
+                ?.metadata
+                ?.takeIf { it.hasDetails }
+                ?.let { return it }
+        }
+        return source.latestSnapshot(context.bounds, context.ownLat, context.ownLon, exactSearch = null)
+            ?.aircraft
+            ?.firstOrNull { it.matchesAircraft(aircraft) }
+            ?.metadata
+            ?.takeIf { it.hasDetails }
+    }
+
+    private fun webDetailLookupContext(): WebDetailLookupContext? {
+        val location = latestLocation ?: return null
+        return WebDetailLookupContext(
+            bounds = aircraftBoundsForCurrentViewport(location).toFeedBounds(),
+            ownLat = location.latitude,
+            ownLon = location.longitude
+        )
+    }
+
+    private fun FeedAircraft.matchesAircraft(aircraft: Aircraft): Boolean {
+        val feedHex = icao24.trim().trimStart('~').lowercase(Locale.US)
+        val selectedHex = aircraft.icao24.trim().trimStart('~').lowercase(Locale.US)
+        if (feedHex.isNotBlank() && selectedHex.isNotBlank() && feedHex == selectedHex) return true
+        val feedRegistration = normalizedRegistration(registration)
+        val selectedRegistration = normalizedRegistration(aircraft.registration)
+        if (feedRegistration != null && selectedRegistration != null && feedRegistration == selectedRegistration) return true
+        return callsign.compactCallsign().isNotBlank() &&
+            callsign.compactCallsign() == aircraft.callsign.compactCallsign()
+    }
+
+    private fun String.compactCallsign(): String {
+        return trim().replace(" ", "").uppercase(Locale.US)
+    }
+
+    private fun postAircraftPhoto(
+        requestedId: String,
+        requestToken: Long,
+        photo: AircraftPhotoResult.Found,
+        allowReplace: Boolean
+    ) {
+        if (!isCurrentDetailsRequest(requestedId, requestToken)) return
+        val currentQuality = aircraftPhotoQuality
+        if (!allowReplace && aircraftPhoto != null) return
+        if (allowReplace && currentQuality != null && photo.quality.rank <= currentQuality.rank) {
+            aircraftPhotoStatus = "Current photo is best available from checked sources"
+            invalidate()
+            return
+        }
+        aircraftPhoto = photo.bitmap
+        aircraftPhotoStatus = photo.note
+        aircraftPhotoEvidence = photo.evidence
+        aircraftPhotoQuality = photo.quality
+        invalidate()
+    }
+
+    private fun photoLookupKey(aircraft: Aircraft, details: AircraftDetails): String {
+        return listOfNotNull(
+            normalizedRegistration(details.registration ?: aircraft.registration),
+            details.manufacturer?.trim()?.uppercase(Locale.US),
+            details.type?.trim()?.uppercase(Locale.US),
+            details.typeCode?.trim()?.uppercase(Locale.US),
+            details.owner?.trim()?.uppercase(Locale.US)
+        ).joinToString("|").ifBlank { aircraft.icao24.trim().lowercase(Locale.US) }
     }
 
     private fun mergeAircraftDetails(seed: AircraftDetails, enrichment: AircraftDetails): AircraftDetails {
@@ -4896,11 +5177,11 @@ class FlightMapView(
     private fun fetchAircraftPhoto(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult {
         val registration = normalizedRegistration(details.registration ?: aircraft.registration)
         fetchAdsbDbPhotoUrls(aircraft.icao24, registration).forEach { imageUrl ->
-            fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from ADSBdb") }
+            fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from ADSBdb", quality = PhotoQuality.EXACT) }
         }
         if (registration != null) {
             fetchJetPhotosExactImageUrls(registration).forEach { imageUrl ->
-                fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from JetPhotos; registration verified") }
+                fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from JetPhotos; registration verified", quality = PhotoQuality.EXACT) }
             }
         }
         val exactSources = listOfNotNull(
@@ -4909,11 +5190,11 @@ class FlightMapView(
         )
         exactSources.forEach { apiUrl ->
             fetchPlanespottersPhotoUrl(apiUrl)?.let { imageUrl ->
-                fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from PlaneSpotters") }
+                fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from PlaneSpotters", quality = PhotoQuality.EXACT) }
             }
         }
         fetchBitmap("https://hexdb.io/hex-image-thumb?hex=${aircraft.icao24.trim()}")?.let {
-            return AircraftPhotoResult.Found(it, "Exact aircraft photo from HexDB")
+            return AircraftPhotoResult.Found(it, "Exact aircraft photo from HexDB", quality = PhotoQuality.EXACT)
         }
         return fetchRepresentativePhoto(details)
             ?: fetchVerifiedGenericSearchPhoto(aircraft, details)
@@ -4980,7 +5261,7 @@ class FlightMapView(
                 val apiUrl = "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=10&gsrsearch=$encoded&prop=imageinfo&iiprop=url|mime"
                 fetchWikimediaImageUrls(apiUrl).take(MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY).forEach { url ->
                     fetchBitmap(url)?.let { bitmap ->
-                        return AircraftPhotoResult.Found(bitmap, "Representative $model photo from Wikimedia Commons; not this exact aircraft")
+                        return AircraftPhotoResult.Found(bitmap, "Representative $model photo from Wikimedia Commons; not this exact aircraft", quality = PhotoQuality.REPRESENTATIVE)
                     }
                 }
             }
@@ -4988,7 +5269,7 @@ class FlightMapView(
             queries.forEach { query ->
                 fetchWikipediaPageImageUrls(query).take(MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY).forEach { url ->
                     fetchBitmap(url)?.let { bitmap ->
-                        return AircraftPhotoResult.Found(bitmap, "Representative $model photo from Wikipedia; not this exact aircraft")
+                        return AircraftPhotoResult.Found(bitmap, "Representative $model photo from Wikipedia; not this exact aircraft", quality = PhotoQuality.REPRESENTATIVE)
                     }
                 }
             }
@@ -5007,7 +5288,8 @@ class FlightMapView(
                     candidate = candidate,
                     query = query,
                     note = "Verified exact-aircraft search result for ${registration ?: aircraft.icao24.uppercase(Locale.US)}",
-                    verificationTerms = exactTerms
+                    verificationTerms = exactTerms,
+                    quality = PhotoQuality.EXACT
                 )?.let { return it }
             }
         }
@@ -5019,11 +5301,12 @@ class FlightMapView(
                     fetchOpenverseImageCandidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
                 candidates.distinctBy { it.imageUrl }.forEach { candidate ->
                     verifiedSearchPhoto(
-                        candidate = candidate,
-                        query = query,
-                        note = "Verified search result for $model; not this exact aircraft",
-                        verificationTerms = verificationTerms
-                    )?.let { return it }
+                    candidate = candidate,
+                    query = query,
+                    note = "Verified search result for $model; not this exact aircraft",
+                    verificationTerms = verificationTerms,
+                    quality = PhotoQuality.REPRESENTATIVE
+                )?.let { return it }
                 }
             }
         }
@@ -5050,7 +5333,8 @@ class FlightMapView(
                 return AircraftPhotoResult.Found(
                     bitmap,
                     "Unverified search result; tap photo to inspect source",
-                    evidence
+                    evidence,
+                    PhotoQuality.INVESTIGABLE
                 )
             }
         }
@@ -5061,7 +5345,8 @@ class FlightMapView(
         candidate: SearchImageCandidate,
         query: String,
         note: String,
-        verificationTerms: List<String>
+        verificationTerms: List<String>,
+        quality: PhotoQuality
     ): AircraftPhotoResult.Found? {
         val quote = fetchVerificationQuote(candidate.pageUrl, verificationTerms)
             ?: candidate.verificationText?.let { quoteFromText(it, verificationTerms) }
@@ -5078,7 +5363,8 @@ class FlightMapView(
         return AircraftPhotoResult.Found(
             bitmap,
             note,
-            evidence
+            evidence,
+            quality
         )
     }
 
@@ -5874,15 +6160,19 @@ class FlightMapView(
         invalidate()
     }
 
-    private fun setGlobeWebSourceEnabled(enabled: Boolean) {
-        if (globeWebSourceEnabled == enabled) return
-        globeWebSourceEnabled = enabled
-        prefs.edit { putBoolean(FlightAlertSettings.KEY_GLOBE_WEB_SOURCE_ENABLED, globeWebSourceEnabled) }
+    private fun setAircraftFeedMode(mode: FlightAlertSettings.AircraftFeedMode) {
+        if (aircraftFeedMode == mode) return
+        aircraftFeedMode = mode
+        globeWebSourceEnabled = mode.usesGlobe
+        prefs.edit {
+            putString(FlightAlertSettings.KEY_AIRCRAFT_FEED_MODE, aircraftFeedMode.name)
+            putBoolean(FlightAlertSettings.KEY_GLOBE_WEB_SOURCE_ENABLED, globeWebSourceEnabled)
+        }
         globeWebAircraftSource?.setEnabled(globeWebSourceEnabled)
-        aircraftStatus = if (globeWebSourceEnabled) {
-            "Globe web feed enabled; waiting for validated snapshot"
-        } else {
-            "Globe web feed disabled; using aircraft API feeds"
+        aircraftStatus = when (aircraftFeedMode) {
+            FlightAlertSettings.AircraftFeedMode.WEB -> "Web feed enabled; waiting for validated snapshot"
+            FlightAlertSettings.AircraftFeedMode.API -> "API feed enabled"
+            FlightAlertSettings.AircraftFeedMode.HYBRID -> "Hybrid feed enabled; loading API plus web supplement"
         }
         requestVisibleAircraftIfNeeded(force = true)
         invalidate()
@@ -5929,7 +6219,7 @@ class FlightMapView(
     }
 
     private fun aircraftSourcePreferenceLabel(): String {
-        return if (globeWebSourceEnabled) "globe web feed first" else "API feeds"
+        return aircraftFeedMode.displayName
     }
 
     private fun setAlertsEnabled(enabled: Boolean) {
@@ -7704,9 +7994,31 @@ class FlightMapView(
     }
 
     private sealed class AircraftPhotoResult {
-        data class Found(val bitmap: Bitmap, val note: String, val evidence: PhotoEvidence? = null) : AircraftPhotoResult()
+        data class Found(
+            val bitmap: Bitmap,
+            val note: String,
+            val evidence: PhotoEvidence? = null,
+            val quality: PhotoQuality
+        ) : AircraftPhotoResult()
         data class Unavailable(val reason: String) : AircraftPhotoResult()
     }
+
+    private enum class PhotoQuality(val rank: Int) {
+        INVESTIGABLE(1),
+        REPRESENTATIVE(2),
+        EXACT(3)
+    }
+
+    private data class AircraftDetailCandidate(
+        val sourceName: String,
+        val fetch: () -> AircraftDetails?
+    )
+
+    private data class WebDetailLookupContext(
+        val bounds: FeedBounds,
+        val ownLat: Double,
+        val ownLon: Double
+    )
 
     private data class PhotoEvidence(
         val sourceName: String,
@@ -7884,6 +8196,9 @@ class FlightMapView(
         const val AIRCRAFT_FORCE_REFRESH_MS = 350L
         const val AIRCRAFT_IN_FLIGHT_RETRY_MS = 180L
         const val AIRCRAFT_TICKER_FETCH_MS = 1000L
+        const val WEB_DETAIL_WAIT_MS = 9000L
+        const val WEB_DETAIL_POLL_MS = 350L
+        const val PHOTO_LONG_PRESS_MS = 550L
         const val AIRCRAFT_BOUNDS_PADDING_PX = 96.0
         const val AIRCRAFT_APPEAR_DURATION_MS = 420L
         const val AIRCRAFT_SCALE_ZOOM_MIN = 6.4f

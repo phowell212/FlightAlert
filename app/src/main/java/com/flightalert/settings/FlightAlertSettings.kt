@@ -16,6 +16,7 @@ object FlightAlertSettings {
     const val KEY_PRIORITY_RANGE_CIRCLE_VISIBLE = "priority_range_circle_visible"
     const val KEY_MAP_SOURCE = "map_source"
     const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
+    const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
     const val KEY_GLOBE_WEB_SOURCE_ENABLED = "globe_web_source_enabled"
     const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
     const val KEY_LAYER_RESTRICTED_AIRSPACES_ENABLED = "layer_restricted_airspaces_enabled"
@@ -51,6 +52,39 @@ object FlightAlertSettings {
     }
 
     fun readVisualTheme(context: Context): VisualTheme = readVisualTheme(prefs(context))
+
+    fun readAircraftFeedMode(prefs: SharedPreferences): AircraftFeedMode {
+        val stored = prefs.getString(KEY_AIRCRAFT_FEED_MODE, null)
+        if (stored != null) {
+            return AircraftFeedMode.entries.firstOrNull { it.name == stored } ?: AircraftFeedMode.HYBRID
+        }
+        if (prefs.contains(KEY_GLOBE_WEB_SOURCE_ENABLED)) {
+            return if (prefs.getBoolean(KEY_GLOBE_WEB_SOURCE_ENABLED, DEFAULT_GLOBE_WEB_SOURCE_ENABLED)) {
+                AircraftFeedMode.WEB
+            } else {
+                AircraftFeedMode.API
+            }
+        }
+        return AircraftFeedMode.HYBRID
+    }
+
+    fun readAircraftFeedMode(context: Context): AircraftFeedMode = readAircraftFeedMode(prefs(context))
+
+    enum class AircraftFeedMode(
+        val displayName: String,
+        val compactName: String,
+        val usesGlobe: Boolean
+    ) {
+        WEB("Web feed", "Web feed", true),
+        API("API feed", "API feed", false),
+        HYBRID("Hybrid feed", "Hybrid", true);
+
+        fun next(): AircraftFeedMode = when (this) {
+            WEB -> API
+            API -> HYBRID
+            HYBRID -> WEB
+        }
+    }
 
     data class ThemeColors(
         val mapEmpty: Int,

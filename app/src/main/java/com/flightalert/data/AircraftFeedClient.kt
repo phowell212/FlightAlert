@@ -511,6 +511,7 @@ enum class FeedSource(val displayName: String) {
     OPENSKY("OpenSky"),
     AIRPLANES_LIVE("Airplanes.Live"),
     AIRPLANES_LIVE_GLOBE("Airplanes.Live globe web source"),
+    HYBRID("Hybrid feed"),
     COMBINED("OpenSky + Airplanes.Live")
 }
 
