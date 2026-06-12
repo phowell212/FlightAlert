@@ -301,11 +301,23 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
         }
         val registration = item.optStringOrNull("registration")
         val callsign = item.optStringOrNull("flight") ?: registration ?: hex
+        val typeCode = item.optStringOrNull("typeCode")
+        val metadata = AircraftMetadataSeed(
+            sourceName = FeedSource.AIRPLANES_LIVE_GLOBE.displayName,
+            registration = registration,
+            manufacturer = item.optStringOrNull("manufacturer"),
+            type = item.optStringOrNull("description"),
+            typeCode = typeCode,
+            owner = item.optStringOrNull("ownerOperator"),
+            manufacturedYear = item.optStringOrNull("year")?.take(4),
+            operatorCode = item.optStringOrNull("operatorCode")
+        ).takeIf { it.hasDetails }
         return FeedAircraft(
             icao24 = hex,
             callsign = callsign,
             registration = registration,
-            typeCode = item.optStringOrNull("typeCode"),
+            typeCode = typeCode,
+            metadata = metadata,
             dbFlags = item.optIntOrNull("dbFlags"),
             lat = lat,
             lon = lon,
@@ -443,8 +455,13 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
                     hex: String(p.icao || ""),
                     flight: p.flight || p.name || null,
                     registration: p.registration || null,
+                    manufacturer: p.manufacturer || p.manufacturerName || null,
                     typeCode: p.icaoType || null,
+                    description: p.desc || p.description || p.typeDescription || null,
                     category: p.category || null,
+                    ownerOperator: p.ownOp || p.ownerOperator || p.operator || p.owner || null,
+                    operatorCode: p.ownOpCode || p.operatorCode || null,
+                    year: p.year || p.mfrYear || p.manufacturedYear || null,
                     dbFlags: dbFlags,
                     lat: lat,
                     lon: lon,

@@ -7,10 +7,22 @@ import java.net.URL
 import java.util.Locale
 
 class AircraftDetailsClient(private val userAgent: String) {
+    private val detailsCache = linkedMapOf<String, CachedDetails>()
 
-    fun fetchDetails(hex: String, callsign: String, registrationHint: String? = null): AircraftDetails {
+    fun fetchDetails(
+        hex: String,
+        callsign: String,
+        registrationHint: String? = null,
+        metadataSeed: AircraftMetadataSeed? = null
+    ): AircraftDetails {
         val normalizedHex = hex.trim().trimStart('~').lowercase(Locale.US)
         val cleanCallsign = callsign.trim().replace(" ", "")
+        val cacheKey = detailsCacheKey(normalizedHex, cleanCallsign, metadataSeed)
+        cachedDetails(cacheKey)?.let { return it }
+        detailsFromSeed(normalizedHex, registrationHint, metadataSeed)?.let { details ->
+            cacheDetails(cacheKey, details)
+            return details
+        }
         val airplanesLive = fetchAirplanesLiveMetadata(normalizedHex)
         val feedRegistration = normalizedRegistration(registrationHint)
         val decodedUsRegistration = decodeUsNNumber(normalizedHex)
@@ -74,7 +86,72 @@ class AircraftDetailsClient(private val userAgent: String) {
             routeUpdatedEpochSec = route?.optLongOrNull("updatetime"),
             originAirport = origin,
             destinationAirport = destination
+        ).also { cacheDetails(cacheKey, it) }
+    }
+
+    private fun detailsFromSeed(
+        normalizedHex: String,
+        registrationHint: String?,
+        seed: AircraftMetadataSeed?
+    ): AircraftDetails? {
+        if (seed == null || !seed.hasDetails) return null
+        val registration = firstPresent(
+            normalizedRegistration(seed.registration),
+            normalizedRegistration(registrationHint),
+            decodeUsNNumber(normalizedHex)
         )
+        val manufacturer = seed.manufacturer?.cleanSeedValue()
+        val type = seed.type?.cleanSeedValue()
+        val typeCode = seed.typeCode?.cleanSeedValue()
+        val owner = seed.owner?.cleanSeedValue()
+        val year = seed.manufacturedYear?.cleanSeedValue()?.take(4)
+        val operatorCode = seed.operatorCode?.cleanSeedValue()
+        if (listOf(registration, manufacturer, type, typeCode, owner, year, operatorCode).all { it.isNullOrBlank() }) {
+            return null
+        }
+        return AircraftDetails(
+            icao24 = normalizedHex,
+            registration = registration,
+            manufacturer = manufacturer,
+            type = type,
+            typeCode = typeCode,
+            owner = owner,
+            manufacturedYear = year,
+            registrySource = seed.sourceName,
+            operatorCode = operatorCode,
+            route = null,
+            routeUpdatedEpochSec = null,
+            originAirport = null,
+            destinationAirport = null
+        )
+    }
+
+    private fun detailsCacheKey(normalizedHex: String, cleanCallsign: String, seed: AircraftMetadataSeed?): String {
+        val source = seed?.sourceName?.takeIf { seed.hasDetails } ?: "network"
+        return "$normalizedHex|${cleanCallsign.uppercase(Locale.US)}|$source"
+    }
+
+    private fun cachedDetails(key: String): AircraftDetails? {
+        val now = System.currentTimeMillis()
+        return synchronized(detailsCache) {
+            val cached = detailsCache[key] ?: return@synchronized null
+            if (now - cached.storedAtMs > DETAILS_CACHE_MAX_AGE_MS) {
+                detailsCache.remove(key)
+                null
+            } else {
+                cached.details
+            }
+        }
+    }
+
+    private fun cacheDetails(key: String, details: AircraftDetails) {
+        synchronized(detailsCache) {
+            detailsCache[key] = CachedDetails(details, System.currentTimeMillis())
+            while (detailsCache.size > DETAILS_CACHE_MAX_ENTRIES) {
+                val firstKey = detailsCache.keys.firstOrNull() ?: break
+                detailsCache.remove(firstKey)
+            }
+        }
     }
 
     private fun fetchInternetAircraftMetadata(
@@ -371,6 +448,16 @@ private fun cleanRegistryValue(value: String): String? {
     return cleaned
 }
 
+private fun String.cleanSeedValue(): String? {
+    val cleaned = trim().trim('-').trim()
+    return cleaned.takeIf {
+        it.isNotBlank() &&
+            !it.equals("null", ignoreCase = true) &&
+            !it.equals("n/a", ignoreCase = true) &&
+            !it.equals("unavailable", ignoreCase = true)
+    }
+}
+
 private fun normalizedRegistration(value: String?): String? {
     return value
         ?.uppercase(Locale.US)
@@ -478,6 +565,11 @@ private data class WikipediaSummary(
     val extract: String
 )
 
+private data class CachedDetails(
+    val details: AircraftDetails,
+    val storedAtMs: Long
+)
+
 data class AircraftDetails(
     val icao24: String,
     val registration: String?,
@@ -537,6 +629,8 @@ private fun JSONObject.optDoubleOrNull(key: String): Double? {
 
 private const val US_N_NUMBER_ICAO_START = 0xA00001L
 private const val HTTP_TOO_MANY_REQUESTS = 429
+private const val DETAILS_CACHE_MAX_AGE_MS = 10L * 60L * 1000L
+private const val DETAILS_CACHE_MAX_ENTRIES = 128
 private const val US_N_NUMBER_ICAO_END = 0xADF7C7L
 private const val FIRST_N_NUMBER_STRIDE = 101711
 private const val SECOND_N_NUMBER_STRIDE = 10111

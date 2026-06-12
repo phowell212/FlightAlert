@@ -58,6 +58,7 @@ import com.flightalert.data.FeedStatus
 import com.flightalert.data.FlightTrace
 import com.flightalert.data.FlightTraceClient
 import com.flightalert.data.GlobeWebAircraftSource
+import com.flightalert.data.AircraftMetadataSeed
 import com.flightalert.data.TraceSegment
 import com.flightalert.data.TrackPoint
 import com.flightalert.service.AircraftAlertService
@@ -4731,18 +4732,21 @@ class FlightMapView(
         val requestedId = aircraft.icao24
         val requestToken = ++detailsRequestToken
         executor.execute {
-            val details = aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration)
+            val seed = aircraft.metadataSeed.takeIf { globeWebSourceEnabled }
+            val fastDetails = seed?.let {
+                aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration, it)
+            }
+            fastDetails?.let { details ->
+                post { postAircraftDetails(requestedId, requestToken, details) }
+            }
+            val networkDetails = if (fastDetails == null || shouldEnrichSeedDetails(fastDetails)) {
+                aircraftDetailsClient.fetchDetails(aircraft.icao24, aircraft.callsign, aircraft.registration)
+            } else {
+                fastDetails
+            }
+            val details = fastDetails?.let { mergeAircraftDetails(it, networkDetails) } ?: networkDetails
             post {
-                if (isCurrentDetailsRequest(requestedId, requestToken)) {
-                    aircraftDetails = details
-                    aircraftDetailsStatus = if (!hasAircraftMetadata(details)) {
-                        "Metadata unavailable from configured APIs"
-                    } else {
-                        "Metadata from ${details.registrySource ?: "configured APIs"}"
-                    }
-                    aircraftPhotoStatus = "Searching real photo sources"
-                    invalidate()
-                }
+                postAircraftDetails(requestedId, requestToken, details)
             }
             val photo = fetchAircraftPhoto(aircraft, details)
             post {
@@ -4762,6 +4766,52 @@ class FlightMapView(
                 invalidate()
             }
         }
+    }
+
+    private fun postAircraftDetails(requestedId: String, requestToken: Long, details: AircraftDetails) {
+        if (!isCurrentDetailsRequest(requestedId, requestToken)) return
+        aircraftDetails = details
+        aircraftDetailsStatus = if (!hasAircraftMetadata(details)) {
+            "Metadata unavailable from configured APIs"
+        } else {
+            "Metadata from ${details.registrySource ?: "configured APIs"}"
+        }
+        aircraftPhotoStatus = "Searching real photo sources"
+        invalidate()
+    }
+
+    private fun shouldEnrichSeedDetails(details: AircraftDetails): Boolean {
+        return details.owner == null ||
+            details.manufacturer == null ||
+            details.manufacturedYear == null ||
+            details.route == null ||
+            details.originAirport == null ||
+            details.destinationAirport == null
+    }
+
+    private fun mergeAircraftDetails(seed: AircraftDetails, enrichment: AircraftDetails): AircraftDetails {
+        val source = listOfNotNull(seed.registrySource, enrichment.registrySource)
+            .flatMap { it.split(" + ") }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" + ")
+            .ifEmpty { null }
+        return AircraftDetails(
+            icao24 = seed.icao24,
+            registration = enrichment.registration ?: seed.registration,
+            manufacturer = enrichment.manufacturer ?: seed.manufacturer,
+            type = enrichment.type ?: seed.type,
+            typeCode = enrichment.typeCode ?: seed.typeCode,
+            owner = enrichment.owner ?: seed.owner,
+            manufacturedYear = enrichment.manufacturedYear ?: seed.manufacturedYear,
+            registrySource = source,
+            operatorCode = enrichment.operatorCode ?: seed.operatorCode,
+            route = enrichment.route ?: seed.route,
+            routeUpdatedEpochSec = enrichment.routeUpdatedEpochSec ?: seed.routeUpdatedEpochSec,
+            originAirport = enrichment.originAirport ?: seed.originAirport,
+            destinationAirport = enrichment.destinationAirport ?: seed.destinationAirport
+        )
     }
 
     private fun isCurrentDetailsRequest(requestedId: String, requestToken: Long): Boolean {
@@ -7158,6 +7208,7 @@ class FlightMapView(
             callsign = callsign,
             registration = registration,
             typeCode = typeCode,
+            metadataSeed = metadata,
             isMilitary = dbFlags?.let { it and DB_FLAG_MILITARY != 0 } == true,
             lat = lat,
             lon = lon,
@@ -7684,6 +7735,7 @@ class FlightMapView(
         val callsign: String,
         val registration: String?,
         val typeCode: String?,
+        val metadataSeed: AircraftMetadataSeed?,
         val isMilitary: Boolean,
         val lat: Double,
         val lon: Double,

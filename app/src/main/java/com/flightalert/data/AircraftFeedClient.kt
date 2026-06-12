@@ -471,6 +471,7 @@ data class FeedAircraft(
     val callsign: String,
     val registration: String?,
     val typeCode: String?,
+    val metadata: AircraftMetadataSeed? = null,
     val dbFlags: Int?,
     val lat: Double,
     val lon: Double,
@@ -484,6 +485,21 @@ data class FeedAircraft(
     val lastContactSec: Double?,
     val distanceM: Double
 )
+
+data class AircraftMetadataSeed(
+    val sourceName: String,
+    val registration: String? = null,
+    val manufacturer: String? = null,
+    val type: String? = null,
+    val typeCode: String? = null,
+    val owner: String? = null,
+    val manufacturedYear: String? = null,
+    val operatorCode: String? = null
+) {
+    val hasDetails: Boolean
+        get() = listOf(registration, manufacturer, type, typeCode, owner, manufacturedYear, operatorCode)
+            .any { !it.isNullOrBlank() }
+}
 
 enum class FeedStatus {
     OK,
