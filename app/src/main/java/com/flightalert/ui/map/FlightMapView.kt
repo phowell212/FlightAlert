@@ -63,6 +63,49 @@ import com.flightalert.data.GlobeWebAircraftSource
 import com.flightalert.data.AircraftMetadataSeed
 import com.flightalert.data.TraceSegment
 import com.flightalert.data.TrackPoint
+import com.flightalert.ui.map.filters.AircraftFilterEngine
+import com.flightalert.ui.map.filters.AircraftFilterState
+import com.flightalert.ui.map.filters.AircraftTypeFilter
+import com.flightalert.ui.map.filters.AltitudeFilter
+import com.flightalert.ui.map.filters.DistanceFilter
+import com.flightalert.ui.map.filters.FilterStats
+import com.flightalert.ui.map.filters.FlightStatusFilter
+import com.flightalert.ui.map.filters.ReportAgeFilter
+import com.flightalert.ui.map.geo.MapProjection
+import com.flightalert.ui.map.details.AircraftDetailCandidate
+import com.flightalert.ui.map.details.WebDetailLookupContext
+import com.flightalert.ui.map.impact.AircraftImpactEstimator
+import com.flightalert.ui.map.impact.AircraftImpactPresenter
+import com.flightalert.ui.map.impact.ImpactProfile
+import com.flightalert.ui.map.impact.ImpactTrace
+import com.flightalert.ui.map.model.Aircraft
+import com.flightalert.ui.map.model.AircraftAppearance
+import com.flightalert.ui.map.model.AircraftHit
+import com.flightalert.ui.map.model.AircraftLabelStyle
+import com.flightalert.ui.map.model.AltitudeColorPalette
+import com.flightalert.ui.map.model.Bounds
+import com.flightalert.ui.map.model.GeoPoint
+import com.flightalert.ui.map.model.ScaleLabel
+import com.flightalert.ui.map.model.ScreenPoint
+import com.flightalert.ui.map.model.TrafficDisplay
+import com.flightalert.ui.map.model.Viewport
+import com.flightalert.ui.map.model.WorldPoint
+import com.flightalert.ui.map.origin.OriginAerodrome
+import com.flightalert.ui.map.photo.AircraftPhotoFetcher
+import com.flightalert.ui.map.photo.AircraftPhotoResult
+import com.flightalert.ui.map.photo.PhotoEvidence
+import com.flightalert.ui.map.photo.PhotoQuality
+import com.flightalert.ui.map.registry.AircraftRegistryResolver
+import com.flightalert.ui.map.render.AircraftSymbolRenderer
+import com.flightalert.ui.map.route.AircraftRoutePresenter
+import com.flightalert.ui.map.route.AircraftRouteTraceContext
+import com.flightalert.ui.map.route.CurrentRouteValidator
+import com.flightalert.ui.map.settings.TileSource
+import com.flightalert.ui.map.settings.UnitSystem
+import com.flightalert.ui.map.symbols.AircraftSymbol
+import com.flightalert.ui.map.symbols.AircraftSymbolClassifier
+import com.flightalert.ui.map.usage.AircraftUsageAnalyzer
+import com.flightalert.ui.map.usage.UsageStats
 import com.flightalert.service.AircraftAlertService
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.settings.FlightAlertSettings.ThemeTreatment
@@ -70,20 +113,11 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
-import java.time.DayOfWeek
-import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import org.json.JSONArray
 import org.json.JSONObject
-import kotlin.math.asin
-import kotlin.math.atan
 import kotlin.math.atan2
 import kotlin.math.abs
 import kotlin.math.cos
@@ -96,7 +130,6 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
-import kotlin.math.sinh
 
 // Custom map cockpit: real map tiles, real aircraft feeds, and canvas UI that adapts to device shape.
 class FlightMapView(
@@ -138,6 +171,7 @@ class FlightMapView(
     private val flightTraceClient = FlightTraceClient(USER_AGENT)
     private val aircraftFeedClient = AircraftFeedClient(USER_AGENT)
     private val aircraftDetailsClient = AircraftDetailsClient(USER_AGENT)
+    private val aircraftPhotoFetcher = AircraftPhotoFetcher(USER_AGENT)
     private val aviationLayerClient = AviationLayerClient(USER_AGENT)
     private val flightPathRequests = mutableSetOf<String>()
 
@@ -185,6 +219,7 @@ class FlightMapView(
     private var aircraftPhotoQuality: PhotoQuality? = null
     private var photoEvidenceOpen = false
     private var detailsRequestToken = 0L
+    private var routeDiagnosticKey: String? = null
     private var aircraftFetchInFlight = false
     private var aircraftRefreshScheduled = false
     private var scheduledAircraftRefreshForce = false
@@ -1693,6 +1728,7 @@ class FlightMapView(
                     if (selectedAircraftId?.lowercase(Locale.US) == key) {
                         selectedFlightPathAircraftId = if (trace != null) key else null
                         selectedFlightPath = trace
+                        Log.d(TAG, "Flight trace icao=$key ${flightTraceDiagnostic(trace)}")
                         selectedFlightPathVisible = false
                         selectedPreviousFlightsVisible = false
                         displayedTraffic().aircraft?.let { requestMilitaryOriginIfNeeded(it) }
@@ -1807,8 +1843,8 @@ class FlightMapView(
         val shapeProgress = smoothStep(0f, 1f, 1f - blend)
         val enterScale = 0.18f + 0.82f * appear
         val alpha = (appear * 255).toInt().coerceIn(0, 255)
-        val symbol = aircraftSymbol(aircraft)
-        val typeScale = aircraftSizeMultiplier(aircraft, symbol)
+        val symbol = AircraftSymbolClassifier.symbolFor(aircraft)
+        val typeScale = AircraftSymbolClassifier.sizeMultiplier(aircraft, symbol)
         val iconScale = max(aircraftIconScale(), AIRCRAFT_DOT_SCALE_FLOOR * blend) * typeScale * enterScale
         val color = aircraftColor(aircraft)
         if (alpha > 4) {
@@ -1834,14 +1870,7 @@ class FlightMapView(
                 paint.color = withAlpha(color, alpha)
                 strokePaint.color = withAlpha(scrimColor, (235 * appear).toInt().coerceIn(0, 235))
                 strokePaint.strokeWidth = dp(1.2f)
-                when (symbol) {
-                    AircraftSymbol.ROTORCRAFT -> drawRotorcraftSymbol(this, shapeProgress)
-                    AircraftSymbol.GLIDER -> drawGliderSymbol(this, shapeProgress)
-                    AircraftSymbol.UAV -> drawUavSymbol(this, shapeProgress)
-                    AircraftSymbol.SURFACE -> drawSurfaceSymbol(this, shapeProgress)
-                    AircraftSymbol.AIRLINER -> drawAirlinerSymbol(this, shapeProgress)
-                    AircraftSymbol.GENERAL_AVIATION -> drawGeneralAviationSymbol(this, shapeProgress)
-                }
+                AircraftSymbolRenderer.draw(this, symbol, shapeProgress, paint, strokePaint, ::dp)
             }
         }
         paint.alpha = 255
@@ -2117,166 +2146,6 @@ class FlightMapView(
         return listOf(selected) + this
     }
 
-    private fun drawMorphedPolygon(canvas: Canvas, target: List<ScreenPoint>, progress: Float) {
-        val p = smoothStep(0f, 1f, progress.coerceIn(0f, 1f))
-        iconPath.reset()
-        target.forEachIndexed { index, point ->
-            val angle = atan2(point.y.toDouble(), point.x.toDouble())
-            val startX = (cos(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
-            val startY = (sin(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
-            val x = lerp(startX, point.x, p)
-            val y = lerp(startY, point.y, p)
-            if (index == 0) {
-                iconPath.moveTo(dp(x), dp(y))
-            } else {
-                iconPath.lineTo(dp(x), dp(y))
-            }
-        }
-        iconPath.close()
-        canvas.drawPath(iconPath, paint)
-        canvas.drawPath(iconPath, strokePaint)
-    }
-
-    private fun drawGeneralAviationSymbol(canvas: Canvas, progress: Float) {
-        val p = progress.coerceIn(0f, 1f)
-        val target = listOf(
-            ScreenPoint(0f, -17f),
-            ScreenPoint(3.2f, -4.2f),
-            ScreenPoint(17f, 0.8f),
-            ScreenPoint(15.2f, 4.4f),
-            ScreenPoint(3.3f, 3.4f),
-            ScreenPoint(2.2f, 13.8f),
-            ScreenPoint(8.4f, 17.2f),
-            ScreenPoint(0f, 12.7f),
-            ScreenPoint(-8.4f, 17.2f),
-            ScreenPoint(-2.2f, 13.8f),
-            ScreenPoint(-3.3f, 3.4f),
-            ScreenPoint(-15.2f, 4.4f),
-            ScreenPoint(-17f, 0.8f),
-            ScreenPoint(-3.2f, -4.2f)
-        )
-        drawMorphedPolygon(canvas, target, p)
-    }
-
-    private fun drawAirlinerSymbol(canvas: Canvas, progress: Float) {
-        val p = progress.coerceIn(0f, 1f)
-        val target = listOf(
-            ScreenPoint(0f, -21f),
-            ScreenPoint(5.5f, -4.8f),
-            ScreenPoint(23.5f, 0.8f),
-            ScreenPoint(21.5f, 5.8f),
-            ScreenPoint(7.2f, 6.2f),
-            ScreenPoint(5.1f, 16.5f),
-            ScreenPoint(13.5f, 21f),
-            ScreenPoint(2.8f, 17.2f),
-            ScreenPoint(0f, 13.5f),
-            ScreenPoint(-2.8f, 17.2f),
-            ScreenPoint(-13.5f, 21f),
-            ScreenPoint(-5.1f, 16.5f),
-            ScreenPoint(-7.2f, 6.2f),
-            ScreenPoint(-21.5f, 5.8f),
-            ScreenPoint(-23.5f, 0.8f),
-            ScreenPoint(-5.5f, -4.8f)
-        )
-        drawMorphedPolygon(canvas, target, p)
-
-        val engine = smoothStep(0.48f, 1f, p)
-        if (engine > 0f) {
-            canvas.drawCircle(-dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), strokePaint)
-            canvas.drawCircle(dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), strokePaint)
-        }
-    }
-
-    private fun drawRotorcraftSymbol(canvas: Canvas, progress: Float) {
-        val p = progress.coerceIn(0f, 1f)
-        val body = smoothStep(0f, 0.55f, p)
-        val rotor = smoothStep(0.25f, 1f, p)
-        val tail = smoothStep(0.45f, 1f, p)
-        val bodyRect = RectF(-dp(4f + 4f * body), -dp(4f + 3f * body), dp(4f + 5f * body), dp(4f + 4f * body))
-        canvas.drawOval(bodyRect, paint)
-        canvas.drawOval(bodyRect, strokePaint)
-        strokePaint.strokeWidth = dp(2.5f)
-        canvas.drawLine(-dp(5f + 19f * rotor), 0f, dp(5f + 19f * rotor), 0f, strokePaint)
-        canvas.drawLine(0f, -dp(5f + 17f * rotor), 0f, dp(5f + 17f * rotor), strokePaint)
-        strokePaint.strokeWidth = dp(2)
-        canvas.drawLine(dp(5f + 4f * body), dp(1), dp(7f + 16f * tail), dp(4f + 5f * tail), strokePaint)
-        canvas.drawLine(dp(8f + 13f * tail), dp(3f + 2f * tail), dp(9f + 16f * tail), dp(5f + 8f * tail), strokePaint)
-        strokePaint.strokeWidth = dp(1.2f)
-    }
-
-    private fun drawGliderSymbol(canvas: Canvas, progress: Float) {
-        val p = progress.coerceIn(0f, 1f)
-        val target = listOf(
-            ScreenPoint(0f, -16f),
-            ScreenPoint(3f, 2f),
-            ScreenPoint(27f, 5f),
-            ScreenPoint(4f, 8f),
-            ScreenPoint(1.8f, 17f),
-            ScreenPoint(-1.8f, 17f),
-            ScreenPoint(-4f, 8f),
-            ScreenPoint(-27f, 5f),
-            ScreenPoint(-3f, 2f)
-        )
-        drawMorphedPolygon(canvas, target, p)
-    }
-
-    private fun drawUavSymbol(canvas: Canvas, progress: Float) {
-        val p = progress.coerceIn(0f, 1f)
-        val body = smoothStep(0f, 0.55f, p)
-        val arms = smoothStep(0.2f, 1f, p)
-        val rotors = smoothStep(0.55f, 1f, p)
-        iconPath.reset()
-        iconPath.moveTo(0f, -dp(5f + 8f * body))
-        iconPath.lineTo(dp(3f + 5f * body), 0f)
-        iconPath.lineTo(0f, dp(5f + 8f * body))
-        iconPath.lineTo(-dp(3f + 5f * body), 0f)
-        iconPath.close()
-        canvas.drawPath(iconPath, paint)
-        canvas.drawPath(iconPath, strokePaint)
-        strokePaint.strokeWidth = dp(2)
-        val armInner = dp(4f + 2f * body)
-        val armOuter = dp(7f + 11f * arms)
-        canvas.drawLine(-armInner, -armInner, -armOuter, -armOuter, strokePaint)
-        canvas.drawLine(armInner, -armInner, armOuter, -armOuter, strokePaint)
-        canvas.drawLine(-armInner, armInner, -armOuter, armOuter, strokePaint)
-        canvas.drawLine(armInner, armInner, armOuter, armOuter, strokePaint)
-        listOf(
-            -dp(8f + 12f * arms) to -dp(8f + 12f * arms),
-            dp(8f + 12f * arms) to -dp(8f + 12f * arms),
-            -dp(8f + 12f * arms) to dp(8f + 12f * arms),
-            dp(8f + 12f * arms) to dp(8f + 12f * arms)
-        ).forEach { (x, y) ->
-            canvas.drawCircle(x, y, dp(1.5f + 3.5f * rotors), paint)
-            canvas.drawCircle(x, y, dp(1.5f + 3.5f * rotors), strokePaint)
-            canvas.drawLine(x - dp(5f * rotors), y, x + dp(5f * rotors), y, strokePaint)
-        }
-        strokePaint.strokeWidth = dp(1.2f)
-    }
-
-    private fun drawSurfaceSymbol(canvas: Canvas, progress: Float) {
-        val p = progress.coerceIn(0f, 1f)
-        val body = smoothStep(0f, 0.6f, p)
-        val gear = smoothStep(0.55f, 1f, p)
-        val target = listOf(
-            ScreenPoint(0f, -15f),
-            ScreenPoint(5f, -4f),
-            ScreenPoint(18f, 1f),
-            ScreenPoint(15f, 6f),
-            ScreenPoint(4f, 4f),
-            ScreenPoint(2f, 13f),
-            ScreenPoint(-2f, 13f),
-            ScreenPoint(-4f, 4f),
-            ScreenPoint(-15f, 6f),
-            ScreenPoint(-18f, 1f),
-            ScreenPoint(-5f, -4f)
-        )
-        drawMorphedPolygon(canvas, target, p)
-        strokePaint.strokeWidth = dp(2)
-        canvas.drawLine(-dp(5f + 9f * gear), dp(8f + 10f * body), dp(5f + 9f * gear), dp(8f + 10f * body), strokePaint)
-        canvas.drawCircle(-dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), strokePaint)
-        canvas.drawCircle(dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), strokePaint)
-        strokePaint.strokeWidth = dp(1.2f)
-    }
     private fun drawOwnship(canvas: Canvas, viewport: Viewport, location: Location) {
         val point = latLonToWorld(location.latitude, location.longitude, viewport.zoom)
         val x = (point.x - viewport.centerX + viewport.width / 2.0).toFloat()
@@ -2813,24 +2682,25 @@ class FlightMapView(
             if (aircraft != null) {
                 val detailsLoading = isDetailsLoadingFor(aircraft)
                 val routeDetails = currentFlightRouteDetails(details, aircraft)
+                val routeContext = routeTraceContext(aircraft)
                 y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "ICAO", aircraft.icao24.uppercase(Locale.US))
                 y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Registration", details?.registration ?: aircraft.registration ?: loadingOrUnavailable(detailsLoading))
                 y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Registry country", registryCountryLabel(aircraft, details, detailsLoading))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Owner/Operator", detailsValue(details?.owner, detailsLoading))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Aircraft", formatAircraftType(details, aircraft, detailsLoading))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "MFR year", detailsValue(details?.manufacturedYear, detailsLoading))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Registry source", detailsValue(details?.registrySource, detailsLoading))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Owner/Operator", AircraftRoutePresenter.detailsValue(details?.owner, detailsLoading))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Aircraft", AircraftRoutePresenter.aircraftType(details, aircraft, detailsLoading))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "MFR year", AircraftRoutePresenter.detailsValue(details?.manufacturedYear, detailsLoading))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Registry source", AircraftRoutePresenter.detailsValue(details?.registrySource, detailsLoading))
                 if (aircraft.isMilitary) {
                     y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Military", "Tagged military")
                     y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Origin status", formatOriginStatus(aircraft, routeDetails))
                 }
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Route", formatFlightRouteValue(routeDetails?.route, aircraft, detailsLoading))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Origin", formatFlightRouteAirport(routeDetails?.originAirport, aircraft, detailsLoading))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Destination", formatFlightRouteAirport(routeDetails?.destinationAirport, aircraft, detailsLoading))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Path source", formatTraceSource(aircraft))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Flight time", formatObservedFlightTime(aircraft))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Route complete", formatRouteCompletion(routeDetails, aircraft))
-                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Observed path span", formatObservedPathSpan(aircraft))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Route", AircraftRoutePresenter.value(routeDetails?.route, currentFlightRouteLoading(aircraft, detailsLoading)))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Origin", AircraftRoutePresenter.airport(routeDetails?.originAirport, currentFlightRouteLoading(aircraft, detailsLoading)))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Destination", AircraftRoutePresenter.airport(routeDetails?.destinationAirport, currentFlightRouteLoading(aircraft, detailsLoading)))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Path source", AircraftRoutePresenter.traceSource(routeContext))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Flight time", AircraftRoutePresenter.observedFlightTime(routeContext))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Route complete", AircraftRoutePresenter.routeCompletion(routeDetails, aircraft, routeContext, detailsLoading))
+                y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, "Observed path span", AircraftRoutePresenter.observedPathSpan(routeContext))
             }
             y
         }
@@ -2857,24 +2727,25 @@ class FlightMapView(
         val rows = mutableListOf<Pair<String, String>>()
         val detailsLoading = isDetailsLoadingFor(aircraft)
         val routeDetails = currentFlightRouteDetails(details, aircraft)
+        val routeContext = routeTraceContext(aircraft)
         rows += "ICAO" to aircraft.icao24.uppercase(Locale.US)
         rows += "Registration" to (details?.registration ?: aircraft.registration ?: loadingOrUnavailable(detailsLoading))
         rows += "Registry country" to registryCountryLabel(aircraft, details, detailsLoading)
-        rows += "Owner/Operator" to detailsValue(details?.owner, detailsLoading)
-        rows += "Aircraft" to formatAircraftType(details, aircraft, detailsLoading)
-        rows += "MFR year" to detailsValue(details?.manufacturedYear, detailsLoading)
-        rows += "Registry source" to detailsValue(details?.registrySource, detailsLoading)
+        rows += "Owner/Operator" to AircraftRoutePresenter.detailsValue(details?.owner, detailsLoading)
+        rows += "Aircraft" to AircraftRoutePresenter.aircraftType(details, aircraft, detailsLoading)
+        rows += "MFR year" to AircraftRoutePresenter.detailsValue(details?.manufacturedYear, detailsLoading)
+        rows += "Registry source" to AircraftRoutePresenter.detailsValue(details?.registrySource, detailsLoading)
         if (aircraft.isMilitary) {
             rows += "Military" to "Tagged military"
             rows += "Origin status" to formatOriginStatus(aircraft, routeDetails)
         }
-        rows += "Route" to formatFlightRouteValue(routeDetails?.route, aircraft, detailsLoading)
-        rows += "Origin" to formatFlightRouteAirport(routeDetails?.originAirport, aircraft, detailsLoading)
-        rows += "Destination" to formatFlightRouteAirport(routeDetails?.destinationAirport, aircraft, detailsLoading)
-        rows += "Path source" to formatTraceSource(aircraft)
-        rows += "Flight time" to formatObservedFlightTime(aircraft)
-        rows += "Route complete" to formatRouteCompletion(routeDetails, aircraft)
-        rows += "Observed path span" to formatObservedPathSpan(aircraft)
+        rows += "Route" to AircraftRoutePresenter.value(routeDetails?.route, currentFlightRouteLoading(aircraft, detailsLoading))
+        rows += "Origin" to AircraftRoutePresenter.airport(routeDetails?.originAirport, currentFlightRouteLoading(aircraft, detailsLoading))
+        rows += "Destination" to AircraftRoutePresenter.airport(routeDetails?.destinationAirport, currentFlightRouteLoading(aircraft, detailsLoading))
+        rows += "Path source" to AircraftRoutePresenter.traceSource(routeContext)
+        rows += "Flight time" to AircraftRoutePresenter.observedFlightTime(routeContext)
+        rows += "Route complete" to AircraftRoutePresenter.routeCompletion(routeDetails, aircraft, routeContext, detailsLoading)
+        rows += "Observed path span" to AircraftRoutePresenter.observedPathSpan(routeContext)
 
         val split = (rows.size + 1) / 2
         var yA = colA.top
@@ -2906,13 +2777,13 @@ class FlightMapView(
 
         val details = aircraftDetails
         val detailsLoading = isDetailsLoadingFor(aircraft)
-        val profile = impactProfileFor(aircraft, details)
+        val profile = AircraftImpactPresenter.profileFor(aircraft, details)
         val trace = currentImpactTraceFor(aircraft)
         val traceLoading = isFlightPathLoading(aircraft)
         textPaint.isFakeBoldText = false
         textPaint.textSize = sp(12)
         textPaint.color = mutedColor
-        canvas.drawText(ellipsize(impactStatus(profile, trace, detailsLoading, traceLoading), rect.width() - dp(36)), rect.left + dp(18), rect.top + dp(62), textPaint)
+        canvas.drawText(ellipsize(AircraftImpactPresenter.status(profile, trace, detailsLoading, traceLoading), rect.width() - dp(36)), rect.left + dp(18), rect.top + dp(62), textPaint)
 
         val clip = detailsContentBounds(rect)
         val checkpoint = canvas.save()
@@ -2924,7 +2795,7 @@ class FlightMapView(
         var y = rect.top + dp(98)
         y = drawImpactScoreSummary(canvas, rect, y, profile, trace, detailsLoading, traceLoading)
         y += dp(10)
-        impactRows(aircraft, details, profile, trace, detailsLoading, traceLoading).forEach { (label, value) ->
+        AircraftImpactPresenter.rows(aircraft, details, profile, trace, usageTraceFor(aircraft), detailsLoading, traceLoading, units).forEach { (label, value) ->
             y = drawAdaptiveDetailRow(canvas, detailsRowBounds(rect), y, label, value)
         }
 
@@ -2945,11 +2816,11 @@ class FlightMapView(
         val left = rect.left + dp(18)
         val right = rect.right - dp(18)
         val loading = detailsLoading || traceLoading
-        val scoreText = profile?.let { "${impactScore(it)} / 100" } ?: loadingOrUnavailable(detailsLoading)
+        val scoreText = profile?.let { "${AircraftImpactEstimator.score(it)} / 100" } ?: loadingOrUnavailable(detailsLoading)
         val co2Text = when {
-            profile != null && trace != null -> formatCarbonRange(profile.carbonForHours(trace.hours))
+            profile != null && trace != null -> AircraftImpactPresenter.carbonRange(profile.carbonForHours(trace.hours))
             traceLoading -> "Loading"
-            profile != null -> formatImpactKgRange(profile.lowCo2KgPerHour(), profile.highCo2KgPerHour())
+            profile != null -> AircraftImpactPresenter.kgRange(profile.lowCo2KgPerHour(), profile.highCo2KgPerHour())
             else -> loadingOrUnavailable(loading)
         }
 
@@ -3011,15 +2882,15 @@ class FlightMapView(
             return
         }
 
-        val stats = usageStats(trace)
+        val stats = AircraftUsageAnalyzer.statsFor(trace)
         if (stats.flightCount == 0) {
             drawUsageCenteredMessage(canvas, "Unavailable: trace data does not contain usable completed or current flight segments.", RectF(rect.left + dp(18), rect.top + dp(96), rect.right - dp(18), rect.bottom - dp(24)))
             return
         }
 
         var y = rect.top + dp(102)
-        y = drawUsageStatLine(canvas, rect, y, "Current week", "${stats.weekFlightCount} flights  ${formatUsageHours(stats.weekHours)}")
-        y = drawUsageStatLine(canvas, rect, y, "Trace window total", "${stats.flightCount} flights  ${formatUsageHours(stats.totalHours)}")
+        y = drawUsageStatLine(canvas, rect, y, "Current week", "${stats.weekFlightCount} flights  ${AircraftUsageAnalyzer.formatHours(stats.weekHours)}")
+        y = drawUsageStatLine(canvas, rect, y, "Trace window total", "${stats.flightCount} flights  ${AircraftUsageAnalyzer.formatHours(stats.totalHours)}")
         y = drawUsageStatLine(canvas, rect, y, "Trace window", stats.windowLabel)
 
         val graph = RectF(rect.left + dp(18), y + dp(14), rect.right - dp(18), rect.bottom - dp(28))
@@ -3471,300 +3342,50 @@ class FlightMapView(
 
     private fun currentFlightRouteDetails(details: AircraftDetails?, aircraft: Aircraft): AircraftDetails? {
         val routeDetails = details ?: return null
-        if (!hasFlightRouteMetadata(routeDetails)) return null
-        return routeDetails.takeIf { isCurrentFlightRoute(it, aircraft) }
+        if (!CurrentRouteValidator.hasRouteMetadata(routeDetails)) return null
+        val validation = CurrentRouteValidator.evaluate(
+            details = routeDetails,
+            aircraftIcao24 = aircraft.icao24,
+            aircraftCallsign = aircraft.callsign,
+            selectedTraceAircraftId = selectedFlightPathAircraftId,
+            traceSegments = selectedPathSegments(visibleOnly = false)
+        )
+        logRouteDiagnostic(validation.diagnostic)
+        return routeDetails.takeIf { validation.accepted }
     }
 
-    private fun hasFlightRouteMetadata(details: AircraftDetails): Boolean {
-        return details.route != null || details.originAirport != null || details.destinationAirport != null
+    private fun logRouteDiagnostic(diagnostic: String) {
+        if (routeDiagnosticKey == diagnostic) return
+        routeDiagnosticKey = diagnostic
+        Log.d(TAG, diagnostic)
     }
 
-    private fun isCurrentFlightRoute(details: AircraftDetails, aircraft: Aircraft): Boolean {
-        val id = aircraft.icao24.lowercase(Locale.US)
-        if (selectedFlightPathAircraftId != id) return false
-        val origin = details.originAirport ?: return false
-        val originLat = origin.latitude ?: return false
-        val originLon = origin.longitude ?: return false
-        val points = selectedSegmentPoints(visibleOnly = false)
-            ?.sortedBy { it.epochSec }
-            ?: return false
-        val first = points.firstOrNull() ?: return false
-        val destination = details.destinationAirport
-        val destLat = destination?.latitude
-        val destLon = destination?.longitude
-        val directRouteMeters = if (destLat != null && destLon != null) {
-            distanceMeters(originLat, originLon, destLat, destLon)
-        } else {
-            null
-        }
-        val originTolerance = directRouteMeters
-            ?.let {
-                max(CURRENT_ROUTE_ORIGIN_MATCH_M, it * CURRENT_ROUTE_ORIGIN_ROUTE_FRACTION)
-                    .coerceAtMost(CURRENT_ROUTE_ORIGIN_MATCH_MAX_M)
-            }
-            ?: CURRENT_ROUTE_ORIGIN_MATCH_M
-        if (distanceMeters(originLat, originLon, first.lat, first.lon) > originTolerance) return false
-        if (
-            destLat != null &&
-            destLon != null &&
-            !traceDirectionMatchesRoute(points, originLat, originLon, destLat, destLon)
-        ) {
-            return false
-        }
-        return true
+    private fun flightTraceDiagnostic(trace: FlightTrace?): String {
+        if (trace == null) return "source=none points=0"
+        val points = trace.allPoints.sortedBy { it.epochSec }
+        val first = points.firstOrNull()
+        val last = points.lastOrNull()
+        return "source=${trace.source.ifBlank { "unknown" }} points=${trace.pointCount} previous=${trace.previousPointCount} " +
+            "first=${first?.latLonLabel() ?: "none"} last=${last?.latLonLabel() ?: "none"}"
     }
 
-    private fun traceDirectionMatchesRoute(
-        points: List<TrackPoint>,
-        originLat: Double,
-        originLon: Double,
-        destLat: Double,
-        destLon: Double
-    ): Boolean {
-        val directRouteMeters = distanceMeters(originLat, originLon, destLat, destLon)
-        if (directRouteMeters < CURRENT_ROUTE_MIN_DIRECTION_M) return true
-        val first = points.firstOrNull() ?: return false
-        val last = points.lastOrNull() ?: return false
-        val observedMeters = distanceMeters(first.lat, first.lon, last.lat, last.lon)
-        if (observedMeters < CURRENT_ROUTE_MIN_DIRECTION_M) return true
-        val routeBearing = initialBearingDegrees(originLat, originLon, destLat, destLon)
-        val observedBearing = initialBearingDegrees(first.lat, first.lon, last.lat, last.lon)
-        return angularDeltaDegrees(routeBearing, observedBearing) <= CURRENT_ROUTE_MAX_BEARING_DELTA_DEG
-    }
-
-    private fun initialBearingDegrees(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val fromLat = Math.toRadians(lat1)
-        val toLat = Math.toRadians(lat2)
-        val deltaLon = Math.toRadians(lon2 - lon1)
-        val y = sin(deltaLon) * cos(toLat)
-        val x = cos(fromLat) * sin(toLat) - sin(fromLat) * cos(toLat) * cos(deltaLon)
-        return (Math.toDegrees(atan2(y, x)) + 360.0) % 360.0
-    }
-
-    private fun angularDeltaDegrees(first: Double, second: Double): Double {
-        return abs((first - second + 540.0) % 360.0 - 180.0)
+    private fun TrackPoint.latLonLabel(): String {
+        return String.format(Locale.US, "%.4f,%.4f", lat, lon)
     }
 
     private fun currentFlightRouteLoading(aircraft: Aircraft, detailsLoading: Boolean): Boolean {
         return detailsLoading || isFlightPathLoading(aircraft)
     }
 
-    private fun formatFlightRouteValue(value: String?, aircraft: Aircraft, detailsLoading: Boolean): String {
-        return value ?: loadingOrUnavailable(currentFlightRouteLoading(aircraft, detailsLoading))
-    }
-
-    private fun formatFlightRouteAirport(
-        airport: com.flightalert.data.AirportDetails?,
-        aircraft: Aircraft,
-        detailsLoading: Boolean
-    ): String {
-        return airport?.let { formatAirport(it) }
-            ?: loadingOrUnavailable(currentFlightRouteLoading(aircraft, detailsLoading))
-    }
-
-    private fun formatAircraftType(details: AircraftDetails?, aircraft: Aircraft, loading: Boolean = false): String {
-        return listOfNotNull(details?.manufacturer, details?.type, details?.typeCode ?: aircraft.typeCode)
-            .distinct()
-            .joinToString(" ")
-            .ifEmpty { loadingOrUnavailable(loading) }
-    }
-
-    private fun formatAirport(airport: com.flightalert.data.AirportDetails?, loading: Boolean = false): String {
-        return if (airport == null) {
-            loadingOrUnavailable(loading)
-        } else {
-            listOfNotNull(airport.name, airport.icao, airport.iata).joinToString(" / ")
-        }
-    }
-
-    private fun formatObservedPathSpan(aircraft: Aircraft): String {
+    private fun routeTraceContext(aircraft: Aircraft): AircraftRouteTraceContext {
         val id = aircraft.icao24.lowercase(Locale.US)
-        if (selectedFlightPathAircraftId != id) return loadingOrUnavailable(isFlightPathLoading(aircraft))
-        val points = selectedSegmentPoints(visibleOnly = false) ?: return loadingOrUnavailable(isFlightPathLoading(aircraft))
-        val start = points.minOf { it.epochSec }
-        val end = points.maxOf { it.epochSec }
-        val minutes = ((end - start) / 60.0).coerceAtLeast(0.0)
-        return String.format(Locale.US, "%.0f min", minutes)
-    }
-
-    private fun formatTraceSource(aircraft: Aircraft): String {
-        val id = aircraft.icao24.lowercase(Locale.US)
-        val trace = selectedFlightPath?.takeIf { selectedFlightPathAircraftId == id } ?: return loadingOrUnavailable(isFlightPathLoading(aircraft))
-        val history = trace.previousSegments.size.takeIf { it > 0 }?.let { count -> ", $count prior ${if (count == 1) "flight" else "flights"}" }.orEmpty()
-        return "${trace.source}, ${trace.pointCount} pts$history"
-    }
-
-    private fun formatObservedFlightTime(aircraft: Aircraft): String {
-        val id = aircraft.icao24.lowercase(Locale.US)
-        if (selectedFlightPathAircraftId != id) return loadingOrUnavailable(isFlightPathLoading(aircraft))
-        val points = selectedSegmentPoints(visibleOnly = false) ?: return loadingOrUnavailable(isFlightPathLoading(aircraft))
-        val start = points.minOf { it.epochSec }
-        val latest = max(points.maxOf { it.epochSec }.toDouble(), System.currentTimeMillis() / 1000.0)
-        return String.format(Locale.US, "Observed %.0f min", ((latest - start) / 60.0).coerceAtLeast(0.0))
-    }
-
-    private fun formatRouteCompletion(details: AircraftDetails?, aircraft: Aircraft): String {
-        if (details == null && isDetailsLoadingFor(aircraft)) return "Loading"
-        if (isFlightPathLoading(aircraft)) return "Loading"
-        val origin = details?.originAirport
-        val destination = details?.destinationAirport
-        val originLat = origin?.latitude ?: return "Unavailable"
-        val originLon = origin.longitude ?: return "Unavailable"
-        val destLat = destination?.latitude ?: return "Unavailable"
-        val destLon = destination.longitude ?: return "Unavailable"
-        val total = distanceMeters(originLat, originLon, destLat, destLon)
-        if (total < 1000.0) return "Unavailable"
-        traceBasedRouteCompletion(aircraft, originLat, originLon, destLat, destLon, total)?.let {
-            return String.format(Locale.US, "~%.0f%% observed track", it)
-        }
-        val completed = (distanceMeters(originLat, originLon, aircraft.lat, aircraft.lon) / total * 100.0).coerceIn(0.0, 100.0)
-        return String.format(Locale.US, "~%.0f%% direct estimate", completed)
-    }
-
-    private fun traceBasedRouteCompletion(
-        aircraft: Aircraft,
-        originLat: Double,
-        originLon: Double,
-        destLat: Double,
-        destLon: Double,
-        directRouteMeters: Double
-    ): Double? {
-        val id = aircraft.icao24.lowercase(Locale.US)
-        if (selectedFlightPathAircraftId != id) return null
-        val segments = selectedPathSegments(visibleOnly = false) ?: return null
-        if (segments.sumOf { it.points.size } < 2) return null
-        val observedMeters = traceDistanceMeters(segments)
-        if (observedMeters < 1000.0) return null
-        val first = segments.firstOrNull()?.points?.firstOrNull() ?: return null
-        val firstFromOriginMeters = distanceMeters(originLat, originLon, first.lat, first.lon)
-        val creditedDepartureMeters = firstFromOriginMeters.takeIf {
-            it <= max(25000.0, directRouteMeters * 0.12)
-        } ?: 0.0
-        val last = segments.lastOrNull()?.points?.lastOrNull() ?: return null
-        val remainingMeters = distanceMeters(last.lat, last.lon, destLat, destLon)
-        val totalEstimatedMeters = creditedDepartureMeters + observedMeters + remainingMeters
-        if (totalEstimatedMeters < 1000.0) return null
-        return ((creditedDepartureMeters + observedMeters) / totalEstimatedMeters * 100.0).coerceIn(0.0, 100.0)
-    }
-
-    private fun traceDistanceMeters(segments: List<TraceSegment>): Double {
-        var distance = 0.0
-        for (segment in segments) {
-            val points = segment.points
-            for (index in 1 until points.size) {
-                val previous = points[index - 1]
-                val current = points[index]
-                distance += distanceMeters(previous.lat, previous.lon, current.lat, current.lon)
-            }
-        }
-        return distance
-    }
-
-    private fun impactRows(
-        aircraft: Aircraft,
-        details: AircraftDetails?,
-        profile: ImpactProfile?,
-        trace: ImpactTrace?,
-        detailsLoading: Boolean,
-        traceLoading: Boolean
-    ): List<Pair<String, String>> {
-        val loading = detailsLoading || traceLoading || (profile == null && isDetailsLoadingFor(aircraft))
-        return listOf(
-            "Data basis" to impactDataBasis(aircraft, details, detailsLoading),
-            "Aircraft class" to (profile?.label ?: loadingOrUnavailable(loading)),
-            "Current trace" to formatCurrentTraceImpact(trace, traceLoading),
-            "Trace CO2 estimate" to formatCurrentTraceCarbon(profile, trace, loading),
-            "Observed intensity" to formatObservedCarbonIntensity(profile, trace, loading),
-            "Class CO2 rate" to (profile?.let { formatImpactKgRange(it.lowCo2KgPerHour(), it.highCo2KgPerHour()) } ?: loadingOrUnavailable(loading)),
-            "Class cruise context" to (profile?.cruiseIntensityLabel() ?: loadingOrUnavailable(loading)),
-            "Fuel and factor" to (profile?.fuelAndFactorLabel() ?: loadingOrUnavailable(loading)),
-            "Live state" to formatImpactLiveState(aircraft),
-            "Trace history" to formatTraceHistoryCarbon(aircraft, profile, traceLoading, loading),
-            "Comparison" to (profile?.let { impactComparison(it) } ?: loadingOrUnavailable(loading)),
-            "Score meaning" to "0-100 log scale for class CO2/hr intensity; trace distance/time does not inflate the score.",
-            "Lead / non-carbon" to impactLeadNote(profile, loading),
-            "Limits" to "No exact engine fuel flow, phase power, payload, SAF blend, contrails, NOx, or noise from the live feed.",
-            "Confidence" to impactConfidence(profile, trace, loading, details)
+        return AircraftRouteTraceContext(
+            aircraftId = id,
+            selectedTraceAircraftId = selectedFlightPathAircraftId,
+            trace = selectedFlightPath,
+            segments = selectedPathSegments(visibleOnly = false),
+            loading = isFlightPathLoading(aircraft)
         )
-    }
-
-    private fun impactStatus(profile: ImpactProfile?, trace: ImpactTrace?, detailsLoading: Boolean, traceLoading: Boolean): String {
-        return when {
-            profile != null && trace != null -> "Trace-derived time/distance with class fuel benchmark; not measured fuel flow"
-            profile != null && traceLoading -> "Loading real trace before estimating current-flight carbon"
-            profile != null -> "Class carbon-rate estimate; current trace unavailable"
-            detailsLoading -> "Loading aircraft metadata"
-            else -> "Unavailable: aircraft type or fuel class is not supported"
-        }
-    }
-
-    private fun impactDataBasis(aircraft: Aircraft, details: AircraftDetails?, loading: Boolean): String {
-        val code = impactTypeCode(aircraft, details)
-        val model = listOfNotNull(details?.manufacturer, details?.type).joinToString(" ").ifBlank { null }
-        val category = aircraft.category?.let { "ADS-B category $it" }
-        val source = when {
-            details?.registrySource != null -> details.registrySource
-            aircraft.typeCode != null || aircraft.category != null -> "live aircraft feed"
-            loading -> "Loading"
-            else -> "Unavailable"
-        }
-        return listOfNotNull(code?.let { "type $it" }, model, category, source).joinToString("; ").ifEmpty { loadingOrUnavailable(loading) }
-    }
-
-    private fun formatImpactLiveState(aircraft: Aircraft): String {
-        val state = when (aircraft.onGround) {
-            true -> "Ground"
-            false -> "Airborne"
-            null -> "State unavailable"
-        }
-        return "$state, ${formatAltitudeValue(aircraft.altitudeM)}, ${formatSpeedValue(aircraft.velocityMs)}, report ${formatAge(aircraft)}"
-    }
-
-    private fun formatCurrentTraceImpact(trace: ImpactTrace?, loading: Boolean): String {
-        if (loading) return "Loading"
-        trace ?: return "Unavailable"
-        return "${formatDistance(trace.distanceM)}, ${formatUsageHours(trace.hours)}, ${formatSpeedValue(trace.averageSpeedMs)} avg from ${trace.source}"
-    }
-
-    private fun formatCurrentTraceCarbon(profile: ImpactProfile?, trace: ImpactTrace?, loading: Boolean): String {
-        if (profile == null || trace == null) return loadingOrUnavailable(loading)
-        return "${formatCarbonRange(profile.carbonForHours(trace.hours))} over ${formatUsageHours(trace.hours)}"
-    }
-
-    private fun formatObservedCarbonIntensity(profile: ImpactProfile?, trace: ImpactTrace?, loading: Boolean): String {
-        if (profile == null || trace == null) return loadingOrUnavailable(loading)
-        if (trace.distanceM <= 0.0) return "Unavailable"
-        val carbon = profile.carbonForHours(trace.hours)
-        val displayDistance = units.distanceMetersToDisplay(trace.distanceM)
-        if (displayDistance <= 0.0) return "Unavailable"
-        val unit = units.distanceLabel
-        return String.format(
-            Locale.US,
-            "%s-%s kg CO2/%s observed trace",
-            formatImpactKgDecimal(carbon.lowKg / displayDistance),
-            formatImpactKgDecimal(carbon.highKg / displayDistance),
-            unit
-        )
-    }
-
-    private fun formatTraceHistoryCarbon(
-        aircraft: Aircraft,
-        profile: ImpactProfile?,
-        traceLoading: Boolean,
-        loading: Boolean
-    ): String {
-        if (traceLoading) return "Loading"
-        if (profile == null) return loadingOrUnavailable(loading)
-        val trace = usageTraceFor(aircraft) ?: return "Unavailable"
-        val stats = usageStats(trace)
-        val pieces = mutableListOf<String>()
-        if (stats.weekHours > 0.0 && stats.weekFlightCount > 0) {
-            pieces += "week ${formatImpactKgCompact(profile.midCo2KgPerHour() * stats.weekHours)} kg"
-        }
-        if (stats.totalHours > 0.0 && stats.flightCount > 0) {
-            pieces += "trace window ${formatImpactKgCompact(profile.midCo2KgPerHour() * stats.totalHours)} kg"
-        }
-        return pieces.joinToString("; ").ifEmpty { "Unavailable" }
     }
 
     private fun currentImpactTraceFor(aircraft: Aircraft): ImpactTrace? {
@@ -3773,7 +3394,7 @@ class FlightMapView(
         val start = points.minOf { it.epochSec }
         val end = points.maxOf { it.epochSec }
         val seconds = (end - start).coerceAtLeast(0L)
-        val distance = traceDistanceMeters(segments)
+        val distance = AircraftRoutePresenter.traceDistanceMeters(segments)
         if (seconds <= 0L || distance <= 0.0) return null
         return ImpactTrace(
             distanceM = distance,
@@ -3792,181 +3413,13 @@ class FlightMapView(
         }
     }
 
-    private fun impactComparison(profile: ImpactProfile): String {
-        val current = profile.midCo2KgPerHour()
-        val piston = IMPACT_PISTON_SINGLE.midCo2KgPerHour()
-        val narrow = IMPACT_NARROW_BODY.midCo2KgPerHour()
-        return "${formatImpactMultiplier(current, piston)} piston single; ${formatImpactMultiplier(current, narrow)} A320/B737 class"
-    }
-
-    private fun impactLeadNote(profile: ImpactProfile?, loading: Boolean): String {
-        return when (profile?.fuel) {
-            ImpactFuel.AVGAS -> "Avgas may be leaded; exact fuel and unleaded status are unavailable and not included in the carbon score."
-            ImpactFuel.JET -> "Jet-fuel carbon is scored; leaded-avgas exposure is not part of this class."
-            null -> loadingOrUnavailable(loading)
-        }
-    }
-
-    private fun impactConfidence(profile: ImpactProfile?, trace: ImpactTrace?, loading: Boolean, details: AircraftDetails?): String {
-        if (profile == null) return loadingOrUnavailable(loading)
-        val traceText = trace?.let { "real trace, ${it.pointCount} pts" } ?: "no current trace total"
-        val sourceNote = when {
-            details?.registrySource?.contains("Wikipedia", ignoreCase = true) == true ->
-                " Metadata includes broad internet fallback, so model confidence is lower than registry/API metadata."
-            details?.registrySource?.contains("Airplanes.Live", ignoreCase = true) == true ->
-                " Metadata uses live web/feed aircraft fields before registry/API fallbacks."
-            else -> ""
-        }
-        return "${profile.confidence} Basis: $traceText; class benchmark, not measured fuel.$sourceNote"
-    }
-
-    private fun impactProfileFor(aircraft: Aircraft, details: AircraftDetails?): ImpactProfile? {
-        val code = impactTypeCode(aircraft, details)?.uppercase(Locale.US).orEmpty()
-        val text = impactSearchText(aircraft, details)
-        if (code.isBlank() && text.isBlank()) return null
-        if (aircraft.category == 14 || text.contains("UAV") || text.contains("DRONE")) return null
-        if (aircraft.category == 9 || code.startsWith("GL") || text.contains("GLIDER")) return null
-        if (aircraft.onGround == true && aircraft.category != null && aircraft.category in listOf(16, 17, 18, 19, 20)) return null
-
-        return when {
-            isSmallPistonAircraft(code, text) -> IMPACT_PISTON_SINGLE
-            isPistonRotorcraft(code, text) -> IMPACT_PISTON_ROTOR
-            isTurbineRotorcraft(code, text) -> IMPACT_TURBINE_ROTOR
-            isMilitaryTransportAircraft(code, text) -> IMPACT_HEAVY
-            isTacticalJetAircraft(code, text) -> IMPACT_TACTICAL_JET
-            isHeavyAircraft(code, text) -> IMPACT_HEAVY
-            isLargeAirlinerAircraft(code, text) -> IMPACT_NARROW_BODY
-            isRegionalAircraft(code, text) -> IMPACT_REGIONAL
-            isTurbopropAircraft(code, text) -> IMPACT_TURBOPROP
-            isLightJetAircraft(code, text) -> IMPACT_LIGHT_JET
-            aircraft.category in listOf(4, 5, 6) -> IMPACT_NARROW_BODY
-            aircraft.category == 8 -> null
-            isAirlinerTypeCode(code) -> IMPACT_NARROW_BODY
-            else -> null
-        }
-    }
-
-    private fun impactTypeCode(aircraft: Aircraft, details: AircraftDetails?): String? {
-        return listOfNotNull(details?.typeCode, aircraft.typeCode)
-            .map { it.trim().uppercase(Locale.US) }
-            .firstOrNull { it.isNotBlank() }
-    }
-
-    private fun impactSearchText(aircraft: Aircraft, details: AircraftDetails?): String {
-        return listOfNotNull(aircraft.typeCode, details?.typeCode, details?.manufacturer, details?.type)
-            .joinToString(" ")
-            .uppercase(Locale.US)
-    }
-
-    private fun isSmallPistonAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, SMALL_PISTON_IMPACT_PREFIXES, SMALL_PISTON_IMPACT_TEXT)
-    }
-
-    private fun isPistonRotorcraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, PISTON_ROTOR_IMPACT_PREFIXES, PISTON_ROTOR_IMPACT_TEXT)
-    }
-
-    private fun isTurbineRotorcraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, TURBINE_ROTOR_IMPACT_PREFIXES, TURBINE_ROTOR_IMPACT_TEXT)
-    }
-
-    private fun isTurbopropAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, TURBOPROP_IMPACT_PREFIXES, TURBOPROP_IMPACT_TEXT)
-    }
-
-    private fun isRegionalAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, REGIONAL_IMPACT_PREFIXES, REGIONAL_IMPACT_TEXT)
-    }
-
-    private fun isLightJetAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, LIGHT_JET_IMPACT_PREFIXES, LIGHT_JET_IMPACT_TEXT)
-    }
-
-    private fun isLargeAirlinerAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, NARROW_BODY_IMPACT_PREFIXES, NARROW_BODY_IMPACT_TEXT)
-    }
-
-    private fun isHeavyAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, HEAVY_IMPACT_PREFIXES, HEAVY_IMPACT_TEXT)
-    }
-
-    private fun isMilitaryTransportAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, MILITARY_TRANSPORT_IMPACT_PREFIXES, MILITARY_TRANSPORT_IMPACT_TEXT)
-    }
-
-    private fun isTacticalJetAircraft(code: String, text: String): Boolean {
-        return matchesImpactTerms(code, text, TACTICAL_JET_IMPACT_PREFIXES, TACTICAL_JET_IMPACT_TEXT)
-    }
-
-    private fun matchesImpactTerms(
-        code: String,
-        text: String,
-        prefixes: List<String>,
-        phrases: List<String>
-    ): Boolean {
-        val compactCode = compactImpactText(code)
-        val compactText = compactImpactText(text)
-        return prefixes.any { prefix ->
-            val compactPrefix = compactImpactText(prefix)
-            compactPrefix.isNotBlank() &&
-                (compactCode.startsWith(compactPrefix) || compactText.contains(compactPrefix))
-        } || phrases.any { phrase ->
-            text.contains(phrase) || compactText.contains(compactImpactText(phrase))
-        }
-    }
-
-    private fun compactImpactText(value: String): String {
-        return value.uppercase(Locale.US).replace(Regex("[^A-Z0-9]+"), "")
-    }
-
-    private fun impactScore(profile: ImpactProfile): Int {
-        val normalized = ((log10(profile.midCo2KgPerHour()) - log10(IMPACT_SCORE_MIN_KG_CO2_PER_HOUR)) /
-            (log10(IMPACT_SCORE_MAX_KG_CO2_PER_HOUR) - log10(IMPACT_SCORE_MIN_KG_CO2_PER_HOUR)))
-            .coerceIn(0.0, 1.0)
-        return (normalized * 100.0).roundToInt()
-    }
-
     private fun impactScoreColor(profile: ImpactProfile): Int {
-        val score = impactScore(profile)
+        val score = AircraftImpactEstimator.score(profile)
         return when {
             score >= 76 -> dangerColor
             score >= 55 -> accentOrangeColor
             score >= 34 -> accentYellowColor
             else -> accentGreenColor
-        }
-    }
-
-    private fun formatImpactKgRange(low: Double, high: Double): String {
-        return "~${formatImpactKgCompact(low)}-${formatImpactKgCompact(high)} kg CO2/hr"
-    }
-
-    private fun formatCarbonRange(range: ImpactCarbonRange): String {
-        return "~${formatImpactKgCompact(range.lowKg)}-${formatImpactKgCompact(range.highKg)} kg CO2"
-    }
-
-    private fun formatImpactKgCompact(kg: Double): String {
-        return if (kg >= 1000.0) {
-            String.format(Locale.US, "%,.0f", kg)
-        } else {
-            String.format(Locale.US, "%.0f", kg)
-        }
-    }
-
-    private fun formatImpactKgDecimal(kg: Double): String {
-        return when {
-            kg >= 100.0 -> String.format(Locale.US, "%.0f", kg)
-            kg >= 10.0 -> String.format(Locale.US, "%.1f", kg)
-            else -> String.format(Locale.US, "%.2f", kg)
-        }
-    }
-
-    private fun formatImpactMultiplier(value: Double, baseline: Double): String {
-        if (baseline <= 0.0) return "Unavailable"
-        val ratio = value / baseline
-        return when {
-            ratio >= 10.0 -> String.format(Locale.US, "~%.0fx", ratio)
-            ratio >= 1.0 -> String.format(Locale.US, "~%.1fx", ratio)
-            else -> String.format(Locale.US, "~%.2fx", ratio)
         }
     }
 
@@ -3982,83 +3435,12 @@ class FlightMapView(
         return trace
     }
 
-    private fun usageStats(trace: FlightTrace): UsageStats {
-        val flights = (trace.previousSegments + trace.segments)
-            .mapNotNull { usageFlight(it) }
-            .sortedBy { it.startEpochSec }
-        if (flights.isEmpty()) {
-            return UsageStats(emptyList(), 0, 0.0, 0, 0.0, "Unavailable")
-        }
-
-        val zone = ZoneId.systemDefault()
-        val today = LocalDate.now(zone)
-        val weekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-            .atStartOfDay(zone)
-            .toEpochSecond()
-        val now = System.currentTimeMillis() / 1000L
-        val weekFlights = flights.filter { it.endEpochSec >= weekStart && it.startEpochSec <= now }
-        val weekHours = weekFlights.sumOf { overlapHours(it, weekStart, now) }
-
-        val buckets = (6 downTo 0).map { offset ->
-            val day = today.minusDays(offset.toLong())
-            val start = day.atStartOfDay(zone).toEpochSecond()
-            val end = day.plusDays(1).atStartOfDay(zone).toEpochSecond()
-            val dayFlights = flights.filter { it.endEpochSec >= start && it.startEpochSec < end }
-            UsageBucket(
-                label = day.format(USAGE_DAY_FORMATTER),
-                flights = dayFlights.size,
-                hours = dayFlights.sumOf { overlapHours(it, start, end) }
-            )
-        }
-
-        val first = flights.first().startEpochSec
-        val last = flights.maxOf { it.endEpochSec }
-        return UsageStats(
-            buckets = buckets,
-            flightCount = flights.size,
-            totalHours = flights.sumOf { it.hours },
-            weekFlightCount = weekFlights.size,
-            weekHours = weekHours,
-            windowLabel = "${formatUsageDate(first, zone)}-${formatUsageDate(last, zone)}"
-        )
-    }
-
-    private fun usageFlight(segment: TraceSegment): UsageFlight? {
-        val points = segment.points
-        if (points.size < 2) return null
-        val start = points.first().epochSec
-        val end = points.last().epochSec
-        val duration = end - start
-        if (duration < MIN_USAGE_SEGMENT_SECONDS) return null
-        val distance = traceDistanceMeters(listOf(segment))
-        if (distance < MIN_USAGE_SEGMENT_DISTANCE_M) return null
-        return UsageFlight(start, end, duration / 3600.0)
-    }
-
-    private fun overlapHours(flight: UsageFlight, startEpochSec: Long, endEpochSec: Long): Double {
-        val start = max(flight.startEpochSec, startEpochSec)
-        val end = min(flight.endEpochSec, endEpochSec)
-        return max(0L, end - start) / 3600.0
-    }
-
-    private fun formatUsageHours(hours: Double): String {
-        return if (hours < 10.0) {
-            String.format(Locale.US, "%.1f h", hours)
-        } else {
-            String.format(Locale.US, "%.0f h", hours)
-        }
-    }
-
-    private fun formatUsageDate(epochSec: Long, zone: ZoneId): String {
-        return Instant.ofEpochSecond(epochSec).atZone(zone).toLocalDate().format(USAGE_DATE_FORMATTER)
-    }
-
     private fun formatOriginStatus(aircraft: Aircraft, details: AircraftDetails?): String {
         if (!aircraft.isMilitary) return "Unavailable"
         val selectedStatus = militaryOriginStatus.takeIf { militaryOriginAircraftId == aircraft.icao24 && it != "Unavailable" }
         if (selectedStatus != null) return selectedStatus
         val origin = details?.originAirport ?: return "Unavailable"
-        val label = formatAirport(origin)
+        val label = AircraftRoutePresenter.airport(origin)
         return if (isMilitaryAirportName(origin.name, origin.icao)) {
             "Military base: $label"
         } else {
@@ -4283,7 +3665,7 @@ class FlightMapView(
             }
         }
 
-        IMPACT_SOURCE_LABELS.forEachIndexed { index, label ->
+        AircraftImpactEstimator.sourceLabels.forEachIndexed { index, label ->
             drawChoiceButton(canvas, impactSourceButtonBounds(rect, index), label, false)
         }
     }
@@ -4666,7 +4048,7 @@ class FlightMapView(
             if (impactMethodologyOpen) {
                 when {
                     closeButtonBounds(panel).contains(x, y) -> impactMethodologyOpen = false
-                    else -> IMPACT_SOURCE_URLS.forEachIndexed { index, url ->
+                    else -> AircraftImpactEstimator.sourceUrls.forEachIndexed { index, url ->
                         if (impactSourceButtonBounds(panel, index).contains(x, y)) {
                             openUrl(url)
                         }
@@ -4825,6 +4207,7 @@ class FlightMapView(
     private fun selectAircraft(aircraft: Aircraft) {
         selectedAircraftId = aircraft.icao24
         selectedAircraftSnapshot = aircraft
+        routeDiagnosticKey = null
         selectedFlightPathAircraftId = null
         selectedFlightPath = null
         selectedFlightPathVisible = false
@@ -4846,7 +4229,7 @@ class FlightMapView(
         aircraftPhotoStatus = "Checking for improved photo"
         invalidate()
         executor.execute {
-            val result = fetchAircraftPhoto(aircraft, details)
+            val result = aircraftPhotoFetcher.fetch(aircraft, details)
             post {
                 if (!isCurrentDetailsRequest(requestedId, requestToken)) return@post
                 when (result) {
@@ -4903,7 +4286,7 @@ class FlightMapView(
                 return
             }
             photoInFlight.incrementAndGet()
-            val photo = fetchAircraftPhoto(aircraft, details)
+            val photo = aircraftPhotoFetcher.fetch(aircraft, details)
             photoInFlight.decrementAndGet()
             when (photo) {
                 is AircraftPhotoResult.Found -> {
@@ -5090,6 +4473,7 @@ class FlightMapView(
             operatorCode = enrichment.operatorCode ?: seed.operatorCode,
             route = enrichment.route ?: seed.route,
             routeUpdatedEpochSec = enrichment.routeUpdatedEpochSec ?: seed.routeUpdatedEpochSec,
+            routeSource = enrichment.routeSource ?: seed.routeSource,
             originAirport = enrichment.originAirport ?: seed.originAirport,
             destinationAirport = enrichment.destinationAirport ?: seed.destinationAirport
         )
@@ -5174,652 +4558,6 @@ class FlightMapView(
         }
     }
 
-    private fun fetchAircraftPhoto(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult {
-        val registration = normalizedRegistration(details.registration ?: aircraft.registration)
-        fetchAdsbDbPhotoUrls(aircraft.icao24, registration).forEach { imageUrl ->
-            fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from ADSBdb", quality = PhotoQuality.EXACT) }
-        }
-        if (registration != null) {
-            fetchJetPhotosExactImageUrls(registration).forEach { imageUrl ->
-                fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from JetPhotos; registration verified", quality = PhotoQuality.EXACT) }
-            }
-        }
-        val exactSources = listOfNotNull(
-            "https://api.planespotters.net/pub/photos/hex/${aircraft.icao24.trim()}",
-            (details.registration ?: aircraft.registration)?.let { "https://api.planespotters.net/pub/photos/reg/${it.trim()}" }
-        )
-        exactSources.forEach { apiUrl ->
-            fetchPlanespottersPhotoUrl(apiUrl)?.let { imageUrl ->
-                fetchBitmap(imageUrl)?.let { return AircraftPhotoResult.Found(it, "Exact aircraft photo from PlaneSpotters", quality = PhotoQuality.EXACT) }
-            }
-        }
-        fetchBitmap("https://hexdb.io/hex-image-thumb?hex=${aircraft.icao24.trim()}")?.let {
-            return AircraftPhotoResult.Found(it, "Exact aircraft photo from HexDB", quality = PhotoQuality.EXACT)
-        }
-        return fetchRepresentativePhoto(details)
-            ?: fetchVerifiedGenericSearchPhoto(aircraft, details)
-            ?: fetchInvestigableSearchPhoto(aircraft, details)
-            ?: AircraftPhotoResult.Unavailable("Exact, representative, and search photos unavailable")
-    }
-
-    private fun fetchAdsbDbPhotoUrls(icao24: String, registration: String?): List<String> {
-        val keys = listOfNotNull(icao24.trim().takeIf { it.isNotBlank() }, registration).distinct()
-        return keys.flatMap { key ->
-            val encoded = URLEncoder.encode(key, "UTF-8")
-            val json = fetchJsonObject("https://api.adsbdb.com/v0/aircraft/$encoded") ?: return@flatMap emptyList()
-            val aircraft = json.optJSONObject("response")?.optJSONObject("aircraft") ?: return@flatMap emptyList()
-            listOfNotNull(
-                aircraft.optString("url_photo").takeIf { it.startsWith("https://", ignoreCase = true) },
-                aircraft.optString("url_photo_thumbnail").takeIf { it.startsWith("https://", ignoreCase = true) }
-            )
-        }.distinct()
-    }
-
-    private fun fetchJetPhotosExactImageUrls(registration: String): List<String> {
-        val encoded = URLEncoder.encode(registration, "UTF-8")
-        val apiUrl = "https://jp.rewis.workers.dev/?page=1&sort-order=1&keywords=$encoded&keywords-type=registration&keywords-contain=0"
-        val photos = fetchJsonObject(apiUrl)?.optJSONArray("photos") ?: return emptyList()
-        val urls = mutableListOf<String>()
-        for (index in 0 until photos.length()) {
-            val item = photos.optJSONObject(index) ?: continue
-            val foundRegistration = normalizedRegistration(item.optString("registration"))
-            if (foundRegistration != registration) continue
-            listOf(item.optString("imageUrl"), item.optString("thumbnailUrl")).forEach { url ->
-                if (url.startsWith("https://", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(url)) urls += url
-            }
-        }
-        return urls.distinct()
-    }
-
-    private fun fetchPlanespottersPhotoUrl(apiUrl: String): String? {
-        val safeUrl = httpsUrl(apiUrl) ?: return null
-        var connection: HttpURLConnection? = null
-        return try {
-            connection = (safeUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 8000
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", USER_AGENT)
-            }
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                connection.errorStream?.close()
-                return null
-            }
-            findFirstImageUrl(JSONObject(connection.inputStream.bufferedReader().use { it.readText() }))
-        } catch (_: Exception) {
-            null
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    private fun fetchRepresentativePhoto(details: AircraftDetails): AircraftPhotoResult.Found? {
-        representativeModelNames(details).forEach { model ->
-            val queries = representativePhotoQueries(details, model)
-            queries.forEach { query ->
-                val encoded = URLEncoder.encode(query, "UTF-8")
-                val apiUrl = "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=10&gsrsearch=$encoded&prop=imageinfo&iiprop=url|mime"
-                fetchWikimediaImageUrls(apiUrl).take(MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY).forEach { url ->
-                    fetchBitmap(url)?.let { bitmap ->
-                        return AircraftPhotoResult.Found(bitmap, "Representative $model photo from Wikimedia Commons; not this exact aircraft", quality = PhotoQuality.REPRESENTATIVE)
-                    }
-                }
-            }
-
-            queries.forEach { query ->
-                fetchWikipediaPageImageUrls(query).take(MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY).forEach { url ->
-                    fetchBitmap(url)?.let { bitmap ->
-                        return AircraftPhotoResult.Found(bitmap, "Representative $model photo from Wikipedia; not this exact aircraft", quality = PhotoQuality.REPRESENTATIVE)
-                    }
-                }
-            }
-        }
-        return null
-    }
-
-    private fun fetchVerifiedGenericSearchPhoto(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult.Found? {
-        val registration = normalizedRegistration(details.registration ?: aircraft.registration)
-        val exactTerms = listOfNotNull(registration, aircraft.icao24.takeIf { it.isNotBlank() })
-        exactPhotoQueries(registration, aircraft.icao24).forEach { query ->
-            val candidates = fetchWikimediaSearchImageCandidates(query) +
-                fetchOpenverseImageCandidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
-            candidates.distinctBy { it.imageUrl }.forEach { candidate ->
-                verifiedSearchPhoto(
-                    candidate = candidate,
-                    query = query,
-                    note = "Verified exact-aircraft search result for ${registration ?: aircraft.icao24.uppercase(Locale.US)}",
-                    verificationTerms = exactTerms,
-                    quality = PhotoQuality.EXACT
-                )?.let { return it }
-            }
-        }
-
-        representativeModelNames(details).forEach { model ->
-            val verificationTerms = photoVerificationTerms(details, model)
-            representativePhotoQueries(details, model).forEach { query ->
-                val candidates = fetchWikimediaSearchImageCandidates(query) +
-                    fetchOpenverseImageCandidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
-                candidates.distinctBy { it.imageUrl }.forEach { candidate ->
-                    verifiedSearchPhoto(
-                    candidate = candidate,
-                    query = query,
-                    note = "Verified search result for $model; not this exact aircraft",
-                    verificationTerms = verificationTerms,
-                    quality = PhotoQuality.REPRESENTATIVE
-                )?.let { return it }
-                }
-            }
-        }
-        return null
-    }
-
-    private fun fetchInvestigableSearchPhoto(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult.Found? {
-        val registration = normalizedRegistration(details.registration ?: aircraft.registration)
-        val exactQueries = exactPhotoQueries(registration, aircraft.icao24)
-        val representativeQueries = representativeModelNames(details).flatMap { representativePhotoQueries(details, it) }
-        (exactQueries + representativeQueries).distinct().forEach { query ->
-            val candidates = fetchWikimediaSearchImageCandidates(query) +
-                fetchOpenverseImageCandidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
-            candidates.distinctBy { it.imageUrl }.forEach { candidate ->
-                val bitmap = fetchBitmap(candidate.imageUrl) ?: return@forEach
-                val evidence = PhotoEvidence(
-                    sourceName = candidate.sourceName,
-                    imageUrl = candidate.imageUrl,
-                    pageUrl = candidate.pageUrl,
-                    searchQuery = query,
-                    quote = candidate.investigationText(),
-                    matchedTerms = emptyList()
-                )
-                return AircraftPhotoResult.Found(
-                    bitmap,
-                    "Unverified search result; tap photo to inspect source",
-                    evidence,
-                    PhotoQuality.INVESTIGABLE
-                )
-            }
-        }
-        return null
-    }
-
-    private fun verifiedSearchPhoto(
-        candidate: SearchImageCandidate,
-        query: String,
-        note: String,
-        verificationTerms: List<String>,
-        quality: PhotoQuality
-    ): AircraftPhotoResult.Found? {
-        val quote = fetchVerificationQuote(candidate.pageUrl, verificationTerms)
-            ?: candidate.verificationText?.let { quoteFromText(it, verificationTerms) }
-            ?: return null
-        val bitmap = fetchBitmap(candidate.imageUrl) ?: return null
-        val evidence = PhotoEvidence(
-            sourceName = candidate.sourceName,
-            imageUrl = candidate.imageUrl,
-            pageUrl = candidate.pageUrl,
-            searchQuery = query,
-            quote = quote.text,
-            matchedTerms = quote.matchedTerms
-        )
-        return AircraftPhotoResult.Found(
-            bitmap,
-            note,
-            evidence,
-            quality
-        )
-    }
-
-    private fun SearchImageCandidate.investigationText(): String {
-        val titleText = title.takeIf { it.isNotBlank() }?.let { "Title: $it" }
-        val metadataText = verificationText?.takeIf { it.isNotBlank() }?.let { "Metadata: $it" }
-        return listOfNotNull(titleText, metadataText, "Source page: $pageUrl")
-            .joinToString("  ")
-    }
-
-    private fun representativeModelName(details: AircraftDetails): String? {
-        val code = details.typeCode?.uppercase(Locale.US)?.trim()
-        val knownModel = when (code) {
-            "A19N" -> "Airbus A319neo"
-            "A20N" -> "Airbus A320neo"
-            "A21N" -> "Airbus A321neo"
-            "A319" -> "Airbus A319"
-            "A320" -> "Airbus A320"
-            "A321" -> "Airbus A321"
-            "B37M" -> "Boeing 737 MAX 7"
-            "B38M" -> "Boeing 737 MAX 8"
-            "B39M" -> "Boeing 737 MAX 9"
-            "B3XM" -> "Boeing 737 MAX 10"
-            "B737" -> "Boeing 737"
-            "B738" -> "Boeing 737-800"
-            "B739" -> "Boeing 737-900"
-            "B752" -> "Boeing 757-200"
-            "B763" -> "Boeing 767-300"
-            "B772" -> "Boeing 777-200"
-            "B77W" -> "Boeing 777-300ER"
-            "B788" -> "Boeing 787-8"
-            "B789" -> "Boeing 787-9"
-            "B78X" -> "Boeing 787-10"
-            "B744" -> "Boeing 747-400"
-            "B748" -> "Boeing 747-8"
-            "BCS1" -> "Airbus A220-100"
-            "BCS3" -> "Airbus A220-300"
-            "AT72" -> "ATR 72"
-            "AT76" -> "ATR 72-600"
-            "AA1" -> "Grumman American AA-1 Yankee"
-            "AA5" -> "Grumman American AA-5 Traveler"
-            "AG5B" -> "American General AG-5B Tiger"
-            "BE20" -> "Beechcraft King Air 200"
-            "BE30" -> "Beechcraft King Air 300"
-            "BE33" -> "Beechcraft Bonanza"
-            "BE35" -> "Beechcraft Bonanza"
-            "BE36" -> "Beechcraft Bonanza"
-            "BE40" -> "Beechjet 400"
-            "BE55" -> "Beechcraft Baron"
-            "BE58" -> "Beechcraft Baron"
-            "BE76" -> "Beechcraft Duchess"
-            "B350" -> "Beechcraft King Air 350"
-            "C120" -> "Cessna 120"
-            "C140" -> "Cessna 140"
-            "C150" -> "Cessna 150"
-            "C152" -> "Cessna 152"
-            "C172" -> "Cessna 172"
-            "C175" -> "Cessna 175 Skylark"
-            "C177" -> "Cessna 177 Cardinal"
-            "C180" -> "Cessna 180"
-            "C182" -> "Cessna 182"
-            "C195" -> "Cessna 195"
-            "C185" -> "Cessna 185"
-            "C206" -> "Cessna 206"
-            "C208" -> "Cessna 208 Caravan"
-            "C210" -> "Cessna 210"
-            "C337" -> "Cessna 337 Skymaster"
-            "C25A" -> "Cessna Citation CJ2"
-            "C25B" -> "Cessna Citation CJ3"
-            "C25C" -> "Cessna Citation CJ4"
-            "C310" -> "Cessna 310"
-            "C414" -> "Cessna 414"
-            "C421" -> "Cessna 421"
-            "C525" -> "Cessna CitationJet"
-            "C56X" -> "Cessna Citation Excel"
-            "C680" -> "Cessna Citation Sovereign"
-            "C700" -> "Cessna Citation Longitude"
-            "CL30" -> "Bombardier Challenger 300"
-            "CL35" -> "Bombardier Challenger 350"
-            "CL60" -> "Bombardier Challenger 600"
-            "CRJ7" -> "Bombardier CRJ700"
-            "CRJ9" -> "Bombardier CRJ900"
-            "DA40" -> "Diamond DA40"
-            "DA42" -> "Diamond DA42"
-            "GA7" -> "Grumman American GA-7 Cougar"
-            "DH8D" -> "De Havilland Canada Dash 8 Q400"
-            "E170" -> "Embraer 170"
-            "E75L", "E75S" -> "Embraer 175"
-            "E190" -> "Embraer 190"
-            "E195" -> "Embraer 195"
-            "E50P" -> "Embraer Phenom 100"
-            "E55P" -> "Embraer Phenom 300"
-            "F2TH" -> "Dassault Falcon 2000"
-            "F900" -> "Dassault Falcon 900"
-            "FA50" -> "Dassault Falcon 50"
-            "GL5T" -> "Bombardier Global 5000"
-            "GL7T" -> "Bombardier Global 7500"
-            "GLEX" -> "Bombardier Global Express"
-            "GLF4" -> "Gulfstream IV"
-            "GLF5" -> "Gulfstream V"
-            "GLF6" -> "Gulfstream G650"
-            "H25B" -> "Hawker 800"
-            "LJ35" -> "Learjet 35"
-            "LJ45" -> "Learjet 45"
-            "P28A" -> "Piper PA-28 Cherokee"
-            "PA28" -> "Piper PA-28 Cherokee"
-            "PA30" -> "Piper PA-30 Twin Comanche"
-            "PA31" -> "Piper PA-31 Navajo"
-            "PA32" -> "Piper PA-32 Cherokee Six"
-            "PA34" -> "Piper PA-34 Seneca"
-            "PA44" -> "Piper PA-44 Seminole"
-            "P46T" -> "Piper PA-46 Malibu"
-            "PC12" -> "Pilatus PC-12"
-            "R44" -> "Robinson R44"
-            "R66" -> "Robinson R66"
-            "S22T" -> "Cirrus SR22T"
-            "SF34" -> "Saab 340"
-            "SR20" -> "Cirrus SR20"
-            "SR22" -> "Cirrus SR22"
-            "M20P" -> "Mooney M20"
-            "M20T" -> "Mooney M20"
-            "RV6" -> "Van's RV-6"
-            "RV7" -> "Van's RV-7"
-            "RV8" -> "Van's RV-8"
-            "RV9" -> "Van's RV-9"
-            "TBM7" -> "Socata TBM 700"
-            "TBM8" -> "Socata TBM 850"
-            "TBM9" -> "Daher TBM 900"
-            else -> null
-        }
-        if (knownModel != null) return knownModel
-        return listOfNotNull(details.manufacturer, details.type ?: details.typeCode)
-            .joinToString(" ")
-            .trim()
-            .ifEmpty { null }
-    }
-
-    private fun representativeModelNames(details: AircraftDetails): List<String> {
-        val base = representativeModelName(details)
-        val type = details.type?.trim()
-        val manufacturer = details.manufacturer?.trim()
-        val aliases = mutableListOf<String>()
-        if (base != null) aliases += base
-        if (manufacturer != null && type != null) {
-            aliases += "$manufacturer $type"
-            manufacturerAliases(manufacturer).forEach { alias -> aliases += "$alias $type" }
-            typeModelAliases(type).forEach { aliasType ->
-                aliases += "$manufacturer $aliasType"
-                manufacturerAliases(manufacturer).forEach { alias -> aliases += "$alias $aliasType" }
-            }
-        }
-        type?.let { aliases += it }
-        return aliases
-            .map { normalizeAircraftSearchName(it) }
-            .filter { it.length >= 3 }
-            .distinct()
-    }
-
-    private fun manufacturerAliases(manufacturer: String): List<String> {
-        val normalized = manufacturer.uppercase(Locale.US)
-        return when {
-            "GRUMMAN" in normalized -> listOf("Grumman American", "Grumman")
-            "AMERICAN" in normalized && "GENERAL" in normalized -> listOf("American General", "Grumman American")
-            "CESSNA" in normalized -> listOf("Cessna")
-            "PIPER" in normalized -> listOf("Piper")
-            "BEECH" in normalized -> listOf("Beechcraft", "Beech")
-            "CIRRUS" in normalized -> listOf("Cirrus")
-            "DIAMOND" in normalized -> listOf("Diamond")
-            "MOONEY" in normalized -> listOf("Mooney")
-            "ROBINSON" in normalized -> listOf("Robinson")
-            "VANS" in normalized || "VAN'S" in normalized -> listOf("Van's", "Vans")
-            "PILATUS" in normalized -> listOf("Pilatus")
-            else -> emptyList()
-        }
-    }
-
-    private fun typeModelAliases(type: String): List<String> {
-        val normalized = type.uppercase(Locale.US).replace(Regex("[^A-Z0-9]+"), " ").trim()
-        val compact = normalized.replace(" ", "")
-        return when {
-            compact == "AA1" || compact.startsWith("AA1") -> listOf("AA-1", "AA1", "American Yankee")
-            compact.startsWith("AA5") -> listOf("AA-5", "AA5", "Cheetah", "Tiger")
-            compact.startsWith("GA7") -> listOf("GA-7", "GA7", "Cougar")
-            compact.startsWith("C120") -> listOf("120")
-            compact.startsWith("C140") -> listOf("140")
-            compact.startsWith("C150") -> listOf("150")
-            compact.startsWith("C152") -> listOf("152")
-            compact.startsWith("C172") -> listOf("172 Skyhawk", "172")
-            compact.startsWith("C177") -> listOf("177 Cardinal", "177")
-            compact.startsWith("C182") -> listOf("182 Skylane", "182")
-            compact.startsWith("C185") -> listOf("185 Skywagon", "185")
-            compact.startsWith("C206") -> listOf("206 Stationair", "206")
-            compact.startsWith("C210") -> listOf("210 Centurion", "210")
-            compact.startsWith("C337") -> listOf("337 Skymaster", "337")
-            compact.startsWith("BE33") -> listOf("Bonanza")
-            compact.startsWith("BE35") -> listOf("Bonanza")
-            compact.startsWith("BE36") -> listOf("Bonanza")
-            compact.startsWith("BE55") -> listOf("Baron")
-            compact.startsWith("BE58") -> listOf("Baron")
-            compact.startsWith("BE20") -> listOf("King Air 200", "King Air")
-            compact.startsWith("B350") -> listOf("King Air 350", "King Air")
-            compact.startsWith("PA28") -> listOf("PA-28 Cherokee", "PA-28")
-            compact.startsWith("PA32") -> listOf("PA-32 Cherokee Six", "PA-32")
-            compact.startsWith("PA34") -> listOf("PA-34 Seneca", "PA-34")
-            compact.startsWith("PA44") -> listOf("PA-44 Seminole", "PA-44")
-            compact.startsWith("PA46") || compact.startsWith("P46T") -> listOf("PA-46 Malibu", "PA-46 Mirage", "PA-46 Meridian", "PA-46")
-            compact.startsWith("SR20") -> listOf("SR20")
-            compact.startsWith("SR22") || compact.startsWith("S22T") -> listOf("SR22", "SR22T")
-            compact.startsWith("DA40") -> listOf("DA40")
-            compact.startsWith("DA42") -> listOf("DA42")
-            compact.startsWith("M20") -> listOf("M20")
-            compact.startsWith("RV6") -> listOf("RV-6", "RV6")
-            compact.startsWith("RV7") -> listOf("RV-7", "RV7")
-            compact.startsWith("RV8") -> listOf("RV-8", "RV8")
-            compact.startsWith("RV9") -> listOf("RV-9", "RV9")
-            compact.startsWith("R44") -> listOf("R44 Raven", "R44")
-            compact.startsWith("R66") -> listOf("R66")
-            compact.startsWith("PC12") -> listOf("PC-12", "PC12")
-            else -> emptyList()
-        }
-    }
-
-    private fun normalizeAircraftSearchName(value: String): String {
-        return value
-            .replace(Regex("\\bINC\\.?\\b", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("\\bCORP\\.?\\b", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("\\bAVN\\.?\\b", RegexOption.IGNORE_CASE), " Aviation ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun representativePhotoQueries(details: AircraftDetails, model: String): List<String> {
-        return listOfNotNull(
-            "\"$model\" aircraft",
-            "$model aircraft",
-            "\"$model\" aircraft photo",
-            "$model aircraft photo",
-            "\"$model\" airplane",
-            "$model airplane",
-            "\"$model\" airliner",
-            "\"$model\" in flight",
-            details.type?.let { "\"$it\" aircraft" },
-            details.typeCode?.let { "${details.manufacturer.orEmpty()} $it aircraft".trim() },
-            details.typeCode?.let { "$it aircraft" }
-        ).filter { it.isNotBlank() }.distinct()
-    }
-
-    private fun exactPhotoQueries(registration: String?, icao24: String): List<String> {
-        return listOfNotNull(
-            registration?.let { "\"$it\" aircraft photo" },
-            registration?.let { "$it aircraft" },
-            icao24.takeIf { it.isNotBlank() }?.let { "\"${it.uppercase(Locale.US)}\" aircraft" }
-        ).distinct()
-    }
-
-    private fun fetchWikimediaImageUrls(apiUrl: String): List<String> {
-        var connection: HttpURLConnection? = null
-        return try {
-            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 8000
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", USER_AGENT)
-            }
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                connection.errorStream?.close()
-                return emptyList()
-            }
-            val pages = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-                .optJSONObject("query")
-                ?.optJSONObject("pages")
-                ?: return emptyList()
-            val keys = pages.keys()
-            val urls = mutableListOf<String>()
-            while (keys.hasNext()) {
-                val info = pages.optJSONObject(keys.next())?.optJSONArray("imageinfo")?.optJSONObject(0) ?: continue
-                val mime = info.optString("mime")
-                val url = info.optString("url")
-                if (mime.startsWith("image/") && isAllowedHttpsImageUrl(url)) urls += url
-            }
-            urls
-        } catch (_: Exception) {
-            emptyList()
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    private fun fetchOpenverseImageCandidates(query: String): List<SearchImageCandidate> {
-        var connection: HttpURLConnection? = null
-        return try {
-            val encoded = URLEncoder.encode(query, "UTF-8")
-            val apiUrl = "https://api.openverse.org/v1/images/?format=json&page_size=12&mature=false&q=$encoded"
-            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 9000
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", USER_AGENT)
-            }
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                connection.errorStream?.close()
-                return emptyList()
-            }
-            val results = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-                .optJSONArray("results")
-                ?: return emptyList()
-            val candidates = mutableListOf<SearchImageCandidate>()
-            for (index in 0 until results.length()) {
-                val item = results.optJSONObject(index) ?: continue
-                val imageUrl = item.optString("url").trim()
-                val pageUrl = item.optString("foreign_landing_url").trim()
-                val title = item.optString("title").trim()
-                val lowerTitle = title.lowercase(Locale.US)
-                if (
-                    isAllowedHttpsImageUrl(imageUrl) &&
-                    pageUrl.startsWith("https://", ignoreCase = true) &&
-                    !lowerTitle.contains("logo") &&
-                    !lowerTitle.contains("diagram")
-                ) {
-                    val tags = item.optJSONArray("tags")?.let { tagArray ->
-                        (0 until tagArray.length()).mapNotNull { tagIndex ->
-                            tagArray.optJSONObject(tagIndex)?.optString("name")?.trim()?.takeIf { it.isNotBlank() }
-                        }
-                    }.orEmpty()
-                    candidates += SearchImageCandidate(
-                        imageUrl = imageUrl,
-                        pageUrl = pageUrl,
-                        sourceName = item.optString("provider").trim().ifEmpty { "Openverse source" },
-                        title = title,
-                        verificationText = listOf(
-                            title,
-                            item.optString("creator").trim(),
-                            tags.take(8).joinToString(" ")
-                        ).filter { it.isNotBlank() }.joinToString(" ")
-                    )
-                }
-            }
-            candidates.distinctBy { it.imageUrl }
-        } catch (_: Exception) {
-            emptyList()
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    private fun fetchWikimediaSearchImageCandidates(query: String): List<SearchImageCandidate> {
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        val apiUrl = "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=10&gsrsearch=$encoded&prop=imageinfo&iiprop=url|mime|extmetadata"
-        val pages = fetchJsonObject(apiUrl)
-            ?.optJSONObject("query")
-            ?.optJSONObject("pages")
-            ?: return emptyList()
-        val candidates = mutableListOf<SearchImageCandidate>()
-        val keys = pages.keys()
-        while (keys.hasNext()) {
-            val page = pages.optJSONObject(keys.next()) ?: continue
-            val title = page.optString("title").removePrefix("File:").trim()
-            val info = page.optJSONArray("imageinfo")?.optJSONObject(0) ?: continue
-            val mime = info.optString("mime")
-            val imageUrl = info.optString("url").trim()
-            val pageUrl = info.optString("descriptionurl").trim()
-            if (!mime.startsWith("image/") || !isAllowedHttpsImageUrl(imageUrl)) continue
-            if (!pageUrl.startsWith("https://", ignoreCase = true)) continue
-            val metadata = info.optJSONObject("extmetadata")
-            val metadataText = listOfNotNull(
-                title,
-                metadata?.optJSONObject("ObjectName")?.optString("value"),
-                metadata?.optJSONObject("ImageDescription")?.optString("value"),
-                metadata?.optJSONObject("Categories")?.optString("value")
-            ).joinToString(" ")
-            candidates += SearchImageCandidate(
-                imageUrl = imageUrl,
-                pageUrl = pageUrl,
-                sourceName = "Wikimedia Commons",
-                title = title,
-                verificationText = normalizeHtmlText(metadataText)
-            )
-        }
-        return candidates.distinctBy { it.imageUrl }.take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
-    }
-
-    private fun fetchVerificationQuote(pageUrl: String, terms: List<String>): VerificationQuote? {
-        val html = fetchText(pageUrl) ?: return null
-        return quoteFromText(normalizeHtmlText(html), terms)
-    }
-
-    private fun quoteFromText(text: String, terms: List<String>): VerificationQuote? {
-        val upper = text.uppercase(Locale.US)
-        val matched = terms.filter { term -> upper.contains(term.uppercase(Locale.US)) }.distinct()
-        if (matched.isEmpty()) return null
-        val firstIndex = matched.mapNotNull { term ->
-            val index = upper.indexOf(term.uppercase(Locale.US))
-            if (index >= 0) index else null
-        }.minOrNull() ?: return null
-        val start = max(0, firstIndex - 120)
-        val end = min(text.length, firstIndex + 180)
-        return VerificationQuote(
-            text = text.substring(start, end).trim(),
-            matchedTerms = matched.take(4)
-        )
-    }
-
-    private fun photoVerificationTerms(details: AircraftDetails, model: String): List<String> {
-        val familyTerms = listOfNotNull(
-            Regex("""Airbus A\d{3}""").find(model)?.value,
-            Regex("""Boeing \d{3}""").find(model)?.value,
-            Regex("""Cessna \d{3}""").find(model)?.value,
-            Regex("""Piper PA-\d{2}""").find(model)?.value,
-            Regex("""Embraer \d{3}""").find(model)?.value
-        )
-        return listOfNotNull(
-            model,
-            model.substringAfterLast(" ").takeIf { it.length >= 3 && it.any(Char::isDigit) },
-            details.type,
-            details.typeCode
-        ).plus(familyTerms)
-            .map { it.trim() }
-            .filter { it.length >= 3 }
-            .distinct()
-    }
-
-    private fun normalizeHtmlText(html: String): String {
-        return html
-            .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("<[^>]+>"), " ")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun fetchWikipediaPageImageUrls(query: String): List<String> {
-        val encoded = URLEncoder.encode("$query aircraft", "UTF-8")
-        val apiUrl = "https://en.wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrsearch=$encoded&gsrlimit=6&prop=pageimages&piprop=thumbnail|original&pithumbsize=1100"
-        val pages = fetchJsonObject(apiUrl)
-            ?.optJSONObject("query")
-            ?.optJSONObject("pages")
-            ?: return emptyList()
-        val urls = mutableListOf<String>()
-        val keys = pages.keys()
-        while (keys.hasNext()) {
-            val page = pages.optJSONObject(keys.next()) ?: continue
-            listOfNotNull(
-                page.optJSONObject("original")?.optString("source"),
-                page.optJSONObject("thumbnail")?.optString("source")
-            ).forEach { url ->
-                if (isAllowedHttpsImageUrl(url)) urls += url
-            }
-        }
-        return urls.distinct()
-    }
-
     private fun fetchJsonObject(url: String): JSONObject? {
         val safeUrl = httpsUrl(url) ?: return null
         var connection: HttpURLConnection? = null
@@ -5842,76 +4580,6 @@ class FlightMapView(
         }
     }
 
-    private fun fetchText(url: String): String? {
-        val safeUrl = httpsUrl(url) ?: return null
-        var connection: HttpURLConnection? = null
-        return try {
-            connection = (safeUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = PHOTO_TEXT_READ_TIMEOUT_MS
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", USER_AGENT)
-            }
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                connection.errorStream?.close()
-                return null
-            }
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } catch (_: Exception) {
-            null
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    private fun fetchBitmap(url: String): Bitmap? {
-        if (!isAllowedHttpsImageUrl(url)) return null
-        val safeUrl = httpsUrl(url) ?: return null
-        var connection: HttpURLConnection? = null
-        return try {
-            connection = (safeUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 8000
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", USER_AGENT)
-            }
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                connection.errorStream?.close()
-                return null
-            }
-            BitmapFactory.decodeStream(connection.inputStream)
-        } catch (_: Exception) {
-            null
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    private fun findFirstImageUrl(value: Any?): String? {
-        return when (value) {
-            is JSONObject -> {
-                val keys = value.keys()
-                while (keys.hasNext()) {
-                    findFirstImageUrl(value.opt(keys.next()))?.let { return it }
-                }
-                null
-            }
-            is JSONArray -> {
-                for (index in 0 until value.length()) {
-                    findFirstImageUrl(value.opt(index))?.let { return it }
-                }
-                null
-            }
-            is String -> value.takeIf { isAllowedHttpsImageUrl(it) }
-            else -> null
-        }
-    }
-
-    private fun isAllowedHttpsImageUrl(value: String?): Boolean {
-        val url = value?.trim() ?: return false
-        return url.startsWith("https://", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(url)
-    }
-
     private fun httpsUrl(value: String): URL? {
         return try {
             URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }
@@ -5931,64 +4599,7 @@ class FlightMapView(
 
     private fun registryCountryLabel(aircraft: Aircraft, details: AircraftDetails? = null, loading: Boolean = false): String {
         val registration = normalizedRegistration(details?.registration ?: aircraft.registration)
-        val country = registryCountryFromRegistration(registration)
-            ?: registryCountryFromIcao24(aircraft.icao24)
-        return country?.label ?: loadingOrUnavailable(loading)
-    }
-
-    private fun registryCountryFromRegistration(registration: String?): RegistryCountry? {
-        val reg = registration ?: return null
-        return when {
-            reg.startsWith("N") && reg.getOrNull(1)?.isDigit() == true -> REGISTRY_UNITED_STATES
-            reg.startsWith("C-F") || reg.startsWith("C-G") || reg.startsWith("C-I") || reg.startsWith("CF") -> RegistryCountry("CA", "Canada")
-            reg.startsWith("G-") -> RegistryCountry("GB", "United Kingdom")
-            reg.startsWith("D-") -> RegistryCountry("DE", "Germany")
-            reg.startsWith("F-") -> RegistryCountry("FR", "France")
-            reg.startsWith("I-") -> RegistryCountry("IT", "Italy")
-            reg.startsWith("EC-") -> RegistryCountry("ES", "Spain")
-            reg.startsWith("PH-") -> RegistryCountry("NL", "Netherlands")
-            reg.startsWith("HB-") -> RegistryCountry("CH", "Switzerland")
-            reg.startsWith("OE-") -> RegistryCountry("AT", "Austria")
-            reg.startsWith("OO-") -> RegistryCountry("BE", "Belgium")
-            reg.startsWith("SE-") -> RegistryCountry("SE", "Sweden")
-            reg.startsWith("LN-") -> RegistryCountry("NO", "Norway")
-            reg.startsWith("OY-") -> RegistryCountry("DK", "Denmark")
-            reg.startsWith("OH-") -> RegistryCountry("FI", "Finland")
-            reg.startsWith("EI-") -> RegistryCountry("IE", "Ireland")
-            reg.startsWith("CS-") -> RegistryCountry("PT", "Portugal")
-            reg.startsWith("SP-") -> RegistryCountry("PL", "Poland")
-            reg.startsWith("OK-") -> RegistryCountry("CZ", "Czechia")
-            reg.startsWith("HA-") -> RegistryCountry("HU", "Hungary")
-            reg.startsWith("SX-") -> RegistryCountry("GR", "Greece")
-            reg.startsWith("TC-") -> RegistryCountry("TR", "Turkiye")
-            reg.startsWith("RA-") || reg.startsWith("RF-") -> RegistryCountry("RU", "Russia")
-            reg.startsWith("B-") -> RegistryCountry("CN", "China")
-            reg.startsWith("JA") -> RegistryCountry("JP", "Japan")
-            reg.startsWith("HL") -> RegistryCountry("KR", "South Korea")
-            reg.startsWith("VH-") -> RegistryCountry("AU", "Australia")
-            reg.startsWith("ZK-") -> RegistryCountry("NZ", "New Zealand")
-            reg.startsWith("PT") || reg.startsWith("PR") || reg.startsWith("PP") || reg.startsWith("PS") -> RegistryCountry("BR", "Brazil")
-            reg.startsWith("LV-") -> RegistryCountry("AR", "Argentina")
-            reg.startsWith("XA") || reg.startsWith("XB") || reg.startsWith("XC") -> RegistryCountry("MX", "Mexico")
-            reg.startsWith("HK-") -> RegistryCountry("CO", "Colombia")
-            reg.startsWith("CC-") -> RegistryCountry("CL", "Chile")
-            reg.startsWith("9M-") -> RegistryCountry("MY", "Malaysia")
-            reg.startsWith("HS-") -> RegistryCountry("TH", "Thailand")
-            reg.startsWith("VT-") -> RegistryCountry("IN", "India")
-            reg.startsWith("RP-") -> RegistryCountry("PH", "Philippines")
-            reg.startsWith("PK-") -> RegistryCountry("ID", "Indonesia")
-            reg.startsWith("9V-") -> RegistryCountry("SG", "Singapore")
-            reg.startsWith("A6-") -> RegistryCountry("AE", "United Arab Emirates")
-            reg.startsWith("A7-") -> RegistryCountry("QA", "Qatar")
-            reg.startsWith("HZ-") -> RegistryCountry("SA", "Saudi Arabia")
-            reg.startsWith("ZS") || reg.startsWith("ZU") || reg.startsWith("ZT") -> RegistryCountry("ZA", "South Africa")
-            else -> null
-        }
-    }
-
-    private fun registryCountryFromIcao24(icao24: String): RegistryCountry? {
-        val value = icao24.trim().trimStart('~').toIntOrNull(16) ?: return null
-        return ICAO_REGISTRY_RANGES.firstOrNull { value in it.start..it.end }?.country
+        return AircraftRegistryResolver.labelFor(registration, aircraft.icao24) ?: loadingOrUnavailable(loading)
     }
 
     private fun showSelectedFlightPath() {
@@ -6269,7 +4880,7 @@ class FlightMapView(
         val availablePixels = min(focusArea.width(), focusArea.height()).coerceAtLeast(dp(120)).toDouble()
         val metersPerPixel = targetSpanMeters / availablePixels
         val latitude = latestLocation?.latitude ?: 0.0
-        zoom = log2((cos(Math.toRadians(latitude)) * EARTH_CIRCUMFERENCE_M) / (TILE_SIZE * metersPerPixel))
+        zoom = log2((cos(Math.toRadians(latitude)) * MapProjection.EARTH_CIRCUMFERENCE_M) / (TILE_SIZE * metersPerPixel))
             .coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
         prefs.edit { putFloat(FlightAlertSettings.KEY_ZOOM, zoom.toFloat()) }
     }
@@ -6441,47 +5052,30 @@ class FlightMapView(
     }
 
     private fun sanitizeFilterSearch(value: String): String {
-        return value
-            .uppercase(Locale.US)
-            .filter { it.isLetterOrDigit() || it == '-' }
-            .take(MAX_FILTER_SEARCH_CHARS)
+        return AircraftFilterEngine.sanitizeSearch(value)
     }
 
     private fun filtersActive(): Boolean {
-        return !filtersInNormalAirborneMode()
+        return AircraftFilterEngine.isActive(currentFilterState())
     }
 
     private fun filtersInNormalAirborneMode(): Boolean {
-        return filterSearchQuery.isBlank() &&
-            aircraftTypeFilter == AircraftTypeFilter.ALL &&
-            altitudeFilter == AltitudeFilter.ANY &&
-            distanceFilter == DistanceFilter.ANY &&
-            flightStatusFilter == FlightStatusFilter.AIRBORNE &&
-            reportAgeFilter == ReportAgeFilter.ANY &&
-            !alertVolumeFilter
+        return AircraftFilterEngine.isNormalAirborneMode(currentFilterState())
     }
 
     private fun filtersRestrictAircraft(): Boolean {
-        return filterSearchQuery.isNotBlank() ||
-            aircraftTypeFilter != AircraftTypeFilter.ALL ||
-            altitudeFilter != AltitudeFilter.ANY ||
-            distanceFilter != DistanceFilter.ANY ||
-            flightStatusFilter != FlightStatusFilter.ANY ||
-            reportAgeFilter != ReportAgeFilter.ANY ||
-            alertVolumeFilter
+        return AircraftFilterEngine.restrictsAircraft(currentFilterState())
     }
 
     private fun filterStats(): FilterStats {
         val all = allAircraftSnapshot()
-        val matched = all.count { passesAircraftFilters(it) }
-        val summary = when {
-            filtersInNormalAirborneMode() -> "$matched airborne aircraft in current feed"
-            !filtersRestrictAircraft() -> "${all.size} live aircraft in current feed"
-            all.isEmpty() -> "No live aircraft in current feed"
-            matched == 0 -> "0 of ${all.size} live aircraft match filters"
-            else -> "$matched of ${all.size} live aircraft match filters"
-        }
-        return FilterStats(all.size, matched, summary)
+        return AircraftFilterEngine.stats(
+            aircraft = all,
+            filters = currentFilterState(),
+            nowEpochSec = System.currentTimeMillis() / 1000.0,
+            distanceMeters = ::displayDistanceMeters,
+            isHazardAircraft = ::isHazardAircraft
+        )
     }
 
     private fun allAircraftSnapshot(): List<Aircraft> {
@@ -6515,86 +5109,25 @@ class FlightMapView(
     }
 
     private fun passesAircraftFilters(item: Aircraft): Boolean {
-        if (!matchesSearchFilter(item)) return false
-        if (!matchesTypeFilter(item)) return false
-        if (!matchesAltitudeFilter(item)) return false
-        if (!matchesDistanceFilter(item)) return false
-        if (!matchesFlightStatusFilter(item)) return false
-        if (!matchesReportAgeFilter(item)) return false
-        if (alertVolumeFilter && !isHazardAircraft(item)) return false
-        return true
+        return AircraftFilterEngine.passes(
+            aircraft = item,
+            filters = currentFilterState(),
+            nowEpochSec = System.currentTimeMillis() / 1000.0,
+            distanceMeters = ::displayDistanceMeters,
+            isHazardAircraft = ::isHazardAircraft
+        )
     }
 
-    private fun matchesSearchFilter(item: Aircraft): Boolean {
-        val query = filterSearchQuery
-        if (query.isBlank()) return true
-        return listOf(
-            item.callsign,
-            item.registration.orEmpty(),
-            item.icao24,
-            item.typeCode.orEmpty()
-        ).any { sanitizeFilterSearch(it).contains(query) }
-    }
-
-    private fun matchesTypeFilter(item: Aircraft): Boolean {
-        val symbol = aircraftSymbol(item)
-        return when (aircraftTypeFilter) {
-            AircraftTypeFilter.ALL -> true
-            AircraftTypeFilter.AIRPLANES -> symbol == AircraftSymbol.AIRLINER || symbol == AircraftSymbol.GENERAL_AVIATION
-            AircraftTypeFilter.ROTORCRAFT -> symbol == AircraftSymbol.ROTORCRAFT
-            AircraftTypeFilter.GLIDER -> symbol == AircraftSymbol.GLIDER
-            AircraftTypeFilter.UAV -> symbol == AircraftSymbol.UAV
-            AircraftTypeFilter.SURFACE -> symbol == AircraftSymbol.SURFACE
-            AircraftTypeFilter.MILITARY -> item.isMilitary
-        }
-    }
-
-    private fun matchesAltitudeFilter(item: Aircraft): Boolean {
-        if (altitudeFilter == AltitudeFilter.ANY) return true
-        val feet = item.altitudeM?.times(FEET_PER_METER)
-        return when (altitudeFilter) {
-            AltitudeFilter.ANY -> true
-            AltitudeFilter.BELOW_1000 -> feet != null && feet < 1000.0
-            AltitudeFilter.FROM_1000_TO_5000 -> feet != null && feet >= 1000.0 && feet < 5000.0
-            AltitudeFilter.FROM_5000_TO_18000 -> feet != null && feet >= 5000.0 && feet < 18000.0
-            AltitudeFilter.ABOVE_18000 -> feet != null && feet >= 18000.0
-            AltitudeFilter.UNKNOWN -> feet == null
-        }
-    }
-
-    private fun matchesDistanceFilter(item: Aircraft): Boolean {
-        val meters = displayDistanceMeters(item)
-        return when (distanceFilter) {
-            DistanceFilter.ANY -> true
-            DistanceFilter.WITHIN_5 -> meters <= 5.0 * METERS_PER_STATUTE_MILE
-            DistanceFilter.WITHIN_10 -> meters <= 10.0 * METERS_PER_STATUTE_MILE
-            DistanceFilter.WITHIN_25 -> meters <= 25.0 * METERS_PER_STATUTE_MILE
-            DistanceFilter.BEYOND_25 -> meters > 25.0 * METERS_PER_STATUTE_MILE
-        }
-    }
-
-    private fun matchesFlightStatusFilter(item: Aircraft): Boolean {
-        return when (flightStatusFilter) {
-            FlightStatusFilter.ANY -> true
-            FlightStatusFilter.AIRBORNE -> item.onGround == false
-            FlightStatusFilter.ON_GROUND -> item.onGround == true
-            FlightStatusFilter.UNKNOWN -> item.onGround == null
-        }
-    }
-
-    private fun matchesReportAgeFilter(item: Aircraft): Boolean {
-        val age = contactAgeSeconds(item)
-        return when (reportAgeFilter) {
-            ReportAgeFilter.ANY -> true
-            ReportAgeFilter.FRESH_30 -> age != null && age <= 30.0
-            ReportAgeFilter.STALE_60 -> age != null && age >= 60.0
-            ReportAgeFilter.UNKNOWN -> age == null
-        }
-    }
-
-    private fun contactAgeSeconds(item: Aircraft): Double? {
-        val contact = item.lastContactSec ?: item.positionTimeSec ?: return null
-        return max(0.0, System.currentTimeMillis() / 1000.0 - contact)
+    private fun currentFilterState(): AircraftFilterState {
+        return AircraftFilterState(
+            searchQuery = filterSearchQuery,
+            aircraftType = aircraftTypeFilter,
+            altitude = altitudeFilter,
+            distance = distanceFilter,
+            flightStatus = flightStatusFilter,
+            reportAge = reportAgeFilter,
+            alertVolumeOnly = alertVolumeFilter
+        )
     }
 
     private fun settingsPanelBounds(w: Float, h: Float): RectF {
@@ -6726,10 +5259,10 @@ class FlightMapView(
 
     private fun impactSourceButtonBounds(panel: RectF, index: Int): RectF {
         val gap = dp(8)
-        val safeIndex = index.coerceIn(0, IMPACT_SOURCE_LABELS.lastIndex)
+        val safeIndex = index.coerceIn(0, AircraftImpactEstimator.sourceLabels.lastIndex)
         return if (isCompactSettingsPanel(panel)) {
             val left = panel.left + dp(18)
-            val buttonWidth = (panel.width() - dp(36) - gap * (IMPACT_SOURCE_LABELS.size - 1)) / IMPACT_SOURCE_LABELS.size
+            val buttonWidth = (panel.width() - dp(36) - gap * (AircraftImpactEstimator.sourceLabels.size - 1)) / AircraftImpactEstimator.sourceLabels.size
             val x = left + safeIndex * (buttonWidth + gap)
             RectF(x, panel.bottom - dp(46), x + buttonWidth, panel.bottom - dp(16))
         } else {
@@ -7198,16 +5731,7 @@ class FlightMapView(
     }
 
     private fun destinationPoint(lat: Double, lon: Double, bearingDeg: Double, distanceM: Double): GeoPoint {
-        val angularDistance = distanceM / EARTH_RADIUS_M
-        val bearing = Math.toRadians(bearingDeg)
-        val lat1 = Math.toRadians(lat)
-        val lon1 = Math.toRadians(lon)
-        val lat2 = asin(sin(lat1) * cos(angularDistance) + cos(lat1) * sin(angularDistance) * cos(bearing))
-        val lon2 = lon1 + atan2(
-            sin(bearing) * sin(angularDistance) * cos(lat1),
-            cos(angularDistance) - sin(lat1) * sin(lat2)
-        )
-        return GeoPoint(Math.toDegrees(lat2), normalizeLongitude(Math.toDegrees(lon2)))
+        return MapProjection.destinationPoint(lat, lon, bearingDeg, distanceM)
     }
 
     private fun displayDistanceMeters(aircraft: Aircraft): Double {
@@ -7231,44 +5755,6 @@ class FlightMapView(
 
     private fun isExtremePriority(aircraft: Aircraft): Boolean {
         return priorityTrackingEnabled && alertsEnabled && isHazardAircraft(aircraft)
-    }
-
-    private fun aircraftSymbol(aircraft: Aircraft): AircraftSymbol {
-        if (aircraft.onGround == true) return AircraftSymbol.SURFACE
-        return when (aircraft.category) {
-            4, 5, 6 -> AircraftSymbol.AIRLINER
-            8 -> AircraftSymbol.ROTORCRAFT
-            9, 10 -> AircraftSymbol.GLIDER
-            14 -> AircraftSymbol.UAV
-            16, 17, 18, 19, 20 -> AircraftSymbol.SURFACE
-            else -> if (isAirlinerTypeCode(aircraft.typeCode)) AircraftSymbol.AIRLINER else AircraftSymbol.GENERAL_AVIATION
-        }
-    }
-
-    private fun isAirlinerTypeCode(typeCode: String?): Boolean {
-        val code = typeCode?.uppercase(Locale.US)?.trim() ?: return false
-        return AIRLINER_TYPE_PREFIXES.any { code.startsWith(it) }
-    }
-
-    private fun aircraftSizeMultiplier(aircraft: Aircraft, symbol: AircraftSymbol): Float {
-        val code = aircraft.typeCode?.uppercase(Locale.US)?.trim().orEmpty()
-        return when (symbol) {
-            AircraftSymbol.AIRLINER -> when {
-                HEAVY_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.18f
-                LARGE_AIRLINER_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.10f
-                REGIONAL_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 0.98f
-                else -> 1.05f
-            }
-            AircraftSymbol.GENERAL_AVIATION -> when {
-                LIGHT_JET_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.04f
-                SMALL_GENERAL_AVIATION_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 0.86f
-                else -> 1.0f
-            }
-            AircraftSymbol.ROTORCRAFT -> 0.9f
-            AircraftSymbol.GLIDER -> 0.82f
-            AircraftSymbol.UAV -> 0.74f
-            AircraftSymbol.SURFACE -> 0.86f
-        }
     }
 
     private fun trafficDistanceColor(aircraft: Aircraft): Int {
@@ -7435,35 +5921,25 @@ class FlightMapView(
         }
     }
     private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val result = FloatArray(1)
-        Location.distanceBetween(lat1, lon1, lat2, lon2, result)
-        return result[0].toDouble()
+        return MapProjection.distanceMeters(lat1, lon1, lat2, lon2)
     }
 
     private fun feetToMeters(feet: Double): Double = feet / 3.28084
 
     private fun metersPerPixelAt(latitude: Double, z: Double): Double {
-        return cos(Math.toRadians(latitude.coerceIn(-85.0, 85.0))) * EARTH_CIRCUMFERENCE_M / (TILE_SIZE * 2.0.pow(z))
+        return MapProjection.metersPerPixelAt(latitude, z)
     }
 
     private fun latLonToWorld(lat: Double, lon: Double, z: Double): WorldPoint {
-        val scale = TILE_SIZE * 2.0.pow(z)
-        val sinLat = sin(Math.toRadians(lat.coerceIn(-85.05112878, 85.05112878)))
-        val x = (lon + 180.0) / 360.0 * scale
-        val y = (0.5 - ln((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * Math.PI)) * scale
-        return WorldPoint(x, y)
+        return MapProjection.latLonToWorld(lat, lon, z)
     }
 
     private fun worldToLatLon(x: Double, y: Double, z: Double): GeoPoint {
-        val scale = TILE_SIZE * 2.0.pow(z)
-        val lon = x / scale * 360.0 - 180.0
-        val mercator = Math.PI - 2.0 * Math.PI * y / scale
-        val lat = Math.toDegrees(atan(sinh(mercator)))
-        return GeoPoint(lat.coerceIn(-85.05112878, 85.05112878), normalizeLongitude(lon))
+        return MapProjection.worldToLatLon(x, y, z)
     }
 
     private fun normalizeLongitude(lon: Double): Double {
-        return ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+        return MapProjection.normalizeLongitude(lon)
     }
 
     private fun Bounds.toFeedBounds(): FeedBounds {
@@ -7856,336 +6332,6 @@ class FlightMapView(
         return Color.argb(alpha.coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
     }
 
-    private data class GeoPoint(val lat: Double, val lon: Double)
-
-    private data class ScreenPoint(val x: Float, val y: Float)
-
-    private data class WorldPoint(val x: Double, val y: Double)
-
-    private data class Viewport(
-        val zoom: Double,
-        val centerX: Double,
-        val centerY: Double,
-        val width: Float,
-        val height: Float
-    )
-
-    private data class Bounds(val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)
-
-    private data class TrafficDisplay(val aircraft: Aircraft?, val selected: Boolean)
-
-    private data class AircraftHit(val aircraft: Aircraft, val distanceSquared: Float)
-
-    private data class RegistryCountry(val isoCode: String, val name: String) {
-        val label: String
-            get() = "${flagEmoji(isoCode)} $name"
-
-        private fun flagEmoji(code: String): String {
-            val normalized = code.uppercase(Locale.US).take(2)
-            if (normalized.length != 2 || normalized.any { it !in 'A'..'Z' }) return normalized
-            val first = Character.toChars(0x1F1E6 + (normalized[0] - 'A')).concatToString()
-            val second = Character.toChars(0x1F1E6 + (normalized[1] - 'A')).concatToString()
-            return first + second
-        }
-    }
-
-    private data class IcaoRegistryRange(val start: Int, val end: Int, val country: RegistryCountry)
-
-    private data class FilterStats(val total: Int, val matched: Int, val summary: String)
-
-    private data class UsageFlight(val startEpochSec: Long, val endEpochSec: Long, val hours: Double)
-
-    private data class UsageBucket(val label: String, val flights: Int, val hours: Double)
-
-    private data class UsageStats(
-        val buckets: List<UsageBucket>,
-        val flightCount: Int,
-        val totalHours: Double,
-        val weekFlightCount: Int,
-        val weekHours: Double,
-        val windowLabel: String
-    )
-
-    private data class ImpactTrace(
-        val distanceM: Double,
-        val hours: Double,
-        val averageSpeedMs: Double,
-        val pointCount: Int,
-        val source: String
-    )
-
-    private data class ImpactCarbonRange(val lowKg: Double, val midKg: Double, val highKg: Double)
-
-    private data class ImpactProfile(
-        val label: String,
-        val examples: String,
-        val fuel: ImpactFuel,
-        val lowGallonsPerHour: Double,
-        val highGallonsPerHour: Double,
-        val cruiseKnots: Double,
-        val confidence: String
-    ) {
-        fun midpointGallonsPerHour(): Double = (lowGallonsPerHour + highGallonsPerHour) / 2.0
-
-        fun lowCo2KgPerHour(): Double = lowGallonsPerHour * fuel.co2KgPerGallon
-
-        fun highCo2KgPerHour(): Double = highGallonsPerHour * fuel.co2KgPerGallon
-
-        fun midCo2KgPerHour(): Double = midpointGallonsPerHour() * fuel.co2KgPerGallon
-
-        fun carbonForHours(hours: Double): ImpactCarbonRange {
-            return ImpactCarbonRange(
-                lowKg = lowCo2KgPerHour() * hours,
-                midKg = midCo2KgPerHour() * hours,
-                highKg = highCo2KgPerHour() * hours
-            )
-        }
-
-        fun cruiseIntensityLabel(): String {
-            val low = lowCo2KgPerHour() / cruiseKnots
-            val high = highCo2KgPerHour() / cruiseKnots
-            return String.format(Locale.US, "%s, ~%.1f-%.1f kg CO2/NM", examples, low, high)
-        }
-
-        fun fuelAndFactorLabel(): String {
-            return String.format(
-                Locale.US,
-                "%s, %.0f-%.0f gal/hr, %.2f kg CO2/gal EIA",
-                fuel.displayName,
-                lowGallonsPerHour,
-                highGallonsPerHour,
-                fuel.co2KgPerGallon
-            )
-        }
-    }
-
-    private enum class ImpactFuel(val displayName: String, val co2KgPerGallon: Double) {
-        JET("Probable jet fuel", 9.75),
-        AVGAS("Probable aviation gasoline", 8.31)
-    }
-
-    private data class AircraftLabelStyle(
-        val fill: Int,
-        val stroke: Int,
-        val title: Int,
-        val detail: Int,
-        val accent: Int,
-        val radiusDp: Float,
-        val strokeWidthDp: Float
-    )
-    private data class AltitudeColorPalette(
-        val low: Int,
-        val mid: Int,
-        val high: Int
-    )
-
-    private data class ScaleLabel(val pixels: Float, val label: String)
-
-    private data class OriginAerodrome(
-        val name: String?,
-        val icao: String?,
-        val distanceM: Double,
-        val military: Boolean
-    ) {
-        fun label(): String = listOfNotNull(name, icao)
-            .distinct()
-            .joinToString(" / ")
-            .ifEmpty { "Unnamed aerodrome" }
-    }
-
-    private sealed class AircraftPhotoResult {
-        data class Found(
-            val bitmap: Bitmap,
-            val note: String,
-            val evidence: PhotoEvidence? = null,
-            val quality: PhotoQuality
-        ) : AircraftPhotoResult()
-        data class Unavailable(val reason: String) : AircraftPhotoResult()
-    }
-
-    private enum class PhotoQuality(val rank: Int) {
-        INVESTIGABLE(1),
-        REPRESENTATIVE(2),
-        EXACT(3)
-    }
-
-    private data class AircraftDetailCandidate(
-        val sourceName: String,
-        val fetch: () -> AircraftDetails?
-    )
-
-    private data class WebDetailLookupContext(
-        val bounds: FeedBounds,
-        val ownLat: Double,
-        val ownLon: Double
-    )
-
-    private data class PhotoEvidence(
-        val sourceName: String,
-        val imageUrl: String,
-        val pageUrl: String,
-        val searchQuery: String,
-        val quote: String,
-        val matchedTerms: List<String>
-    )
-
-    private data class SearchImageCandidate(
-        val imageUrl: String,
-        val pageUrl: String,
-        val sourceName: String,
-        val title: String = "",
-        val verificationText: String? = null
-    )
-
-    private data class VerificationQuote(
-        val text: String,
-        val matchedTerms: List<String>
-    )
-
-    private data class Aircraft(
-        val icao24: String,
-        val callsign: String,
-        val registration: String?,
-        val typeCode: String?,
-        val metadataSeed: AircraftMetadataSeed?,
-        val isMilitary: Boolean,
-        val lat: Double,
-        val lon: Double,
-        val onGround: Boolean?,
-        val altitudeM: Double?,
-        val velocityMs: Double?,
-        val trackDeg: Double?,
-        val verticalRateMs: Double?,
-        val category: Int?,
-        val positionTimeSec: Double?,
-        val lastContactSec: Double?,
-        val distanceM: Double
-    )
-
-    private fun Aircraft.appearanceKey(): String {
-        return icao24.ifBlank { "${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}:$callsign" }
-    }
-
-    private data class AircraftAppearance(val firstSeenMs: Long, val delayMs: Long)
-
-    private enum class AircraftSymbol {
-        GENERAL_AVIATION,
-        AIRLINER,
-        ROTORCRAFT,
-        GLIDER,
-        UAV,
-        SURFACE
-    }
-
-    private enum class AircraftTypeFilter(val shortLabel: String) {
-        ALL("All"),
-        AIRPLANES("Airplanes"),
-        ROTORCRAFT("Rotor"),
-        GLIDER("Glider"),
-        UAV("UAV"),
-        SURFACE("Surface"),
-        MILITARY("Military");
-
-        fun next(): AircraftTypeFilter = entries[(ordinal + 1) % entries.size]
-    }
-
-    private enum class AltitudeFilter(val shortLabel: String) {
-        ANY("Any"),
-        BELOW_1000("<1k ft"),
-        FROM_1000_TO_5000("1k-5k ft"),
-        FROM_5000_TO_18000("5k-18k ft"),
-        ABOVE_18000("18k+ ft"),
-        UNKNOWN("Unknown");
-
-        fun next(): AltitudeFilter = entries[(ordinal + 1) % entries.size]
-    }
-
-    private enum class DistanceFilter(val shortLabel: String) {
-        ANY("Any"),
-        WITHIN_5("<5 mi"),
-        WITHIN_10("<10 mi"),
-        WITHIN_25("<25 mi"),
-        BEYOND_25(">25 mi");
-
-        fun next(): DistanceFilter = entries[(ordinal + 1) % entries.size]
-    }
-
-    private enum class FlightStatusFilter(val shortLabel: String) {
-        ANY("Any"),
-        AIRBORNE("Airborne"),
-        ON_GROUND("Ground"),
-        UNKNOWN("Unknown");
-
-        fun next(): FlightStatusFilter = entries[(ordinal + 1) % entries.size]
-    }
-
-    private enum class ReportAgeFilter(val shortLabel: String) {
-        ANY("Any"),
-        FRESH_30("Fresh <=30s"),
-        STALE_60("Stale >=60s"),
-        UNKNOWN("Unknown");
-
-        fun next(): ReportAgeFilter = entries[(ordinal + 1) % entries.size]
-    }
-
-
-    private enum class TileSource(
-        val baseCacheKey: String,
-        val displayName: String,
-        private val baseAttribution: String,
-        val maxNativeZoom: Int
-    ) {
-        // Providers stay explicit so the map background remains auditable and never becomes fake imagery.
-        STREET("osm", "Street map", "OpenStreetMap / CARTO tiles", 19),
-        SATELLITE("esri_world_imagery", "Satellite", "Esri World Imagery", 19);
-
-        fun cacheKey(labelsEnabled: Boolean): String {
-            return when (this) {
-                STREET -> if (labelsEnabled) baseCacheKey else "carto_voyager_nolabels"
-                SATELLITE -> baseCacheKey
-            }
-        }
-
-        fun attributionText(labelsEnabled: Boolean): String {
-            return when (this) {
-                STREET -> if (labelsEnabled) baseAttribution else "CARTO no-label tiles, OpenStreetMap data"
-                SATELLITE -> baseAttribution
-            }
-        }
-
-        fun tileUrl(z: Int, x: Int, y: Int, labelsEnabled: Boolean): String {
-            return when (this) {
-                STREET -> if (labelsEnabled) {
-                    "https://tile.openstreetmap.org/$z/$x/$y.png"
-                } else {
-                    "https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/$z/$x/$y.png"
-                }
-                SATELLITE -> "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
-            }
-        }
-    }
-
-    private enum class UnitSystem(
-        val distanceLabel: String,
-        val altitudeLabel: String,
-        val speedLabel: String
-    ) {
-        IMPERIAL("mi", "ft", "mph"),
-        METRIC("km", "m", "km/h");
-
-        fun distanceMetersToDisplay(meters: Double): Double {
-            return if (this == IMPERIAL) meters / 1609.344 else meters / 1000.0
-        }
-
-        fun altitudeMetersToDisplay(meters: Double): Double {
-            return if (this == IMPERIAL) meters * 3.28084 else meters
-        }
-
-        fun speedMetersPerSecondToDisplay(ms: Double): Double {
-            return if (this == IMPERIAL) ms * 2.236936 else ms * 3.6
-        }
-    }
-
     private companion object {
         const val TILE_SIZE = 256
         const val MIN_ZOOM = 3
@@ -8226,15 +6372,12 @@ class FlightMapView(
         const val OCEANIC_TRACK_MIN_ZOOM = 3.0
         const val PATH_FIT_CONTEXT_MULTIPLIER = 1.5
         const val PRIORITY_PANEL_ROWS = 5
-        const val MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY = 4
-        const val MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY = 5
         const val PROOF_QUOTE_LINES = 3
         const val PHOTO_PLACEHOLDER_LINES = 4
         const val PHOTO_CAPTION_MAX_LINES = 7
         const val DETAILS_ROW_MAX_LINES = 12
         const val DETAILS_EVIDENCE_LINE_MAX_LINES = 4
         const val DETAILS_PROOF_QUOTE_LINES = 12
-        const val PHOTO_TEXT_READ_TIMEOUT_MS = 9000
         const val AIRCRAFT_TAP_RADIUS_DP = 42
         const val HOLE_PUNCH_MAX_SIZE_DP = 72
         const val DB_FLAG_MILITARY = 1
@@ -8242,290 +6385,15 @@ class FlightMapView(
         const val PATH_TRACE_NEWER_THAN_FEED_SECONDS = 45L
         const val MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS = 180.0
         const val ALTITUDE_COLOR_MAX_FEET = 45000.0
-        const val FEET_PER_METER = 3.28084
-        const val METERS_PER_STATUTE_MILE = 1609.344
-        const val MAX_FILTER_SEARCH_CHARS = 18
-        const val MIN_USAGE_SEGMENT_SECONDS = 180L
-        const val MIN_USAGE_SEGMENT_DISTANCE_M = 5000.0
         const val MIN_PROJECTED_PATH_CONNECTOR_M = 60.0
         const val RADAR_GRID_SPACING_DP = 36f
-        const val EARTH_RADIUS_M = 6371000.0
-        const val EARTH_CIRCUMFERENCE_M = 40075016.686
         const val ORIGIN_AERODROME_RADIUS_M = 9000.0
-        const val CURRENT_ROUTE_ORIGIN_MATCH_M = 25000.0
-        const val CURRENT_ROUTE_ORIGIN_MATCH_MAX_M = 60000.0
-        const val CURRENT_ROUTE_ORIGIN_ROUTE_FRACTION = 0.08
-        const val CURRENT_ROUTE_MIN_DIRECTION_M = 25000.0
-        const val CURRENT_ROUTE_MAX_BEARING_DELTA_DEG = 80.0
         const val DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M = 30000.0
         const val INITIAL_RANGE_MULTIPLIER = 1.25
         const val TILE_CACHE_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
         const val USER_AGENT = "FlightAlertPrototype/0.1"
         const val TAG = "FlightAlert"
 
-        val REGISTRY_UNITED_STATES = RegistryCountry("US", "United States")
-        val ICAO_REGISTRY_RANGES = listOf(
-            IcaoRegistryRange(0xA00000, 0xADF7C7, REGISTRY_UNITED_STATES),
-            IcaoRegistryRange(0xC00000, 0xC3FFFF, RegistryCountry("CA", "Canada")),
-            IcaoRegistryRange(0x400000, 0x43FFFF, RegistryCountry("GB", "United Kingdom")),
-            IcaoRegistryRange(0x3C0000, 0x3FFFFF, RegistryCountry("DE", "Germany")),
-            IcaoRegistryRange(0x380000, 0x3BFFFF, RegistryCountry("FR", "France")),
-            IcaoRegistryRange(0x300000, 0x33FFFF, RegistryCountry("IT", "Italy")),
-            IcaoRegistryRange(0x340000, 0x37FFFF, RegistryCountry("ES", "Spain")),
-            IcaoRegistryRange(0x440000, 0x447FFF, RegistryCountry("AT", "Austria")),
-            IcaoRegistryRange(0x448000, 0x44FFFF, RegistryCountry("BE", "Belgium")),
-            IcaoRegistryRange(0x458000, 0x45FFFF, RegistryCountry("DK", "Denmark")),
-            IcaoRegistryRange(0x460000, 0x467FFF, RegistryCountry("FI", "Finland")),
-            IcaoRegistryRange(0x468000, 0x46FFFF, RegistryCountry("GR", "Greece")),
-            IcaoRegistryRange(0x480000, 0x487FFF, RegistryCountry("NL", "Netherlands")),
-            IcaoRegistryRange(0x4B0000, 0x4B7FFF, RegistryCountry("CH", "Switzerland")),
-            IcaoRegistryRange(0x4B8000, 0x4BFFFF, RegistryCountry("TR", "Turkiye")),
-            IcaoRegistryRange(0x7C0000, 0x7FFFFF, RegistryCountry("AU", "Australia")),
-            IcaoRegistryRange(0x840000, 0x87FFFF, RegistryCountry("JP", "Japan"))
-        )
-        val IMAGE_URL_PATTERN = Regex("\\.(jpg|jpeg|png|webp)(\\?|$)", RegexOption.IGNORE_CASE)
-        val USAGE_DAY_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE", Locale.US)
-        val USAGE_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d", Locale.US)
-        const val IMPACT_SCORE_MIN_KG_CO2_PER_HOUR = 20.0
-        const val IMPACT_SCORE_MAX_KG_CO2_PER_HOUR = 20000.0
-
-        val IMPACT_PISTON_SINGLE = ImpactProfile(
-            label = "Piston general aviation",
-            examples = "C172/SR22/PA-28/PA-44",
-            fuel = ImpactFuel.AVGAS,
-            lowGallonsPerHour = 8.0,
-            highGallonsPerHour = 18.0,
-            cruiseKnots = 125.0,
-            confidence = "Medium: type class is supported, exact engine/fuel flow is unavailable."
-        )
-        val IMPACT_PISTON_ROTOR = ImpactProfile(
-            label = "Piston rotorcraft",
-            examples = "R22/R44",
-            fuel = ImpactFuel.AVGAS,
-            lowGallonsPerHour = 10.0,
-            highGallonsPerHour = 22.0,
-            cruiseKnots = 95.0,
-            confidence = "Medium-low: rotorcraft fuel flow varies strongly by engine and mission."
-        )
-        val IMPACT_TURBINE_ROTOR = ImpactProfile(
-            label = "Turbine rotorcraft",
-            examples = "H60/AW139/S-76",
-            fuel = ImpactFuel.JET,
-            lowGallonsPerHour = 60.0,
-            highGallonsPerHour = 220.0,
-            cruiseKnots = 130.0,
-            confidence = "Medium-low: rotorcraft fuel flow varies strongly by engine and mission."
-        )
-        val IMPACT_TURBOPROP = ImpactProfile(
-            label = "Turboprop or commuter aircraft",
-            examples = "PC-12/C208/B350",
-            fuel = ImpactFuel.JET,
-            lowGallonsPerHour = 40.0,
-            highGallonsPerHour = 160.0,
-            cruiseKnots = 250.0,
-            confidence = "Medium: broad turbine-prop benchmark, not exact aircraft fuel flow."
-        )
-        val IMPACT_LIGHT_JET = ImpactProfile(
-            label = "Business or light jet",
-            examples = "Citation/Phenom/Learjet",
-            fuel = ImpactFuel.JET,
-            lowGallonsPerHour = 90.0,
-            highGallonsPerHour = 350.0,
-            cruiseKnots = 410.0,
-            confidence = "Medium: type class is supported, exact engine/fuel flow is unavailable."
-        )
-        val IMPACT_REGIONAL = ImpactProfile(
-            label = "Regional airline aircraft",
-            examples = "CRJ/E175/Dash 8",
-            fuel = ImpactFuel.JET,
-            lowGallonsPerHour = 220.0,
-            highGallonsPerHour = 650.0,
-            cruiseKnots = 430.0,
-            confidence = "Medium: class benchmark only; load factor and route phase are unavailable."
-        )
-        val IMPACT_NARROW_BODY = ImpactProfile(
-            label = "Large narrow-body airliner",
-            examples = "A320/B737/A321",
-            fuel = ImpactFuel.JET,
-            lowGallonsPerHour = 550.0,
-            highGallonsPerHour = 950.0,
-            cruiseKnots = 455.0,
-            confidence = "Medium: class benchmark only; load factor and route phase are unavailable."
-        )
-        val IMPACT_HEAVY = ImpactProfile(
-            label = "Heavy transport or wide-body aircraft",
-            examples = "B777/A350/C-17",
-            fuel = ImpactFuel.JET,
-            lowGallonsPerHour = 1200.0,
-            highGallonsPerHour = 3200.0,
-            cruiseKnots = 485.0,
-            confidence = "Medium-low: heavy-aircraft fuel flow depends heavily on model, weight, and mission."
-        )
-        val IMPACT_TACTICAL_JET = ImpactProfile(
-            label = "High-performance tactical jet",
-            examples = "F-16/F-18/F-35/T-38",
-            fuel = ImpactFuel.JET,
-            lowGallonsPerHour = 700.0,
-            highGallonsPerHour = 2200.0,
-            cruiseKnots = 480.0,
-            confidence = "Low: military mission profile and power setting are unavailable."
-        )
-
-        val IMPACT_SOURCE_LABELS = listOf("EIA CO2", "EPA Hub", "ICAO", "FAA AEDT", "EPA Lead")
-        val IMPACT_SOURCE_URLS = listOf(
-            "https://www.eia.gov/environment/emissions/co2_vol_mass.php",
-            "https://www.epa.gov/climateleadership/ghg-emission-factors-hub",
-            "https://www.icao.int/environmental-protection/environmental-tools/icec",
-            "https://aedt.faa.gov/",
-            "https://www.epa.gov/regulations-emissions-vehicles-and-engines/regulations-lead-emissions-aircraft"
-        )
-
-        val SMALL_PISTON_IMPACT_PREFIXES = listOf(
-            "AA5", "BE23", "BE33", "BE35", "BE36", "BE55", "BE56", "BE58", "BE76",
-            "C150", "C152", "C162", "C170", "C172", "C175", "C177", "C180", "C182",
-            "C185", "C206", "C207", "C210", "C310", "C320", "C337", "C340", "C402",
-            "C414", "C421", "DA40", "DA42", "GA7", "M20P", "M20T", "P28A", "PA23",
-            "PA24", "PA28", "PA30", "PA31", "PA32", "PA34", "PA38", "PA44", "PA46",
-            "SR20", "SR22"
-        )
-        val SMALL_PISTON_IMPACT_TEXT = listOf(
-            "CESSNA 150", "CESSNA 152", "CESSNA 172", "CESSNA 182", "CESSNA 206",
-            "CESSNA 310", "CESSNA 340", "CESSNA 402", "CESSNA 414", "CESSNA 421",
-            "PIPER PA-28", "PIPER PA28", "PIPER PA-32", "PIPER PA32", "PIPER PA-34",
-            "PIPER PA34", "PIPER PA-44", "PIPER PA44", "PA-44-180", "PIPER SEMINOLE",
-            "PIPER CHEROKEE", "PIPER ARCHER", "PIPER AZTEC", "PIPER NAVAJO",
-            "CIRRUS SR20", "CIRRUS SR22", "DIAMOND DA40", "DIAMOND DA42",
-            "BEECH BONANZA", "BEECH BARON", "BEECHCRAFT BARON", "GRUMMAN TIGER",
-            "MOONEY M20"
-        )
-        val PISTON_ROTOR_IMPACT_PREFIXES = listOf("R22", "R44")
-        val PISTON_ROTOR_IMPACT_TEXT = listOf("ROBINSON R22", "ROBINSON R44")
-        val TURBINE_ROTOR_IMPACT_PREFIXES = listOf(
-            "H60", "AS3", "AS5", "EC30", "EC35", "EC45", "B06", "B407", "B429", "S76", "S92", "A109", "A139", "AW13"
-        )
-        val TURBINE_ROTOR_IMPACT_TEXT = listOf(
-            "BLACK HAWK", "SIKORSKY S-76", "SIKORSKY S-92", "AW139", "BELL 407", "BELL 429",
-            "EUROCOPTER", "AIRBUS HELICOPTERS"
-        )
-        val TURBOPROP_IMPACT_PREFIXES = listOf("C208", "PC12", "TBM", "B350", "BE20", "BE30", "P46T", "DHC6")
-        val TURBOPROP_IMPACT_TEXT = listOf("CARAVAN", "PC-12", "KING AIR", "TBM", "TWIN OTTER")
-        val LIGHT_JET_IMPACT_PREFIXES = listOf("C25", "C510", "C52", "C55", "C56", "C68", "E50", "E55", "E545", "GLF", "H25", "LJ", "PRM", "SF50", "CL30")
-        val LIGHT_JET_IMPACT_TEXT = listOf("CITATION", "PHENOM", "LEARJET", "GULFSTREAM", "PILATUS PC-24", "VISION JET", "CHALLENGER 300")
-        val REGIONAL_IMPACT_PREFIXES = listOf("AT4", "AT7", "CRJ", "DH8", "E17", "E19", "E70", "E75", "F70", "F90", "SB20")
-        val REGIONAL_IMPACT_TEXT = listOf("CRJ", "EMBRAER 170", "EMBRAER 175", "DASH 8", "ATR 42", "ATR 72", "SAAB 2000")
-        val NARROW_BODY_IMPACT_PREFIXES = listOf("A19", "A20", "A21", "A30", "A31", "A32", "B37", "B38", "B39", "B70", "B71", "B72", "B73", "B75", "B76", "BCS", "MD8", "MD9")
-        val NARROW_BODY_IMPACT_TEXT = listOf("AIRBUS A320", "AIRBUS A321", "BOEING 737", "BOEING 757", "BOEING 767", "A220", "737 MAX")
-        val HEAVY_IMPACT_PREFIXES = listOf("A33", "A34", "A35", "A38", "B74", "B77", "B78", "DC10", "MD11", "A124", "IL76")
-        val HEAVY_IMPACT_TEXT = listOf("A330", "A340", "A350", "A380", "747", "777", "787", "MD-11", "C-17", "C-5", "IL-76", "AN-124")
-        val MILITARY_TRANSPORT_IMPACT_PREFIXES = listOf("C17", "C5", "C130", "A400", "K35", "KC10", "R135")
-        val MILITARY_TRANSPORT_IMPACT_TEXT = listOf("GLOBEMASTER", "GALAXY", "HERCULES", "ATLAS", "STRATOTANKER", "EXTENDER")
-        val TACTICAL_JET_IMPACT_PREFIXES = listOf("A10", "F15", "F16", "F18", "F22", "F35", "T38", "EUFI", "TOR")
-        val TACTICAL_JET_IMPACT_TEXT = listOf("F-15", "F-16", "F-18", "F-22", "F-35", "T-38", "TYPHOON", "TORNADO", "WARTHOG")
-
-        val HEAVY_SIZE_TYPE_PREFIXES = listOf(
-            "A34",
-            "A35",
-            "A38",
-            "B74",
-            "B77",
-            "B78",
-            "C5",
-            "C17",
-            "DC10",
-            "MD11"
-        )
-        val LARGE_AIRLINER_SIZE_TYPE_PREFIXES = listOf(
-            "A30",
-            "A31",
-            "A32",
-            "A33",
-            "B70",
-            "B71",
-            "B72",
-            "B73",
-            "B75",
-            "B76",
-            "B79"
-        )
-        val REGIONAL_SIZE_TYPE_PREFIXES = listOf(
-            "AT4",
-            "AT7",
-            "BCS",
-            "CRJ",
-            "DH8",
-            "E17",
-            "E19",
-            "E70",
-            "E75",
-            "F70",
-            "F90"
-        )
-        val LIGHT_JET_SIZE_TYPE_PREFIXES = listOf(
-            "C25",
-            "C55",
-            "C56",
-            "E50",
-            "E55",
-            "GLF",
-            "LJ",
-            "PRM",
-            "SF50"
-        )
-        val SMALL_GENERAL_AVIATION_SIZE_TYPE_PREFIXES = listOf(
-            "BE23",
-            "BE35",
-            "BE36",
-            "C15",
-            "C17",
-            "C18",
-            "C19",
-            "C20",
-            "C21",
-            "DA40",
-            "DA42",
-            "P28",
-            "PA2",
-            "SR20",
-            "SR22"
-        )
-        val AIRLINER_TYPE_PREFIXES = listOf(
-            "A19",
-            "A20",
-            "A21",
-            "A30",
-            "A31",
-            "A32",
-            "A33",
-            "A34",
-            "A35",
-            "A38",
-            "AT4",
-            "AT7",
-            "B37",
-            "B38",
-            "B39",
-            "B70",
-            "B71",
-            "B72",
-            "B73",
-            "B74",
-            "B75",
-            "B76",
-            "B77",
-            "B78",
-            "BCS",
-            "CRJ",
-            "DH8",
-            "E17",
-            "E19",
-            "E29",
-            "E70",
-            "E75",
-            "F70",
-            "F90",
-            "MD8",
-            "MD9"
-        )
         val MILITARY_AERODROME_KEYWORDS = listOf(
             "AIR FORCE",
             "AFB",

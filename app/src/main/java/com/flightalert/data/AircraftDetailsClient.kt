@@ -1,5 +1,6 @@
 ﻿package com.flightalert.data
 
+import android.util.Log
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URLEncoder
@@ -50,6 +51,19 @@ class AircraftDetailsClient(private val userAgent: String) {
         val routeCodes = route?.optStringOrNull("route")?.split("-")?.takeIf { it.size >= 2 }
         val origin = adsbRoute?.origin ?: routeCodes?.firstOrNull()?.let { fetchAirport(it) }
         val destination = adsbRoute?.destination ?: routeCodes?.lastOrNull()?.let { fetchAirport(it) }
+        val routeSource = when {
+            adsbRoute != null -> AircraftRouteSource.ADSBDB_CALLSIGN
+            routeCodes != null -> AircraftRouteSource.HEXDB_CALLSIGN
+            else -> null
+        }
+        if (cleanCallsign.isNotEmpty()) {
+            Log.d(
+                TAG,
+                "Route lookup hex=$normalizedHex callsign=$cleanCallsign " +
+                    "adsb=${adsbRoute?.route ?: "none"} hexdb=${route?.optStringOrNull("route") ?: "none"} " +
+                    "origin=${origin?.icao ?: "none"} destination=${destination?.icao ?: "none"}"
+            )
+        }
         val feedType = airplanesLive?.description
         val apiManufacturer = faa?.manufacturer ?: adsbAircraft?.manufacturer ?: aircraft?.optStringOrNull("Manufacturer")
         val apiType = faa?.model ?: adsbAircraft?.type ?: aircraft?.optStringOrNull("Type")
@@ -84,6 +98,7 @@ class AircraftDetailsClient(private val userAgent: String) {
             operatorCode = adsbAircraft?.operatorCode ?: aircraft?.optStringOrNull("OperatorFlagCode") ?: airplanesLive?.operatorCode,
             route = adsbRoute?.route ?: route?.optStringOrNull("route"),
             routeUpdatedEpochSec = route?.optLongOrNull("updatetime"),
+            routeSource = routeSource,
             originAirport = origin,
             destinationAirport = destination
         ).also { cacheDetails(cacheKey, it) }
@@ -121,6 +136,7 @@ class AircraftDetailsClient(private val userAgent: String) {
             operatorCode = operatorCode,
             route = null,
             routeUpdatedEpochSec = null,
+            routeSource = null,
             originAirport = null,
             destinationAirport = null
         )
@@ -307,7 +323,10 @@ class AircraftDetailsClient(private val userAgent: String) {
         val route = fetchJson("https://api.adsbdb.com/v0/callsign/$encoded")
             ?.optJSONObject("response")
             ?.optJSONObject("flightroute")
-            ?: return null
+            ?: run {
+                Log.d(TAG, "ADSBdb route unavailable callsign=${callsign.trim()}")
+                return null
+            }
         val origin = route.optJSONObject("origin")?.toAdsbDbAirport()
         val destination = route.optJSONObject("destination")?.toAdsbDbAirport()
         if (origin == null && destination == null) return null
@@ -523,15 +542,6 @@ private fun nNumberSingleSuffix(offset: Int): String {
     return if (offset <= 0) "" else N_NUMBER_ALPHABET[offset - 1].toString()
 }
 
-data class FaaRegistryRecord(
-    val registration: String,
-    val manufacturer: String?,
-    val model: String?,
-    val manufacturedYear: String?,
-    val registeredOwner: String?,
-    val sourceName: String
-)
-
 private data class AdsbDbAircraftRecord(
     val registration: String?,
     val manufacturer: String?,
@@ -570,32 +580,6 @@ private data class CachedDetails(
     val storedAtMs: Long
 )
 
-data class AircraftDetails(
-    val icao24: String,
-    val registration: String?,
-    val manufacturer: String?,
-    val type: String?,
-    val typeCode: String?,
-    val owner: String?,
-    val manufacturedYear: String?,
-    val registrySource: String?,
-    val operatorCode: String?,
-    val route: String?,
-    val routeUpdatedEpochSec: Long?,
-    val originAirport: AirportDetails?,
-    val destinationAirport: AirportDetails?
-)
-
-data class AirportDetails(
-    val icao: String,
-    val iata: String?,
-    val name: String?,
-    val countryCode: String?,
-    val regionName: String?,
-    val latitude: Double?,
-    val longitude: Double?
-)
-
 private data class RouteLookup(
     val route: String?,
     val origin: AirportDetails?,
@@ -631,6 +615,7 @@ private const val US_N_NUMBER_ICAO_START = 0xA00001L
 private const val HTTP_TOO_MANY_REQUESTS = 429
 private const val DETAILS_CACHE_MAX_AGE_MS = 10L * 60L * 1000L
 private const val DETAILS_CACHE_MAX_ENTRIES = 128
+private const val TAG = "FlightAlert"
 private const val US_N_NUMBER_ICAO_END = 0xADF7C7L
 private const val FIRST_N_NUMBER_STRIDE = 101711
 private const val SECOND_N_NUMBER_STRIDE = 10111

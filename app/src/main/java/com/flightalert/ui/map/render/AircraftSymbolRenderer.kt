@@ -1,0 +1,268 @@
+package com.flightalert.ui.map.render
+
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import com.flightalert.ui.map.model.ScreenPoint
+import com.flightalert.ui.map.symbols.AircraftSymbol
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+
+object AircraftSymbolRenderer {
+    fun draw(
+        canvas: Canvas,
+        symbol: AircraftSymbol,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        when (symbol) {
+            AircraftSymbol.ROTORCRAFT -> drawRotorcraft(canvas, progress, paint, strokePaint, dp)
+            AircraftSymbol.GLIDER -> drawGlider(canvas, progress, paint, strokePaint, dp)
+            AircraftSymbol.UAV -> drawUav(canvas, progress, paint, strokePaint, dp)
+            AircraftSymbol.SURFACE -> drawSurface(canvas, progress, paint, strokePaint, dp)
+            AircraftSymbol.AIRLINER -> drawAirliner(canvas, progress, paint, strokePaint, dp)
+            AircraftSymbol.GENERAL_AVIATION -> drawGeneralAviation(canvas, progress, paint, strokePaint, dp)
+        }
+    }
+
+    private fun drawGeneralAviation(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        drawMorphedPolygon(
+            canvas = canvas,
+            target = listOf(
+                ScreenPoint(0f, -17f),
+                ScreenPoint(3.2f, -4.2f),
+                ScreenPoint(17f, 0.8f),
+                ScreenPoint(15.2f, 4.4f),
+                ScreenPoint(3.3f, 3.4f),
+                ScreenPoint(2.2f, 13.8f),
+                ScreenPoint(8.4f, 17.2f),
+                ScreenPoint(0f, 12.7f),
+                ScreenPoint(-8.4f, 17.2f),
+                ScreenPoint(-2.2f, 13.8f),
+                ScreenPoint(-3.3f, 3.4f),
+                ScreenPoint(-15.2f, 4.4f),
+                ScreenPoint(-17f, 0.8f),
+                ScreenPoint(-3.2f, -4.2f)
+            ),
+            progress = progress,
+            paint = paint,
+            strokePaint = strokePaint,
+            dp = dp
+        )
+    }
+
+    private fun drawAirliner(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val p = progress.coerceIn(0f, 1f)
+        drawMorphedPolygon(
+            canvas = canvas,
+            target = listOf(
+                ScreenPoint(0f, -21f),
+                ScreenPoint(5.5f, -4.8f),
+                ScreenPoint(23.5f, 0.8f),
+                ScreenPoint(21.5f, 5.8f),
+                ScreenPoint(7.2f, 6.2f),
+                ScreenPoint(5.1f, 16.5f),
+                ScreenPoint(13.5f, 21f),
+                ScreenPoint(2.8f, 17.2f),
+                ScreenPoint(0f, 13.5f),
+                ScreenPoint(-2.8f, 17.2f),
+                ScreenPoint(-13.5f, 21f),
+                ScreenPoint(-5.1f, 16.5f),
+                ScreenPoint(-7.2f, 6.2f),
+                ScreenPoint(-21.5f, 5.8f),
+                ScreenPoint(-23.5f, 0.8f),
+                ScreenPoint(-5.5f, -4.8f)
+            ),
+            progress = p,
+            paint = paint,
+            strokePaint = strokePaint,
+            dp = dp
+        )
+
+        val engine = smoothStep(0.48f, 1f, p)
+        if (engine > 0f) {
+            canvas.drawCircle(-dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), strokePaint)
+            canvas.drawCircle(dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), strokePaint)
+        }
+    }
+
+    private fun drawRotorcraft(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val p = progress.coerceIn(0f, 1f)
+        val body = smoothStep(0f, 0.55f, p)
+        val rotor = smoothStep(0.25f, 1f, p)
+        val tail = smoothStep(0.45f, 1f, p)
+        val bodyRect = RectF(-dp(4f + 4f * body), -dp(4f + 3f * body), dp(4f + 5f * body), dp(4f + 4f * body))
+        canvas.drawOval(bodyRect, paint)
+        canvas.drawOval(bodyRect, strokePaint)
+        strokePaint.strokeWidth = dp(2.5f)
+        canvas.drawLine(-dp(5f + 19f * rotor), 0f, dp(5f + 19f * rotor), 0f, strokePaint)
+        canvas.drawLine(0f, -dp(5f + 17f * rotor), 0f, dp(5f + 17f * rotor), strokePaint)
+        strokePaint.strokeWidth = dp(2f)
+        canvas.drawLine(dp(5f + 4f * body), dp(1f), dp(7f + 16f * tail), dp(4f + 5f * tail), strokePaint)
+        canvas.drawLine(dp(8f + 13f * tail), dp(3f + 2f * tail), dp(9f + 16f * tail), dp(5f + 8f * tail), strokePaint)
+        strokePaint.strokeWidth = dp(1.2f)
+    }
+
+    private fun drawGlider(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        drawMorphedPolygon(
+            canvas = canvas,
+            target = listOf(
+                ScreenPoint(0f, -16f),
+                ScreenPoint(3f, 2f),
+                ScreenPoint(27f, 5f),
+                ScreenPoint(4f, 8f),
+                ScreenPoint(1.8f, 17f),
+                ScreenPoint(-1.8f, 17f),
+                ScreenPoint(-4f, 8f),
+                ScreenPoint(-27f, 5f),
+                ScreenPoint(-3f, 2f)
+            ),
+            progress = progress,
+            paint = paint,
+            strokePaint = strokePaint,
+            dp = dp
+        )
+    }
+
+    private fun drawUav(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val path = Path()
+        val p = progress.coerceIn(0f, 1f)
+        val body = smoothStep(0f, 0.55f, p)
+        val arms = smoothStep(0.2f, 1f, p)
+        val rotors = smoothStep(0.55f, 1f, p)
+        path.moveTo(0f, -dp(5f + 8f * body))
+        path.lineTo(dp(3f + 5f * body), 0f)
+        path.lineTo(0f, dp(5f + 8f * body))
+        path.lineTo(-dp(3f + 5f * body), 0f)
+        path.close()
+        canvas.drawPath(path, paint)
+        canvas.drawPath(path, strokePaint)
+        strokePaint.strokeWidth = dp(2f)
+        val armInner = dp(4f + 2f * body)
+        val armOuter = dp(7f + 11f * arms)
+        canvas.drawLine(-armInner, -armInner, -armOuter, -armOuter, strokePaint)
+        canvas.drawLine(armInner, -armInner, armOuter, -armOuter, strokePaint)
+        canvas.drawLine(-armInner, armInner, -armOuter, armOuter, strokePaint)
+        canvas.drawLine(armInner, armInner, armOuter, armOuter, strokePaint)
+        listOf(
+            -dp(8f + 12f * arms) to -dp(8f + 12f * arms),
+            dp(8f + 12f * arms) to -dp(8f + 12f * arms),
+            -dp(8f + 12f * arms) to dp(8f + 12f * arms),
+            dp(8f + 12f * arms) to dp(8f + 12f * arms)
+        ).forEach { (x, y) ->
+            canvas.drawCircle(x, y, dp(1.5f + 3.5f * rotors), paint)
+            canvas.drawCircle(x, y, dp(1.5f + 3.5f * rotors), strokePaint)
+            canvas.drawLine(x - dp(5f * rotors), y, x + dp(5f * rotors), y, strokePaint)
+        }
+        strokePaint.strokeWidth = dp(1.2f)
+    }
+
+    private fun drawSurface(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val p = progress.coerceIn(0f, 1f)
+        val body = smoothStep(0f, 0.6f, p)
+        val gear = smoothStep(0.55f, 1f, p)
+        drawMorphedPolygon(
+            canvas = canvas,
+            target = listOf(
+                ScreenPoint(0f, -15f),
+                ScreenPoint(5f, -4f),
+                ScreenPoint(18f, 1f),
+                ScreenPoint(15f, 6f),
+                ScreenPoint(4f, 4f),
+                ScreenPoint(2f, 13f),
+                ScreenPoint(-2f, 13f),
+                ScreenPoint(-4f, 4f),
+                ScreenPoint(-15f, 6f),
+                ScreenPoint(-18f, 1f),
+                ScreenPoint(-5f, -4f)
+            ),
+            progress = p,
+            paint = paint,
+            strokePaint = strokePaint,
+            dp = dp
+        )
+        strokePaint.strokeWidth = dp(2f)
+        canvas.drawLine(-dp(5f + 9f * gear), dp(8f + 10f * body), dp(5f + 9f * gear), dp(8f + 10f * body), strokePaint)
+        canvas.drawCircle(-dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), strokePaint)
+        canvas.drawCircle(dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), strokePaint)
+        strokePaint.strokeWidth = dp(1.2f)
+    }
+
+    private fun drawMorphedPolygon(
+        canvas: Canvas,
+        target: List<ScreenPoint>,
+        progress: Float,
+        paint: Paint,
+        strokePaint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val path = Path()
+        val p = smoothStep(0f, 1f, progress.coerceIn(0f, 1f))
+        target.forEachIndexed { index, point ->
+            val angle = atan2(point.y.toDouble(), point.x.toDouble())
+            val startX = (cos(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
+            val startY = (sin(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
+            val x = lerp(startX, point.x, p)
+            val y = lerp(startY, point.y, p)
+            if (index == 0) {
+                path.moveTo(dp(x), dp(y))
+            } else {
+                path.lineTo(dp(x), dp(y))
+            }
+        }
+        path.close()
+        canvas.drawPath(path, paint)
+        canvas.drawPath(path, strokePaint)
+    }
+
+    private fun smoothStep(edge0: Float, edge1: Float, value: Float): Float {
+        val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
+    private fun lerp(start: Float, end: Float, progress: Float): Float {
+        return start + (end - start) * progress.coerceIn(0f, 1f)
+    }
+
+    private const val AIRCRAFT_MORPH_SEED_RADIUS_DP = 4f
+}
