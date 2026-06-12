@@ -16,28 +16,28 @@ import com.flightalert.ui.map.FlightMapView
 
 // Activity stays intentionally thin: permissions, lifecycle, and the single custom map surface.
 class MainActivity : ComponentActivity() {
-    private var flightMapView: FlightMapView? = null
-    private var globeWebAircraftSource: GlobeWebAircraftSource? = null
-    private val locationPermissionLauncher = registerForActivityResult(
+    private var flight_map_view: FlightMapView? = null
+    private var globe_web_aircraft_source: GlobeWebAircraftSource? = null
+    private val location_permission_launcher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        flightMapView?.setLocationPermissionGranted(hasLocationPermission())
-        updateAlertService()
+        flight_map_view?.set_location_permission_granted(has_location_permission())
+        update_alert_service()
     }
-    private val notificationPermissionLauncher = registerForActivityResult(
+    private val notification_permission_launcher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        updateAlertService()
+        update_alert_service()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        configureSystemBars()
+        configure_system_bars()
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (flightMapView?.handleBackPress() == true) return
+                    if (flight_map_view?.handle_back_press() == true) return
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
                     isEnabled = true
@@ -45,63 +45,63 @@ class MainActivity : ComponentActivity() {
             }
         )
 
-        val globeSource = GlobeWebAircraftSource(this, APP_USER_AGENT)
-        globeSource.setEnabled(
-            FlightAlertSettings.readAircraftFeedMode(this).usesGlobe
+        val globe_source = GlobeWebAircraftSource(this, APP_USER_AGENT)
+        globe_source.set_enabled(
+            FlightAlertSettings.read_aircraft_feed_mode(this).uses_globe
         )
-        globeWebAircraftSource = globeSource
-        val view = FlightMapView(this, globeSource)
+        globe_web_aircraft_source = globe_source
+        val view = FlightMapView(this, globe_source)
         view.keepScreenOn = true
-        flightMapView = view
+        flight_map_view = view
         val root = FrameLayout(this).apply {
             addView(
-                globeSource.webView,
+                globe_source.web_view,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             )
             addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
         setContentView(root)
         view.requestFocus()
-        requestLocationPermissionIfNeeded()
-        requestNotificationPermissionIfNeeded()
+        request_location_permission_if_needed()
+        request_notification_permission_if_needed()
     }
 
     override fun onResume() {
         super.onResume()
-        configureSystemBars()
-        requestLocationPermissionIfNeeded()
-        globeWebAircraftSource?.start()
-        flightMapView?.start()
-        updateAlertService()
+        configure_system_bars()
+        request_location_permission_if_needed()
+        globe_web_aircraft_source?.start()
+        flight_map_view?.start()
+        update_alert_service()
     }
 
     override fun onPause() {
-        flightMapView?.stop()
-        globeWebAircraftSource?.stop()
+        flight_map_view?.stop()
+        globe_web_aircraft_source?.stop()
         super.onPause()
     }
 
     override fun onDestroy() {
-        globeWebAircraftSource?.destroy()
-        globeWebAircraftSource = null
+        globe_web_aircraft_source?.destroy()
+        globe_web_aircraft_source = null
         super.onDestroy()
     }
 
     @Suppress("DEPRECATION")
-    private fun configureSystemBars() {
+    private fun configure_system_bars() {
         // The map view handles insets; opaque bars keep Android chrome from blending into app UI.
-        val systemBarColor = FlightAlertSettings.readVisualTheme(this).colors.systemBar
-        window.statusBarColor = systemBarColor
-        window.navigationBarColor = systemBarColor
+        val system_bar_color = FlightAlertSettings.read_visual_theme(this).colors.system_bar
+        window.statusBarColor = system_bar_color
+        window.navigationBarColor = system_bar_color
         window.isStatusBarContrastEnforced = false
         window.isNavigationBarContrastEnforced = false
     }
 
-    private fun requestLocationPermissionIfNeeded() {
-        val granted = hasLocationPermission()
-        flightMapView?.setLocationPermissionGranted(granted)
+    private fun request_location_permission_if_needed() {
+        val granted = has_location_permission()
+        flight_map_view?.set_location_permission_granted(granted)
         if (!granted) {
-            locationPermissionLauncher.launch(
+            location_permission_launcher.launch(
                 arrayOf(
                     Manifest.permission.ACCESS_FINE_LOCATION,
                     Manifest.permission.ACCESS_COARSE_LOCATION
@@ -110,24 +110,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun hasLocationPermission(): Boolean {
+    private fun has_location_permission(): Boolean {
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun requestNotificationPermissionIfNeeded() {
+    private fun request_notification_permission_if_needed() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            notification_permission_launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
-    private fun updateAlertService() {
+    private fun update_alert_service() {
         val prefs = FlightAlertSettings.prefs(this)
         val enabled = prefs.getBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true) ||
             prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
-        if (enabled && hasLocationPermission()) {
+        if (enabled && has_location_permission()) {
             AircraftAlertService.start(this)
         } else {
             AircraftAlertService.stop(this)

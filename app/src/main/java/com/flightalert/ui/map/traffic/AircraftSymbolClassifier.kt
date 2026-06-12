@@ -1,6 +1,6 @@
-package com.flightalert.ui.map.symbols
+package com.flightalert.ui.map.traffic
 
-import com.flightalert.ui.map.model.Aircraft
+import com.flightalert.ui.map.Aircraft
 import java.util.Locale
 
 enum class AircraftSymbol {
@@ -13,20 +13,20 @@ enum class AircraftSymbol {
 }
 
 object AircraftSymbolClassifier {
-    fun symbolFor(aircraft: Aircraft): AircraftSymbol {
-        if (aircraft.onGround == true) return AircraftSymbol.SURFACE
+    fun symbol_for(aircraft: Aircraft): AircraftSymbol {
+        if (aircraft.on_ground == true) return AircraftSymbol.SURFACE
         return when (aircraft.category) {
             4, 5, 6 -> AircraftSymbol.AIRLINER
             8 -> AircraftSymbol.ROTORCRAFT
             9, 10 -> AircraftSymbol.GLIDER
             14 -> AircraftSymbol.UAV
             16, 17, 18, 19, 20 -> AircraftSymbol.SURFACE
-            else -> if (isAirlinerTypeCode(aircraft.typeCode)) AircraftSymbol.AIRLINER else AircraftSymbol.GENERAL_AVIATION
+            else -> if (is_airliner_type_code(aircraft.type_code)) AircraftSymbol.AIRLINER else AircraftSymbol.GENERAL_AVIATION
         }
     }
 
-    fun sizeMultiplier(aircraft: Aircraft, symbol: AircraftSymbol): Float {
-        val code = aircraft.typeCode?.uppercase(Locale.US)?.trim().orEmpty()
+    fun size_multiplier(aircraft: Aircraft, symbol: AircraftSymbol): Float {
+        val code = aircraft.type_code?.uppercase(Locale.US)?.trim().orEmpty()
         return when (symbol) {
             AircraftSymbol.AIRLINER -> when {
                 HEAVY_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.18f
@@ -46,8 +46,8 @@ object AircraftSymbolClassifier {
         }
     }
 
-    private fun isAirlinerTypeCode(typeCode: String?): Boolean {
-        val code = typeCode?.uppercase(Locale.US)?.trim() ?: return false
+    private fun is_airliner_type_code(type_code: String?): Boolean {
+        val code = type_code?.uppercase(Locale.US)?.trim() ?: return false
         return AIRLINER_TYPE_PREFIXES.any { code.startsWith(it) }
     }
 

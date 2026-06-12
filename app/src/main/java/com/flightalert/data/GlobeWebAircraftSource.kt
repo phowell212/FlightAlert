@@ -23,24 +23,24 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 // Experimental source: reads the normalized PlaneObject layer from the public Airplanes.Live globe page.
-class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
-    val webView: WebView = WebView(context)
+class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
+    val web_view: WebView = WebView(context)
 
     private val handler = Handler(Looper.getMainLooper())
     private var loaded = false
-    private var hostResumed = false
+    private var host_resumed = false
     private var running = false
 
     @Volatile
-    private var sourceEnabled = false
+    private var source_enabled = false
 
     @Volatile
     private var destroyed = false
 
     @Volatile
-    private var pendingViewport: GlobeViewport? = null
-    private var viewportGeneration = 0L
-    private var appliedViewportGeneration = 0L
+    private var pending_viewport: GlobeViewport? = null
+    private var viewport_generation = 0L
+    private var applied_viewport_generation = 0L
 
     @Volatile
     private var latest: GlobeSnapshot? = null
@@ -48,159 +48,159 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
     private val extractor = object : Runnable {
         override fun run() {
             if (!running) return
-            extractAircraft()
+            extract_aircraft()
             handler.postDelayed(this, EXTRACT_INTERVAL_MS)
         }
     }
 
     init {
-        configureWebView()
+        configure_web_view()
     }
 
     fun start() {
-        hostResumed = true
-        startIfAllowed()
+        host_resumed = true
+        start_if_allowed()
     }
 
     fun stop() {
-        hostResumed = false
-        stopActive(clearSnapshot = false, clearPage = false)
+        host_resumed = false
+        stop_active(clear_snapshot = false, clear_page = false)
     }
 
     fun destroy() {
         destroyed = true
-        stopActive(clearSnapshot = true, clearPage = true)
-        webView.destroy()
+        stop_active(clear_snapshot = true, clear_page = true)
+        web_view.destroy()
     }
 
-    fun setEnabled(enabled: Boolean) {
+    fun set_enabled(enabled: Boolean) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { setEnabled(enabled) }
+            handler.post { set_enabled(enabled) }
             return
         }
-        if (sourceEnabled == enabled) return
-        sourceEnabled = enabled
+        if (source_enabled == enabled) return
+        source_enabled = enabled
         if (enabled) {
-            webView.visibility = View.INVISIBLE
-            startIfAllowed()
+            web_view.visibility = View.INVISIBLE
+            start_if_allowed()
         } else {
-            stopActive(clearSnapshot = true, clearPage = true)
+            stop_active(clear_snapshot = true, clear_page = true)
         }
     }
 
-    fun updateViewport(bounds: FeedBounds, centerLat: Double, centerLon: Double, zoom: Double) {
-        if (!sourceEnabled || destroyed) return
+    fun update_viewport(bounds: FeedBounds, center_lat: Double, center_lon: Double, zoom: Double) {
+        if (!source_enabled || destroyed) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { updateViewport(bounds, centerLat, centerLon, zoom) }
+            handler.post { update_viewport(bounds, center_lat, center_lon, zoom) }
             return
         }
         val viewport = GlobeViewport(
             bounds = bounds,
-            centerLat = centerLat,
-            centerLon = centerLon,
+            center_lat = center_lat,
+            center_lon = center_lon,
             zoom = zoom.coerceIn(MIN_GLOBE_ZOOM, MAX_GLOBE_ZOOM),
-            generation = viewportGeneration
+            generation = viewport_generation
         )
-        val previous = pendingViewport
+        val previous = pending_viewport
         if (previous != null && previous.matches(viewport)) return
-        viewportGeneration += 1L
-        val next = viewport.copy(generation = viewportGeneration)
-        pendingViewport = next
+        viewport_generation += 1L
+        val next = viewport.copy(generation = viewport_generation)
+        pending_viewport = next
         latest = null
-        if (loaded && running) applyViewport(next)
+        if (loaded && running) apply_viewport(next)
     }
 
-    fun latestSnapshot(bounds: FeedBounds, ownLat: Double, ownLon: Double, exactSearch: String?): FeedResult? {
-        if (!sourceEnabled || destroyed) return null
-        val viewport = pendingViewport ?: return null
+    fun latest_snapshot(bounds: FeedBounds, own_lat: Double, own_lon: Double, exact_search: String?): FeedResult? {
+        if (!source_enabled || destroyed) return null
+        val viewport = pending_viewport ?: return null
         val snapshot = latest ?: return null
-        if (snapshot.viewportGeneration != viewport.generation) return null
-        if (SystemClock.elapsedRealtime() - snapshot.receivedElapsedMs > MAX_SNAPSHOT_AGE_MS) return null
-        if (snapshot.aircraft.isEmpty() && snapshot.partialCoverage) return null
-        val normalizedSearch = exactSearch?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }
-        val normalizedBounds = normalizeBounds(bounds)
+        if (snapshot.viewport_generation != viewport.generation) return null
+        if (SystemClock.elapsedRealtime() - snapshot.received_elapsed_ms > MAX_SNAPSHOT_AGE_MS) return null
+        if (snapshot.aircraft.isEmpty() && snapshot.partial_coverage) return null
+        val normalized_search = exact_search?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }
+        val normalized_bounds = normalize_bounds(bounds)
         val filtered = snapshot.aircraft
             .asSequence()
-            .filter { aircraft -> normalizedSearch == null || aircraft.matchesSearch(normalizedSearch) }
-            .filter { aircraft -> normalizedSearch != null || normalizedBounds.contains(aircraft.lat, aircraft.lon) }
-            .map { aircraft -> aircraft.withDistanceFrom(ownLat, ownLon) }
-            .sortedBy { it.distanceM }
+            .filter { aircraft -> normalized_search == null || aircraft.matches_search(normalized_search) }
+            .filter { aircraft -> normalized_search != null || normalized_bounds.contains(aircraft.lat, aircraft.lon) }
+            .map { aircraft -> aircraft.with_distance_from(own_lat, own_lon) }
+            .sortedBy { it.distance_m }
             .toList()
-        if (normalizedSearch != null && filtered.isEmpty()) return null
+        if (normalized_search != null && filtered.isEmpty()) return null
         return FeedResult(
             status = FeedStatus.OK,
             source = FeedSource.AIRPLANES_LIVE_GLOBE,
             aircraft = filtered,
-            epochSec = snapshot.epochSec,
-            queryCount = 0,
-            partialCoverage = snapshot.partialCoverage
+            epoch_sec = snapshot.epoch_sec,
+            query_count = 0,
+            partial_coverage = snapshot.partial_coverage
         )
     }
 
-    private fun startIfAllowed() {
-        if (destroyed || !sourceEnabled || !hostResumed || running) return
+    private fun start_if_allowed() {
+        if (destroyed || !source_enabled || !host_resumed || running) return
         running = true
-        webView.visibility = View.INVISIBLE
-        webView.onResume()
-        if (!loaded || webView.url?.startsWith(AirplanesLiveHttp.GLOBE_BASE_URL) != true) {
+        web_view.visibility = View.INVISIBLE
+        web_view.onResume()
+        if (!loaded || web_view.url?.startsWith(AirplanesLiveHttp.GLOBE_BASE_URL) != true) {
             loaded = false
-            webView.loadUrl("${AirplanesLiveHttp.GLOBE_BASE_URL}/")
+            web_view.loadUrl("${AirplanesLiveHttp.GLOBE_BASE_URL}/")
         } else {
-            pendingViewport?.let(::applyViewport)
+            pending_viewport?.let(::apply_viewport)
         }
         handler.removeCallbacks(extractor)
         handler.postDelayed(extractor, FIRST_EXTRACT_DELAY_MS)
     }
 
-    private fun stopActive(clearSnapshot: Boolean, clearPage: Boolean) {
+    private fun stop_active(clear_snapshot: Boolean, clear_page: Boolean) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { stopActive(clearSnapshot, clearPage) }
+            handler.post { stop_active(clear_snapshot, clear_page) }
             return
         }
         running = false
         handler.removeCallbacks(extractor)
-        webView.onPause()
-        if (clearSnapshot) {
+        web_view.onPause()
+        if (clear_snapshot) {
             latest = null
-            pendingViewport = null
-            viewportGeneration = 0L
-            appliedViewportGeneration = 0L
+            pending_viewport = null
+            viewport_generation = 0L
+            applied_viewport_generation = 0L
         }
-        if (clearPage && !destroyed) {
+        if (clear_page && !destroyed) {
             loaded = false
-            webView.stopLoading()
-            webView.loadUrl("about:blank")
-            webView.visibility = View.GONE
+            web_view.stopLoading()
+            web_view.loadUrl("about:blank")
+            web_view.visibility = View.GONE
         }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun configureWebView() {
-        webView.alpha = 0f
-        webView.visibility = View.GONE
-        webView.isClickable = false
-        webView.isFocusable = false
-        webView.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-        webView.settings.apply {
+    private fun configure_web_view() {
+        web_view.alpha = 0f
+        web_view.visibility = View.GONE
+        web_view.isClickable = false
+        web_view.isFocusable = false
+        web_view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        web_view.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = true
             loadsImagesAutomatically = false
             blockNetworkImage = true
-            userAgentString = AirplanesLiveHttp.browserUserAgent(userAgent)
+            userAgentString = AirplanesLiveHttp.browser_user_agent(user_agent)
         }
-        webView.webViewClient = object : WebViewClient() {
+        web_view.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
-                loaded = sourceEnabled && url.startsWith(AirplanesLiveHttp.GLOBE_BASE_URL)
-                pendingViewport?.takeIf { loaded }?.let(::applyViewport)
+                loaded = source_enabled && url.startsWith(AirplanesLiveHttp.GLOBE_BASE_URL)
+                pending_viewport?.takeIf { loaded }?.let(::apply_viewport)
             }
         }
     }
 
-    private fun applyViewport(viewport: GlobeViewport) {
+    private fun apply_viewport(viewport: GlobeViewport) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { applyViewport(viewport) }
+            handler.post { apply_viewport(viewport) }
             return
         }
         val script = String.format(
@@ -222,38 +222,38 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
               }
             })();
             """.trimIndent(),
-            viewport.centerLat,
-            viewport.centerLon,
+            viewport.center_lat,
+            viewport.center_lon,
             viewport.zoom,
-            viewport.centerLon,
-            viewport.centerLat,
+            viewport.center_lon,
+            viewport.center_lat,
             viewport.zoom
         )
-        webView.evaluateJavascript(script) { result ->
-            if (result == "true" && sourceEnabled && pendingViewport?.generation == viewport.generation) {
-                appliedViewportGeneration = viewport.generation
+        web_view.evaluateJavascript(script) { result ->
+            if (result == "true" && source_enabled && pending_viewport?.generation == viewport.generation) {
+                applied_viewport_generation = viewport.generation
             }
         }
     }
 
-    private fun extractAircraft() {
-        if (!sourceEnabled || !loaded || appliedViewportGeneration == 0L) return
+    private fun extract_aircraft() {
+        if (!source_enabled || !loaded || applied_viewport_generation == 0L) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { extractAircraft() }
+            handler.post { extract_aircraft() }
             return
         }
-        val generation = appliedViewportGeneration
-        webView.evaluateJavascript(EXTRACT_AIRCRAFT_JS) { value ->
-            parseSnapshot(value, generation)?.let { snapshot ->
-                if (sourceEnabled && pendingViewport?.generation == snapshot.viewportGeneration) {
+        val generation = applied_viewport_generation
+        web_view.evaluateJavascript(EXTRACT_AIRCRAFT_JS) { value ->
+            parse_snapshot(value, generation)?.let { snapshot ->
+                if (source_enabled && pending_viewport?.generation == snapshot.viewport_generation) {
                     latest = snapshot
                 }
-                Log.d(TAG, "Globe web source: ${snapshot.aircraft.size} aircraft, partial=${snapshot.partialCoverage}")
+                Log.d(TAG, "Globe web source: ${snapshot.aircraft.size} aircraft, partial=${snapshot.partial_coverage}")
             }
         }
     }
 
-    private fun parseSnapshot(value: String?, viewportGeneration: Long): GlobeSnapshot? {
+    private fun parse_snapshot(value: String?, viewport_generation: Long): GlobeSnapshot? {
         if (value.isNullOrBlank() || value == "null") return null
         return try {
             val token = JSONTokener(value).nextValue()
@@ -264,105 +264,105 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
             }
             val json = JSONObject(raw)
             if (!json.optBoolean("ready", false)) return null
-            val nowSec = json.optDoubleOrNull("now") ?: (System.currentTimeMillis() / 1000.0)
+            val now_sec = json.opt_double_or_null("now") ?: (System.currentTimeMillis() / 1000.0)
             val rows = json.optJSONArray("aircraft") ?: return null
             val parsed = mutableListOf<FeedAircraft>()
             for (index in 0 until rows.length()) {
                 val item = rows.optJSONObject(index) ?: continue
-                parseAircraft(item, nowSec)?.let { parsed += it }
+                parse_aircraft(item, now_sec)?.let { parsed += it }
             }
             GlobeSnapshot(
                 aircraft = parsed,
-                epochSec = nowSec,
-                receivedElapsedMs = SystemClock.elapsedRealtime(),
-                partialCoverage = !json.optBoolean("firstFetchDone", false) || json.optInt("pendingFetches", 0) > 0,
-                viewportGeneration = viewportGeneration
+                epoch_sec = now_sec,
+                received_elapsed_ms = SystemClock.elapsedRealtime(),
+                partial_coverage = !json.optBoolean("first_fetch_done", false) || json.optInt("pending_fetches", 0) > 0,
+                viewport_generation = viewport_generation
             )
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun parseAircraft(item: JSONObject, nowSec: Double): FeedAircraft? {
-        val lat = item.optDoubleOrNull("lat") ?: return null
-        val lon = item.optDoubleOrNull("lon") ?: return null
+    private fun parse_aircraft(item: JSONObject, now_sec: Double): FeedAircraft? {
+        val lat = item.opt_double_or_null("lat") ?: return null
+        val lon = item.opt_double_or_null("lon") ?: return null
         if (!lat.isFinite() || !lon.isFinite() || lat !in -90.0..90.0 || lon !in -180.0..180.0) return null
-        val hex = item.optStringOrNull("hex")?.trim()?.trimStart('~')?.lowercase(Locale.US) ?: return null
+        val hex = item.opt_string_or_null("hex")?.trim()?.trimStart('~')?.lowercase(Locale.US) ?: return null
         if (!MODE_S_OR_NON_ICAO.matches(hex)) return null
-        val positionTimeSec = item.optDoubleOrNull("positionTimeSec")
-        if (positionTimeSec != null && nowSec - positionTimeSec > MAX_POSITION_AGE_SECONDS) return null
-        val lastContactSec = item.optDoubleOrNull("lastContactSec")
+        val position_time_sec = item.opt_double_or_null("position_time_sec")
+        if (position_time_sec != null && now_sec - position_time_sec > MAX_POSITION_AGE_SECONDS) return null
+        val last_contact_sec = item.opt_double_or_null("last_contact_sec")
         val altitude = item.opt("altitude")
-        val onGround = altitude is String && altitude.equals("ground", ignoreCase = true)
-        val altitudeFeet = when (altitude) {
+        val on_ground = altitude is String && altitude.equals("ground", ignoreCase = true)
+        val altitude_feet = when (altitude) {
             is Number -> altitude.toDouble()
-            is String -> altitude.toDoubleOrNull() ?: if (onGround) 0.0 else null
+            is String -> altitude.toDoubleOrNull() ?: if (on_ground) 0.0 else null
             else -> null
         }
-        val registration = item.optStringOrNull("registration")
-        val callsign = item.optStringOrNull("flight") ?: registration ?: hex
-        val typeCode = item.optStringOrNull("typeCode")
+        val registration = item.opt_string_or_null("registration")
+        val callsign = item.opt_string_or_null("flight") ?: registration ?: hex
+        val type_code = item.opt_string_or_null("type_code")
         val metadata = AircraftMetadataSeed(
-            sourceName = FeedSource.AIRPLANES_LIVE_GLOBE.displayName,
+            source_name = FeedSource.AIRPLANES_LIVE_GLOBE.display_name,
             registration = registration,
-            manufacturer = item.optStringOrNull("manufacturer"),
-            type = item.optStringOrNull("description"),
-            typeCode = typeCode,
-            owner = item.optStringOrNull("ownerOperator"),
-            manufacturedYear = item.optStringOrNull("year")?.take(4),
-            operatorCode = item.optStringOrNull("operatorCode")
-        ).takeIf { it.hasDetails }
+            manufacturer = item.opt_string_or_null("manufacturer"),
+            type = item.opt_string_or_null("description"),
+            type_code = type_code,
+            owner = item.opt_string_or_null("owner_operator"),
+            manufactured_year = item.opt_string_or_null("year")?.take(4),
+            operator_code = item.opt_string_or_null("operator_code")
+        ).takeIf { it.has_details }
         return FeedAircraft(
             icao24 = hex,
             callsign = callsign,
             registration = registration,
-            typeCode = typeCode,
+            type_code = type_code,
             metadata = metadata,
-            dbFlags = item.optIntOrNull("dbFlags"),
+            db_flags = item.opt_int_or_null("db_flags"),
             lat = lat,
             lon = lon,
-            onGround = onGround,
-            altitudeM = altitudeFeet?.let { it / FEET_PER_METER },
-            velocityMs = item.optDoubleOrNull("speedKt")?.let { it * KNOTS_TO_METERS_PER_SECOND },
-            trackDeg = item.optDoubleOrNull("trackDeg"),
-            verticalRateMs = item.optDoubleOrNull("verticalRateFpm")?.let { it / FEET_PER_METER / 60.0 },
-            category = categoryFromGlobe(item.optStringOrNull("category"), item.optStringOrNull("typeCode")),
-            positionTimeSec = positionTimeSec,
-            lastContactSec = lastContactSec,
-            distanceM = 0.0
+            on_ground = on_ground,
+            altitude_m = altitude_feet?.let { it / FEET_PER_METER },
+            velocity_ms = item.opt_double_or_null("speed_kt")?.let { it * KNOTS_TO_METERS_PER_SECOND },
+            track_deg = item.opt_double_or_null("track_deg"),
+            vertical_rate_ms = item.opt_double_or_null("vertical_rate_fpm")?.let { it / FEET_PER_METER / 60.0 },
+            category = category_from_globe(item.opt_string_or_null("category"), item.opt_string_or_null("type_code")),
+            position_time_sec = position_time_sec,
+            last_contact_sec = last_contact_sec,
+            distance_m = 0.0
         )
     }
 
-    private fun FeedAircraft.withDistanceFrom(ownLat: Double, ownLon: Double): FeedAircraft {
-        return copy(distanceM = distanceMeters(ownLat, ownLon, lat, lon))
+    private fun FeedAircraft.with_distance_from(own_lat: Double, own_lon: Double): FeedAircraft {
+        return copy(distance_m = distance_meters(own_lat, own_lon, lat, lon))
     }
 
-    private fun FeedAircraft.matchesSearch(search: String): Boolean {
+    private fun FeedAircraft.matches_search(search: String): Boolean {
         return icao24.uppercase(Locale.US).contains(search) ||
             callsign.uppercase(Locale.US).replace(" ", "").contains(search.replace(" ", "")) ||
             registration?.uppercase(Locale.US)?.contains(search) == true
     }
 
     private fun GlobeBounds.contains(lat: Double, lon: Double): Boolean {
-        return lat in minLat..maxLat && lon in minLon..maxLon
+        return lat in min_lat..max_lat && lon in min_lon..max_lon
     }
 
-    private fun normalizeBounds(bounds: FeedBounds): GlobeBounds {
+    private fun normalize_bounds(bounds: FeedBounds): GlobeBounds {
         return GlobeBounds(
-            minLat = min(bounds.minLat, bounds.maxLat).coerceIn(-90.0, 90.0),
-            maxLat = max(bounds.minLat, bounds.maxLat).coerceIn(-90.0, 90.0),
-            minLon = min(bounds.minLon, bounds.maxLon).coerceIn(-180.0, 180.0),
-            maxLon = max(bounds.minLon, bounds.maxLon).coerceIn(-180.0, 180.0)
+            min_lat = min(bounds.min_lat, bounds.max_lat).coerceIn(-90.0, 90.0),
+            max_lat = max(bounds.min_lat, bounds.max_lat).coerceIn(-90.0, 90.0),
+            min_lon = min(bounds.min_lon, bounds.max_lon).coerceIn(-180.0, 180.0),
+            max_lon = max(bounds.min_lon, bounds.max_lon).coerceIn(-180.0, 180.0)
         )
     }
 
-    private fun categoryFromGlobe(category: String?, typeCode: String?): Int? {
+    private fun category_from_globe(category: String?, type_code: String?): Int? {
         val normalized = category?.trim()?.uppercase(Locale.US).orEmpty()
         if (normalized.startsWith("A7") || normalized.startsWith("B7")) return 8
         if (normalized.startsWith("B1")) return 9
         if (normalized.startsWith("B6")) return 14
         if (normalized.startsWith("C") || normalized.startsWith("D")) return 15
-        val type = typeCode?.trim()?.uppercase(Locale.US).orEmpty()
+        val type = type_code?.trim()?.uppercase(Locale.US).orEmpty()
         return when {
             type.startsWith("H") || type.startsWith("R") -> 8
             type.startsWith("GL") -> 9
@@ -373,35 +373,35 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
 
     private data class GlobeSnapshot(
         val aircraft: List<FeedAircraft>,
-        val epochSec: Double,
-        val receivedElapsedMs: Long,
-        val partialCoverage: Boolean,
-        val viewportGeneration: Long
+        val epoch_sec: Double,
+        val received_elapsed_ms: Long,
+        val partial_coverage: Boolean,
+        val viewport_generation: Long
     )
 
     private data class GlobeViewport(
         val bounds: FeedBounds,
-        val centerLat: Double,
-        val centerLon: Double,
+        val center_lat: Double,
+        val center_lon: Double,
         val zoom: Double,
         val generation: Long
     )
 
     private fun GlobeViewport.matches(other: GlobeViewport): Boolean {
-        return abs(centerLat - other.centerLat) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(centerLon - other.centerLon) < VIEWPORT_LAT_LON_EPSILON &&
+        return abs(center_lat - other.center_lat) < VIEWPORT_LAT_LON_EPSILON &&
+            abs(center_lon - other.center_lon) < VIEWPORT_LAT_LON_EPSILON &&
             abs(zoom - other.zoom) < VIEWPORT_ZOOM_EPSILON &&
-            abs(bounds.minLat - other.bounds.minLat) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(bounds.maxLat - other.bounds.maxLat) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(bounds.minLon - other.bounds.minLon) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(bounds.maxLon - other.bounds.maxLon) < VIEWPORT_LAT_LON_EPSILON
+            abs(bounds.min_lat - other.bounds.min_lat) < VIEWPORT_LAT_LON_EPSILON &&
+            abs(bounds.max_lat - other.bounds.max_lat) < VIEWPORT_LAT_LON_EPSILON &&
+            abs(bounds.min_lon - other.bounds.min_lon) < VIEWPORT_LAT_LON_EPSILON &&
+            abs(bounds.max_lon - other.bounds.max_lon) < VIEWPORT_LAT_LON_EPSILON
     }
 
     private data class GlobeBounds(
-        val minLat: Double,
-        val maxLat: Double,
-        val minLon: Double,
-        val maxLon: Double
+        val min_lat: Double,
+        val max_lat: Double,
+        val min_lon: Double,
+        val max_lon: Double
     )
 
     private companion object {
@@ -425,9 +425,9 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
                 if (!globe || !globe.planes) {
                   return JSON.stringify({ready:false, reason:"g.planes unavailable"});
                 }
-                var nowSec = (typeof now !== 'undefined') ? Number(now) : NaN;
-                if (!isFinite(nowSec) || nowSec <= 0) nowSec = Date.now() / 1000;
-                function truthyFlag(value) {
+                var now_sec = (typeof now !== 'undefined') ? Number(now) : NaN;
+                if (!isFinite(now_sec) || now_sec <= 0) now_sec = Date.now() / 1000;
+                function truthy_flag(value) {
                   if (value === true || value === 1) return true;
                   if (typeof value === "string") {
                     var normalized = value.trim().toLowerCase();
@@ -443,42 +443,42 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
                   var lon = Number(p.position[0]);
                   var lat = Number(p.position[1]);
                   if (!isFinite(lat) || !isFinite(lon)) continue;
-                  var positionTime = Number(p.position_time);
-                  var lastMessage = Number(p.last_message_time);
-                  var seenPos = isFinite(positionTime) ? nowSec - positionTime : Number(p.seen_pos);
-                  if (!isFinite(seenPos) || seenPos > 120) continue;
-                  var dbFlags = 0;
-                  if (truthyFlag(p.military)) dbFlags = dbFlags | 1;
-                  if (truthyFlag(p.pia)) dbFlags = dbFlags | 4;
-                  if (truthyFlag(p.ladd)) dbFlags = dbFlags | 8;
+                  var position_time = Number(p.position_time);
+                  var last_message = Number(p.last_message_time);
+                  var seen_pos = isFinite(position_time) ? now_sec - position_time : Number(p.seen_pos);
+                  if (!isFinite(seen_pos) || seen_pos > 120) continue;
+                  var db_flags = 0;
+                  if (truthy_flag(p.military)) db_flags = db_flags | 1;
+                  if (truthy_flag(p.pia)) db_flags = db_flags | 4;
+                  if (truthy_flag(p.ladd)) db_flags = db_flags | 8;
                   rows.push({
                     hex: String(p.icao || ""),
                     flight: p.flight || p.name || null,
                     registration: p.registration || null,
                     manufacturer: p.manufacturer || p.manufacturerName || null,
-                    typeCode: p.icaoType || null,
+                    type_code: p.icao_type || null,
                     description: p.desc || p.description || p.typeDescription || null,
                     category: p.category || null,
-                    ownerOperator: p.ownOp || p.ownerOperator || p.operator || p.owner || null,
-                    operatorCode: p.ownOpCode || p.operatorCode || null,
+                    owner_operator: p.ownOp || p.owner_operator || p.operator || p.owner || null,
+                    operator_code: p.ownOpCode || p.operator_code || null,
                     year: p.year || p.mfrYear || p.manufacturedYear || null,
-                    dbFlags: dbFlags,
+                    db_flags: db_flags,
                     lat: lat,
                     lon: lon,
                     altitude: p.altitude != null ? p.altitude : p.alt_baro,
-                    speedKt: p.gs != null ? p.gs : p.speed,
-                    trackDeg: p.track,
-                    verticalRateFpm: p.vert_rate != null ? p.vert_rate : (p.baro_rate != null ? p.baro_rate : p.geom_rate),
-                    positionTimeSec: isFinite(positionTime) ? positionTime : null,
-                    lastContactSec: isFinite(lastMessage) ? lastMessage : null,
-                    sourceType: p.dataSource || null
+                    speed_kt: p.gs != null ? p.gs : p.speed,
+                    track_deg: p.track,
+                    vertical_rate_fpm: p.vert_rate != null ? p.vert_rate : (p.baro_rate != null ? p.baro_rate : p.geom_rate),
+                    position_time_sec: isFinite(position_time) ? position_time : null,
+                    last_contact_sec: isFinite(last_message) ? last_message : null,
+                    source_type: p.dataSource || null
                   });
                 }
                 return JSON.stringify({
                   ready: true,
-                  now: nowSec,
-                  firstFetchDone: !!(globe && globe.firstFetchDone),
-                  pendingFetches: (typeof pendingFetches !== 'undefined') ? (Number(pendingFetches) || 0) : 0,
+                  now: now_sec,
+                  first_fetch_done: !!(globe && globe.firstFetchDone),
+                  pending_fetches: (typeof pendingFetches !== 'undefined') ? (Number(pendingFetches) || 0) : 0,
                   aircraft: rows
                 });
               } catch (e) {
@@ -489,26 +489,26 @@ class GlobeWebAircraftSource(context: Context, private val userAgent: String) {
     }
 }
 
-private fun JSONObject.optStringOrNull(key: String): String? {
+private fun JSONObject.opt_string_or_null(key: String): String? {
     if (!has(key) || isNull(key)) return null
     return optString(key).trim().ifEmpty { null }
 }
 
-private fun JSONObject.optDoubleOrNull(key: String): Double? {
+private fun JSONObject.opt_double_or_null(key: String): Double? {
     if (!has(key) || isNull(key)) return null
     return optDouble(key).takeIf { it.isFinite() }
 }
 
-private fun JSONObject.optIntOrNull(key: String): Int? {
+private fun JSONObject.opt_int_or_null(key: String): Int? {
     return if (has(key) && !isNull(key)) optInt(key) else null
 }
 
-private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-    val lat1Rad = Math.toRadians(lat1)
-    val lat2Rad = Math.toRadians(lat2)
-    val deltaLat = Math.toRadians(lat2 - lat1)
-    val deltaLon = Math.toRadians(lon2 - lon1)
-    val a = sin(deltaLat / 2.0).pow(2.0) + cos(lat1Rad) * cos(lat2Rad) * sin(deltaLon / 2.0).pow(2.0)
+private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val lat1_rad = Math.toRadians(lat1)
+    val lat2_rad = Math.toRadians(lat2)
+    val delta_lat = Math.toRadians(lat2 - lat1)
+    val delta_lon = Math.toRadians(lon2 - lon1)
+    val a = sin(delta_lat / 2.0).pow(2.0) + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2.0).pow(2.0)
     return 2.0 * GLOBE_EARTH_RADIUS_M * atan2(sqrt(a), sqrt(max(0.0, 1.0 - a)))
 }
 

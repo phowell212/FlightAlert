@@ -3,7 +3,7 @@ package com.flightalert.data
 import kotlin.math.max
 import kotlin.math.min
 
-enum class AviationLayerKind(val displayName: String) {
+enum class AviationLayerKind(val display_name: String) {
     ATC_BOUNDARIES("ATC boundaries"),
     RESTRICTED_AIRSPACES("Restricted airspaces"),
     AIRPORTS("Airport labels"),
@@ -22,44 +22,44 @@ data class AviationLayerStatus(
 )
 
 data class AviationLayerSnapshot(
-    val atcBoundaries: List<AviationAirspaceFeature>,
-    val restrictedAirspaces: List<AviationAirspaceFeature>,
+    val atc_boundaries: List<AviationAirspaceFeature>,
+    val restricted_airspaces: List<AviationAirspaceFeature>,
     val airports: List<AviationAirportFeature>,
-    val oceanicTracks: List<AviationOceanicTrack>,
+    val oceanic_tracks: List<AviationOceanicTrack>,
     val statuses: Map<AviationLayerKind, AviationLayerStatus>,
-    val fetchedAtMs: Long
+    val fetched_at_ms: Long
 )
 
 data class AviationLayerBounds(
-    val minLat: Double,
-    val minLon: Double,
-    val maxLat: Double,
-    val maxLon: Double
+    val min_lat: Double,
+    val min_lon: Double,
+    val max_lat: Double,
+    val max_lon: Double
 ) {
-    fun arcGisEnvelope(): String = "$minLon,$minLat,$maxLon,$maxLat"
+    fun arc_gis_envelope(): String = "$min_lon,$min_lat,$max_lon,$max_lat"
 }
 
 data class AviationLayerPoint(val lat: Double, val lon: Double)
 
 data class AviationGeoBounds(
-    val minLat: Double,
-    val minLon: Double,
-    val maxLat: Double,
-    val maxLon: Double
+    val min_lat: Double,
+    val min_lon: Double,
+    val max_lat: Double,
+    val max_lon: Double
 ) {
     fun intersects(other: AviationGeoBounds): Boolean {
-        return maxLat >= other.minLat &&
-            minLat <= other.maxLat &&
-            maxLon >= other.minLon &&
-            minLon <= other.maxLon
+        return max_lat >= other.min_lat &&
+            min_lat <= other.max_lat &&
+            max_lon >= other.min_lon &&
+            min_lon <= other.max_lon
     }
 }
 
 data class AviationAirspaceFeature(
     val name: String,
     val type: String,
-    val lowerLimit: String?,
-    val upperLimit: String?,
+    val lower_limit: String?,
+    val upper_limit: String?,
     val schedule: String?,
     val rings: List<List<AviationLayerPoint>>,
     val bounds: AviationGeoBounds
@@ -77,22 +77,22 @@ data class AviationAirportFeature(
 data class AviationOceanicTrack(
     val name: String,
     val source: String,
-    val activeWindow: String?,
+    val active_window: String?,
     val points: List<AviationLayerPoint>,
     val bounds: AviationGeoBounds
 )
 
-fun List<AviationLayerPoint>.toBounds(): AviationGeoBounds {
+fun List<AviationLayerPoint>.to_bounds(): AviationGeoBounds {
     if (isEmpty()) return AviationGeoBounds(0.0, 0.0, 0.0, 0.0)
-    var minLat = first().lat
-    var maxLat = first().lat
-    var minLon = first().lon
-    var maxLon = first().lon
+    var min_lat = first().lat
+    var max_lat = first().lat
+    var min_lon = first().lon
+    var max_lon = first().lon
     forEach { point ->
-        minLat = min(minLat, point.lat)
-        maxLat = max(maxLat, point.lat)
-        minLon = min(minLon, point.lon)
-        maxLon = max(maxLon, point.lon)
+        min_lat = min(min_lat, point.lat)
+        max_lat = max(max_lat, point.lat)
+        min_lon = min(min_lon, point.lon)
+        max_lon = max(max_lon, point.lon)
     }
-    return AviationGeoBounds(minLat, minLon, maxLat, maxLon)
+    return AviationGeoBounds(min_lat, min_lon, max_lat, max_lon)
 }

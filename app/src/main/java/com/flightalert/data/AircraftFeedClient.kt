@@ -15,72 +15,72 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-class AircraftFeedClient(private val userAgent: String) {
+class AircraftFeedClient(private val user_agent: String) {
 
-    fun fetchAircraft(bounds: FeedBounds, ownLat: Double, ownLon: Double, exactSearch: String? = null): FeedResult {
-        val viewportResult = fetchViewportAircraft(bounds, ownLat, ownLon)
-        val searchResult = fetchAirplanesLiveExactSearch(exactSearch, ownLat, ownLon)
-        return mergeViewportAndSearch(viewportResult, searchResult)
+    fun fetch_aircraft(bounds: FeedBounds, own_lat: Double, own_lon: Double, exact_search: String? = null): FeedResult {
+        val viewport_result = fetch_viewport_aircraft(bounds, own_lat, own_lon)
+        val search_result = fetch_airplanes_live_exact_search(exact_search, own_lat, own_lon)
+        return merge_viewport_and_search(viewport_result, search_result)
     }
 
-    private fun fetchViewportAircraft(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
+    private fun fetch_viewport_aircraft(bounds: FeedBounds, own_lat: Double, own_lon: Double): FeedResult {
         val now = System.currentTimeMillis()
-        val airplanesResult = if (now >= airplanesLiveRetryAfterMs) {
-            fetchAirplanesLive(bounds, ownLat, ownLon)
+        val airplanes_result = if (now >= airplanes_live_retry_after_ms) {
+            fetch_airplanes_live(bounds, own_lat, own_lon)
         } else {
-            FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, httpCode = HTTP_TOO_MANY_REQUESTS)
+            FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, http_code = HTTP_TOO_MANY_REQUESTS)
         }
-        if (airplanesResult.status == FeedStatus.OK) {
-            return airplanesResult
+        if (airplanes_result.status == FeedStatus.OK) {
+            return airplanes_result
         }
 
-        val openSkyResult = if (now >= openSkyRetryAfterMs) fetchOpenSky(bounds, ownLat, ownLon) else null
-        if (openSkyResult?.status == FeedStatus.OK) return openSkyResult
+        val open_sky_result = if (now >= open_sky_retry_after_ms) fetch_open_sky(bounds, own_lat, own_lon) else null
+        if (open_sky_result?.status == FeedStatus.OK) return open_sky_result
 
-        return openSkyResult ?: airplanesResult
+        return open_sky_result ?: airplanes_result
     }
 
-    private fun mergeViewportAndSearch(viewport: FeedResult, search: FeedResult?): FeedResult {
+    private fun merge_viewport_and_search(viewport: FeedResult, search: FeedResult?): FeedResult {
         if (search == null) return viewport
         if (search.status != FeedStatus.OK) return viewport
         if (viewport.status != FeedStatus.OK) return search
-        if (search.aircraft.isEmpty()) return viewport.copy(queryCount = viewport.queryCount + search.queryCount)
-        return mergeCompleteCoverageWithDetail(viewport, search)
+        if (search.aircraft.isEmpty()) return viewport.copy(query_count = viewport.query_count + search.query_count)
+        return merge_complete_coverage_with_detail(viewport, search)
     }
 
-    private fun mergeCompleteCoverageWithDetail(complete: FeedResult, detail: FeedResult): FeedResult {
+    private fun merge_complete_coverage_with_detail(complete: FeedResult, detail: FeedResult): FeedResult {
         val merged = linkedMapOf<String, FeedAircraft>()
         complete.aircraft.forEach { item ->
-            merged[item.feedKey()] = item
+            merged[item.feed_key()] = item
         }
         detail.aircraft.forEach { item ->
-            val key = item.feedKey()
-            merged[key] = newerAircraft(merged[key], item)
+            val key = item.feed_key()
+            merged[key] = newer_aircraft(merged[key], item)
         }
         return FeedResult(
             status = FeedStatus.OK,
-            source = mergedSource(complete.source, detail.source),
-            aircraft = merged.values.sortedBy { it.distanceM },
-            epochSec = maxOfEpoch(complete.epochSec, detail.epochSec),
-            queryCount = complete.queryCount + detail.queryCount,
-            partialCoverage = false
+            source = merged_source(complete.source, detail.source),
+            aircraft = merged.values.sortedBy { it.distance_m },
+            epoch_sec = max_of_epoch(complete.epoch_sec, detail.epoch_sec),
+            query_count = complete.query_count + detail.query_count,
+            partial_coverage = false
         )
     }
 
-    private fun fetchOpenSky(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
+    private fun fetch_open_sky(bounds: FeedBounds, own_lat: Double, own_lon: Double): FeedResult {
         var connection: HttpURLConnection? = null
         return try {
             val url = URL(
                 String.format(
                     Locale.US,
                     "https://opensky-network.org/api/states/all?lamin=%.5f&lomin=%.5f&lamax=%.5f&lomax=%.5f&extended=1",
-                    bounds.minLat,
-                    bounds.minLon,
-                    bounds.maxLat,
-                    bounds.maxLon
+                    bounds.min_lat,
+                    bounds.min_lon,
+                    bounds.max_lat,
+                    bounds.max_lon
                 )
             )
-            connection = openConnection(url)
+            connection = open_connection(url)
             when (val code = connection.responseCode) {
                 HttpURLConnection.HTTP_OK -> {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -88,19 +88,19 @@ class AircraftFeedClient(private val userAgent: String) {
                     FeedResult(
                         status = FeedStatus.OK,
                         source = FeedSource.OPENSKY,
-                        aircraft = parseOpenSkyAircraft(json, ownLat, ownLon),
-                        epochSec = json.optDoubleOrNull("time")
+                        aircraft = parse_open_sky_aircraft(json, own_lat, own_lon),
+                        epoch_sec = json.opt_double_or_null("time")
                     )
                 }
                 HTTP_TOO_MANY_REQUESTS -> {
-                    val retrySeconds = connection.getHeaderField("X-Rate-Limit-Retry-After-Seconds")?.toLongOrNull()
-                    openSkyRetryAfterMs = System.currentTimeMillis() + ((retrySeconds ?: DEFAULT_OPENSKY_BACKOFF_SECONDS) * 1000L)
+                    val retry_seconds = connection.getHeaderField("X-Rate-Limit-Retry-After-Seconds")?.toLongOrNull()
+                    open_sky_retry_after_ms = System.currentTimeMillis() + ((retry_seconds ?: DEFAULT_OPENSKY_BACKOFF_SECONDS) * 1000L)
                     connection.errorStream?.close()
-                    FeedResult(FeedStatus.RATE_LIMITED, FeedSource.OPENSKY, httpCode = code)
+                    FeedResult(FeedStatus.RATE_LIMITED, FeedSource.OPENSKY, http_code = code)
                 }
                 else -> {
                     connection.errorStream?.close()
-                    FeedResult(FeedStatus.UNAVAILABLE, FeedSource.OPENSKY, httpCode = code)
+                    FeedResult(FeedStatus.UNAVAILABLE, FeedSource.OPENSKY, http_code = code)
                 }
             }
         } catch (_: Exception) {
@@ -110,94 +110,94 @@ class AircraftFeedClient(private val userAgent: String) {
         }
     }
 
-    private fun fetchAirplanesLive(bounds: FeedBounds, ownLat: Double, ownLon: Double): FeedResult {
-        val plan = airplanesLiveQueryPlan(bounds)
+    private fun fetch_airplanes_live(bounds: FeedBounds, own_lat: Double, own_lon: Double): FeedResult {
+        val plan = airplanes_live_query_plan(bounds)
         val merged = linkedMapOf<String, FeedAircraft>()
-        var latestEpochSec: Double? = null
-        var sawOk = false
-        var sawRateLimit = false
-        var lastHttpCode: Int? = null
-        val queryResults = fetchAirplanesLivePoints(plan.queries, ownLat, ownLon)
-        val timedOut = queryResults.size < plan.queries.size
+        var latest_epoch_sec: Double? = null
+        var saw_ok = false
+        var saw_rate_limit = false
+        var last_http_code: Int? = null
+        val query_results = fetch_airplanes_live_points(plan.queries, own_lat, own_lon)
+        val timed_out = query_results.size < plan.queries.size
 
-        for (result in queryResults) {
-            latestEpochSec = maxOfEpoch(latestEpochSec, result.epochSec)
-            lastHttpCode = result.httpCode ?: lastHttpCode
+        for (result in query_results) {
+            latest_epoch_sec = max_of_epoch(latest_epoch_sec, result.epoch_sec)
+            last_http_code = result.http_code ?: last_http_code
             when (result.status) {
                 FeedStatus.OK -> {
-                    sawOk = true
+                    saw_ok = true
                     result.aircraft.forEach { item ->
-                        val key = item.feedKey()
-                        merged[key] = newerAircraft(merged[key], item)
+                        val key = item.feed_key()
+                        merged[key] = newer_aircraft(merged[key], item)
                     }
                 }
                 FeedStatus.RATE_LIMITED -> {
-                    sawRateLimit = true
-                    lastHttpCode = result.httpCode ?: HTTP_TOO_MANY_REQUESTS
+                    saw_rate_limit = true
+                    last_http_code = result.http_code ?: HTTP_TOO_MANY_REQUESTS
                 }
                 FeedStatus.UNAVAILABLE -> Unit
             }
         }
 
         return when {
-            sawOk -> FeedResult(
+            saw_ok -> FeedResult(
                 status = FeedStatus.OK,
                 source = FeedSource.AIRPLANES_LIVE,
-                aircraft = merged.values.sortedBy { it.distanceM },
-                epochSec = latestEpochSec,
-                queryCount = plan.queries.size,
-                partialCoverage = plan.partialCoverage || timedOut
+                aircraft = merged.values.sortedBy { it.distance_m },
+                epoch_sec = latest_epoch_sec,
+                query_count = plan.queries.size,
+                partial_coverage = plan.partial_coverage || timed_out
             )
-            sawRateLimit -> FeedResult(
+            saw_rate_limit -> FeedResult(
                 status = FeedStatus.RATE_LIMITED,
                 source = FeedSource.AIRPLANES_LIVE,
-                httpCode = lastHttpCode,
-                queryCount = plan.queries.size,
-                partialCoverage = plan.partialCoverage
+                http_code = last_http_code,
+                query_count = plan.queries.size,
+                partial_coverage = plan.partial_coverage
             )
             else -> FeedResult(
                 status = FeedStatus.UNAVAILABLE,
                 source = FeedSource.AIRPLANES_LIVE,
-                httpCode = lastHttpCode,
-                queryCount = plan.queries.size,
-                partialCoverage = plan.partialCoverage || timedOut
+                http_code = last_http_code,
+                query_count = plan.queries.size,
+                partial_coverage = plan.partial_coverage || timed_out
             )
         }
     }
 
-    private fun fetchAirplanesLivePoints(
+    private fun fetch_airplanes_live_points(
         queries: List<AirplanesLiveQuery>,
-        ownLat: Double,
-        ownLon: Double
+        own_lat: Double,
+        own_lon: Double
     ): List<FeedResult> {
-        return queries.map { query -> fetchAirplanesLivePoint(query, ownLat, ownLon) }
+        return queries.map { query -> fetch_airplanes_live_point(query, own_lat, own_lon) }
     }
 
-    private fun fetchAirplanesLivePoint(query: AirplanesLiveQuery, ownLat: Double, ownLon: Double): FeedResult {
+    private fun fetch_airplanes_live_point(query: AirplanesLiveQuery, own_lat: Double, own_lon: Double): FeedResult {
         val path = String.format(
             Locale.US,
             "point/%.5f/%.5f/%.0f",
-            query.centerLat,
-            query.centerLon,
-            query.radiusNm
+            query.center_lat,
+            query.center_lon,
+            query.radius_nm
         )
-        return fetchAirplanesLivePath(path, ownLat, ownLon)
+        return fetch_airplanes_live_path(path, own_lat, own_lon)
     }
 
-    private fun fetchAirplanesLiveExactSearch(search: String?, ownLat: Double, ownLon: Double): FeedResult? {
-        val path = airplanesLiveSearchPath(search) ?: return null
-        if (System.currentTimeMillis() < airplanesLiveRetryAfterMs) {
-            return FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, httpCode = HTTP_TOO_MANY_REQUESTS)
+    private fun fetch_airplanes_live_exact_search(search: String?, own_lat: Double, own_lon: Double): FeedResult? {
+        val path = airplanes_live_search_path(search) ?: return null
+        if (System.currentTimeMillis() < airplanes_live_retry_after_ms) {
+            return FeedResult(FeedStatus.RATE_LIMITED, FeedSource.AIRPLANES_LIVE, http_code = HTTP_TOO_MANY_REQUESTS)
         }
-        return fetchAirplanesLivePath(path, ownLat, ownLon)
+        return fetch_airplanes_live_path(path, own_lat, own_lon)
     }
 
-    private fun fetchAirplanesLivePath(path: String, ownLat: Double, ownLon: Double): FeedResult {
+    private fun fetch_airplanes_live_path(path: String, own_lat: Double, own_lon: Double): FeedResult {
         var connection: HttpURLConnection? = null
         return try {
-            AirplanesLiveHttp.waitForRestApiSlot()
+            AirplanesLiveHttp.wait_for_rest_api_slot()
             val url = URL("${AirplanesLiveHttp.API_BASE_URL}/$path")
-            connection = openConnection(url)
+            connection = open_connection(url)
             val code = connection.responseCode
             if (code == HttpURLConnection.HTTP_OK) {
                 val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -205,33 +205,33 @@ class AircraftFeedClient(private val userAgent: String) {
                 FeedResult(
                     status = FeedStatus.OK,
                     source = FeedSource.AIRPLANES_LIVE,
-                    aircraft = parseAirplanesLiveAircraft(json, ownLat, ownLon),
-                    epochSec = json.optDoubleOrNull("now")?.let { normalizeEpochSeconds(it) },
-                    queryCount = 1
+                    aircraft = parse_airplanes_live_aircraft(json, own_lat, own_lon),
+                    epoch_sec = json.opt_double_or_null("now")?.let { normalize_epoch_seconds(it) },
+                    query_count = 1
                 )
             } else {
                 if (code == HTTP_TOO_MANY_REQUESTS) {
-                    val retrySeconds = connection.getHeaderField("Retry-After")?.toLongOrNull()
+                    val retry_seconds = connection.getHeaderField("Retry-After")?.toLongOrNull()
                         ?: DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS
-                    AirplanesLiveHttp.backOffRestApi(retrySeconds)
-                    airplanesLiveRetryAfterMs = System.currentTimeMillis() + retrySeconds * 1000L
+                    AirplanesLiveHttp.back_off_rest_api(retry_seconds)
+                    airplanes_live_retry_after_ms = System.currentTimeMillis() + retry_seconds * 1000L
                 }
                 connection.errorStream?.close()
                 FeedResult(
                     status = if (code == HTTP_TOO_MANY_REQUESTS) FeedStatus.RATE_LIMITED else FeedStatus.UNAVAILABLE,
                     source = FeedSource.AIRPLANES_LIVE,
-                    httpCode = code,
-                    queryCount = 1
+                    http_code = code,
+                    query_count = 1
                 )
             }
         } catch (_: Exception) {
-            FeedResult(FeedStatus.UNAVAILABLE, FeedSource.AIRPLANES_LIVE, queryCount = 1)
+            FeedResult(FeedStatus.UNAVAILABLE, FeedSource.AIRPLANES_LIVE, query_count = 1)
         } finally {
             connection?.disconnect()
         }
     }
 
-    private fun airplanesLiveSearchPath(search: String?): String? {
+    private fun airplanes_live_search_path(search: String?): String? {
         val raw = search?.trim().orEmpty()
         if (raw.length < 2) return null
         val compact = raw.replace("\\s+".toRegex(), "").take(MAX_EXACT_SEARCH_CHARS)
@@ -239,47 +239,47 @@ class AircraftFeedClient(private val userAgent: String) {
         val upper = compact.uppercase(Locale.US)
         return when {
             MODE_S_HEX.matches(upper) -> "hex/${upper.lowercase(Locale.US)}"
-            looksLikeRegistrationSearch(upper) -> "reg/${urlEncode(upper)}"
-            CALLSIGN_SEARCH.matches(upper) -> "callsign/${urlEncode(upper)}"
+            looks_like_registration_search(upper) -> "reg/${url_encode(upper)}"
+            CALLSIGN_SEARCH.matches(upper) -> "callsign/${url_encode(upper)}"
             else -> null
         }
     }
 
-    private fun looksLikeRegistrationSearch(upper: String): Boolean {
+    private fun looks_like_registration_search(upper: String): Boolean {
         return upper.startsWith("N") || upper.contains("-")
     }
 
-    private fun urlEncode(value: String): String = URLEncoder.encode(value, "UTF-8")
+    private fun url_encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
-    private fun airplanesLiveQueryPlan(bounds: FeedBounds): AirplanesLiveQueryPlan {
+    private fun airplanes_live_query_plan(bounds: FeedBounds): AirplanesLiveQueryPlan {
         val normalized = bounds.normalized()
-        val centerLat = (normalized.minLat + normalized.maxLat) / 2.0
-        val centerLon = (normalized.minLon + normalized.maxLon) / 2.0
-        val widthM = distanceMeters(centerLat, normalized.minLon, centerLat, normalized.maxLon)
-        val heightM = distanceMeters(normalized.minLat, centerLon, normalized.maxLat, centerLon)
-        val targetCellSpanM = MAX_AIRPLANES_RADIUS_NM * METERS_PER_NAUTICAL_MILE * AIRPLANES_GRID_CELL_RADIUS_FACTOR
-        var columns = ceil(widthM / targetCellSpanM).toInt().coerceAtLeast(1)
-        var rows = ceil(heightM / targetCellSpanM).toInt().coerceAtLeast(1)
-        val neededRows = rows
-        val neededColumns = columns
+        val center_lat = (normalized.min_lat + normalized.max_lat) / 2.0
+        val center_lon = (normalized.min_lon + normalized.max_lon) / 2.0
+        val width_m = distance_meters(center_lat, normalized.min_lon, center_lat, normalized.max_lon)
+        val height_m = distance_meters(normalized.min_lat, center_lon, normalized.max_lat, center_lon)
+        val target_cell_span_m = MAX_AIRPLANES_RADIUS_NM * METERS_PER_NAUTICAL_MILE * AIRPLANES_GRID_CELL_RADIUS_FACTOR
+        var columns = ceil(width_m / target_cell_span_m).toInt().coerceAtLeast(1)
+        var rows = ceil(height_m / target_cell_span_m).toInt().coerceAtLeast(1)
+        val needed_rows = rows
+        val needed_columns = columns
         while (rows * columns > MAX_AIRPLANES_LIVE_QUERIES) {
             if (columns >= rows && columns > 1) columns-- else if (rows > 1) rows-- else break
         }
 
         val queries = mutableListOf<AirplanesLiveQuery>()
         for (row in 0 until rows) {
-            val minLat = lerp(normalized.minLat, normalized.maxLat, row.toDouble() / rows)
-            val maxLat = lerp(normalized.minLat, normalized.maxLat, (row + 1.0) / rows)
+            val min_lat = lerp(normalized.min_lat, normalized.max_lat, row.toDouble() / rows)
+            val max_lat = lerp(normalized.min_lat, normalized.max_lat, (row + 1.0) / rows)
             for (column in 0 until columns) {
-                val minLon = lerp(normalized.minLon, normalized.maxLon, column.toDouble() / columns)
-                val maxLon = lerp(normalized.minLon, normalized.maxLon, (column + 1.0) / columns)
-                val cell = FeedBounds(minLat, minLon, maxLat, maxLon)
-                val cellCenterLat = (minLat + maxLat) / 2.0
-                val cellCenterLon = (minLon + maxLon) / 2.0
+                val min_lon = lerp(normalized.min_lon, normalized.max_lon, column.toDouble() / columns)
+                val max_lon = lerp(normalized.min_lon, normalized.max_lon, (column + 1.0) / columns)
+                val cell = FeedBounds(min_lat, min_lon, max_lat, max_lon)
+                val cell_center_lat = (min_lat + max_lat) / 2.0
+                val cell_center_lon = (min_lon + max_lon) / 2.0
                 queries += AirplanesLiveQuery(
-                    centerLat = cellCenterLat,
-                    centerLon = cellCenterLon,
-                    radiusNm = radiusNmFor(cell, cellCenterLat, cellCenterLon)
+                    center_lat = cell_center_lat,
+                    center_lon = cell_center_lon,
+                    radius_nm = radius_nm_for(cell, cell_center_lat, cell_center_lon)
                         .times(AIRPLANES_QUERY_RADIUS_PADDING)
                         .coerceIn(MIN_AIRPLANES_RADIUS_NM, MAX_AIRPLANES_RADIUS_NM)
                 )
@@ -288,113 +288,113 @@ class AircraftFeedClient(private val userAgent: String) {
 
         return AirplanesLiveQueryPlan(
             queries = queries.ifEmpty {
-                listOf(AirplanesLiveQuery(centerLat, centerLon, MIN_AIRPLANES_RADIUS_NM))
+                listOf(AirplanesLiveQuery(center_lat, center_lon, MIN_AIRPLANES_RADIUS_NM))
             },
-            partialCoverage = rows < neededRows || columns < neededColumns
+            partial_coverage = rows < needed_rows || columns < needed_columns
         )
     }
 
-    private fun openConnection(url: URL): HttpURLConnection {
+    private fun open_connection(url: URL): HttpURLConnection {
         require(url.protocol.equals("https", ignoreCase = true)) { "Only HTTPS aircraft feeds are allowed" }
         return (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 4000
             readTimeout = 6000
             requestMethod = "GET"
             if (url.host.equals("api.airplanes.live", ignoreCase = true)) {
-                AirplanesLiveHttp.applyBrowserHeaders(this, userAgent)
+                AirplanesLiveHttp.apply_browser_headers(this, user_agent)
             } else {
-                setRequestProperty("User-Agent", userAgent)
+                setRequestProperty("User-Agent", user_agent)
                 setRequestProperty("Accept", "application/json")
             }
         }
     }
 
-    private fun parseOpenSkyAircraft(json: JSONObject, ownLat: Double, ownLon: Double): List<FeedAircraft> {
+    private fun parse_open_sky_aircraft(json: JSONObject, own_lat: Double, own_lon: Double): List<FeedAircraft> {
         val rows = json.optJSONArray("states") ?: JSONArray()
         val parsed = mutableListOf<FeedAircraft>()
         for (index in 0 until rows.length()) {
             val row = rows.optJSONArray(index) ?: continue
-            val lon = row.optNullableDouble(5) ?: continue
-            val lat = row.optNullableDouble(6) ?: continue
+            val lon = row.opt_nullable_double(5) ?: continue
+            val lat = row.opt_nullable_double(6) ?: continue
             val icao24 = row.optString(0).trim()
             val callsign = row.optString(1).trim().ifEmpty { icao24.ifEmpty { "Unknown" } }
             parsed += FeedAircraft(
                 icao24 = icao24,
                 callsign = callsign,
                 registration = null,
-                typeCode = null,
-                dbFlags = null,
+                type_code = null,
+                db_flags = null,
                 lat = lat,
                 lon = lon,
-                onGround = row.optNullableBoolean(8),
-                altitudeM = row.optNullableDouble(7) ?: row.optNullableDouble(13),
-                velocityMs = row.optNullableDouble(9),
-                trackDeg = row.optNullableDouble(10),
-                verticalRateMs = row.optNullableDouble(11),
-                category = row.optNullableInt(17),
-                positionTimeSec = row.optNullableDouble(3),
-                lastContactSec = row.optNullableDouble(4),
-                distanceM = distanceMeters(ownLat, ownLon, lat, lon)
+                on_ground = row.opt_nullable_boolean(8),
+                altitude_m = row.opt_nullable_double(7) ?: row.opt_nullable_double(13),
+                velocity_ms = row.opt_nullable_double(9),
+                track_deg = row.opt_nullable_double(10),
+                vertical_rate_ms = row.opt_nullable_double(11),
+                category = row.opt_nullable_int(17),
+                position_time_sec = row.opt_nullable_double(3),
+                last_contact_sec = row.opt_nullable_double(4),
+                distance_m = distance_meters(own_lat, own_lon, lat, lon)
             )
         }
-        return parsed.sortedBy { it.distanceM }
+        return parsed.sortedBy { it.distance_m }
     }
 
-    private fun parseAirplanesLiveAircraft(json: JSONObject, ownLat: Double, ownLon: Double): List<FeedAircraft> {
-        val nowSec = json.optDoubleOrNull("now")?.let { normalizeEpochSeconds(it) } ?: (System.currentTimeMillis() / 1000.0)
+    private fun parse_airplanes_live_aircraft(json: JSONObject, own_lat: Double, own_lon: Double): List<FeedAircraft> {
+        val now_sec = json.opt_double_or_null("now")?.let { normalize_epoch_seconds(it) } ?: (System.currentTimeMillis() / 1000.0)
         val rows = json.optJSONArray("aircraft") ?: json.optJSONArray("ac") ?: JSONArray()
         val parsed = mutableListOf<FeedAircraft>()
         for (index in 0 until rows.length()) {
             val item = rows.optJSONObject(index) ?: continue
-            val lat = item.optDoubleOrNull("lat") ?: item.optJSONObject("lastPosition")?.optDoubleOrNull("lat") ?: continue
-            val lon = item.optDoubleOrNull("lon") ?: item.optJSONObject("lastPosition")?.optDoubleOrNull("lon") ?: continue
+            val lat = item.opt_double_or_null("lat") ?: item.optJSONObject("lastPosition")?.opt_double_or_null("lat") ?: continue
+            val lon = item.opt_double_or_null("lon") ?: item.optJSONObject("lastPosition")?.opt_double_or_null("lon") ?: continue
             val icao24 = item.optString("hex").trim().trimStart('~').lowercase(Locale.US)
             val callsign = item.optString("flight").trim().ifEmpty { item.optString("r").trim().ifEmpty { icao24.ifEmpty { "Unknown" } } }
-            val typeCode = item.optString("t").trim().ifEmpty { null }
-            val altitudeFeet = item.optAltitudeFeet("alt_baro") ?: item.optAltitudeFeet("alt_geom")
-            val seenPositionSec = item.optDoubleOrNull("seen_pos")
-            val seenMessageSec = item.optDoubleOrNull("seen")
-            val lastPositionTime = if (seenPositionSec != null) nowSec - seenPositionSec else nowSec
-            val lastContactTime = if (seenMessageSec != null) nowSec - seenMessageSec else lastPositionTime
+            val type_code = item.optString("t").trim().ifEmpty { null }
+            val altitude_feet = item.opt_altitude_feet("alt_baro") ?: item.opt_altitude_feet("alt_geom")
+            val seen_position_sec = item.opt_double_or_null("seen_pos")
+            val seen_message_sec = item.opt_double_or_null("seen")
+            val last_position_time = seen_position_sec?.let { now_sec - it }
+            val last_contact_time = seen_message_sec?.let { now_sec - it } ?: last_position_time
             parsed += FeedAircraft(
                 icao24 = icao24,
                 callsign = callsign,
                 registration = item.optString("r").trim().ifEmpty { null },
-                typeCode = typeCode,
-                dbFlags = item.optIntOrNull("dbFlags"),
+                type_code = type_code,
+                db_flags = item.opt_int_or_null("dbFlags"),
                 lat = lat,
                 lon = lon,
-                onGround = item.optString("alt_baro") == "ground",
-                altitudeM = altitudeFeet?.let { it / FEET_PER_METER },
-                velocityMs = item.optDoubleOrNull("gs")?.let { knotsToMetersPerSecond(it) },
-                trackDeg = item.optDoubleOrNull("track"),
-                verticalRateMs = (item.optDoubleOrNull("baro_rate") ?: item.optDoubleOrNull("geom_rate"))?.let { feetPerMinuteToMetersPerSecond(it) },
-                category = categoryFromAirplanesLive(item.optString("category"), item.optString("t")),
-                positionTimeSec = lastPositionTime,
-                lastContactSec = lastContactTime,
-                distanceM = distanceMeters(ownLat, ownLon, lat, lon)
+                on_ground = item.optString("alt_baro") == "ground",
+                altitude_m = altitude_feet?.let { it / FEET_PER_METER },
+                velocity_ms = item.opt_double_or_null("gs")?.let { knots_to_meters_per_second(it) },
+                track_deg = item.opt_double_or_null("track"),
+                vertical_rate_ms = (item.opt_double_or_null("baro_rate") ?: item.opt_double_or_null("geom_rate"))?.let { feet_per_minute_to_meters_per_second(it) },
+                category = category_from_airplanes_live(item.optString("category"), item.optString("t")),
+                position_time_sec = last_position_time,
+                last_contact_sec = last_contact_time,
+                distance_m = distance_meters(own_lat, own_lon, lat, lon)
             )
         }
-        return parsed.sortedBy { it.distanceM }
+        return parsed.sortedBy { it.distance_m }
     }
 
-    private fun radiusNmFor(bounds: FeedBounds, centerLat: Double, centerLon: Double): Double {
+    private fun radius_nm_for(bounds: FeedBounds, center_lat: Double, center_lon: Double): Double {
         val corners = listOf(
-            bounds.minLat to bounds.minLon,
-            bounds.minLat to bounds.maxLon,
-            bounds.maxLat to bounds.minLon,
-            bounds.maxLat to bounds.maxLon
+            bounds.min_lat to bounds.min_lon,
+            bounds.min_lat to bounds.max_lon,
+            bounds.max_lat to bounds.min_lon,
+            bounds.max_lat to bounds.max_lon
         )
-        return corners.maxOf { (lat, lon) -> distanceMeters(centerLat, centerLon, lat, lon) } / METERS_PER_NAUTICAL_MILE
+        return corners.maxOf { (lat, lon) -> distance_meters(center_lat, center_lon, lat, lon) } / METERS_PER_NAUTICAL_MILE
     }
 
-    private fun categoryFromAirplanesLive(category: String, typeCode: String): Int? {
+    private fun category_from_airplanes_live(category: String, type_code: String): Int? {
         val normalized = category.trim().uppercase(Locale.US)
         if (normalized.startsWith("A7") || normalized.startsWith("B7")) return 8
         if (normalized.startsWith("B1")) return 9
         if (normalized.startsWith("B6")) return 14
         if (normalized.startsWith("C") || normalized.startsWith("D")) return 15
-        val type = typeCode.trim().uppercase(Locale.US)
+        val type = type_code.trim().uppercase(Locale.US)
         return when {
             type.startsWith("H") || type.startsWith("R") -> 8
             type.startsWith("GL") -> 9
@@ -403,11 +403,11 @@ class AircraftFeedClient(private val userAgent: String) {
         }
     }
 
-    private fun normalizeEpochSeconds(value: Double): Double {
+    private fun normalize_epoch_seconds(value: Double): Double {
         return if (value > 10_000_000_000.0) value / 1000.0 else value
     }
 
-    private fun maxOfEpoch(first: Double?, second: Double?): Double? {
+    private fun max_of_epoch(first: Double?, second: Double?): Double? {
         return when {
             first == null -> second
             second == null -> first
@@ -415,18 +415,18 @@ class AircraftFeedClient(private val userAgent: String) {
         }
     }
 
-    private fun newerAircraft(existing: FeedAircraft?, incoming: FeedAircraft): FeedAircraft {
+    private fun newer_aircraft(existing: FeedAircraft?, incoming: FeedAircraft): FeedAircraft {
         if (existing == null) return incoming
-        val existingTime = existing.lastContactSec ?: existing.positionTimeSec ?: 0.0
-        val incomingTime = incoming.lastContactSec ?: incoming.positionTimeSec ?: 0.0
-        return if (incomingTime >= existingTime) incoming else existing
+        val existing_time = existing.last_contact_sec ?: existing.position_time_sec ?: 0.0
+        val incoming_time = incoming.last_contact_sec ?: incoming.position_time_sec ?: 0.0
+        return if (incoming_time >= existing_time) incoming else existing
     }
 
     private fun lerp(start: Double, end: Double, amount: Double): Double {
         return start + (end - start) * amount
     }
 
-    private fun mergedSource(first: FeedSource, second: FeedSource): FeedSource {
+    private fun merged_source(first: FeedSource, second: FeedSource): FeedSource {
         return if (first == second) first else FeedSource.COMBINED
     }
 
@@ -447,41 +447,41 @@ class AircraftFeedClient(private val userAgent: String) {
         private val CALLSIGN_SEARCH = Regex("^[A-Z0-9]{2,12}$")
 
         @Volatile
-        private var openSkyRetryAfterMs = 0L
+        private var open_sky_retry_after_ms = 0L
 
         @Volatile
-        private var airplanesLiveRetryAfterMs = 0L
+        private var airplanes_live_retry_after_ms = 0L
     }
 }
 
-private data class AirplanesLiveQuery(val centerLat: Double, val centerLon: Double, val radiusNm: Double)
+private data class AirplanesLiveQuery(val center_lat: Double, val center_lon: Double, val radius_nm: Double)
 
-private data class AirplanesLiveQueryPlan(val queries: List<AirplanesLiveQuery>, val partialCoverage: Boolean)
+private data class AirplanesLiveQueryPlan(val queries: List<AirplanesLiveQuery>, val partial_coverage: Boolean)
 
-private fun JSONArray.optNullableDouble(index: Int): Double? {
+private fun JSONArray.opt_nullable_double(index: Int): Double? {
     if (index >= length() || isNull(index)) return null
     return optDouble(index)
 }
 
-private fun JSONArray.optNullableInt(index: Int): Int? {
+private fun JSONArray.opt_nullable_int(index: Int): Int? {
     if (index >= length() || isNull(index)) return null
     return optInt(index)
 }
 
-private fun JSONArray.optNullableBoolean(index: Int): Boolean? {
+private fun JSONArray.opt_nullable_boolean(index: Int): Boolean? {
     if (index >= length() || isNull(index)) return null
     return optBoolean(index)
 }
 
-private fun JSONObject.optIntOrNull(key: String): Int? {
+private fun JSONObject.opt_int_or_null(key: String): Int? {
     return if (has(key) && !isNull(key)) optInt(key) else null
 }
 
-private fun JSONObject.optDoubleOrNull(key: String): Double? {
+private fun JSONObject.opt_double_or_null(key: String): Double? {
     return if (has(key) && !isNull(key)) optDouble(key) else null
 }
 
-private fun JSONObject.optAltitudeFeet(key: String): Double? {
+private fun JSONObject.opt_altitude_feet(key: String): Double? {
     if (!has(key) || isNull(key)) return null
     return when (val raw = opt(key)) {
         is Number -> raw.toDouble()
@@ -490,17 +490,17 @@ private fun JSONObject.optAltitudeFeet(key: String): Double? {
     }
 }
 
-private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-    val lat1Rad = Math.toRadians(lat1)
-    val lat2Rad = Math.toRadians(lat2)
-    val deltaLat = Math.toRadians(lat2 - lat1)
-    val deltaLon = Math.toRadians(lon2 - lon1)
-    val a = sin(deltaLat / 2.0).pow(2.0) + cos(lat1Rad) * cos(lat2Rad) * sin(deltaLon / 2.0).pow(2.0)
+private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val lat1_rad = Math.toRadians(lat1)
+    val lat2_rad = Math.toRadians(lat2)
+    val delta_lat = Math.toRadians(lat2 - lat1)
+    val delta_lon = Math.toRadians(lon2 - lon1)
+    val a = sin(delta_lat / 2.0).pow(2.0) + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2.0).pow(2.0)
     return 2.0 * EARTH_RADIUS_M * atan2(sqrt(a), sqrt(max(0.0, 1.0 - a)))
 }
 
-private fun knotsToMetersPerSecond(knots: Double): Double = knots * 0.514444
+private fun knots_to_meters_per_second(knots: Double): Double = knots * 0.514444
 
-private fun feetPerMinuteToMetersPerSecond(feetPerMinute: Double): Double = feetPerMinute / 196.850394
+private fun feet_per_minute_to_meters_per_second(feet_per_minute: Double): Double = feet_per_minute / 196.850394
 
 private const val EARTH_RADIUS_M = 6371000.0

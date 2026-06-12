@@ -4,12 +4,12 @@ import com.flightalert.data.AircraftDetails
 import com.flightalert.data.FeedBounds
 
 data class AircraftDetailCandidate(
-    val sourceName: String,
+    val source_name: String,
     val fetch: () -> AircraftDetails?
 )
 
 data class WebDetailLookupContext(
     val bounds: FeedBounds,
-    val ownLat: Double,
-    val ownLon: Double
+    val own_lat: Double,
+    val own_lon: Double
 )

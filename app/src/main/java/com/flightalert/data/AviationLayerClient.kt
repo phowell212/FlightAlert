@@ -7,115 +7,115 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
 
-class AviationLayerClient(private val userAgent: String) {
+class AviationLayerClient(private val user_agent: String) {
 
-    fun fetchLayers(
+    fun fetch_layers(
         bounds: AviationLayerBounds,
-        includeAtcBoundaries: Boolean,
-        includeRestrictedAirspaces: Boolean,
-        includeAirports: Boolean,
-        includeOceanicTracks: Boolean
+        include_atc_boundaries: Boolean,
+        include_restricted_airspaces: Boolean,
+        include_airports: Boolean,
+        include_oceanic_tracks: Boolean
     ): AviationLayerSnapshot {
         val statuses = mutableMapOf<AviationLayerKind, AviationLayerStatus>()
-        val atc = if (includeAtcBoundaries) {
-            fetchFeatureLayer(
+        val atc = if (include_atc_boundaries) {
+            fetch_feature_layer(
                 kind = AviationLayerKind.ATC_BOUNDARIES,
                 bounds = bounds,
-                baseUrl = BOUNDARY_AIRSPACE_QUERY_URL,
+                base_url = BOUNDARY_AIRSPACE_QUERY_URL,
                 where = "TYPE_CODE IN ('ARTCC','FIR','OCA')",
-                outFields = "NAME,IDENT,TYPE_CODE,LOCAL_TYPE,LEVEL_,UPPER_VAL,LOWER_VAL",
-                maxRecords = MAX_BOUNDARY_RECORDS,
+                out_fields = "NAME,IDENT,TYPE_CODE,LOCAL_TYPE,LEVEL_,UPPER_VAL,LOWER_VAL",
+                max_records = MAX_BOUNDARY_RECORDS,
                 statuses = statuses,
-                parser = ::parseAirspaceFeatures
+                parser = ::parse_airspace_features
             )
         } else {
             emptyList()
         }
-        val restricted = if (includeRestrictedAirspaces) {
-            fetchFeatureLayer(
+        val restricted = if (include_restricted_airspaces) {
+            fetch_feature_layer(
                 kind = AviationLayerKind.RESTRICTED_AIRSPACES,
                 bounds = bounds,
-                baseUrl = SPECIAL_USE_AIRSPACE_QUERY_URL,
+                base_url = SPECIAL_USE_AIRSPACE_QUERY_URL,
                 where = "1=1",
-                outFields = "NAME,TYPE_CODE,UPPER_VAL,LOWER_VAL,UPPER_UOM,LOWER_UOM,TIMESOFUSE,CITY,STATE",
-                maxRecords = MAX_SPECIAL_USE_RECORDS,
+                out_fields = "NAME,TYPE_CODE,UPPER_VAL,LOWER_VAL,UPPER_UOM,LOWER_UOM,TIMESOFUSE,CITY,STATE",
+                max_records = MAX_SPECIAL_USE_RECORDS,
                 statuses = statuses,
-                parser = ::parseAirspaceFeatures
+                parser = ::parse_airspace_features
             )
         } else {
             emptyList()
         }
-        val airports = if (includeAirports) {
-            fetchFeatureLayer(
+        val airports = if (include_airports) {
+            fetch_feature_layer(
                 kind = AviationLayerKind.AIRPORTS,
                 bounds = bounds,
-                baseUrl = AIRPORT_QUERY_URL,
+                base_url = AIRPORT_QUERY_URL,
                 where = "OPERSTATUS = 'OPERATIONAL'",
-                outFields = "IDENT,NAME,ICAO_ID,TYPE_CODE,MIL_CODE,SERVCITY,STATE,COUNTRY",
-                maxRecords = MAX_AIRPORT_RECORDS,
+                out_fields = "IDENT,NAME,ICAO_ID,TYPE_CODE,MIL_CODE,SERVCITY,STATE,COUNTRY",
+                max_records = MAX_AIRPORT_RECORDS,
                 statuses = statuses,
-                parser = ::parseAirportFeatures
+                parser = ::parse_airport_features
             )
         } else {
             emptyList()
         }
-        val oceanic = if (includeOceanicTracks) {
-            fetchOceanicTracks(statuses)
+        val oceanic = if (include_oceanic_tracks) {
+            fetch_oceanic_tracks(statuses)
         } else {
             emptyList()
         }
 
         return AviationLayerSnapshot(
-            atcBoundaries = atc,
-            restrictedAirspaces = restricted,
+            atc_boundaries = atc,
+            restricted_airspaces = restricted,
             airports = airports,
-            oceanicTracks = oceanic,
+            oceanic_tracks = oceanic,
             statuses = statuses,
-            fetchedAtMs = System.currentTimeMillis()
+            fetched_at_ms = System.currentTimeMillis()
         )
     }
 
-    private fun <T> fetchFeatureLayer(
+    private fun <T> fetch_feature_layer(
         kind: AviationLayerKind,
         bounds: AviationLayerBounds,
-        baseUrl: String,
+        base_url: String,
         where: String,
-        outFields: String,
-        maxRecords: Int,
+        out_fields: String,
+        max_records: Int,
         statuses: MutableMap<AviationLayerKind, AviationLayerStatus>,
         parser: (JSONObject) -> List<T>
     ): List<T> {
         return try {
             val url = URL(
-                "$baseUrl?f=geojson" +
+                "$base_url?f=geojson" +
                     "&where=${encode(where)}" +
-                    "&geometry=${encode(bounds.arcGisEnvelope())}" +
+                    "&geometry=${encode(bounds.arc_gis_envelope())}" +
                     "&geometryType=esriGeometryEnvelope" +
                     "&inSR=4326" +
                     "&spatialRel=esriSpatialRelIntersects" +
-                    "&outFields=${encode(outFields)}" +
+                    "&out_fields=${encode(out_fields)}" +
                     "&outSR=4326" +
                     "&returnGeometry=true" +
-                    "&resultRecordCount=$maxRecords"
+                    "&resultRecordCount=$max_records"
             )
-            val json = fetchJson(url)
+            val json = fetch_json(url)
             val parsed = parser(json)
             statuses[kind] = if (parsed.isEmpty()) {
-                AviationLayerStatus(AviationLayerState.EMPTY, "No ${kind.displayName.lowercase(Locale.US)} in view")
+                AviationLayerStatus(AviationLayerState.EMPTY, "No ${kind.display_name.lowercase(Locale.US)} in view")
             } else {
-                AviationLayerStatus(AviationLayerState.LOADED, "${parsed.size} ${kind.displayName.lowercase(Locale.US)} loaded")
+                AviationLayerStatus(AviationLayerState.LOADED, "${parsed.size} ${kind.display_name.lowercase(Locale.US)} loaded")
             }
             parsed
         } catch (_: Exception) {
-            statuses[kind] = AviationLayerStatus(AviationLayerState.UNAVAILABLE, "${kind.displayName} unavailable")
+            statuses[kind] = AviationLayerStatus(AviationLayerState.UNAVAILABLE, "${kind.display_name} unavailable")
             emptyList()
         }
     }
 
-    private fun fetchOceanicTracks(statuses: MutableMap<AviationLayerKind, AviationLayerStatus>): List<AviationOceanicTrack> {
+    private fun fetch_oceanic_tracks(statuses: MutableMap<AviationLayerKind, AviationLayerStatus>): List<AviationOceanicTrack> {
         return try {
-            val json = fetchJsonArray(URL(NAT_TRACKS_URL))
-            val tracks = parseNatTracks(json)
+            val json = fetch_json_array(URL(NAT_TRACKS_URL))
+            val tracks = parse_nat_tracks(json)
             statuses[AviationLayerKind.OCEANIC_TRACKS] = if (tracks.isEmpty()) {
                 AviationLayerStatus(AviationLayerState.EMPTY, "No drawable NAT track coordinates")
             } else {
@@ -128,32 +128,32 @@ class AviationLayerClient(private val userAgent: String) {
         }
     }
 
-    private fun parseAirspaceFeatures(json: JSONObject): List<AviationAirspaceFeature> {
+    private fun parse_airspace_features(json: JSONObject): List<AviationAirspaceFeature> {
         val features = json.optJSONArray("features") ?: JSONArray()
         val parsed = mutableListOf<AviationAirspaceFeature>()
         for (index in 0 until features.length()) {
             val feature = features.optJSONObject(index) ?: continue
             val properties = feature.optJSONObject("properties") ?: JSONObject()
-            val rings = polygonRings(feature.optJSONObject("geometry")).take(MAX_RINGS_PER_FEATURE)
+            val rings = polygon_rings(feature.optJSONObject("geometry")).take(MAX_RINGS_PER_FEATURE)
             if (rings.isEmpty()) continue
-            val type = properties.optCleanString("TYPE_CODE") ?: properties.optCleanString("LOCAL_TYPE") ?: "Airspace"
-            val name = properties.optCleanString("NAME")
-                ?: properties.optCleanString("IDENT")
+            val type = properties.opt_clean_string("TYPE_CODE") ?: properties.opt_clean_string("LOCAL_TYPE") ?: "Airspace"
+            val name = properties.opt_clean_string("NAME")
+                ?: properties.opt_clean_string("IDENT")
                 ?: type
             parsed += AviationAirspaceFeature(
                 name = name,
                 type = type,
-                lowerLimit = altitudeLabel(properties, "LOWER"),
-                upperLimit = altitudeLabel(properties, "UPPER"),
-                schedule = properties.optCleanString("TIMESOFUSE"),
+                lower_limit = altitude_label(properties, "LOWER"),
+                upper_limit = altitude_label(properties, "UPPER"),
+                schedule = properties.opt_clean_string("TIMESOFUSE"),
                 rings = rings,
-                bounds = rings.flatten().toBounds()
+                bounds = rings.flatten().to_bounds()
             )
         }
         return parsed
     }
 
-    private fun parseAirportFeatures(json: JSONObject): List<AviationAirportFeature> {
+    private fun parse_airport_features(json: JSONObject): List<AviationAirportFeature> {
         val features = json.optJSONArray("features") ?: JSONArray()
         val parsed = mutableListOf<AviationAirportFeature>()
         for (index in 0 until features.length()) {
@@ -161,18 +161,18 @@ class AviationLayerClient(private val userAgent: String) {
             val geometry = feature.optJSONObject("geometry") ?: continue
             if (geometry.optString("type") != "Point") continue
             val coordinates = geometry.optJSONArray("coordinates") ?: continue
-            val lon = coordinates.optDoubleOrNull(0) ?: continue
-            val lat = coordinates.optDoubleOrNull(1) ?: continue
+            val lon = coordinates.opt_double_or_null(0) ?: continue
+            val lat = coordinates.opt_double_or_null(1) ?: continue
             val properties = feature.optJSONObject("properties") ?: JSONObject()
-            val ident = properties.optCleanString("ICAO_ID")
-                ?: properties.optCleanString("IDENT")
+            val ident = properties.opt_clean_string("ICAO_ID")
+                ?: properties.opt_clean_string("IDENT")
                 ?: continue
-            val name = properties.optCleanString("NAME") ?: ident
+            val name = properties.opt_clean_string("NAME") ?: ident
             parsed += AviationAirportFeature(
                 ident = ident,
                 name = name,
-                type = properties.optCleanString("TYPE_CODE") ?: "AD",
-                military = properties.optCleanString("MIL_CODE")?.contains("MIL", ignoreCase = true) == true,
+                type = properties.opt_clean_string("TYPE_CODE") ?: "AD",
+                military = properties.opt_clean_string("MIL_CODE")?.contains("MIL", ignoreCase = true) == true,
                 lat = lat,
                 lon = lon
             )
@@ -180,58 +180,58 @@ class AviationLayerClient(private val userAgent: String) {
         return parsed
     }
 
-    private fun parseNatTracks(json: JSONArray): List<AviationOceanicTrack> {
+    private fun parse_nat_tracks(json: JSONArray): List<AviationOceanicTrack> {
         val tracks = linkedMapOf<String, AviationOceanicTrack>()
         for (index in 0 until json.length()) {
             val item = json.optJSONObject(index) ?: continue
-            val source = item.optCleanString("notam_number_formatted") ?: item.optCleanString("icao_id") ?: "FAA NMS"
-            val window = listOfNotNull(item.optCleanString("start_datetime"), item.optCleanString("end_datetime"))
+            val source = item.opt_clean_string("notam_number_formatted") ?: item.opt_clean_string("icao_id") ?: "FAA NMS"
+            val window = listOfNotNull(item.opt_clean_string("start_datetime"), item.opt_clean_string("end_datetime"))
                 .joinToString(" to ")
                 .ifBlank { null }
-            val message = item.optCleanString("condition_message") ?: continue
+            val message = item.opt_clean_string("condition_message") ?: continue
             message.split('\n')
                 .map { it.trim().trimEnd('-') }
                 .forEach { line ->
                     val tokens = line.split(Regex("\\s+")).filter { it.isNotBlank() }
                     if (tokens.size < 3) return@forEach
                     val designator = tokens.first().takeIf { TRACK_DESIGNATOR.matches(it) } ?: return@forEach
-                    val points = tokens.drop(1).mapNotNull(::parseNatCoordinate)
+                    val points = tokens.drop(1).mapNotNull(::parse_nat_coordinate)
                     if (points.size < 2) return@forEach
                     val key = "$source:$designator"
                     tracks[key] = AviationOceanicTrack(
                         name = "NAT $designator",
                         source = source,
-                        activeWindow = window,
+                        active_window = window,
                         points = points,
-                        bounds = points.toBounds()
+                        bounds = points.to_bounds()
                     )
                 }
         }
         return tracks.values.toList()
     }
 
-    private fun parseNatCoordinate(raw: String): AviationLayerPoint? {
+    private fun parse_nat_coordinate(raw: String): AviationLayerPoint? {
         val token = raw.trim().uppercase(Locale.US).trimEnd(',', '.', ';')
         val match = NAT_COORDINATE.matchEntire(token) ?: return null
-        val latDegrees = match.groupValues[1].toDoubleOrNull() ?: return null
-        val latMinutes = match.groupValues[2].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
-        val lonDegrees = match.groupValues[3].toDoubleOrNull() ?: return null
-        val lonMinutes = match.groupValues[4].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
-        val lat = latDegrees + latMinutes
-        val lon = -(lonDegrees + lonMinutes)
+        val lat_degrees = match.groupValues[1].toDoubleOrNull() ?: return null
+        val lat_minutes = match.groupValues[2].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
+        val lon_degrees = match.groupValues[3].toDoubleOrNull() ?: return null
+        val lon_minutes = match.groupValues[4].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
+        val lat = lat_degrees + lat_minutes
+        val lon = -(lon_degrees + lon_minutes)
         if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return null
         return AviationLayerPoint(lat, lon)
     }
 
-    private fun polygonRings(geometry: JSONObject?): List<List<AviationLayerPoint>> {
+    private fun polygon_rings(geometry: JSONObject?): List<List<AviationLayerPoint>> {
         geometry ?: return emptyList()
         return when (geometry.optString("type")) {
-            "Polygon" -> geometry.optJSONArray("coordinates").polygonToRings()
+            "Polygon" -> geometry.optJSONArray("coordinates").polygon_to_rings()
             "MultiPolygon" -> {
                 val coordinates = geometry.optJSONArray("coordinates") ?: return emptyList()
                 val rings = mutableListOf<List<AviationLayerPoint>>()
                 for (index in 0 until coordinates.length()) {
-                    rings += coordinates.optJSONArray(index).polygonToRings()
+                    rings += coordinates.optJSONArray(index).polygon_to_rings()
                 }
                 rings
             }
@@ -239,16 +239,16 @@ class AviationLayerClient(private val userAgent: String) {
         }
     }
 
-    private fun JSONArray?.polygonToRings(): List<List<AviationLayerPoint>> {
+    private fun JSONArray?.polygon_to_rings(): List<List<AviationLayerPoint>> {
         this ?: return emptyList()
         val rings = mutableListOf<List<AviationLayerPoint>>()
-        for (ringIndex in 0 until length()) {
-            val ring = optJSONArray(ringIndex) ?: continue
+        for (ring_index in 0 until length()) {
+            val ring = optJSONArray(ring_index) ?: continue
             val points = mutableListOf<AviationLayerPoint>()
-            for (pointIndex in 0 until ring.length()) {
-                val coordinate = ring.optJSONArray(pointIndex) ?: continue
-                val lon = coordinate.optDoubleOrNull(0) ?: continue
-                val lat = coordinate.optDoubleOrNull(1) ?: continue
+            for (point_index in 0 until ring.length()) {
+                val coordinate = ring.optJSONArray(point_index) ?: continue
+                val lon = coordinate.opt_double_or_null(0) ?: continue
+                val lat = coordinate.opt_double_or_null(1) ?: continue
                 points += AviationLayerPoint(lat, lon)
             }
             if (points.size >= MIN_RING_POINTS) rings += points
@@ -256,22 +256,22 @@ class AviationLayerClient(private val userAgent: String) {
         return rings
     }
 
-    private fun altitudeLabel(properties: JSONObject, prefix: String): String? {
-        val value = properties.optDoubleOrNull("${prefix}_VAL") ?: return null
+    private fun altitude_label(properties: JSONObject, prefix: String): String? {
+        val value = properties.opt_double_or_null("${prefix}_VAL") ?: return null
         if (value <= MISSING_ALTITUDE_SENTINEL) return null
-        val unit = properties.optCleanString("${prefix}_UOM") ?: "FT"
+        val unit = properties.opt_clean_string("${prefix}_UOM") ?: return null
         return "${value.toInt()} $unit"
     }
 
-    private fun fetchJson(url: URL): JSONObject {
-        return JSONObject(fetchText(url))
+    private fun fetch_json(url: URL): JSONObject {
+        return JSONObject(fetch_text(url))
     }
 
-    private fun fetchJsonArray(url: URL): JSONArray {
-        return JSONArray(fetchText(url))
+    private fun fetch_json_array(url: URL): JSONArray {
+        return JSONArray(fetch_text(url))
     }
 
-    private fun fetchText(url: URL): String {
+    private fun fetch_text(url: URL): String {
         require(url.protocol.equals("https", ignoreCase = true)) { "Only HTTPS aviation layers are allowed" }
         var connection: HttpURLConnection? = null
         return try {
@@ -279,7 +279,7 @@ class AviationLayerClient(private val userAgent: String) {
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
                 requestMethod = "GET"
-                setRequestProperty("User-Agent", userAgent)
+                setRequestProperty("User-Agent", user_agent)
                 setRequestProperty("Accept", "application/json")
             }
             val code = connection.responseCode
@@ -316,17 +316,17 @@ class AviationLayerClient(private val userAgent: String) {
     }
 }
 
-private fun JSONObject.optCleanString(key: String): String? {
+private fun JSONObject.opt_clean_string(key: String): String? {
     if (!has(key) || isNull(key)) return null
     return optString(key).trim().takeIf { it.isNotBlank() }
 }
 
-private fun JSONArray.optDoubleOrNull(index: Int): Double? {
+private fun JSONArray.opt_double_or_null(index: Int): Double? {
     if (index >= length() || isNull(index)) return null
     return optDouble(index)
 }
 
-private fun JSONObject.optDoubleOrNull(key: String): Double? {
+private fun JSONObject.opt_double_or_null(key: String): Double? {
     if (!has(key) || isNull(key)) return null
     return when (val raw = opt(key)) {
         is Number -> raw.toDouble()

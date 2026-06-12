@@ -10,48 +10,48 @@ internal object AirplanesLiveHttp {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     private const val REST_MIN_INTERVAL_MS = 1100L
-    private val restLock = Any()
+    private val rest_lock = Any()
 
     @Volatile
-    private var nextRestRequestAtMs = 0L
+    private var next_rest_request_at_ms = 0L
 
-    fun applyBrowserHeaders(
+    fun apply_browser_headers(
         connection: HttpURLConnection,
-        appUserAgent: String,
+        app_user_agent: String,
         referer: String? = GLOBE_BASE_URL,
         accept: String = "application/json,text/plain,*/*"
     ) {
-        connection.setRequestProperty("User-Agent", browserUserAgent(appUserAgent))
+        connection.setRequestProperty("User-Agent", browser_user_agent(app_user_agent))
         connection.setRequestProperty("Accept", accept)
         connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9")
         connection.setRequestProperty("Cache-Control", "no-cache")
         referer?.let { connection.setRequestProperty("Referer", it) }
     }
 
-    fun waitForRestApiSlot() {
-        synchronized(restLock) {
+    fun wait_for_rest_api_slot() {
+        synchronized(rest_lock) {
             val now = System.currentTimeMillis()
-            val waitMs = nextRestRequestAtMs - now
-            if (waitMs > 0L) {
+            val wait_ms = next_rest_request_at_ms - now
+            if (wait_ms > 0L) {
                 try {
-                    Thread.sleep(waitMs)
+                    Thread.sleep(wait_ms)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
             }
-            nextRestRequestAtMs = System.currentTimeMillis() + REST_MIN_INTERVAL_MS
+            next_rest_request_at_ms = System.currentTimeMillis() + REST_MIN_INTERVAL_MS
         }
     }
 
-    fun backOffRestApi(retryAfterSeconds: Long?) {
-        val retryMs = (retryAfterSeconds ?: 2L).coerceAtLeast(1L) * 1000L
-        synchronized(restLock) {
-            nextRestRequestAtMs = maxOf(nextRestRequestAtMs, System.currentTimeMillis() + retryMs)
+    fun back_off_rest_api(retry_after_seconds: Long?) {
+        val retry_ms = (retry_after_seconds ?: 2L).coerceAtLeast(1L) * 1000L
+        synchronized(rest_lock) {
+            next_rest_request_at_ms = maxOf(next_rest_request_at_ms, System.currentTimeMillis() + retry_ms)
         }
     }
 
-    fun browserUserAgent(appUserAgent: String): String {
-        val trimmed = appUserAgent.trim()
+    fun browser_user_agent(app_user_agent: String): String {
+        val trimmed = app_user_agent.trim()
         if (trimmed.contains("Mozilla/", ignoreCase = true)) return trimmed
         return if (trimmed.isEmpty()) BROWSER_USER_AGENT else "$BROWSER_USER_AGENT $trimmed"
     }

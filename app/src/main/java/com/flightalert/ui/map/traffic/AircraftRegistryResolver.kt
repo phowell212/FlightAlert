@@ -1,12 +1,12 @@
-package com.flightalert.ui.map.registry
+package com.flightalert.ui.map.traffic
 
 import java.util.Locale
 
-data class RegistryCountry(val isoCode: String, val name: String) {
+data class RegistryCountry(val iso_code: String, val name: String) {
     val label: String
-        get() = "${flagEmoji(isoCode)} $name"
+        get() = "${flag_emoji(iso_code)} $name"
 
-    private fun flagEmoji(code: String): String {
+    private fun flag_emoji(code: String): String {
         val normalized = code.uppercase(Locale.US).take(2)
         if (normalized.length != 2 || normalized.any { it !in 'A'..'Z' }) return normalized
         val first = Character.toChars(0x1F1E6 + (normalized[0] - 'A')).concatToString()
@@ -17,13 +17,32 @@ data class RegistryCountry(val isoCode: String, val name: String) {
 
 data class IcaoRegistryRange(val start: Int, val end: Int, val country: RegistryCountry)
 
+enum class RegistryCountrySource {
+    REGISTRATION,
+    ICAO_ALLOCATION
+}
+
+data class RegistryCountryMatch(val country: RegistryCountry, val source: RegistryCountrySource) {
+    val label: String
+        get() = country.label
+}
+
 object AircraftRegistryResolver {
-    fun labelFor(registration: String?, icao24: String): String? {
-        val country = countryFromRegistration(registration) ?: countryFromIcao24(icao24)
-        return country?.label
+    fun country_for(registration: String?, icao24: String): RegistryCountryMatch? {
+        country_from_registration(registration)?.let {
+            return RegistryCountryMatch(it, RegistryCountrySource.REGISTRATION)
+        }
+        country_from_icao24(icao24)?.let {
+            return RegistryCountryMatch(it, RegistryCountrySource.ICAO_ALLOCATION)
+        }
+        return null
     }
 
-    private fun countryFromRegistration(registration: String?): RegistryCountry? {
+    fun label_for(registration: String?, icao24: String): String? {
+        return country_for(registration, icao24)?.label
+    }
+
+    private fun country_from_registration(registration: String?): RegistryCountry? {
         val reg = registration ?: return null
         return when {
             reg.startsWith("N") && reg.getOrNull(1)?.isDigit() == true -> REGISTRY_UNITED_STATES
@@ -73,7 +92,7 @@ object AircraftRegistryResolver {
         }
     }
 
-    private fun countryFromIcao24(icao24: String): RegistryCountry? {
+    private fun country_from_icao24(icao24: String): RegistryCountry? {
         val value = icao24.trim().trimStart('~').toIntOrNull(16) ?: return null
         return ICAO_REGISTRY_RANGES.firstOrNull { value in it.start..it.end }?.country
     }

@@ -4,9 +4,9 @@ data class FaaRegistryRecord(
     val registration: String,
     val manufacturer: String?,
     val model: String?,
-    val manufacturedYear: String?,
-    val registeredOwner: String?,
-    val sourceName: String
+    val manufactured_year: String?,
+    val registered_owner: String?,
+    val source_name: String
 )
 
 data class AircraftDetails(
@@ -14,24 +14,24 @@ data class AircraftDetails(
     val registration: String?,
     val manufacturer: String?,
     val type: String?,
-    val typeCode: String?,
+    val type_code: String?,
     val owner: String?,
-    val manufacturedYear: String?,
-    val registrySource: String?,
-    val operatorCode: String?,
+    val manufactured_year: String?,
+    val registry_source: String?,
+    val operator_code: String?,
     val route: String?,
-    val routeUpdatedEpochSec: Long?,
-    val routeSource: String?,
-    val originAirport: AirportDetails?,
-    val destinationAirport: AirportDetails?
+    val route_updated_epoch_sec: Long?,
+    val route_source: String?,
+    val origin_airport: AirportDetails?,
+    val destination_airport: AirportDetails?
 )
 
 data class AirportDetails(
     val icao: String,
     val iata: String?,
     val name: String?,
-    val countryCode: String?,
-    val regionName: String?,
+    val country_code: String?,
+    val region_name: String?,
     val latitude: Double?,
     val longitude: Double?
 )

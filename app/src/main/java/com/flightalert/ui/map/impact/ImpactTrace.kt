@@ -1,9 +1,9 @@
 package com.flightalert.ui.map.impact
 
 data class ImpactTrace(
-    val distanceM: Double,
+    val distance_m: Double,
     val hours: Double,
-    val averageSpeedMs: Double,
-    val pointCount: Int,
+    val average_speed_ms: Double,
+    val point_count: Int,
     val source: String
 )

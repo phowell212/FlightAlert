@@ -20,23 +20,23 @@ enum class PhotoQuality(val rank: Int) {
 }
 
 data class PhotoEvidence(
-    val sourceName: String,
-    val imageUrl: String,
-    val pageUrl: String,
-    val searchQuery: String,
+    val source_name: String,
+    val image_url: String,
+    val page_url: String,
+    val search_query: String,
     val quote: String,
-    val matchedTerms: List<String>
+    val matched_terms: List<String>
 )
 
 data class SearchImageCandidate(
-    val imageUrl: String,
-    val pageUrl: String,
-    val sourceName: String,
+    val image_url: String,
+    val page_url: String,
+    val source_name: String,
     val title: String = "",
-    val verificationText: String? = null
+    val verification_text: String? = null
 )
 
 data class VerificationQuote(
     val text: String,
-    val matchedTerms: List<String>
+    val matched_terms: List<String>
 )

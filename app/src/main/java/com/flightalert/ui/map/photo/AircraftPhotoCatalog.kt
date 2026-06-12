@@ -4,28 +4,28 @@ import com.flightalert.data.AircraftDetails
 import java.util.Locale
 
 object AircraftPhotoCatalog {
-    fun representativeModelNames(details: AircraftDetails): List<String> {
-        val base = representativeModelName(details)
+    fun representative_model_names(details: AircraftDetails): List<String> {
+        val base = representative_model_name(details)
         val type = details.type?.trim()
         val manufacturer = details.manufacturer?.trim()
         val aliases = mutableListOf<String>()
         if (base != null) aliases += base
         if (manufacturer != null && type != null) {
             aliases += "$manufacturer $type"
-            manufacturerAliases(manufacturer).forEach { alias -> aliases += "$alias $type" }
-            typeModelAliases(type).forEach { aliasType ->
-                aliases += "$manufacturer $aliasType"
-                manufacturerAliases(manufacturer).forEach { alias -> aliases += "$alias $aliasType" }
+            manufacturer_aliases(manufacturer).forEach { alias -> aliases += "$alias $type" }
+            type_model_aliases(type).forEach { alias_type ->
+                aliases += "$manufacturer $alias_type"
+                manufacturer_aliases(manufacturer).forEach { alias -> aliases += "$alias $alias_type" }
             }
         }
         type?.let { aliases += it }
         return aliases
-            .map { normalizeAircraftSearchName(it) }
+            .map { normalize_aircraft_search_name(it) }
             .filter { it.length >= 3 }
             .distinct()
     }
 
-    fun representativePhotoQueries(details: AircraftDetails, model: String): List<String> {
+    fun representative_photo_queries(details: AircraftDetails, model: String): List<String> {
         return listOfNotNull(
             "\"$model\" aircraft",
             "$model aircraft",
@@ -36,12 +36,12 @@ object AircraftPhotoCatalog {
             "\"$model\" airliner",
             "\"$model\" in flight",
             details.type?.let { "\"$it\" aircraft" },
-            details.typeCode?.let { "${details.manufacturer.orEmpty()} $it aircraft".trim() },
-            details.typeCode?.let { "$it aircraft" }
+            details.type_code?.let { "${details.manufacturer.orEmpty()} $it aircraft".trim() },
+            details.type_code?.let { "$it aircraft" }
         ).filter { it.isNotBlank() }.distinct()
     }
 
-    fun exactPhotoQueries(registration: String?, icao24: String): List<String> {
+    fun exact_photo_queries(registration: String?, icao24: String): List<String> {
         return listOfNotNull(
             registration?.let { "\"$it\" aircraft photo" },
             registration?.let { "$it aircraft" },
@@ -49,8 +49,8 @@ object AircraftPhotoCatalog {
         ).distinct()
     }
 
-    fun photoVerificationTerms(details: AircraftDetails, model: String): List<String> {
-        val familyTerms = listOfNotNull(
+    fun photo_verification_terms(details: AircraftDetails, model: String): List<String> {
+        val family_terms = listOfNotNull(
             Regex("""Airbus A\d{3}""").find(model)?.value,
             Regex("""Boeing \d{3}""").find(model)?.value,
             Regex("""Cessna \d{3}""").find(model)?.value,
@@ -61,16 +61,16 @@ object AircraftPhotoCatalog {
             model,
             model.substringAfterLast(" ").takeIf { it.length >= 3 && it.any(Char::isDigit) },
             details.type,
-            details.typeCode
-        ).plus(familyTerms)
+            details.type_code
+        ).plus(family_terms)
             .map { it.trim() }
             .filter { it.length >= 3 }
             .distinct()
     }
 
-    private fun representativeModelName(details: AircraftDetails): String? {
-        val code = details.typeCode?.uppercase(Locale.US)?.trim()
-        val knownModel = when (code) {
+    private fun representative_model_name(details: AircraftDetails): String? {
+        val code = details.type_code?.uppercase(Locale.US)?.trim()
+        val known_model = when (code) {
             "A19N" -> "Airbus A319neo"
             "A20N" -> "Airbus A320neo"
             "A21N" -> "Airbus A321neo"
@@ -188,14 +188,14 @@ object AircraftPhotoCatalog {
             "TBM9" -> "Daher TBM 900"
             else -> null
         }
-        if (knownModel != null) return knownModel
-        return listOfNotNull(details.manufacturer, details.type ?: details.typeCode)
+        if (known_model != null) return known_model
+        return listOfNotNull(details.manufacturer, details.type ?: details.type_code)
             .joinToString(" ")
             .trim()
             .ifEmpty { null }
     }
 
-    private fun manufacturerAliases(manufacturer: String): List<String> {
+    private fun manufacturer_aliases(manufacturer: String): List<String> {
         val normalized = manufacturer.uppercase(Locale.US)
         return when {
             "GRUMMAN" in normalized -> listOf("Grumman American", "Grumman")
@@ -213,7 +213,7 @@ object AircraftPhotoCatalog {
         }
     }
 
-    private fun typeModelAliases(type: String): List<String> {
+    private fun type_model_aliases(type: String): List<String> {
         val normalized = type.uppercase(Locale.US).replace(Regex("[^A-Z0-9]+"), " ").trim()
         val compact = normalized.replace(" ", "")
         return when {
@@ -259,7 +259,7 @@ object AircraftPhotoCatalog {
         }
     }
 
-    private fun normalizeAircraftSearchName(value: String): String {
+    private fun normalize_aircraft_search_name(value: String): String {
         return value
             .replace(Regex("\\bINC\\.?\\b", RegexOption.IGNORE_CASE), " ")
             .replace(Regex("\\bCORP\\.?\\b", RegexOption.IGNORE_CASE), " ")

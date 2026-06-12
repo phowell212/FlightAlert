@@ -69,7 +69,7 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 
 ## 1.4 Verification
 
-- `assembleDebug` passes.
-- Real Galaxy Z Fold5 checks covered portrait and landscape Settings, Layers, main map, and aircraft details.
-- Modal panels now dim/occlude background UI so text does not visually overlap.
-- Root screenshot artifacts were removed and are ignored by `.gitignore`.
+- `assembleDebug`, `testDebugUnitTest`, and `lintDebug` pass.
+- Emulator comparison covered the refactored `test` branch against `master` for the main map, Settings, Filters, aircraft details, and Priority tracker panels.
+- Persistent extreme-priority notification was verified with live aircraft data: it appears only while priority tracking has aircraft inside the configured 3D alert volume and clears when priority tracking is turned off.
+- The map coordinator was refactored so feature logic lives in focused Kotlin objects while preserving the existing styling and user experience.

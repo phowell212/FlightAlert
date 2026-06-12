@@ -1,12 +1,29 @@
-# Add project specific R8 rules here.
-# AGP will combine all keep rule files in src/main/keepRules to pass to R8
+# Flight Alert R8 rules.
 #
-# For more details, see
-#   https://d.android.com/r/tools/r8/keep-rules
+# Project behavior rules live in AGENTS.md. Keep the short reminder below in
+# sync with that file when new agent rules are revealed.
+#
+# Keep this file narrow and project-specific. Flight Alert does not use broad
+# reflection-based JSON binding, generated route tables, or a JavaScript bridge,
+# so do not add package-wide keep rules just to quiet an optimizer warning.
+#
+# Product rules that matter while editing code:
+# - Never invent aircraft, route, altitude, photo, map, alert, or source data.
+# - Live traffic, map tiles, traces, photos, registry data, and aviation layers
+#   must stay tied to real/documented sources or be shown as Unavailable.
+# - Alert decisions must be based on reported horizontal position plus supported
+#   vertical separation, not on visual-only projected sprite positions.
+# - Refactors must keep the existing styling, layout feel, interaction rhythm,
+#   and user experience unless a visible difference is an explicit bug fix.
+# - Release work must build, lint where tooling allows, verify on emulator/device,
+#   test the persistent extreme-priority notification, and clean generated junk.
+#
+# Android manifest entry points. AGP usually preserves manifest classes on its
+# own; these explicit entries keep future minified release builds readable.
+-keep class com.flightalert.MainActivity {
+    public <init>();
+}
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+-keep class com.flightalert.service.AircraftAlertService {
+    public <init>();
+}

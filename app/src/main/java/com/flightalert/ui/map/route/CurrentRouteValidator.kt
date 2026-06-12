@@ -4,7 +4,7 @@ import com.flightalert.data.AircraftDetails
 import com.flightalert.data.AircraftRouteSource
 import com.flightalert.data.TraceSegment
 import com.flightalert.data.TrackPoint
-import com.flightalert.ui.map.settings.FlightMapSettings
+import com.flightalert.ui.map.FlightMapSettings
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -14,206 +14,206 @@ import kotlin.math.min
 import kotlin.math.sin
 
 object CurrentRouteValidator {
-    fun hasRouteMetadata(details: AircraftDetails): Boolean {
-        return details.route != null || details.originAirport != null || details.destinationAirport != null
+    fun has_route_metadata(details: AircraftDetails): Boolean {
+        return details.route != null || details.origin_airport != null || details.destination_airport != null
     }
 
     fun evaluate(
         details: AircraftDetails,
-        aircraftIcao24: String,
-        aircraftCallsign: String,
-        selectedTraceAircraftId: String?,
-        traceSegments: List<TraceSegment>?
+        aircraft_icao24: String,
+        aircraft_callsign: String,
+        selected_trace_aircraft_id: String?,
+        trace_segments: List<TraceSegment>?
     ): CurrentRouteValidation {
-        val id = aircraftIcao24.lowercase(Locale.US)
-        if (selectedTraceAircraftId != id) {
-            return rejected("trace_not_ready selectedTrace=${selectedTraceAircraftId ?: "none"}", details, aircraftIcao24, aircraftCallsign)
+        val id = aircraft_icao24.lowercase(Locale.US)
+        if (selected_trace_aircraft_id != id) {
+            return rejected("trace_not_ready selected_trace=${selected_trace_aircraft_id ?: "none"}", details, aircraft_icao24, aircraft_callsign)
         }
-        val origin = details.originAirport ?: return rejected("missing_origin", details, aircraftIcao24, aircraftCallsign)
-        val originLat = origin.latitude ?: return rejected("missing_origin_lat", details, aircraftIcao24, aircraftCallsign)
-        val originLon = origin.longitude ?: return rejected("missing_origin_lon", details, aircraftIcao24, aircraftCallsign)
-        val points = traceSegments
+        val origin = details.origin_airport ?: return rejected("missing_origin", details, aircraft_icao24, aircraft_callsign)
+        val origin_lat = origin.latitude ?: return rejected("missing_origin_lat", details, aircraft_icao24, aircraft_callsign)
+        val origin_lon = origin.longitude ?: return rejected("missing_origin_lon", details, aircraft_icao24, aircraft_callsign)
+        val points = trace_segments
             ?.flatMap { it.points }
-            ?.sortedBy { it.epochSec }
+            ?.sortedBy { it.epoch_sec }
             ?.takeIf { it.size >= 2 }
-            ?: return rejected("no_trace_points", details, aircraftIcao24, aircraftCallsign)
-        val first = points.firstOrNull() ?: return rejected("empty_trace", details, aircraftIcao24, aircraftCallsign)
-        val destination = details.destinationAirport
-        val destLat = destination?.latitude
-        val destLon = destination?.longitude
-        val directRouteMeters = if (destLat != null && destLon != null) {
-            distanceMeters(originLat, originLon, destLat, destLon)
+            ?: return rejected("no_trace_points", details, aircraft_icao24, aircraft_callsign)
+        val first = points.firstOrNull() ?: return rejected("empty_trace", details, aircraft_icao24, aircraft_callsign)
+        val destination = details.destination_airport
+        val dest_lat = destination?.latitude
+        val dest_lon = destination?.longitude
+        val direct_route_meters = if (dest_lat != null && dest_lon != null) {
+            distance_meters(origin_lat, origin_lon, dest_lat, dest_lon)
         } else {
             null
         }
-        val originTolerance = directRouteMeters?.let { currentRouteEndpointTolerance(it) }
+        val origin_tolerance = direct_route_meters?.let { current_route_endpoint_tolerance(it) }
             ?: FlightMapSettings.CurrentRoute.ORIGIN_MATCH_M
-        val firstDistanceMeters = distanceMeters(originLat, originLon, first.lat, first.lon)
+        val first_distance_meters = distance_meters(origin_lat, origin_lon, first.lat, first.lon)
 
         // ADSBdb callsign routes can be current even when the public trace starts mid-flight.
-        if (firstDistanceMeters > originTolerance) {
+        if (first_distance_meters > origin_tolerance) {
             if (
-                details.isTrustedCurrentCallsignRoute() &&
-                destLat != null &&
-                destLon != null &&
-                directRouteMeters != null &&
-                traceMatchesPartialCurrentRoute(points, originLat, originLon, destLat, destLon, directRouteMeters)
+                details.is_trusted_current_callsign_route() &&
+                dest_lat != null &&
+                dest_lon != null &&
+                direct_route_meters != null &&
+                trace_matches_partial_current_route(points, origin_lat, origin_lon, dest_lat, dest_lon, direct_route_meters)
             ) {
                 return accepted(
-                    "partial_trace distanceM=${firstDistanceMeters.toInt()} toleranceM=${originTolerance.toInt()}",
+                    "partial_trace distance_m=${first_distance_meters.toInt()} tolerance_m=${origin_tolerance.toInt()}",
                     details,
-                    aircraftIcao24,
-                    aircraftCallsign
+                    aircraft_icao24,
+                    aircraft_callsign
                 )
             }
             return rejected(
-                "origin_mismatch distanceM=${firstDistanceMeters.toInt()} toleranceM=${originTolerance.toInt()}",
+                "origin_mismatch distance_m=${first_distance_meters.toInt()} tolerance_m=${origin_tolerance.toInt()}",
                 details,
-                aircraftIcao24,
-                aircraftCallsign
+                aircraft_icao24,
+                aircraft_callsign
             )
         }
         if (
-            destLat != null &&
-            destLon != null &&
-            !traceDirectionMatchesRoute(points, originLat, originLon, destLat, destLon)
+            dest_lat != null &&
+            dest_lon != null &&
+            !trace_direction_matches_route(points, origin_lat, origin_lon, dest_lat, dest_lon)
         ) {
-            return rejected("direction_mismatch", details, aircraftIcao24, aircraftCallsign)
+            return rejected("direction_mismatch", details, aircraft_icao24, aircraft_callsign)
         }
-        return accepted("current_flight", details, aircraftIcao24, aircraftCallsign)
+        return accepted("current_flight", details, aircraft_icao24, aircraft_callsign)
     }
 
-    private fun AircraftDetails.isTrustedCurrentCallsignRoute(): Boolean {
-        return routeSource == AircraftRouteSource.ADSBDB_CALLSIGN
+    private fun AircraftDetails.is_trusted_current_callsign_route(): Boolean {
+        return route_source == AircraftRouteSource.ADSBDB_CALLSIGN
     }
 
-    private fun traceMatchesPartialCurrentRoute(
+    private fun trace_matches_partial_current_route(
         points: List<TrackPoint>,
-        originLat: Double,
-        originLon: Double,
-        destLat: Double,
-        destLon: Double,
-        directRouteMeters: Double
+        origin_lat: Double,
+        origin_lon: Double,
+        dest_lat: Double,
+        dest_lon: Double,
+        direct_route_meters: Double
     ): Boolean {
         val first = points.firstOrNull() ?: return false
         val last = points.lastOrNull() ?: return false
-        val firstToDestination = distanceMeters(first.lat, first.lon, destLat, destLon)
-        val lastToDestination = distanceMeters(last.lat, last.lon, destLat, destLon)
-        val firstFromOrigin = distanceMeters(originLat, originLon, first.lat, first.lon)
-        val lastFromOrigin = distanceMeters(originLat, originLon, last.lat, last.lon)
-        val endpointTolerance = currentRouteEndpointTolerance(directRouteMeters)
-        val progressTolerance = currentRouteProgressTolerance(directRouteMeters)
-        val nearDestination = min(firstToDestination, lastToDestination) <= endpointTolerance &&
-            lastToDestination <= firstToDestination + progressTolerance
-        if (nearDestination) return true
+        val first_to_destination = distance_meters(first.lat, first.lon, dest_lat, dest_lon)
+        val last_to_destination = distance_meters(last.lat, last.lon, dest_lat, dest_lon)
+        val first_from_origin = distance_meters(origin_lat, origin_lon, first.lat, first.lon)
+        val last_from_origin = distance_meters(origin_lat, origin_lon, last.lat, last.lon)
+        val endpoint_tolerance = current_route_endpoint_tolerance(direct_route_meters)
+        val progress_tolerance = current_route_progress_tolerance(direct_route_meters)
+        val near_destination = min(first_to_destination, last_to_destination) <= endpoint_tolerance &&
+            last_to_destination <= first_to_destination + progress_tolerance
+        if (near_destination) return true
 
-        val onRouteCorridor = pointNearCurrentRouteCorridor(
+        val on_route_corridor = point_near_current_route_corridor(
             first,
-            originLat,
-            originLon,
-            destLat,
-            destLon,
-            directRouteMeters
-        ) || pointNearCurrentRouteCorridor(
+            origin_lat,
+            origin_lon,
+            dest_lat,
+            dest_lon,
+            direct_route_meters
+        ) || point_near_current_route_corridor(
             last,
-            originLat,
-            originLon,
-            destLat,
-            destLon,
-            directRouteMeters
+            origin_lat,
+            origin_lon,
+            dest_lat,
+            dest_lon,
+            direct_route_meters
         )
-        if (!onRouteCorridor) return false
-        val notMovingAwayFromRoute = lastToDestination <= firstToDestination + progressTolerance ||
-            lastFromOrigin >= firstFromOrigin - progressTolerance
-        return notMovingAwayFromRoute &&
-            traceDirectionMatchesRoute(points, originLat, originLon, destLat, destLon)
+        if (!on_route_corridor) return false
+        val not_moving_away_from_route = last_to_destination <= first_to_destination + progress_tolerance ||
+            last_from_origin >= first_from_origin - progress_tolerance
+        return not_moving_away_from_route &&
+            trace_direction_matches_route(points, origin_lat, origin_lon, dest_lat, dest_lon)
     }
 
-    private fun pointNearCurrentRouteCorridor(
+    private fun point_near_current_route_corridor(
         point: TrackPoint,
-        originLat: Double,
-        originLon: Double,
-        destLat: Double,
-        destLon: Double,
-        directRouteMeters: Double
+        origin_lat: Double,
+        origin_lon: Double,
+        dest_lat: Double,
+        dest_lon: Double,
+        direct_route_meters: Double
     ): Boolean {
-        val fromOrigin = distanceMeters(originLat, originLon, point.lat, point.lon)
-        val toDestination = distanceMeters(point.lat, point.lon, destLat, destLon)
-        val corridorTolerance = max(
+        val from_origin = distance_meters(origin_lat, origin_lon, point.lat, point.lon)
+        val to_destination = distance_meters(point.lat, point.lon, dest_lat, dest_lon)
+        val corridor_tolerance = max(
             FlightMapSettings.CurrentRoute.CORRIDOR_MATCH_M,
-            directRouteMeters * FlightMapSettings.CurrentRoute.CORRIDOR_ROUTE_FRACTION
+            direct_route_meters * FlightMapSettings.CurrentRoute.CORRIDOR_ROUTE_FRACTION
         ).coerceAtMost(FlightMapSettings.CurrentRoute.CORRIDOR_MATCH_MAX_M)
-        return fromOrigin <= directRouteMeters + corridorTolerance &&
-            toDestination <= directRouteMeters + corridorTolerance &&
-            fromOrigin + toDestination <= directRouteMeters + corridorTolerance
+        return from_origin <= direct_route_meters + corridor_tolerance &&
+            to_destination <= direct_route_meters + corridor_tolerance &&
+            from_origin + to_destination <= direct_route_meters + corridor_tolerance
     }
 
-    private fun currentRouteEndpointTolerance(directRouteMeters: Double): Double {
+    private fun current_route_endpoint_tolerance(direct_route_meters: Double): Double {
         return max(
             FlightMapSettings.CurrentRoute.ORIGIN_MATCH_M,
-            directRouteMeters * FlightMapSettings.CurrentRoute.ORIGIN_ROUTE_FRACTION
+            direct_route_meters * FlightMapSettings.CurrentRoute.ORIGIN_ROUTE_FRACTION
         ).coerceAtMost(FlightMapSettings.CurrentRoute.ORIGIN_MATCH_MAX_M)
     }
 
-    private fun currentRouteProgressTolerance(directRouteMeters: Double): Double {
+    private fun current_route_progress_tolerance(direct_route_meters: Double): Double {
         return max(
             FlightMapSettings.CurrentRoute.PROGRESS_MATCH_M,
-            directRouteMeters * FlightMapSettings.CurrentRoute.PROGRESS_ROUTE_FRACTION
+            direct_route_meters * FlightMapSettings.CurrentRoute.PROGRESS_ROUTE_FRACTION
         ).coerceAtMost(FlightMapSettings.CurrentRoute.PROGRESS_MATCH_MAX_M)
     }
 
-    private fun traceDirectionMatchesRoute(
+    private fun trace_direction_matches_route(
         points: List<TrackPoint>,
-        originLat: Double,
-        originLon: Double,
-        destLat: Double,
-        destLon: Double
+        origin_lat: Double,
+        origin_lon: Double,
+        dest_lat: Double,
+        dest_lon: Double
     ): Boolean {
-        val directRouteMeters = distanceMeters(originLat, originLon, destLat, destLon)
-        if (directRouteMeters < FlightMapSettings.CurrentRoute.MIN_DIRECTION_M) return true
+        val direct_route_meters = distance_meters(origin_lat, origin_lon, dest_lat, dest_lon)
+        if (direct_route_meters < FlightMapSettings.CurrentRoute.MIN_DIRECTION_M) return true
         val first = points.firstOrNull() ?: return false
         val last = points.lastOrNull() ?: return false
-        val observedMeters = distanceMeters(first.lat, first.lon, last.lat, last.lon)
-        if (observedMeters < FlightMapSettings.CurrentRoute.MIN_DIRECTION_M) return true
-        val routeBearing = initialBearingDegrees(originLat, originLon, destLat, destLon)
-        val observedBearing = initialBearingDegrees(first.lat, first.lon, last.lat, last.lon)
-        return angularDeltaDegrees(routeBearing, observedBearing) <= FlightMapSettings.CurrentRoute.MAX_BEARING_DELTA_DEG
+        val observed_meters = distance_meters(first.lat, first.lon, last.lat, last.lon)
+        if (observed_meters < FlightMapSettings.CurrentRoute.MIN_DIRECTION_M) return true
+        val route_bearing = initial_bearing_degrees(origin_lat, origin_lon, dest_lat, dest_lon)
+        val observed_bearing = initial_bearing_degrees(first.lat, first.lon, last.lat, last.lon)
+        return angular_delta_degrees(route_bearing, observed_bearing) <= FlightMapSettings.CurrentRoute.MAX_BEARING_DELTA_DEG
     }
 
-    private fun accepted(reason: String, details: AircraftDetails, aircraftIcao24: String, aircraftCallsign: String): CurrentRouteValidation {
-        return CurrentRouteValidation(true, diagnostic("accepted $reason", details, aircraftIcao24, aircraftCallsign))
+    private fun accepted(reason: String, details: AircraftDetails, aircraft_icao24: String, aircraft_callsign: String): CurrentRouteValidation {
+        return CurrentRouteValidation(true, diagnostic("accepted $reason", details, aircraft_icao24, aircraft_callsign))
     }
 
-    private fun rejected(reason: String, details: AircraftDetails, aircraftIcao24: String, aircraftCallsign: String): CurrentRouteValidation {
-        return CurrentRouteValidation(false, diagnostic("rejected $reason", details, aircraftIcao24, aircraftCallsign))
+    private fun rejected(reason: String, details: AircraftDetails, aircraft_icao24: String, aircraft_callsign: String): CurrentRouteValidation {
+        return CurrentRouteValidation(false, diagnostic("rejected $reason", details, aircraft_icao24, aircraft_callsign))
     }
 
-    private fun diagnostic(result: String, details: AircraftDetails, aircraftIcao24: String, aircraftCallsign: String): String {
-        return "Current route $result icao=$aircraftIcao24 callsign=${aircraftCallsign.ifBlank { "none" }} " +
-            "route=${details.route ?: "none"} origin=${details.originAirport?.icao ?: "none"} " +
-            "destination=${details.destinationAirport?.icao ?: "none"} source=${details.routeSource ?: "none"}"
+    private fun diagnostic(result: String, details: AircraftDetails, aircraft_icao24: String, aircraft_callsign: String): String {
+        return "Current route $result icao=$aircraft_icao24 callsign=${aircraft_callsign.ifBlank { "none" }} " +
+            "route=${details.route ?: "none"} origin=${details.origin_airport?.icao ?: "none"} " +
+            "destination=${details.destination_airport?.icao ?: "none"} source=${details.route_source ?: "none"}"
     }
 
-    private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val latDistance = Math.toRadians(lat2 - lat1)
-        val lonDistance = Math.toRadians(lon2 - lon1)
-        val a = sin(latDistance / 2) * sin(latDistance / 2) +
+    private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val lat_distance = Math.toRadians(lat2 - lat1)
+        val lon_distance = Math.toRadians(lon2 - lon1)
+        val a = sin(lat_distance / 2) * sin(lat_distance / 2) +
             cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
-            sin(lonDistance / 2) * sin(lonDistance / 2)
+            sin(lon_distance / 2) * sin(lon_distance / 2)
         val c = 2 * atan2(kotlin.math.sqrt(a), kotlin.math.sqrt(1 - a))
         return EARTH_RADIUS_M * c
     }
 
-    private fun initialBearingDegrees(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val fromLat = Math.toRadians(lat1)
-        val toLat = Math.toRadians(lat2)
-        val deltaLon = Math.toRadians(lon2 - lon1)
-        val y = sin(deltaLon) * cos(toLat)
-        val x = cos(fromLat) * sin(toLat) - sin(fromLat) * cos(toLat) * cos(deltaLon)
+    private fun initial_bearing_degrees(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val from_lat = Math.toRadians(lat1)
+        val to_lat = Math.toRadians(lat2)
+        val delta_lon = Math.toRadians(lon2 - lon1)
+        val y = sin(delta_lon) * cos(to_lat)
+        val x = cos(from_lat) * sin(to_lat) - sin(from_lat) * cos(to_lat) * cos(delta_lon)
         return (Math.toDegrees(atan2(y, x)) + 360.0) % 360.0
     }
 
-    private fun angularDeltaDegrees(first: Double, second: Double): Double {
+    private fun angular_delta_degrees(first: Double, second: Double): Double {
         return abs((first - second + 540.0) % 360.0 - 180.0)
     }
 

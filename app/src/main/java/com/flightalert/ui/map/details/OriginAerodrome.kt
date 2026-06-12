@@ -1,9 +1,9 @@
-package com.flightalert.ui.map.origin
+package com.flightalert.ui.map.details
 
 data class OriginAerodrome(
     val name: String?,
     val icao: String?,
-    val distanceM: Double,
+    val distance_m: Double,
     val military: Boolean
 ) {
     fun label(): String = listOfNotNull(name, icao)

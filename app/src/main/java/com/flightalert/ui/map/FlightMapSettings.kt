@@ -1,4 +1,4 @@
-package com.flightalert.ui.map.settings
+package com.flightalert.ui.map
 
 object FlightMapSettings {
     object CurrentRoute {

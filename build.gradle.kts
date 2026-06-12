@@ -22,6 +22,9 @@ android {
         getByName("main") {
             setRoot("app/src/main")
         }
+        getByName("test") {
+            setRoot("app/src/test")
+        }
     }
 
     buildTypes {
@@ -41,4 +44,5 @@ android {
 dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.core.ktx)
+    testImplementation(libs.junit)
 }
