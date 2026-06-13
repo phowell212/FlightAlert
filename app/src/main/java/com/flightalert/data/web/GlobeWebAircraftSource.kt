@@ -1,4 +1,4 @@
-package com.flightalert.data
+package com.flightalert.data.web
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -10,10 +10,22 @@ import android.view.View
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.flightalert.data.AircraftDetails
+import com.flightalert.data.AircraftMetadataSeed
+import com.flightalert.data.AirportDetails
+import com.flightalert.data.AircraftTelemetry
+import com.flightalert.data.FeedAircraft
+import com.flightalert.data.FeedBounds
+import com.flightalert.data.FeedResult
+import com.flightalert.data.FeedSource
+import com.flightalert.data.FeedStatus
+import com.flightalert.data.airplaneslive.AirplanesLiveHttp
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -28,6 +40,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
     val web_view: WebView = WebView(context)
 
     private val handler = Handler(Looper.getMainLooper())
+    private val parser_executor = Executors.newSingleThreadExecutor()
     private var loaded = false
     private var host_resumed = false
     private var running = false
@@ -79,6 +92,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
     fun destroy() {
         destroyed = true
         stop_active(clear_snapshot = true, clear_page = true)
+        parser_executor.shutdownNow()
         web_view.destroy()
     }
 
@@ -98,30 +112,25 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         }
     }
 
-    // Store the requested viewport as a generation so old globe snapshots cannot satisfy a new map view.
+    // Keep Globe as a broad traffic inventory. The visible canvas handles screen culling.
+    @Suppress("UNUSED_PARAMETER")
     fun update_viewport(bounds: FeedBounds, center_lat: Double, center_lon: Double, zoom: Double) {
         if (!source_enabled || destroyed) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
             handler.post { update_viewport(bounds, center_lat, center_lon, zoom) }
             return
         }
-        val viewport = GlobeViewport(
-            bounds = bounds,
-            center_lat = center_lat,
-            center_lon = center_lon,
-            zoom = zoom.coerceIn(MIN_GLOBE_ZOOM, MAX_GLOBE_ZOOM),
-            generation = viewport_generation
-        )
+        val viewport = globe_inventory_viewport()
         val previous = pending_viewport
         if (previous != null && previous.matches(viewport)) return
         viewport_generation += 1L
         val next = viewport.copy(generation = viewport_generation)
         pending_viewport = next
-        latest = null
         if (loaded && running) apply_viewport(next)
     }
 
-    // Return a feed result only when the hidden page has fresh data for the current viewport.
+    // Return the hidden page's own fresh aircraft set; the visible renderer handles screen-neighborhood culling.
+    @Suppress("UNUSED_PARAMETER")
     fun latest_snapshot(bounds: FeedBounds, own_lat: Double, own_lon: Double, exact_search: String?): FeedResult? {
         if (!source_enabled || destroyed) return null
         val viewport = pending_viewport ?: return null
@@ -130,11 +139,9 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         if (SystemClock.elapsedRealtime() - snapshot.received_elapsed_ms > MAX_SNAPSHOT_AGE_MS) return null
         if (snapshot.aircraft.isEmpty() && snapshot.partial_coverage) return null
         val normalized_search = exact_search?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }
-        val normalized_bounds = normalize_bounds(bounds)
         val filtered = snapshot.aircraft
             .asSequence()
             .filter { aircraft -> normalized_search == null || aircraft.matches_search(normalized_search) }
-            .filter { aircraft -> normalized_search != null || normalized_bounds.contains(aircraft.lat, aircraft.lon) }
             .map { aircraft -> aircraft.with_distance_from(own_lat, own_lon) }
             .sortedBy { it.distance_m }
             .toList()
@@ -273,12 +280,15 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             (function() {
               try {
                 if (typeof OLMap === 'undefined' || typeof ol === 'undefined' || !OLMap.getView) return false;
+                var view = OLMap.getView();
+                var minZoom = (view.getMinZoom && isFinite(Number(view.getMinZoom()))) ? Number(view.getMinZoom()) : 0;
+                var targetZoom = Math.max(minZoom, %.2f);
                 CenterLat = %.7f;
                 CenterLon = %.7f;
-                if (typeof g !== 'undefined') g.zoomLvl = %.2f;
-                var view = OLMap.getView();
+                if (typeof g !== 'undefined') g.zoomLvl = targetZoom;
+                if (OLMap.updateSize) OLMap.updateSize();
                 view.setCenter(ol.proj.fromLonLat([%.7f, %.7f]));
-                view.setZoom(%.2f);
+                view.setZoom(targetZoom);
                 if (typeof fetchData === 'function') fetchData({force: true});
                 return true;
               } catch (e) {
@@ -286,18 +296,27 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
               }
             })();
             """.trimIndent(),
-            viewport.center_lat,
-            viewport.center_lon,
             viewport.zoom,
-            viewport.center_lon,
             viewport.center_lat,
-            viewport.zoom
+            viewport.center_lon,
+            viewport.center_lon,
+            viewport.center_lat
         )
         web_view.evaluateJavascript(script) { result ->
             if (result == "true" && source_enabled && pending_viewport?.generation == viewport.generation) {
                 applied_viewport_generation = viewport.generation
             }
         }
+    }
+
+    private fun globe_inventory_viewport(): GlobeViewport {
+        return GlobeViewport(
+            bounds = WORLD_FEED_BOUNDS,
+            center_lat = GLOBE_INVENTORY_CENTER_LAT,
+            center_lon = GLOBE_INVENTORY_CENTER_LON,
+            zoom = GLOBE_INVENTORY_ZOOM.coerceIn(MIN_GLOBE_ZOOM, MAX_GLOBE_ZOOM),
+            generation = viewport_generation
+        )
     }
 
     private fun apply_detail_request(request: GlobeDetailRequest) {
@@ -361,12 +380,18 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         }
         val generation = applied_viewport_generation
         web_view.evaluateJavascript(EXTRACT_AIRCRAFT_JS) { value ->
-            parse_snapshot(value, generation)?.let { snapshot ->
-                if (source_enabled && pending_viewport?.generation == snapshot.viewport_generation) {
-                    latest = snapshot
-                    snapshot.detail?.let { latest_detail = it }
+            if (destroyed) return@evaluateJavascript
+            try {
+                parser_executor.execute {
+                    parse_snapshot(value, generation)?.let { snapshot ->
+                        if (source_enabled && pending_viewport?.generation == snapshot.viewport_generation) {
+                            latest = snapshot
+                            snapshot.detail?.let { latest_detail = it }
+                        }
+                        Log.d(TAG, "Globe web source: ${snapshot.aircraft.size} aircraft, partial=${snapshot.partial_coverage}")
+                    }
                 }
-                Log.d(TAG, "Globe web source: ${snapshot.aircraft.size} aircraft, partial=${snapshot.partial_coverage}")
+            } catch (_: RejectedExecutionException) {
             }
         }
     }
@@ -388,7 +413,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             val parsed = mutableListOf<FeedAircraft>()
             for (index in 0 until rows.length()) {
                 val item = rows.optJSONObject(index) ?: continue
-                parse_aircraft(item, now_sec)?.let { parsed += it }
+                parse_aircraft(item)?.let { parsed += it }
             }
             val detail = json.optJSONObject("detail")?.let(::parse_detail)
             GlobeSnapshot(
@@ -405,14 +430,13 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
     }
 
     // Map one globe aircraft object into the shared feed model while preserving nulls for missing fields.
-    private fun parse_aircraft(item: JSONObject, now_sec: Double): FeedAircraft? {
+    private fun parse_aircraft(item: JSONObject): FeedAircraft? {
         val lat = item.opt_double_or_null("lat") ?: return null
         val lon = item.opt_double_or_null("lon") ?: return null
         if (!lat.isFinite() || !lon.isFinite() || lat !in -90.0..90.0 || lon !in -180.0..180.0) return null
         val hex = item.opt_string_or_null("hex")?.trim()?.trimStart('~')?.lowercase(Locale.US) ?: return null
         if (!MODE_S_OR_NON_ICAO.matches(hex)) return null
         val position_time_sec = item.opt_double_or_null("position_time_sec")
-        if (position_time_sec != null && now_sec - position_time_sec > MAX_POSITION_AGE_SECONDS) return null
         val last_contact_sec = item.opt_double_or_null("last_contact_sec")
         val altitude = item.opt("altitude")
         val on_ground = altitude is String && altitude.equals("ground", ignoreCase = true)
@@ -424,6 +448,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         val registration = item.opt_string_or_null("registration")
         val callsign = item.opt_string_or_null("flight") ?: registration ?: hex
         val type_code = item.opt_string_or_null("type_code")
+        val telemetry = item.globe_telemetry()
         val metadata = AircraftMetadataSeed(
             source_name = FeedSource.AIRPLANES_LIVE_GLOBE.display_name,
             registration = registration,
@@ -451,8 +476,49 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             category = category_from_globe(item.opt_string_or_null("category"), item.opt_string_or_null("type_code")),
             position_time_sec = position_time_sec,
             last_contact_sec = last_contact_sec,
-            distance_m = 0.0
+            distance_m = 0.0,
+            telemetry = telemetry
         )
+    }
+
+    private fun JSONObject.globe_telemetry(): AircraftTelemetry? {
+        val telemetry = AircraftTelemetry(
+            source_type = opt_string_or_null("source_type"),
+            squawk = opt_string_or_null("squawk"),
+            baro_altitude_m = opt_double_or_null("baro_altitude_ft")?.let { it / FEET_PER_METER },
+            geom_altitude_m = opt_double_or_null("geom_altitude_ft")?.let { it / FEET_PER_METER },
+            ground_speed_ms = opt_double_or_null("ground_speed_kt")?.let { it * KNOTS_TO_METERS_PER_SECOND },
+            true_speed_ms = opt_double_or_null("true_speed_kt")?.let { it * KNOTS_TO_METERS_PER_SECOND },
+            indicated_speed_ms = opt_double_or_null("indicated_speed_kt")?.let { it * KNOTS_TO_METERS_PER_SECOND },
+            mach = opt_double_or_null("mach"),
+            baro_rate_ms = opt_double_or_null("baro_rate_fpm")?.let { it / FEET_PER_METER / 60.0 },
+            geom_rate_ms = opt_double_or_null("geom_rate_fpm")?.let { it / FEET_PER_METER / 60.0 },
+            selected_altitude_m = opt_double_or_null("selected_altitude_ft")?.let { it / FEET_PER_METER },
+            selected_heading_deg = opt_double_or_null("selected_heading_deg"),
+            wind_speed_ms = opt_double_or_null("wind_speed_kt")?.let { it * KNOTS_TO_METERS_PER_SECOND },
+            wind_direction_deg = opt_double_or_null("wind_direction_deg"),
+            tat_c = opt_double_or_null("tat_c"),
+            oat_c = opt_double_or_null("oat_c"),
+            qnh_hpa = opt_double_or_null("qnh_hpa"),
+            true_heading_deg = opt_double_or_null("true_heading_deg"),
+            magnetic_heading_deg = opt_double_or_null("magnetic_heading_deg"),
+            magnetic_declination_deg = opt_double_or_null("magnetic_declination_deg"),
+            track_rate_deg_per_sec = opt_double_or_null("track_rate_deg_per_sec"),
+            roll_deg = opt_double_or_null("roll_deg"),
+            nav_modes = opt_string_list("nav_modes"),
+            adsb_version = opt_string_or_null("adsb_version"),
+            nac_p = opt_int_or_null("nac_p"),
+            nac_v = opt_int_or_null("nac_v"),
+            sil = opt_int_or_null("sil"),
+            sil_type = opt_string_or_null("sil_type"),
+            nic_baro = opt_string_or_null("nic_baro"),
+            rc_m = opt_double_or_null("rc_m"),
+            rssi = opt_double_or_null("rssi"),
+            message_rate = opt_double_or_null("message_rate"),
+            receiver_count_label = opt_string_or_null("receiver_count_label"),
+            category_label = opt_string_or_null("category")
+        )
+        return telemetry.takeIf { it.has_values }
     }
 
     private fun parse_detail(item: JSONObject): GlobeDetailSnapshot? {
@@ -463,6 +529,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         val route = item.opt_string_or_null("route")
         val route_source = item.opt_string_or_null("route_source")
             ?.takeIf { route != null || route_airports.isNotEmpty() }
+        val telemetry = item.globe_telemetry()
         val source = listOfNotNull(
             FeedSource.AIRPLANES_LIVE_GLOBE.display_name,
             item.opt_string_or_null("trace_source")?.takeIf { item.optBoolean("trace_loaded", false) },
@@ -488,7 +555,8 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             route_updated_epoch_sec = item.opt_long_or_null("route_updated_epoch_sec"),
             route_source = route_source,
             origin_airport = route_airports.firstOrNull(),
-            destination_airport = route_airports.lastOrNull()?.takeIf { route_airports.size >= 2 }
+            destination_airport = route_airports.lastOrNull()?.takeIf { route_airports.size >= 2 },
+            telemetry = telemetry
         )
         val photo = item.optJSONObject("photo")?.let(::parse_photo_hint)
         return GlobeDetailSnapshot(
@@ -559,19 +627,6 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             registration?.uppercase(Locale.US)?.contains(search) == true
     }
 
-    private fun GlobeBounds.contains(lat: Double, lon: Double): Boolean {
-        return lat in min_lat..max_lat && lon in min_lon..max_lon
-    }
-
-    private fun normalize_bounds(bounds: FeedBounds): GlobeBounds {
-        return GlobeBounds(
-            min_lat = min(bounds.min_lat, bounds.max_lat).coerceIn(-90.0, 90.0),
-            max_lat = max(bounds.min_lat, bounds.max_lat).coerceIn(-90.0, 90.0),
-            min_lon = min(bounds.min_lon, bounds.max_lon).coerceIn(-180.0, 180.0),
-            max_lon = max(bounds.min_lon, bounds.max_lon).coerceIn(-180.0, 180.0)
-        )
-    }
-
     private fun category_from_globe(category: String?, type_code: String?): Int? {
         val normalized = category?.trim()?.uppercase(Locale.US).orEmpty()
         if (normalized.startsWith("A7") || normalized.startsWith("B7")) return 8
@@ -628,27 +683,23 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             abs(bounds.max_lon - other.bounds.max_lon) < VIEWPORT_LAT_LON_EPSILON
     }
 
-    private data class GlobeBounds(
-        val min_lat: Double,
-        val max_lat: Double,
-        val min_lon: Double,
-        val max_lon: Double
-    )
-
     private companion object {
         private const val TAG = "FlightAlert"
         private const val EXTRACT_INTERVAL_MS = 2500L
         private const val FIRST_EXTRACT_DELAY_MS = 3500L
         private const val MAX_SNAPSHOT_AGE_MS = 9000L
         private const val MAX_DETAIL_AGE_MS = 45000L
-        private const val MAX_POSITION_AGE_SECONDS = 120.0
-        private const val MIN_GLOBE_ZOOM = 2.0
+        private const val MIN_GLOBE_ZOOM = 0.0
         private const val MAX_GLOBE_ZOOM = 13.0
+        private const val GLOBE_INVENTORY_ZOOM = 0.0
+        private const val GLOBE_INVENTORY_CENTER_LAT = 0.0
+        private const val GLOBE_INVENTORY_CENTER_LON = 0.0
         private const val VIEWPORT_LAT_LON_EPSILON = 0.01
         private const val VIEWPORT_ZOOM_EPSILON = 0.12
         private const val FEET_PER_METER = 3.28084
         private const val KNOTS_TO_METERS_PER_SECOND = 0.514444
         private val MODE_S_OR_NON_ICAO = Regex("^[0-9a-f]{6,8}$")
+        private val WORLD_FEED_BOUNDS = FeedBounds(-90.0, -180.0, 90.0, 180.0)
 
         // This script reads the page's own aircraft objects and wraps them in an auditable envelope for Kotlin.
         private val EXTRACT_AIRCRAFT_JS = """
@@ -668,6 +719,32 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                   }
                   return false;
                 }
+                function cleaned_aircraft_text(value) {
+                  if (value == null) return null;
+                  var text = String(value).replace(/\s+/g, " ").trim();
+                  if (!text || /^n\/a$/i.test(text) || /^unavailable$/i.test(text)) return null;
+                  return text;
+                }
+                function finite_number() {
+                  for (var ni = 0; ni < arguments.length; ni++) {
+                    var value = Number(arguments[ni]);
+                    if (isFinite(value)) return value;
+                  }
+                  return null;
+                }
+                function array_or_csv(value) {
+                  if (value == null) return [];
+                  if (Array.isArray(value)) return value.map(cleaned_aircraft_text).filter(Boolean);
+                  return String(value).split(/[,\s]+/).map(cleaned_aircraft_text).filter(Boolean);
+                }
+                function source_label(p) {
+                  return cleaned_aircraft_text(p.dataSource || p.source || p.addr_type || p.source_type || p.type);
+                }
+                function adsb_version_label(value) {
+                  var raw = cleaned_aircraft_text(value);
+                  if (!raw) return null;
+                  return /^v/i.test(raw) ? raw : ("v" + raw);
+                }
                 var rows = [];
                 var planes = Object.values(globe.planes);
                 for (var i = 0; i < planes.length; i++) {
@@ -678,8 +755,6 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                   if (!isFinite(lat) || !isFinite(lon)) continue;
                   var position_time = Number(p.position_time);
                   var last_message = Number(p.last_message_time);
-                  var seen_pos = isFinite(position_time) ? now_sec - position_time : Number(p.seen_pos);
-                  if (!isFinite(seen_pos) || seen_pos > 120) continue;
                   var db_flags = 0;
                   if (truthy_flag(p.military)) db_flags = db_flags | 1;
                   if (truthy_flag(p.pia)) db_flags = db_flags | 4;
@@ -705,7 +780,39 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                     vertical_rate_fpm: p.vert_rate != null ? p.vert_rate : (p.baro_rate != null ? p.baro_rate : p.geom_rate),
                     position_time_sec: isFinite(position_time) ? position_time : null,
                     last_contact_sec: isFinite(last_message) ? last_message : null,
-                    source_type: p.dataSource || null
+                    source_type: source_label(p),
+                    squawk: cleaned_aircraft_text(p.squawk),
+                    baro_altitude_ft: finite_number(p.alt_baro === "ground" ? 0 : p.alt_baro, p.altitude === "ground" ? 0 : p.altitude),
+                    geom_altitude_ft: finite_number(p.alt_geom, p.altitude_geom),
+                    ground_speed_kt: finite_number(p.gs, p.speed),
+                    true_speed_kt: finite_number(p.tas, p.true_air_speed),
+                    indicated_speed_kt: finite_number(p.ias, p.indicated_air_speed),
+                    mach: finite_number(p.mach),
+                    baro_rate_fpm: finite_number(p.baro_rate, p.vert_rate),
+                    geom_rate_fpm: finite_number(p.geom_rate),
+                    selected_altitude_ft: finite_number(p.nav_altitude_mcp, p.nav_altitude_fms, p.selected_altitude),
+                    selected_heading_deg: finite_number(p.nav_heading, p.selected_heading),
+                    wind_speed_kt: finite_number(p.ws, p.wind_speed),
+                    wind_direction_deg: finite_number(p.wd, p.wind_direction),
+                    tat_c: finite_number(p.tat),
+                    oat_c: finite_number(p.oat),
+                    qnh_hpa: finite_number(p.nav_qnh, p.qnh),
+                    true_heading_deg: finite_number(p.true_heading),
+                    magnetic_heading_deg: finite_number(p.mag_heading, p.magnetic_heading),
+                    magnetic_declination_deg: finite_number(p.mag_declination, p.magnetic_declination),
+                    track_rate_deg_per_sec: finite_number(p.track_rate),
+                    roll_deg: finite_number(p.roll),
+                    nav_modes: array_or_csv(p.nav_modes || p.navModes),
+                    adsb_version: adsb_version_label(p.version),
+                    nac_p: finite_number(p.nac_p),
+                    nac_v: finite_number(p.nac_v),
+                    sil: finite_number(p.sil),
+                    sil_type: cleaned_aircraft_text(p.sil_type),
+                    nic_baro: cleaned_aircraft_text(p.nic_baro),
+                    rc_m: finite_number(p.rc),
+                    rssi: finite_number(p.rssi),
+                    message_rate: finite_number(p.message_rate, p.msgRate, p.messageRate),
+                    receiver_count_label: cleaned_aircraft_text(p.receiverCount || p.receiver_count || p.siteCount || p.receivers)
                   });
                 }
                 function cleaned_text(value) {
@@ -727,6 +834,33 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                   } catch (e) {
                     return null;
                   }
+                }
+                function real_number(value) {
+                  if (value == null || value === "") return null;
+                  var number = Number(value);
+                  return isFinite(number) ? number : null;
+                }
+                function first_real_number() {
+                  for (var ni = 0; ni < arguments.length; ni++) {
+                    var number = real_number(arguments[ni]);
+                    if (number != null) return number;
+                  }
+                  return null;
+                }
+                function number_from_text(value) {
+                  var text = cleaned_text(value);
+                  if (!text) return null;
+                  var match = text.replace(/\u2212/g, "-").match(/[-+]?\d+(?:\.\d+)?/);
+                  return match ? real_number(match[0]) : null;
+                }
+                function temperature_pair_from_text(value) {
+                  var text = cleaned_text(value);
+                  if (!text) return {tat:null, oat:null};
+                  var matches = text.replace(/\u2212/g, "-").match(/[-+]?\d+(?:\.\d+)?/g) || [];
+                  return {
+                    tat: matches.length > 0 ? real_number(matches[0]) : null,
+                    oat: matches.length > 1 ? real_number(matches[1]) : null
+                  };
                 }
                 function route_info_for(p) {
                   var route = cleaned_text(p.routeString);
@@ -787,6 +921,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                   if (truthy_flag(p.ladd)) db_flags = db_flags | 8;
                   var trace = p.fullTrace || p.recentTrace || {};
                   var route = route_info_for(p);
+                  var selectedTemp = temperature_pair_from_text(dom_text("selected_temp"));
                   return {
                     requested_hex: requestedHex,
                     requested_callsign: cleaned_text(request.callsign),
@@ -809,6 +944,40 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                     route_source: route.route_source,
                     route_updated_epoch_sec: route.route_updated_epoch_sec,
                     route_airports: route.route_airports,
+                    source_type: source_label(p) || dom_text("selected_source"),
+                    squawk: cleaned_aircraft_text(p.squawk) || dom_text("selected_squawk1"),
+                    baro_altitude_ft: first_real_number(p.alt_baro === "ground" ? 0 : p.alt_baro, p.altitude === "ground" ? 0 : p.altitude, number_from_text(dom_text("selected_altitude1")), number_from_text(dom_text("selected_altitude2"))),
+                    geom_altitude_ft: first_real_number(p.alt_geom, p.altitude_geom, number_from_text(dom_text("selected_altitude_geom1")), number_from_text(dom_text("selected_altitude_geom2"))),
+                    ground_speed_kt: first_real_number(p.gs, p.speed, number_from_text(dom_text("selected_speed1")), number_from_text(dom_text("selected_speed2"))),
+                    true_speed_kt: first_real_number(p.tas, p.true_air_speed, number_from_text(dom_text("selected_tas"))),
+                    indicated_speed_kt: first_real_number(p.ias, p.indicated_air_speed, number_from_text(dom_text("selected_ias"))),
+                    mach: first_real_number(p.mach, number_from_text(dom_text("selected_mach"))),
+                    baro_rate_fpm: first_real_number(p.baro_rate, p.vert_rate, number_from_text(dom_text("selected_baro_rate")), number_from_text(dom_text("selected_vert_rate"))),
+                    geom_rate_fpm: first_real_number(p.geom_rate, number_from_text(dom_text("selected_geom_rate"))),
+                    selected_altitude_ft: first_real_number(p.nav_altitude_mcp, p.nav_altitude_fms, p.selected_altitude, number_from_text(dom_text("selected_nav_altitude"))),
+                    selected_heading_deg: first_real_number(p.nav_heading, p.selected_heading, number_from_text(dom_text("selected_nav_heading"))),
+                    wind_speed_kt: first_real_number(p.ws, p.wind_speed, number_from_text(dom_text("selected_ws"))),
+                    wind_direction_deg: first_real_number(p.wd, p.wind_direction, number_from_text(dom_text("selected_wd"))),
+                    tat_c: first_real_number(p.tat, selectedTemp.tat),
+                    oat_c: first_real_number(p.oat, selectedTemp.oat),
+                    qnh_hpa: first_real_number(p.nav_qnh, p.qnh, number_from_text(dom_text("selected_nav_qnh"))),
+                    true_heading_deg: first_real_number(p.true_heading, number_from_text(dom_text("selected_true_heading"))),
+                    magnetic_heading_deg: first_real_number(p.mag_heading, p.magnetic_heading, number_from_text(dom_text("selected_mag_heading"))),
+                    magnetic_declination_deg: first_real_number(p.mag_declination, p.magnetic_declination, number_from_text(dom_text("selected_mag_declination"))),
+                    track_rate_deg_per_sec: first_real_number(p.track_rate, number_from_text(dom_text("selected_trackrate"))),
+                    roll_deg: first_real_number(p.roll, number_from_text(dom_text("selected_roll"))),
+                    nav_modes: array_or_csv(p.nav_modes || p.navModes || dom_text("selected_nav_modes")),
+                    adsb_version: adsb_version_label(p.version || dom_text("selected_version")),
+                    category: p.category || dom_text("selected_category"),
+                    nac_p: first_real_number(p.nac_p, number_from_text(dom_text("selected_nac_p"))),
+                    nac_v: first_real_number(p.nac_v, number_from_text(dom_text("selected_nac_v"))),
+                    sil: first_real_number(p.sil, number_from_text(dom_text("selected_sil"))),
+                    sil_type: cleaned_aircraft_text(p.sil_type),
+                    nic_baro: cleaned_aircraft_text(p.nic_baro) || dom_text("selected_nic_baro"),
+                    rc_m: first_real_number(p.rc, number_from_text(dom_text("selected_rc"))),
+                    rssi: first_real_number(p.rssi, number_from_text(dom_text("selected_rssi1"))),
+                    message_rate: first_real_number(p.message_rate, p.msgRate, p.messageRate, number_from_text(dom_text("selected_message_rate"))),
+                    receiver_count_label: cleaned_aircraft_text(p.receiverCount || p.receiver_count || p.siteCount || p.receivers),
                     photo: photo_info_for(p)
                   };
                 }
@@ -851,6 +1020,22 @@ private fun JSONObject.opt_double_or_null(key: String): Double? {
 
 private fun JSONObject.opt_int_or_null(key: String): Int? {
     return if (has(key) && !isNull(key)) optInt(key) else null
+}
+
+private fun JSONObject.opt_string_list(key: String): List<String> {
+    if (!has(key) || isNull(key)) return emptyList()
+    val raw = opt(key)
+    if (raw is JSONArray) {
+        val values = mutableListOf<String>()
+        for (index in 0 until raw.length()) {
+            raw.optString(index).trim().takeIf { it.isNotBlank() }?.let { values += it }
+        }
+        return values
+    }
+    return (raw?.toString() ?: return emptyList())
+        .split(",", " ")
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.equals("n/a", ignoreCase = true) }
 }
 
 private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {

@@ -6,6 +6,14 @@ import com.flightalert.ui.map.UnitSystem
 import com.flightalert.ui.map.details.AircraftUsageAnalyzer
 import java.util.Locale
 
+data class ImpactTrace(
+    val distance_m: Double,
+    val hours: Double,
+    val average_speed_ms: Double,
+    val point_count: Int,
+    val source: String
+)
+
 object AircraftImpactPresenter {
     fun rows(
         aircraft: Aircraft,

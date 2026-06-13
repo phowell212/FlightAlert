@@ -58,13 +58,6 @@ object FlightAlertSettings {
         if (stored != null) {
             return AircraftFeedMode.entries.firstOrNull { it.name == stored } ?: AircraftFeedMode.HYBRID
         }
-        if (prefs.contains(KEY_GLOBE_WEB_SOURCE_ENABLED)) {
-            return if (prefs.getBoolean(KEY_GLOBE_WEB_SOURCE_ENABLED, DEFAULT_GLOBE_WEB_SOURCE_ENABLED)) {
-                AircraftFeedMode.WEB
-            } else {
-                AircraftFeedMode.API
-            }
-        }
         return AircraftFeedMode.HYBRID
     }
 

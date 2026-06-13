@@ -1,5 +1,15 @@
-package com.flightalert.data
+package com.flightalert.data.api
 
+import com.flightalert.data.AviationAirportFeature
+import com.flightalert.data.AviationAirspaceFeature
+import com.flightalert.data.AviationLayerBounds
+import com.flightalert.data.AviationLayerKind
+import com.flightalert.data.AviationLayerPoint
+import com.flightalert.data.AviationLayerState
+import com.flightalert.data.AviationLayerSnapshot
+import com.flightalert.data.AviationLayerStatus
+import com.flightalert.data.AviationOceanicTrack
+import com.flightalert.data.to_bounds
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection

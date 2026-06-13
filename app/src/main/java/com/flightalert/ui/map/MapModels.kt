@@ -1,6 +1,7 @@
 package com.flightalert.ui.map
 
 import com.flightalert.data.AircraftMetadataSeed
+import com.flightalert.data.AircraftTelemetry
 import java.util.Locale
 
 data class GeoPoint(val lat: Double, val lon: Double)
@@ -36,14 +37,19 @@ data class Aircraft(
     val category: Int?,
     val position_time_sec: Double?,
     val last_contact_sec: Double?,
-    val distance_m: Double
+    val distance_m: Double,
+    val telemetry: AircraftTelemetry? = null
 ) {
     fun appearance_key(): String {
-        return icao24.ifBlank { "${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}:$callsign" }
+        val hex = icao24.trim().trimStart('~').lowercase(Locale.US)
+        if (hex.isNotBlank()) return "hex:$hex"
+        registration?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { return "reg:$it" }
+        callsign.trim().uppercase(Locale.US).takeIf { it.isNotBlank() }?.let { return "call:$it" }
+        return "pos:${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}"
     }
 }
 
-data class AircraftAppearance(val first_seen_ms: Long, val delay_ms: Long)
+data class AircraftAppearance(val first_seen_ms: Long, val delay_ms: Long, val last_seen_ms: Long)
 
 data class TrafficDisplay(val aircraft: Aircraft?, val selected: Boolean)
 

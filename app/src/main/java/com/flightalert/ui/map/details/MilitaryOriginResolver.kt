@@ -8,6 +8,18 @@ import java.net.URL
 import java.util.Locale
 import org.json.JSONObject
 
+private data class OriginAerodrome(
+    val name: String?,
+    val icao: String?,
+    val distance_m: Double,
+    val military: Boolean
+) {
+    fun label(): String = listOfNotNull(name, icao)
+        .distinct()
+        .joinToString(" / ")
+        .ifEmpty { "Unnamed aerodrome" }
+}
+
 class MilitaryOriginResolver(private val user_agent: String) {
     fun resolve_origin(point: TrackPoint): String {
         val query = """

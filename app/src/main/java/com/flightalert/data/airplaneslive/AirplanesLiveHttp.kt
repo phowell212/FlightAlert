@@ -1,4 +1,4 @@
-package com.flightalert.data
+package com.flightalert.data.airplaneslive
 
 import java.net.HttpURLConnection
 

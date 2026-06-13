@@ -112,6 +112,8 @@ Use underscore-style names for app-owned functions and properties as the code is
 
 Before changing code, read this file and `docs/code-organization.md`.
 
+For optimization work, use a connected physical phone when one is available. Preserve a pre-optimization copy of the app before making changes. Compare against that copy or `master` so the app displays the same information and preserves the same user experience except for lag reductions and real bug fixes.
+
 After meaningful changes, run:
 
 ```powershell
@@ -119,3 +121,5 @@ After meaningful changes, run:
 ```
 
 For refactors, compare against `master` on an emulator when practical. Treat styling or behavior drift as a regression unless it is explicitly tied to a bug fix or honesty fix.
+
+When taking Android screenshots from PowerShell, prefer `adb shell screencap -p /sdcard/name.png` followed by `adb pull /sdcard/name.png local.png`. Direct `adb exec-out screencap -p > file.png` can produce PNGs that local image viewers fail to decode.

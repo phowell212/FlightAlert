@@ -1,12 +1,12 @@
 package com.flightalert.ui.map.traffic
 
-import com.flightalert.data.AircraftFeedClient
+import com.flightalert.data.api.AircraftFeedClient
 import com.flightalert.data.FeedAircraft
 import com.flightalert.data.FeedBounds
 import com.flightalert.data.FeedResult
 import com.flightalert.data.FeedSource
 import com.flightalert.data.FeedStatus
-import com.flightalert.data.GlobeWebAircraftSource
+import com.flightalert.data.web.GlobeWebAircraftSource
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.Aircraft
 import java.util.Locale
@@ -33,6 +33,7 @@ class AircraftTrafficFeed(
     // Fetch according to the selected source mode, reporting intermediate real results when hybrid data arrives in stages.
     fun fetch_aircraft(
         feed_bounds: FeedBounds,
+        safety_api_bounds: FeedBounds?,
         own_lat: Double,
         own_lon: Double,
         exact_search: String?,
@@ -53,13 +54,15 @@ class AircraftTrafficFeed(
                 aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
             }
             FlightAlertSettings.AircraftFeedMode.HYBRID -> {
+                // Hybrid keeps the web source as the wide-area inventory, then spends API queries on the safety bubble.
+                val targeted_api_bounds = safety_api_bounds ?: feed_bounds
                 val first_globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
                 if (first_globe_result?.status == FeedStatus.OK) {
                     on_intermediate_result(first_globe_result)
                 }
-                val api_result = aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
-                if (api_result.status == FeedStatus.OK) {
-                    on_intermediate_result(api_result)
+                val api_result = aircraft_feed_client.fetch_aircraft(targeted_api_bounds, own_lat, own_lon, exact_search)
+                if (api_result.status == FeedStatus.OK && first_globe_result?.status != FeedStatus.OK) {
+                    on_intermediate_result(api_result.copy(source = FeedSource.HYBRID, partial_coverage = true))
                 }
                 val globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search) ?: first_globe_result
                 when {
@@ -114,7 +117,8 @@ class AircraftTrafficFeed(
                     type_code = api_item.type_code ?: web_item.type_code,
                     metadata = api_item.metadata ?: web_item.metadata,
                     db_flags = api_item.db_flags ?: web_item.db_flags,
-                    category = api_item.category ?: web_item.category
+                    category = api_item.category ?: web_item.category,
+                    telemetry = api_item.telemetry?.with_fallback(web_item.telemetry) ?: web_item.telemetry
                 )
             }
         }
@@ -124,7 +128,7 @@ class AircraftTrafficFeed(
             aircraft = merged.values.sortedBy { it.distance_m },
             epoch_sec = max_epoch(api_result.epoch_sec, globe_result.epoch_sec),
             query_count = api_result.query_count + globe_result.query_count,
-            partial_coverage = api_result.partial_coverage || globe_result.partial_coverage
+            partial_coverage = globe_result.partial_coverage
         )
     }
 
@@ -155,7 +159,8 @@ class AircraftTrafficFeed(
             category = category,
             position_time_sec = position_time_sec,
             last_contact_sec = last_contact_sec,
-            distance_m = distance_m
+            distance_m = distance_m,
+            telemetry = telemetry
         )
     }
 

@@ -1,5 +1,9 @@
-package com.flightalert.data
+package com.flightalert.data.api
 
+import com.flightalert.data.FlightTrace
+import com.flightalert.data.TraceSegment
+import com.flightalert.data.TrackPoint
+import com.flightalert.data.airplaneslive.AirplanesLiveHttp
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL

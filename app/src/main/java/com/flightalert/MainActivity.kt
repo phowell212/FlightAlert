@@ -9,7 +9,7 @@ import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import com.flightalert.data.GlobeWebAircraftSource
+import com.flightalert.data.web.GlobeWebAircraftSource
 import com.flightalert.service.AircraftAlertService
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.FlightMapView

@@ -19,7 +19,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import com.flightalert.MainActivity
-import com.flightalert.data.AircraftFeedClient
+import com.flightalert.data.api.AircraftFeedClient
 import com.flightalert.data.FeedAircraft
 import com.flightalert.data.FeedBounds
 import com.flightalert.data.FeedStatus
@@ -212,14 +212,15 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
-    // Fetch enough live traffic to cover the configured alert/priority volume, then classify supported reports.
+    // Safety monitoring deliberately uses API feeds only; map Web/Hybrid mode never drives notifications.
+    // The query bubble is wider than the alert volume so entering aircraft are seen before they cross the boundary.
     private fun fetch_aircraft(location: Location): AlertPoll {
         val alert_distance_feet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_DISTANCE_FEET, FlightAlertSettings.DEFAULT_ALERT_DISTANCE_FEET)
         val alert_altitude_feet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, FlightAlertSettings.DEFAULT_ALERT_ALTITUDE_FEET)
         val priority_enabled = prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
         val priority_range_feet = prefs.getFloat(FlightAlertSettings.KEY_PRIORITY_RANGE_FEET, FlightAlertSettings.DEFAULT_PRIORITY_RANGE_FEET)
         val own_altitude_feet = if (location.hasAltitude()) meters_to_feet(location.altitude) else null
-        val radius_feet = max(alert_distance_feet.toDouble(), if (priority_enabled) priority_range_feet.toDouble() else MIN_QUERY_RADIUS_FEET)
+        val radius_feet = api_query_radius_feet(alert_distance_feet, priority_enabled, priority_range_feet)
         val radius_meters = max(feet_to_meters(radius_feet), feet_to_meters(MIN_QUERY_RADIUS_FEET))
         val bounds = bounds_around(location, radius_meters)
         val result = aircraft_feed_client.fetch_aircraft(bounds.to_feed_bounds(), location.latitude, location.longitude)
@@ -243,6 +244,20 @@ class AircraftAlertService : Service(), LocationListener {
         )
     }
 
+    private fun api_query_radius_feet(
+        alert_distance_feet: Float,
+        priority_enabled: Boolean,
+        priority_range_feet: Float
+    ): Double {
+        val alert_radius = alert_distance_feet.toDouble()
+        val alert_radius_with_margin = max(
+            alert_radius * ALERT_QUERY_RADIUS_MULTIPLIER,
+            alert_radius + ALERT_QUERY_MIN_PADDING_FEET
+        )
+        val queue_radius = if (priority_enabled) priority_range_feet.toDouble() else MIN_QUERY_RADIUS_FEET
+        return max(alert_radius_with_margin, queue_radius)
+    }
+
     private fun format_separation(aircraft: AlertAircraft): String {
         return if (aircraft.vertical_separation_feet == null) {
             String.format(Locale.US, "%.0f ft horizontal, vertical unavailable", aircraft.distance_feet)
@@ -255,7 +270,7 @@ class AircraftAlertService : Service(), LocationListener {
     private fun update_priority_notification(priority_aircraft: List<AlertAircraft>) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (!AlertAircraftClassifier.should_show_persistent_priority_notification(
-                priority_enabled = priority_tracking_enabled(),
+                alerts_enabled = alerts_enabled(),
                 priority_aircraft = priority_aircraft,
                 has_notification_permission = has_notification_permission()
             )
@@ -425,6 +440,7 @@ class AircraftAlertService : Service(), LocationListener {
             last_contact_sec = last_contact_sec,
             position_time_sec = position_time_sec,
             own_altitude_feet = own_altitude_feet,
+            alerts_enabled = alerts_enabled(),
             alert_distance_feet = alert_distance_feet,
             alert_altitude_feet = alert_altitude_feet,
             priority_enabled = priority_enabled,
@@ -460,6 +476,8 @@ class AircraftAlertService : Service(), LocationListener {
         const val EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS = 3.0
         const val STALE_CONTACT_RETRY_MS = 1000L
         const val MIN_QUERY_RADIUS_FEET = 10000.0
+        const val ALERT_QUERY_MIN_PADDING_FEET = 5000.0
+        const val ALERT_QUERY_RADIUS_MULTIPLIER = 1.25
         const val OWN_ALTITUDE_MAX_AGE_MS = 120000L
         const val USER_AGENT = "FlightAlertPrototype/0.1"
         val ALERT_RELEVANT_PREF_KEYS = setOf(

@@ -1,6 +1,12 @@
-package com.flightalert.data
+package com.flightalert.data.api
 
 import android.util.Log
+import com.flightalert.data.AircraftDetails
+import com.flightalert.data.AircraftMetadataSeed
+import com.flightalert.data.AircraftRouteSource
+import com.flightalert.data.AirportDetails
+import com.flightalert.data.FaaRegistryRecord
+import com.flightalert.data.airplaneslive.AirplanesLiveHttp
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URLEncoder

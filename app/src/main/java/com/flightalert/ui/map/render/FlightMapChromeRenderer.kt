@@ -220,21 +220,30 @@ class FlightMapChromeRenderer(
 
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = true
+        val right_status_left = rect.right - host.dp(132f)
+        val title_left = rect.left + host.dp(16f)
         text_paint.textSize = host.sp(19f * theme_style.heading_scale)
         text_paint.color = colors.text
-        canvas.drawText("Flight Alert", rect.left + host.dp(16f), rect.top + host.dp(27f), text_paint)
+        draw_fitted_left_text(
+            canvas = canvas,
+            value = "Flight Alert",
+            left = title_left,
+            y = rect.top + host.dp(27f),
+            max_width = (right_status_left - host.dp(12f) - title_left).coerceAtLeast(host.dp(36f)),
+            start_size = host.sp(19f * theme_style.heading_scale),
+            min_size = host.sp(11f)
+        )
         text_paint.isFakeBoldText = false
         text_paint.textSize = host.sp(12f)
         text_paint.color = colors.muted
 
-        val right_status_left = rect.right - host.dp(132f)
         val subtitle_left = rect.left + host.dp(16f)
         draw_fitted_left_text(
             canvas = canvas,
             value = subtitle,
             left = subtitle_left,
             y = rect.top + host.dp(49f),
-            max_width = (right_status_left - host.dp(12f) - subtitle_left).coerceAtLeast(host.dp(90f)),
+            max_width = (right_status_left - host.dp(12f) - subtitle_left).coerceAtLeast(host.dp(36f)),
             start_size = host.sp(12f),
             min_size = host.sp(9f)
         )
@@ -425,8 +434,13 @@ class FlightMapChromeRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = if (height > host.dp(20f)) host.sp(10f) else host.sp(9f)
         text_paint.color = color
+        val max_width = (rect.width() - host.dp(12f)).coerceAtLeast(host.dp(8f))
+        while (text_paint.textSize > host.sp(7f) && text_paint.measureText(label) > max_width) {
+            text_paint.textSize -= host.dp(0.5f)
+        }
+        val display = if (text_paint.measureText(label) <= max_width) label else host.ellipsize(label, max_width)
         val metrics = text_paint.fontMetrics
-        canvas.drawText(label, rect.centerX(), rect.centerY() - (metrics.ascent + metrics.descent) / 2f, text_paint)
+        canvas.drawText(display, rect.centerX(), rect.centerY() - (metrics.ascent + metrics.descent) / 2f, text_paint)
         text_paint.isFakeBoldText = false
     }
 
@@ -459,8 +473,15 @@ class FlightMapChromeRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = host.sp(9f)
         text_paint.color = colors.accent_yellow
-        val metrics = text_paint.fontMetrics
-        canvas.drawText(scale.label, line_right + host.dp(7f), rect.centerY() - (metrics.ascent + metrics.descent) / 2f, text_paint)
+        draw_fitted_left_text(
+            canvas = canvas,
+            value = scale.label,
+            left = line_right + host.dp(7f),
+            y = rect.centerY() - (text_paint.fontMetrics.ascent + text_paint.fontMetrics.descent) / 2f,
+            max_width = (rect.right - line_right - host.dp(13f)).coerceAtLeast(host.dp(16f)),
+            start_size = host.sp(9f),
+            min_size = host.sp(7f)
+        )
         text_paint.isFakeBoldText = false
     }
 

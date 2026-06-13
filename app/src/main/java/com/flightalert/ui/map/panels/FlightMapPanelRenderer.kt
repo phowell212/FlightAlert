@@ -107,11 +107,7 @@ class FlightMapPanelRenderer(
         val rect = chrome.layout.settings_panel_bounds(w, h)
         chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(20)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Settings", rect.left + dp(18), rect.top + dp(34), text_paint)
+        draw_panel_title(canvas, rect, "Settings", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Close", false)
 
         if (chrome.layout.is_compact_settings_panel(rect)) {
@@ -143,7 +139,7 @@ class FlightMapPanelRenderer(
             text_paint.isFakeBoldText = false
             text_paint.textSize = sp(11)
             text_paint.color = style.visual_theme.colors.muted
-            canvas.drawText("Map: ${state.map_attribution}", rect.left + dp(18), rect.bottom - dp(38), text_paint)
+            draw_fitted_left_text(canvas, "Map: ${state.map_attribution}", rect.left + dp(18), rect.bottom - dp(38), rect.width() - dp(36), sp(11), sp(9))
             val source_label = "Aircraft: ${state.aircraft_source_label}; paths: live trace sources"
             canvas.drawText(chrome.ellipsize(source_label, rect.width() - dp(36)), rect.left + dp(18), rect.bottom - dp(18), text_paint)
         }
@@ -155,11 +151,7 @@ class FlightMapPanelRenderer(
         val compact = chrome.layout.is_compact_settings_panel(rect)
         chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(20)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Map labels", rect.left + dp(18), rect.top + dp(34), text_paint)
+        draw_panel_title(canvas, rect, "Map labels", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
 
         text_paint.textAlign = Paint.Align.LEFT
@@ -182,7 +174,7 @@ class FlightMapPanelRenderer(
         } else {
             "Current: CARTO no-label tiles"
         }
-        canvas.drawText(source_text, rect.left + dp(18), source_y, text_paint)
+        draw_fitted_left_text(canvas, source_text, rect.left + dp(18), source_y, rect.width() - dp(36), text_paint.textSize, sp(8))
     }
 
     // Draw aviation layer toggles with source status visible before any layer is treated as available.
@@ -191,11 +183,7 @@ class FlightMapPanelRenderer(
         val compact = chrome.layout.is_compact_settings_panel(rect)
         chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(20)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Layers", rect.left + dp(18), rect.top + dp(34), text_paint)
+        draw_panel_title(canvas, rect, "Layers", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
 
         val status_rect = chrome.layout.aviation_layer_status_bounds(rect)
@@ -216,11 +204,7 @@ class FlightMapPanelRenderer(
         val compact = chrome.layout.is_compact_settings_panel(rect)
         chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(20)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Impact methodology", rect.left + dp(18), rect.top + dp(34), text_paint)
+        draw_panel_title(canvas, rect, "Impact methodology", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
 
         val items = impact_methodology_items()
@@ -249,11 +233,7 @@ class FlightMapPanelRenderer(
         val compact = chrome.layout.is_compact_settings_panel(rect)
         chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(20)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Filters", rect.left + dp(18), rect.top + dp(34), text_paint)
+        draw_panel_title(canvas, rect, "Filters", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Close", false)
 
         draw_filter_search_control(canvas, rect, style, state)
@@ -269,7 +249,7 @@ class FlightMapPanelRenderer(
         text_paint.textSize = sp(if (compact) 10 else 11)
         text_paint.color = style.visual_theme.colors.muted
         val stats_y = if (compact) rect.bottom - dp(18) else rect.bottom - dp(22)
-        canvas.drawText(state.stats_summary, rect.left + dp(18), stats_y, text_paint)
+        draw_fitted_left_text(canvas, state.stats_summary, rect.left + dp(18), stats_y, rect.width() - dp(36), text_paint.textSize, sp(8))
     }
 
     // Draw alert-volume controls and the current priority queue without inventing aircraft status.
@@ -278,11 +258,7 @@ class FlightMapPanelRenderer(
         val rect = chrome.layout.priority_tracker_panel_bounds(w, h)
         chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(20)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Priority tracker", rect.left + dp(18), rect.top + dp(34), text_paint)
+        draw_panel_title(canvas, rect, "Priority tracker", style)
         chrome.draw_choice_button(canvas, chrome.layout.priority_close_button_bounds(rect), "Close", false)
 
         if (chrome.layout.is_compact_settings_panel(rect)) {
@@ -311,7 +287,15 @@ class FlightMapPanelRenderer(
             text_paint.isFakeBoldText = true
             text_paint.textSize = sp(17)
             text_paint.color = style.visual_theme.colors.text
-            canvas.drawText(if (state.priority_tracking_enabled) "No aircraft in queue" else "Queue is off", rect.left + dp(18), rect.top + dp(386), text_paint)
+            draw_fitted_left_text(
+                canvas,
+                if (state.priority_tracking_enabled) "No aircraft in queue" else "Queue is off",
+                rect.left + dp(18),
+                rect.top + dp(386),
+                rect.width() - dp(36),
+                sp(17),
+                sp(10)
+            )
             text_paint.isFakeBoldText = false
             return
         }
@@ -325,7 +309,7 @@ class FlightMapPanelRenderer(
             text_paint.isFakeBoldText = false
             text_paint.textSize = sp(11)
             text_paint.color = style.visual_theme.colors.muted
-            canvas.drawText("+${state.aircraft_rows.size - PRIORITY_PANEL_ROWS} more", rect.left + dp(18), y + dp(8), text_paint)
+            draw_fitted_left_text(canvas, "+${state.aircraft_rows.size - PRIORITY_PANEL_ROWS} more", rect.left + dp(18), y + dp(8), rect.width() - dp(36), sp(11), sp(8))
         }
     }
 
@@ -516,7 +500,7 @@ class FlightMapPanelRenderer(
             text_paint.isFakeBoldText = false
             text_paint.textSize = sp(11)
             text_paint.color = style.visual_theme.colors.muted
-            canvas.drawText("+${state.aircraft_rows.size - 3} more", right.left, y + dp(4), text_paint)
+            draw_fitted_left_text(canvas, "+${state.aircraft_rows.size - 3} more", right.left, y + dp(4), right.width(), sp(11), sp(8))
         }
     }
 
@@ -539,18 +523,20 @@ class FlightMapPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(15)
         text_paint.color = if (row_state.is_extreme) colors.danger else colors.text
-        canvas.drawText(row_state.title, row.left + dp(10), y, text_paint)
+        val altitude_width = (row.width() * 0.34f).coerceAtLeast(dp(58))
+        val title_width = (row.width() - altitude_width - dp(28)).coerceAtLeast(dp(48))
+        draw_fitted_left_text(canvas, row_state.title, row.left + dp(10), y, title_width, sp(15), sp(9))
 
         text_paint.textAlign = Paint.Align.RIGHT
         text_paint.textSize = sp(13)
         text_paint.color = colors.text
-        canvas.drawText(row_state.altitude, row.right - dp(10), y, text_paint)
+        draw_fitted_right_text(canvas, row_state.altitude, row.right - dp(10), y, altitude_width, sp(13), sp(8))
 
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(11)
         text_paint.color = colors.muted
-        canvas.drawText(row_state.detail, row.left + dp(10), y + dp(20), text_paint)
+        draw_fitted_left_text(canvas, row_state.detail, row.left + dp(10), y + dp(20), row.width() - dp(20), sp(11), sp(8))
         return y + dp(64)
     }
 
@@ -574,9 +560,76 @@ class FlightMapPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(13)
         text_paint.color = style.visual_theme.colors.text
-        canvas.drawText(value, panel.centerX(), y + dp(32), text_paint)
+        draw_fitted_center_text(canvas, value, minus.right + dp(8), plus.left - dp(8), y + dp(32), sp(13), sp(8))
         chrome.draw_choice_button(canvas, minus, "-", false)
         chrome.draw_choice_button(canvas, plus, "+", false)
+    }
+
+    private fun draw_panel_title(canvas: Canvas, rect: RectF, title: String, style: FlightMapPanelStyle) {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = true
+        text_paint.textSize = sp(20)
+        text_paint.color = style.visual_theme.colors.text
+        val left = rect.left + dp(18)
+        val close_left = chrome.layout.close_button_bounds(rect).left
+        draw_fitted_left_text(canvas, title, left, rect.top + dp(34), close_left - left - dp(8), sp(20), sp(11))
+    }
+
+    private fun draw_fitted_left_text(
+        canvas: Canvas,
+        value: String,
+        left: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
+    ) {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.textSize = start_size
+        val width = max_width.coerceAtLeast(dp(8))
+        while (text_paint.textSize > min_size && text_paint.measureText(value) > width) {
+            text_paint.textSize -= dp(0.5f)
+        }
+        val display = if (text_paint.measureText(value) <= width) value else chrome.ellipsize(value, width)
+        canvas.drawText(display, left, y, text_paint)
+    }
+
+    private fun draw_fitted_right_text(
+        canvas: Canvas,
+        value: String,
+        right: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
+    ) {
+        text_paint.textAlign = Paint.Align.RIGHT
+        text_paint.textSize = start_size
+        val width = max_width.coerceAtLeast(dp(8))
+        while (text_paint.textSize > min_size && text_paint.measureText(value) > width) {
+            text_paint.textSize -= dp(0.5f)
+        }
+        val display = if (text_paint.measureText(value) <= width) value else chrome.ellipsize(value, width)
+        canvas.drawText(display, right, y, text_paint)
+    }
+
+    private fun draw_fitted_center_text(
+        canvas: Canvas,
+        value: String,
+        left: Float,
+        right: Float,
+        y: Float,
+        start_size: Float,
+        min_size: Float
+    ) {
+        val width = (right - left).coerceAtLeast(dp(8))
+        text_paint.textAlign = Paint.Align.CENTER
+        text_paint.textSize = start_size
+        while (text_paint.textSize > min_size && text_paint.measureText(value) > width) {
+            text_paint.textSize -= dp(0.5f)
+        }
+        val display = if (text_paint.measureText(value) <= width) value else chrome.ellipsize(value, width)
+        canvas.drawText(display, (left + right) / 2f, y, text_paint)
     }
 
     private fun dp(value: Int): Float = dp(value.toFloat())

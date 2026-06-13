@@ -5,12 +5,12 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import androidx.core.graphics.withClip
 import com.flightalert.settings.FlightAlertSettings.ThemeTreatment
 import com.flightalert.settings.FlightAlertSettings.VisualTheme
 import com.flightalert.ui.map.ScreenPoint
 import com.flightalert.ui.map.photo.AircraftPhotoGalleryItem
 import com.flightalert.ui.map.photo.PhotoEvidence
-import com.flightalert.ui.map.details.UsageStats
 import java.util.Locale
 import kotlin.math.floor
 import kotlin.math.max
@@ -18,7 +18,15 @@ import kotlin.math.min
 
 data class AircraftDetailsPanelStyle(val visual_theme: VisualTheme)
 
-data class AircraftDetailsRow(val label: String, val value: String)
+data class AircraftDetailsRow(
+    val label: String,
+    val value: String,
+    val section: Boolean = false
+) {
+    companion object {
+        fun section(label: String): AircraftDetailsRow = AircraftDetailsRow(label, "", section = true)
+    }
+}
 
 data class AircraftDetailsPhotoState(
     val bitmap: Bitmap?,
@@ -258,7 +266,7 @@ class AircraftDetailsPanelRenderer(
         val photo_rect = photo_bounds(left, wide = true, has_photo = photo.bitmap != null)
         draw_photo_block(canvas, photo_rect, photo, style)
 
-        val split = (rows.size + 1) / 2
+        val split = section_aware_split_index(rows)
         var y_a = col_a.top
         rows.take(split).forEach { row ->
             y_a = draw_adaptive_detail_row(canvas, col_a, y_a, row, style, visible_top, visible_bottom, compact = true)
@@ -268,6 +276,15 @@ class AircraftDetailsPanelRenderer(
             y_b = draw_adaptive_detail_row(canvas, col_b, y_b, row, style, visible_top, visible_bottom, compact = true)
         }
         return maxOf(photo_rect.bottom, y_a, y_b)
+    }
+
+    private fun section_aware_split_index(rows: List<AircraftDetailsRow>): Int {
+        if (rows.size <= 2) return rows.size
+        val target = rows.size / 2
+        return rows.indices
+            .filter { index -> index > 0 && rows[index].section }
+            .minByOrNull { index -> kotlin.math.abs(index - target) }
+            ?: ((rows.size + 1) / 2)
     }
 
     // Draw environmental impact only from prepared presenter rows so missing aircraft data stays unavailable.
@@ -575,14 +592,13 @@ class AircraftDetailsPanelRenderer(
             return AircraftDetailsDrawResult(0f, 0f)
         }
 
-        val checkpoint = canvas.save()
-        canvas.clipRect(clip)
-        canvas.translate(0f, -state.scroll_y)
-        content.items.forEachIndexed { index, item ->
-            val item_rect = gallery_item_bounds(rect, index, state.wide_layout)
-            draw_gallery_item(canvas, item_rect, item, style)
+        canvas.withClip(clip) {
+            translate(0f, -state.scroll_y)
+            content.items.forEachIndexed { index, item ->
+                val item_rect = gallery_item_bounds(rect, index, state.wide_layout)
+                draw_gallery_item(this, item_rect, item, style)
+            }
         }
-        canvas.restoreToCount(checkpoint)
 
         val last = gallery_item_bounds(rect, content.items.lastIndex, state.wide_layout)
         val result = scroll_result(last.bottom - clip.top + dp(18), clip.height(), state.scroll_y)
@@ -645,6 +661,9 @@ class AircraftDetailsPanelRenderer(
         visible_bottom: Float,
         compact: Boolean = false
     ): Float {
+        if (row.section) {
+            return draw_detail_section_header(canvas, rect, y, row.label, style, visible_top, visible_bottom, compact)
+        }
         val label_size = if (compact) sp(9) else sp(10)
         val value_size = if (compact) sp(12) else sp(13)
         val min_value_size = if (compact) sp(8) else sp(9)
@@ -697,6 +716,35 @@ class AircraftDetailsPanelRenderer(
         )
         stroke_paint.strokeWidth = dp(1)
         canvas.drawLine(left, cy - dp(6), right, cy - dp(6), stroke_paint)
+        text_paint.isFakeBoldText = false
+        return row_bottom
+    }
+
+    private fun draw_detail_section_header(
+        canvas: Canvas,
+        rect: RectF,
+        y: Float,
+        label: String,
+        style: AircraftDetailsPanelStyle,
+        visible_top: Float,
+        visible_bottom: Float,
+        compact: Boolean
+    ): Float {
+        val top_gap = if (compact) dp(12) else dp(16)
+        val row_bottom = y + top_gap + dp(if (compact) 21 else 24)
+        if (row_bottom > visible_bottom || y < visible_top) return row_bottom
+
+        val left = rect.left + if (compact) 0f else dp(16)
+        val right = rect.right - if (compact) 0f else dp(16)
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = true
+        text_paint.textSize = if (compact) sp(10) else sp(11)
+        text_paint.color = style.visual_theme.colors.accent_blue
+        canvas.drawText(label.uppercase(Locale.US), left, y + top_gap, text_paint)
+
+        stroke_paint.color = with_alpha(style.visual_theme.colors.panel_stroke, style.visual_theme.style.divider_alpha + 42)
+        stroke_paint.strokeWidth = dp(1)
+        canvas.drawLine(left, y + top_gap + dp(8), right, y + top_gap + dp(8), stroke_paint)
         text_paint.isFakeBoldText = false
         return row_bottom
     }

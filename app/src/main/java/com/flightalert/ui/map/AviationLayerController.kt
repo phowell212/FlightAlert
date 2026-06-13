@@ -2,7 +2,7 @@ package com.flightalert.ui.map
 
 import android.os.SystemClock
 import com.flightalert.data.AviationLayerBounds
-import com.flightalert.data.AviationLayerClient
+import com.flightalert.data.api.AviationLayerClient
 import com.flightalert.data.AviationLayerKind
 import com.flightalert.data.AviationLayerSnapshot
 import com.flightalert.data.AviationLayerState

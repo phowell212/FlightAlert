@@ -18,7 +18,10 @@ FlightAlert should read like objects doing jobs.
 
 ## Target Packages
 
-- `data`: external feeds, DTOs, parsing, route sources, traces, aviation layers.
+- `data`: shared DTOs and source-neutral models used across the app.
+- `data.api`: REST/API clients for aircraft traffic, details, traces, and aviation layers.
+- `data.web`: hidden WebView-backed sources and parsers that mirror live provider web state.
+- `data.airplaneslive`: Airplanes.Live-specific shared HTTP constants, headers, and pacing helpers.
 - `settings`: persisted app preferences and defaults.
 - `service`: Android background service orchestration.
 - `ui.map`: the map coordinator, shared map models, projection math, map display settings, and small root-level controllers.

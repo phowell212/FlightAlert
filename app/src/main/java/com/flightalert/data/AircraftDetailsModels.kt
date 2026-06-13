@@ -23,8 +23,14 @@ data class AircraftDetails(
     val route_updated_epoch_sec: Long?,
     val route_source: String?,
     val origin_airport: AirportDetails?,
-    val destination_airport: AirportDetails?
+    val destination_airport: AirportDetails?,
+    val telemetry: AircraftTelemetry? = null
 )
+
+object AircraftRouteSource {
+    const val ADSBDB_CALLSIGN = "ADSBdb callsign"
+    const val HEXDB_CALLSIGN = "HexDB callsign"
+}
 
 data class AirportDetails(
     val icao: String,

@@ -26,6 +26,7 @@ object AlertAircraftClassifier {
         last_contact_sec: Double?,
         position_time_sec: Double?,
         own_altitude_feet: Double?,
+        alerts_enabled: Boolean,
         alert_distance_feet: Float,
         alert_altitude_feet: Float,
         priority_enabled: Boolean,
@@ -40,6 +41,7 @@ object AlertAircraftClassifier {
         val is_inside_alert_range = distance_feet <= alert_distance_feet &&
             vertical_separation_feet != null &&
             vertical_separation_feet <= alert_altitude_feet
+        val is_alert_aircraft = alerts_enabled && is_inside_alert_range
         return AlertAircraft(
             icao24 = icao24,
             callsign = callsign,
@@ -48,18 +50,18 @@ object AlertAircraftClassifier {
             altitude_feet = altitude_feet,
             vertical_separation_feet = vertical_separation_feet,
             contact_age_seconds = max(0.0, now_epoch_sec - contact_time),
-            is_hazard = is_inside_alert_range,
+            is_hazard = is_alert_aircraft,
             is_priority_range_aircraft = priority_enabled && distance_feet <= priority_range_feet,
-            is_extreme_priority = priority_enabled && is_inside_alert_range
+            is_extreme_priority = is_alert_aircraft
         )
     }
 
     fun should_show_persistent_priority_notification(
-        priority_enabled: Boolean,
+        alerts_enabled: Boolean,
         priority_aircraft: List<AlertAircraft>,
         has_notification_permission: Boolean
     ): Boolean {
-        return priority_enabled && priority_aircraft.isNotEmpty() && has_notification_permission
+        return alerts_enabled && priority_aircraft.isNotEmpty() && has_notification_permission
     }
 
     private fun meters_to_feet(meters: Double): Double = meters * FEET_PER_METER

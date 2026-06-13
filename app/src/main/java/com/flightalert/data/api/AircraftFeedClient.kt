@@ -1,5 +1,13 @@
-package com.flightalert.data
+package com.flightalert.data.api
 
+import com.flightalert.data.AircraftMetadataSeed
+import com.flightalert.data.AircraftTelemetry
+import com.flightalert.data.FeedAircraft
+import com.flightalert.data.FeedBounds
+import com.flightalert.data.FeedResult
+import com.flightalert.data.FeedSource
+import com.flightalert.data.FeedStatus
+import com.flightalert.data.airplaneslive.AirplanesLiveHttp
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -327,6 +335,9 @@ class AircraftFeedClient(private val user_agent: String) {
             val lat = row.opt_nullable_double(6) ?: continue
             val icao24 = row.optString(0).trim()
             val callsign = row.optString(1).trim().ifEmpty { icao24.ifEmpty { "Unknown" } }
+            val altitude_m = row.opt_nullable_double(7) ?: row.opt_nullable_double(13)
+            val velocity_ms = row.opt_nullable_double(9)
+            val vertical_rate_ms = row.opt_nullable_double(11)
             parsed += FeedAircraft(
                 icao24 = icao24,
                 callsign = callsign,
@@ -336,14 +347,20 @@ class AircraftFeedClient(private val user_agent: String) {
                 lat = lat,
                 lon = lon,
                 on_ground = row.opt_nullable_boolean(8),
-                altitude_m = row.opt_nullable_double(7) ?: row.opt_nullable_double(13),
-                velocity_ms = row.opt_nullable_double(9),
+                altitude_m = altitude_m,
+                velocity_ms = velocity_ms,
                 track_deg = row.opt_nullable_double(10),
-                vertical_rate_ms = row.opt_nullable_double(11),
+                vertical_rate_ms = vertical_rate_ms,
                 category = row.opt_nullable_int(17),
                 position_time_sec = row.opt_nullable_double(3),
                 last_contact_sec = row.opt_nullable_double(4),
-                distance_m = distance_meters(own_lat, own_lon, lat, lon)
+                distance_m = distance_meters(own_lat, own_lon, lat, lon),
+                telemetry = AircraftTelemetry(
+                    source_type = "OpenSky",
+                    baro_altitude_m = altitude_m,
+                    ground_speed_ms = velocity_ms,
+                    baro_rate_ms = vertical_rate_ms
+                ).takeIf { it.has_values }
             )
         }
         return parsed.sortedBy { it.distance_m }
@@ -366,6 +383,9 @@ class AircraftFeedClient(private val user_agent: String) {
             val seen_message_sec = item.opt_double_or_null("seen")
             val last_position_time = seen_position_sec?.let { now_sec - it }
             val last_contact_time = seen_message_sec?.let { now_sec - it } ?: last_position_time
+            val vertical_rate_ms = (item.opt_double_or_null("baro_rate") ?: item.opt_double_or_null("geom_rate"))
+                ?.let { feet_per_minute_to_meters_per_second(it) }
+            val telemetry = item.airplanes_live_telemetry()
             parsed += FeedAircraft(
                 icao24 = icao24,
                 callsign = callsign,
@@ -378,14 +398,55 @@ class AircraftFeedClient(private val user_agent: String) {
                 altitude_m = altitude_feet?.let { it / FEET_PER_METER },
                 velocity_ms = item.opt_double_or_null("gs")?.let { knots_to_meters_per_second(it) },
                 track_deg = item.opt_double_or_null("track"),
-                vertical_rate_ms = (item.opt_double_or_null("baro_rate") ?: item.opt_double_or_null("geom_rate"))?.let { feet_per_minute_to_meters_per_second(it) },
+                vertical_rate_ms = vertical_rate_ms,
                 category = category_from_airplanes_live(item.optString("category"), item.optString("t")),
                 position_time_sec = last_position_time,
                 last_contact_sec = last_contact_time,
-                distance_m = distance_meters(own_lat, own_lon, lat, lon)
+                distance_m = distance_meters(own_lat, own_lon, lat, lon),
+                telemetry = telemetry
             )
         }
         return parsed.sortedBy { it.distance_m }
+    }
+
+    private fun JSONObject.airplanes_live_telemetry(): AircraftTelemetry? {
+        val telemetry = AircraftTelemetry(
+            source_type = opt_string_or_null("type") ?: opt_string_or_null("source_type"),
+            squawk = opt_string_or_null("squawk"),
+            baro_altitude_m = opt_altitude_feet("alt_baro")?.let { it / FEET_PER_METER },
+            geom_altitude_m = opt_altitude_feet("alt_geom")?.let { it / FEET_PER_METER },
+            ground_speed_ms = opt_double_or_null("gs")?.let { knots_to_meters_per_second(it) },
+            true_speed_ms = opt_double_or_null("tas")?.let { knots_to_meters_per_second(it) },
+            indicated_speed_ms = opt_double_or_null("ias")?.let { knots_to_meters_per_second(it) },
+            mach = opt_double_or_null("mach"),
+            baro_rate_ms = opt_double_or_null("baro_rate")?.let { feet_per_minute_to_meters_per_second(it) },
+            geom_rate_ms = opt_double_or_null("geom_rate")?.let { feet_per_minute_to_meters_per_second(it) },
+            selected_altitude_m = (opt_altitude_feet("nav_altitude_mcp") ?: opt_altitude_feet("nav_altitude_fms"))?.let { it / FEET_PER_METER },
+            selected_heading_deg = opt_double_or_null("nav_heading"),
+            wind_speed_ms = opt_double_or_null("ws")?.let { knots_to_meters_per_second(it) },
+            wind_direction_deg = opt_double_or_null("wd"),
+            tat_c = opt_double_or_null("tat"),
+            oat_c = opt_double_or_null("oat"),
+            qnh_hpa = opt_double_or_null("nav_qnh"),
+            true_heading_deg = opt_double_or_null("true_heading"),
+            magnetic_heading_deg = opt_double_or_null("mag_heading"),
+            magnetic_declination_deg = opt_double_or_null("mag_declination"),
+            track_rate_deg_per_sec = opt_double_or_null("track_rate"),
+            roll_deg = opt_double_or_null("roll"),
+            nav_modes = opt_string_list("nav_modes"),
+            adsb_version = opt_number_as_string("version")?.let { "v$it" },
+            nac_p = opt_int_or_null("nac_p"),
+            nac_v = opt_int_or_null("nac_v"),
+            sil = opt_int_or_null("sil"),
+            sil_type = opt_string_or_null("sil_type"),
+            nic_baro = opt_number_as_string("nic_baro"),
+            rc_m = opt_double_or_null("rc"),
+            rssi = opt_double_or_null("rssi"),
+            message_rate = opt_first_double_or_null("message_rate", "msgRate", "messageRate"),
+            receiver_count_label = opt_first_count_label("receivers", "receiver_count", "receiverCount", "siteCount"),
+            category_label = opt_string_or_null("category")
+        )
+        return telemetry.takeIf { it.has_values }
     }
 
     private fun radius_nm_for(bounds: FeedBounds, center_lat: Double, center_lon: Double): Double {
@@ -489,7 +550,7 @@ private fun JSONObject.opt_int_or_null(key: String): Int? {
 }
 
 private fun JSONObject.opt_double_or_null(key: String): Double? {
-    return if (has(key) && !isNull(key)) optDouble(key) else null
+    return if (has(key) && !isNull(key)) optDouble(key).takeIf { it.isFinite() } else null
 }
 
 private fun JSONObject.opt_altitude_feet(key: String): Double? {
@@ -499,6 +560,51 @@ private fun JSONObject.opt_altitude_feet(key: String): Double? {
         is String -> raw.toDoubleOrNull()
         else -> null
     }
+}
+
+private fun JSONObject.opt_string_or_null(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return optString(key).trim().takeIf { it.isNotBlank() && !it.equals("n/a", ignoreCase = true) }
+}
+
+private fun JSONObject.opt_number_as_string(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return when (val raw = opt(key)) {
+        is Number -> raw.toString()
+        is String -> raw.trim().takeIf { it.isNotBlank() && !it.equals("n/a", ignoreCase = true) }
+        else -> null
+    }
+}
+
+private fun JSONObject.opt_string_list(key: String): List<String> {
+    if (!has(key) || isNull(key)) return emptyList()
+    val raw = opt(key)
+    if (raw is JSONArray) {
+        val values = mutableListOf<String>()
+        for (index in 0 until raw.length()) {
+            raw.optString(index).trim().takeIf { it.isNotBlank() }?.let { values += it }
+        }
+        return values
+    }
+    return (raw?.toString() ?: return emptyList())
+        .split(",", " ")
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.equals("n/a", ignoreCase = true) }
+}
+
+private fun JSONObject.opt_first_double_or_null(vararg keys: String): Double? {
+    return keys.firstNotNullOfOrNull { key -> opt_double_or_null(key) }
+}
+
+private fun JSONObject.opt_first_count_label(vararg keys: String): String? {
+    for (key in keys) {
+        if (!has(key) || isNull(key)) continue
+        when (val raw = opt(key)) {
+            is Number -> return raw.toInt().toString()
+            is String -> raw.trim().takeIf { it.isNotBlank() && !it.equals("n/a", ignoreCase = true) }?.let { return it }
+        }
+    }
+    return null
 }
 
 private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {

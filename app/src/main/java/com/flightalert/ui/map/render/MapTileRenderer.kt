@@ -107,14 +107,6 @@ class MapTileRenderer(
         synchronized(tile_cache) {
             tile_cache[key]?.let { return it }
         }
-        val file = tile_file(z, x, y, state)
-        if (file.exists() && file.length() > 0L && System.currentTimeMillis() - file.lastModified() < TILE_CACHE_MAX_AGE_MS) {
-            val bitmap = BitmapFactory.decodeFile(file.absolutePath)
-            if (bitmap != null) {
-                synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
-                return bitmap
-            }
-        }
         return null
     }
 
@@ -127,6 +119,14 @@ class MapTileRenderer(
         executor.execute {
             var connection: HttpURLConnection? = null
             try {
+                val file = tile_file(z, x, y, state)
+                if (file.exists() && file.length() > 0L && System.currentTimeMillis() - file.lastModified() < TILE_CACHE_MAX_AGE_MS) {
+                    val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+                    if (bitmap != null) {
+                        synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
+                        return@execute
+                    }
+                }
                 val url = https_url(state.map_source.tile_url(z, x, y, state.map_labels_enabled)) ?: run {
                     report_status("Map tiles unavailable")
                     return@execute
@@ -141,7 +141,6 @@ class MapTileRenderer(
                     val bytes = connection.inputStream.use { it.readBytes() }
                     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     if (bitmap != null) {
-                        val file = tile_file(z, x, y, state)
                         file.parentFile?.mkdirs()
                         file.writeBytes(bytes)
                         synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }

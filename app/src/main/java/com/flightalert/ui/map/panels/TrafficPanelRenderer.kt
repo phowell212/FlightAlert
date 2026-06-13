@@ -56,7 +56,7 @@ class TrafficPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(13)
         text_paint.color = state.title_color
-        canvas.drawText(state.title, rect.left + dp(16), y, text_paint)
+        draw_fitted_left_text(canvas, state.title, rect.left + dp(16), y, rect.width() - dp(32), sp(13), sp(9))
 
         when (val content = state.content) {
             is TrafficPanelEmptyState -> draw_empty_panel(canvas, rect, y + if (wide) dp(60) else dp(38), style, content)
@@ -77,12 +77,30 @@ class TrafficPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = if (wide) sp(29) else sp(24)
         text_paint.color = style.visual_theme.colors.text
-        canvas.drawText(content.callsign, rect.left + dp(16), y, text_paint)
+        val distance_width = (rect.width() * 0.38f).coerceAtLeast(dp(58))
+        val callsign_width = (rect.width() - distance_width - dp(44)).coerceAtLeast(dp(54))
+        draw_fitted_left_text(
+            canvas = canvas,
+            value = content.callsign,
+            left = rect.left + dp(16),
+            y = y,
+            max_width = callsign_width,
+            start_size = if (wide) sp(29) else sp(24),
+            min_size = sp(12)
+        )
 
         text_paint.textAlign = Paint.Align.RIGHT
         text_paint.textSize = if (wide) sp(29) else sp(24)
         text_paint.color = content.distance_color
-        canvas.drawText(content.distance_label, rect.right - dp(16), y, text_paint)
+        draw_fitted_right_text(
+            canvas = canvas,
+            value = content.distance_label,
+            right = rect.right - dp(16),
+            y = y,
+            max_width = distance_width,
+            start_size = if (wide) sp(29) else sp(24),
+            min_size = sp(12)
+        )
 
         if (wide) {
             y += dp(38)
@@ -101,18 +119,18 @@ class TrafficPanelRenderer(
         text_paint.textSize = sp(13)
         text_paint.color = style.visual_theme.colors.muted
         content.compact_primary_values.forEachIndexed { index, value ->
-            canvas.drawText(value, compact_column_x(rect, index, primary = true), y, text_paint)
+            draw_compact_value(canvas, rect, index, primary = true, y = y, value = value)
         }
 
         y += dp(24)
         content.compact_secondary_values.forEachIndexed { index, value ->
-            canvas.drawText(value, compact_column_x(rect, index, primary = false), y, text_paint)
+            draw_compact_value(canvas, rect, index, primary = false, y = y, value = value)
         }
         content.military_label?.let { label ->
             y += dp(22)
             text_paint.isFakeBoldText = true
             text_paint.color = style.visual_theme.colors.military
-            canvas.drawText(label, rect.left + dp(16), y, text_paint)
+            draw_fitted_left_text(canvas, label, rect.left + dp(16), y, rect.width() - dp(32), sp(13), sp(9))
             text_paint.isFakeBoldText = false
         }
     }
@@ -128,13 +146,13 @@ class TrafficPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(20)
         text_paint.color = style.visual_theme.colors.text
-        canvas.drawText(content.headline, rect.left + dp(16), y, text_paint)
+        draw_fitted_left_text(canvas, content.headline, rect.left + dp(16), y, rect.width() - dp(32), sp(20), sp(12))
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(content.message, rect.left + dp(16), y + dp(24), text_paint)
+        draw_fitted_left_text(canvas, content.message, rect.left + dp(16), y + dp(24), rect.width() - dp(32), sp(12), sp(9))
         content.data_time_label?.let {
-            canvas.drawText(it, rect.left + dp(16), y + dp(44), text_paint)
+            draw_fitted_left_text(canvas, it, rect.left + dp(16), y + dp(44), rect.width() - dp(32), sp(12), sp(9))
         }
     }
 
@@ -190,12 +208,52 @@ class TrafficPanelRenderer(
         canvas.drawText(display, right, y, text_paint)
     }
 
+    private fun draw_fitted_left_text(
+        canvas: Canvas,
+        value: String,
+        left: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
+    ) {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.textSize = start_size
+        while (text_paint.textSize > min_size && text_paint.measureText(value) > max_width) {
+            text_paint.textSize -= dp(0.5f)
+        }
+        val display = if (text_paint.measureText(value) <= max_width) value else chrome.ellipsize(value, max_width)
+        canvas.drawText(display, left, y, text_paint)
+    }
+
+    private fun draw_compact_value(
+        canvas: Canvas,
+        rect: RectF,
+        index: Int,
+        primary: Boolean,
+        y: Float,
+        value: String
+    ) {
+        val left = compact_column_x(rect, index, primary)
+        draw_fitted_left_text(canvas, value, left, y, compact_column_width(rect, index, primary), sp(13), sp(8))
+    }
+
     private fun compact_column_x(rect: RectF, index: Int, primary: Boolean): Float {
         return when (index) {
             0 -> rect.left + dp(16)
             1 -> rect.left + rect.width() * if (primary) 0.34f else 0.46f
             else -> rect.left + rect.width() * 0.60f
         }
+    }
+
+    private fun compact_column_width(rect: RectF, index: Int, primary: Boolean): Float {
+        val left = compact_column_x(rect, index, primary)
+        val next = when (index) {
+            0 -> compact_column_x(rect, 1, primary)
+            1 -> compact_column_x(rect, 2, primary)
+            else -> rect.right - dp(16)
+        }
+        return (next - left - dp(8)).coerceAtLeast(dp(24))
     }
 
     private fun dp(value: Int): Float = dp(value.toFloat())

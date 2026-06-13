@@ -3,8 +3,8 @@ package com.flightalert.ui.map.photo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.flightalert.data.AircraftDetails
-import com.flightalert.data.AirplanesLiveHttp
-import com.flightalert.data.GlobePhotoHint
+import com.flightalert.data.airplaneslive.AirplanesLiveHttp
+import com.flightalert.data.web.GlobePhotoHint
 import com.flightalert.ui.map.Aircraft
 import java.net.HttpURLConnection
 import java.net.URL

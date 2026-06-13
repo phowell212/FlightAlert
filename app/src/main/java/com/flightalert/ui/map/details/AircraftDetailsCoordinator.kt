@@ -1,12 +1,13 @@
 package com.flightalert.ui.map.details
 
 import com.flightalert.data.AircraftDetails
-import com.flightalert.data.AircraftDetailsClient
+import com.flightalert.data.api.AircraftDetailsClient
 import com.flightalert.data.AircraftMetadataSeed
 import com.flightalert.data.FeedAircraft
+import com.flightalert.data.FeedBounds
 import com.flightalert.data.FeedSource
-import com.flightalert.data.GlobePhotoHint
-import com.flightalert.data.GlobeWebAircraftSource
+import com.flightalert.data.web.GlobeWebAircraftSource
+import com.flightalert.data.web.GlobePhotoHint
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.Aircraft
 import com.flightalert.ui.map.photo.AircraftPhotoGalleryItem
@@ -17,6 +18,17 @@ import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+
+private data class AircraftDetailCandidate(
+    val source_name: String,
+    val fetch: () -> AircraftDetails?
+)
+
+data class WebDetailLookupContext(
+    val bounds: FeedBounds,
+    val own_lat: Double,
+    val own_lon: Double
+)
 
 // Coordinates details, photo, and web seed lookups so FlightMapView only reacts to finished callbacks.
 class AircraftDetailsCoordinator(
@@ -175,7 +187,7 @@ class AircraftDetailsCoordinator(
         var best_seed: AircraftMetadataSeed? = null
         while (elapsed_realtime_ms() <= deadline) {
             source.latest_aircraft_details(aircraft.icao24, aircraft.callsign, aircraft.registration)
-                ?.takeIf { has_aircraft_metadata(it) || it.route != null || it.origin_airport != null || it.destination_airport != null }
+                ?.takeIf { has_aircraft_metadata(it) || has_route_metadata(it) || it.telemetry?.has_values == true }
                 ?.let { return it }
             best_seed = best_seed ?: find_web_metadata_seed(aircraft, lookup, globe_web_source_enabled)
             sleep_ms(WEB_DETAIL_POLL_MS)
@@ -307,7 +319,8 @@ class AircraftDetailsCoordinator(
             route_updated_epoch_sec = enrichment.route_updated_epoch_sec ?: seed.route_updated_epoch_sec,
             route_source = enrichment.route_source ?: seed.route_source,
             origin_airport = enrichment.origin_airport ?: seed.origin_airport,
-            destination_airport = enrichment.destination_airport ?: seed.destination_airport
+            destination_airport = enrichment.destination_airport ?: seed.destination_airport,
+            telemetry = enrichment.telemetry?.with_fallback(seed.telemetry) ?: seed.telemetry
         )
     }
 
@@ -334,6 +347,7 @@ class AircraftDetailsCoordinator(
             return when {
                 still_loading && !has_aircraft_metadata(details) -> "Loading aircraft details from remaining feed sources"
                 still_loading -> "Metadata from ${details.registry_source ?: "configured sources"}; checking remaining feed sources"
+                !has_aircraft_metadata(details) && details.telemetry?.has_values == true -> "Telemetry from ${details.registry_source ?: "configured sources"}; metadata unavailable"
                 !has_aircraft_metadata(details) -> "Metadata unavailable from configured sources"
                 else -> "Metadata from ${details.registry_source ?: "configured sources"}"
             }
@@ -345,6 +359,12 @@ class AircraftDetailsCoordinator(
                 details.type != null ||
                 details.type_code != null ||
                 details.owner != null
+        }
+
+        private fun has_route_metadata(details: AircraftDetails): Boolean {
+            return details.route != null ||
+                details.origin_airport != null ||
+                details.destination_airport != null
         }
 
         private const val WEB_DETAIL_WAIT_MS = 9000L
