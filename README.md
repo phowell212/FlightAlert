@@ -8,9 +8,11 @@ Current version: **1.4**
 
 - Live aircraft map with real street, no-label, or satellite tiles.
 - ADS-B/MLAT traffic from live public feeds, with source status shown when data is missing.
+- Traffic/details source modes for API-only, Airplanes.Live web-only, or hybrid enrichment.
 - Smooth aircraft motion, zoom/density marker morphing, and type-aware symbols.
 - Aircraft filters for search, class, altitude, range, airborne/ground state, report age, and alert-volume membership.
 - Selectable aircraft details with registry, route, trace, usage, photo, and environmental-impact views when real source data supports them.
+- Long-press an aircraft photo to open a source-labeled gallery; source-marked photos include proof and browser buttons.
 - Registry country flag in aircraft details and the traffic card.
 - Settings skins/themes, with Cockpit retained as an option.
 - Nested Settings panels for street-map labels and aviation layers.
@@ -30,7 +32,7 @@ The app follows a no-pretending rule: if a value cannot be obtained from a live 
 
 - Aircraft traffic: Airplanes.Live and OpenSky-style viewport queries.
 - Flight traces: ADSB.lol tar1090 traces.
-- Aircraft metadata/routes/photos: Airplanes.Live, ADSBdb, HexDB, FAA Registry, PlaneSpotters, JetPhotos, Wikimedia/Openverse/Wikipedia fallbacks.
+- Aircraft metadata/routes/photos: Airplanes.Live API and Globe web pane, ADSBdb, HexDB, FAA Registry, PlaneSpotters, JetPhotos, Wikimedia/Openverse/Wikipedia fallbacks.
 - Map tiles: OpenStreetMap, CARTO no-label tiles, and Esri World Imagery.
 - Aviation layers: FAA ArcGIS services for airspace/airports and FAA NAT track JSON.
 - Environmental impact: trace time/distance when available, broad aircraft-class fuel-burn ranges, and EIA per-gallon CO2 factors.
@@ -71,5 +73,6 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 
 - `assembleDebug`, `testDebugUnitTest`, and `lintDebug` pass.
 - Emulator comparison covered the refactored `test` branch against `master` for the main map, Settings, Filters, aircraft details, and Priority tracker panels.
+- Web source mode was verified on a Samsung SM-F946U against 5 live Airplanes.Live aircraft; registration, type, owner/operator, and Globe photo retrieval matched the live source data for the sampled aircraft.
 - Persistent extreme-priority notification was verified with live aircraft data: it appears only while priority tracking has aircraft inside the configured 3D alert volume and clears when priority tracking is turned off.
 - The map coordinator was refactored so feature logic lives in focused Kotlin objects while preserving the existing styling and user experience.

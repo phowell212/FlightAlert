@@ -12,7 +12,9 @@ data class FlightMapLayoutState(
     val show_previous_flights: Boolean
 )
 
+// Owns map and panel geometry so FlightMapView can ask where things go without doing rectangle math inline.
 class FlightMapLayout(private val scale_dp: (Float) -> Float) {
+    // Keep the top status clear of the traffic card on wide screens and full-width on narrow screens.
     fun top_status_bounds(w: Float, h: Float): RectF {
         val left = dp(12)
         val top = dp(12)
@@ -24,6 +26,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return RectF(left, top, right, top + dp(66))
     }
 
+    // Context controls share one row or stack above the toolbar when width gets tight.
     fun recenter_button_bounds(w: Float, h: Float, state: FlightMapLayoutState): RectF {
         val slot = if (state.has_selected_flight_path) 1 else 0
         return context_button_bounds(w, h, slot)
@@ -48,6 +51,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return context_button_bounds(w, h, slot)
     }
 
+    // Slot-based context buttons let recenter/path/history/clear appear without overlapping filters.
     fun context_button_bounds(w: Float, h: Float, slot: Int): RectF {
         val anchor = filters_button_bounds(w, h)
         val size = dp(44)
@@ -78,6 +82,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return RectF(settings.right + gap, settings.top, settings.right + gap + width, settings.bottom)
     }
 
+    // Settings panel changes shape for landscape-short devices before it starts clipping.
     fun settings_panel_bounds(w: Float, h: Float): RectF {
         val compact = w > h && h < dp(500)
         val narrow_portrait = !compact && w < dp(430)
@@ -269,6 +274,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return layer_toggle_bounds(panel, row = if (is_compact_settings_panel(panel)) 1 else 3, right_column = is_compact_settings_panel(panel))
     }
 
+    // Aviation layer toggles use the same row/column math in compact and portrait panels.
     fun layer_toggle_bounds(panel: RectF, row: Int, right_column: Boolean): RectF {
         return if (is_compact_settings_panel(panel)) {
             val column = if (right_column) compact_settings_right_column(panel) else compact_settings_left_column(panel)
@@ -336,6 +342,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         }
     }
 
+    // Filter rows share spacing math so search, reset, and every toggle stay visible together.
     fun filter_button_bounds(panel: RectF, row: Int, right_column: Boolean): RectF {
         return if (is_compact_settings_panel(panel)) {
             val column = if (right_column) compact_settings_right_column(panel) else compact_settings_left_column(panel)
@@ -352,6 +359,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         }
     }
 
+    // Priority tracker reuses the settings modal size so safety controls do not introduce another layout mode.
     fun priority_tracker_panel_bounds(w: Float, h: Float): RectF {
         return settings_panel_bounds(w, h)
     }
@@ -383,6 +391,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return RectF(button_left, panel.top + dp(72), panel.right - dp(18), panel.top + dp(110))
     }
 
+    // Compact settings means short landscape: use columns before shrinking text or clipping controls.
     fun is_compact_settings_panel(panel: RectF): Boolean {
         return panel.width() > dp(620) && panel.height() < dp(380)
     }
@@ -395,6 +404,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return RectF(panel.left + panel.width() * 0.54f, panel.top, panel.right - dp(18), panel.bottom)
     }
 
+    // Priority alert steppers live in the left column when the modal is split into compact columns.
     fun priority_alert_control_area(panel: RectF): RectF {
         return if (is_compact_settings_panel(panel)) {
             RectF(panel.left, panel.top, panel.left + panel.width() * 0.49f, panel.bottom)
@@ -411,6 +421,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return RectF(panel.right - dp(72), top, panel.right - dp(18), top + dp(38))
     }
 
+    // The traffic panel anchors opposite the top/status controls and becomes a bottom card in portrait.
     fun info_panel_bounds(w: Float, h: Float): RectF {
         val margin = dp(12)
         return if (is_wide_layout(w, h)) {
@@ -422,11 +433,13 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         }
     }
 
+    // Following mode centers the user in the largest open map area, not necessarily the physical screen center.
     fun default_map_focus(w: Float, h: Float, state: FlightMapLayoutState): ScreenPoint {
         val open = largest_unblocked_map_rect(w, h, state)
         return ScreenPoint(open.centerX(), open.centerY())
     }
 
+    // Find the largest rectangle not covered by cockpit UI so map fitting avoids panels and controls.
     fun largest_unblocked_map_rect(w: Float, h: Float, state: FlightMapLayoutState): RectF {
         val obstacles = map_obstacles(w, h, state)
         val xs = mutableListOf(0f, w)
@@ -459,6 +472,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return best
     }
 
+    // Obstacles are the UI rectangles that map focus, labels, and path fitting should avoid.
     fun map_obstacles(w: Float, h: Float, state: FlightMapLayoutState): List<RectF> {
         val items = mutableListOf(
             top_status_bounds(w, h),

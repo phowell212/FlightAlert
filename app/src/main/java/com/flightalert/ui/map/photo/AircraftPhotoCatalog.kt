@@ -27,6 +27,9 @@ object AircraftPhotoCatalog {
 
     fun representative_photo_queries(details: AircraftDetails, model: String): List<String> {
         return listOfNotNull(
+            "\"$model\" aircraft exterior",
+            "$model aircraft exterior",
+            "\"$model\" exterior photo",
             "\"$model\" aircraft",
             "$model aircraft",
             "\"$model\" aircraft photo",
@@ -43,6 +46,8 @@ object AircraftPhotoCatalog {
 
     fun exact_photo_queries(registration: String?, icao24: String): List<String> {
         return listOfNotNull(
+            registration?.let { "\"$it\" aircraft exterior" },
+            registration?.let { "\"$it\" exterior photo" },
             registration?.let { "\"$it\" aircraft photo" },
             registration?.let { "$it aircraft" },
             icao24.takeIf { it.isNotBlank() }?.let { "\"${it.uppercase(Locale.US)}\" aircraft" }

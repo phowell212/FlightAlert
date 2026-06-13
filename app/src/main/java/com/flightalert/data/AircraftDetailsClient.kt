@@ -20,21 +20,20 @@ class AircraftDetailsClient(private val user_agent: String) {
         val clean_callsign = callsign.trim().replace(" ", "")
         val cache_key = details_cache_key(normalized_hex, clean_callsign, metadata_seed)
         cached_details(cache_key)?.let { return it }
-        details_from_seed(normalized_hex, registration_hint, metadata_seed)?.let { details ->
-            cache_details(cache_key, details)
-            return details
-        }
+        val seed_details = details_from_seed(normalized_hex, registration_hint, metadata_seed)
         val airplanes_live = fetch_airplanes_live_metadata(normalized_hex)
         val feed_registration = normalized_registration(registration_hint)
+        val seed_registration = normalized_registration(seed_details?.registration)
         val decoded_us_registration = decode_us_n_number(normalized_hex)
         val airplanes_registration = normalized_registration(airplanes_live?.registration)
-        val adsb_aircraft = fetch_adsb_db_aircraft(normalized_hex, airplanes_registration ?: feed_registration ?: decoded_us_registration)
+        val adsb_aircraft = fetch_adsb_db_aircraft(normalized_hex, airplanes_registration ?: feed_registration ?: seed_registration ?: decoded_us_registration)
         val aircraft = fetch_json("https://hexdb.io/api/v1/aircraft/$normalized_hex")
         val registration = first_present(
             airplanes_registration,
             adsb_aircraft?.registration,
             aircraft?.opt_string_or_null("Registration")?.let(::normalized_registration),
             feed_registration,
+            seed_registration,
             decoded_us_registration
         )
         val faa = registration?.takeIf { it.startsWith("N", ignoreCase = true) }?.let { fetch_faa_registry(it) }
@@ -68,16 +67,18 @@ class AircraftDetailsClient(private val user_agent: String) {
         val api_manufacturer = faa?.manufacturer ?: adsb_aircraft?.manufacturer ?: aircraft?.opt_string_or_null("Manufacturer")
         val api_type = faa?.model ?: adsb_aircraft?.type ?: aircraft?.opt_string_or_null("Type")
         val api_type_code = airplanes_live?.type_code ?: adsb_aircraft?.icao_type ?: aircraft?.opt_string_or_null("ICAOTypeCode")
-        val internet = if (feed_type == null && api_type == null) {
-            fetch_internet_aircraft_metadata(api_manufacturer, feed_type ?: api_type, api_type_code)
+        val seed_type = seed_details?.type
+        val internet = if (feed_type == null && api_type == null && seed_type == null) {
+            fetch_internet_aircraft_metadata(api_manufacturer ?: seed_details?.manufacturer, seed_type, api_type_code ?: seed_details?.type_code)
         } else {
             null
         }
-        val manufacturer = api_manufacturer ?: internet?.manufacturer
-        val type = feed_type ?: api_type ?: internet?.model
-        val owner = faa?.registered_owner ?: adsb_aircraft?.registered_owner ?: aircraft?.opt_string_or_null("RegisteredOwners") ?: airplanes_live?.owner_operator
+        val manufacturer = api_manufacturer ?: seed_details?.manufacturer ?: internet?.manufacturer
+        val type = feed_type ?: api_type ?: seed_type ?: internet?.model
+        val owner = faa?.registered_owner ?: adsb_aircraft?.registered_owner ?: aircraft?.opt_string_or_null("RegisteredOwners") ?: airplanes_live?.owner_operator ?: seed_details?.owner
 
         val metadata_sources = mutableListOf<String>()
+        if (seed_details?.registry_source != null) metadata_sources += seed_details.registry_source
         if (airplanes_live?.has_metadata == true) metadata_sources += airplanes_live.source_name
         if (faa != null) metadata_sources += faa.source_name
         if (adsb_aircraft != null) metadata_sources += "ADSBdb"
@@ -91,16 +92,16 @@ class AircraftDetailsClient(private val user_agent: String) {
             registration = faa?.registration ?: registration,
             manufacturer = manufacturer,
             type = type,
-            type_code = api_type_code,
+            type_code = api_type_code ?: seed_details?.type_code,
             owner = owner,
-            manufactured_year = faa?.manufactured_year ?: airplanes_live?.year,
+            manufactured_year = faa?.manufactured_year ?: airplanes_live?.year ?: seed_details?.manufactured_year,
             registry_source = metadata_sources.distinct().joinToString(" + ").ifEmpty { null },
-            operator_code = adsb_aircraft?.operator_code ?: aircraft?.opt_string_or_null("OperatorFlagCode") ?: airplanes_live?.operator_code,
-            route = adsb_route?.route ?: route?.opt_string_or_null("route"),
-            route_updated_epoch_sec = route?.opt_long_or_null("updatetime"),
-            route_source = route_source,
-            origin_airport = origin,
-            destination_airport = destination
+            operator_code = adsb_aircraft?.operator_code ?: aircraft?.opt_string_or_null("OperatorFlagCode") ?: airplanes_live?.operator_code ?: seed_details?.operator_code,
+            route = adsb_route?.route ?: route?.opt_string_or_null("route") ?: seed_details?.route,
+            route_updated_epoch_sec = route?.opt_long_or_null("updatetime") ?: seed_details?.route_updated_epoch_sec,
+            route_source = route_source ?: seed_details?.route_source,
+            origin_airport = origin ?: seed_details?.origin_airport,
+            destination_airport = destination ?: seed_details?.destination_airport
         ).also { cache_details(cache_key, it) }
     }
 
@@ -234,7 +235,7 @@ class AircraftDetailsClient(private val user_agent: String) {
     private fun fetch_airplanes_live_rest_metadata(hex: String): AirplanesLiveMetadata? {
         AirplanesLiveHttp.wait_for_rest_api_slot()
         val json = fetch_json("${AirplanesLiveHttp.API_BASE_URL}/hex/$hex", browser_headers = true) ?: return null
-        val aircraft = json.optJSONArray("aircraft") ?: return null
+        val aircraft = json.optJSONArray("aircraft") ?: json.optJSONArray("ac") ?: return null
         for (index in 0 until aircraft.length()) {
             val item = aircraft.optJSONObject(index) ?: continue
             val item_hex = item.opt_string_or_null("hex")?.trim()?.trimStart('~')?.lowercase(Locale.US)
@@ -420,8 +421,8 @@ private fun looks_like_aircraft_page(title: String, text: String): Boolean {
         rejected_topics.none { combined.contains(it) }
 }
 
+// Wikipedia titles are useful model hints, but the title alone is not a structured manufacturer field.
 private fun manufacturer_from_wikipedia_title(@Suppress("UNUSED_PARAMETER") title: String): String? {
-    // Wikipedia titles are useful model hints, but the title alone is not a structured manufacturer field.
     return null
 }
 

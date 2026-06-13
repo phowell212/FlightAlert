@@ -15,14 +15,18 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+// Live aircraft feed client: viewport coverage and exact-search detail stay separate until both real sources answer.
+@Suppress("FunctionName")
 class AircraftFeedClient(private val user_agent: String) {
 
+    // Fetch the visible area first, then merge an exact search result if the user is filtering for one aircraft.
     fun fetch_aircraft(bounds: FeedBounds, own_lat: Double, own_lon: Double, exact_search: String? = null): FeedResult {
         val viewport_result = fetch_viewport_aircraft(bounds, own_lat, own_lon)
         val search_result = fetch_airplanes_live_exact_search(exact_search, own_lat, own_lon)
         return merge_viewport_and_search(viewport_result, search_result)
     }
 
+    // Prefer Airplanes.Live coverage, then fall back to OpenSky only when the primary source is not usable.
     private fun fetch_viewport_aircraft(bounds: FeedBounds, own_lat: Double, own_lon: Double): FeedResult {
         val now = System.currentTimeMillis()
         val airplanes_result = if (now >= airplanes_live_retry_after_ms) {
@@ -48,6 +52,7 @@ class AircraftFeedClient(private val user_agent: String) {
         return merge_complete_coverage_with_detail(viewport, search)
     }
 
+    // Merge detail rows into complete coverage by aircraft key, keeping the newest real report for each aircraft.
     private fun merge_complete_coverage_with_detail(complete: FeedResult, detail: FeedResult): FeedResult {
         val merged = linkedMapOf<String, FeedAircraft>()
         complete.aircraft.forEach { item ->
@@ -110,6 +115,7 @@ class AircraftFeedClient(private val user_agent: String) {
         }
     }
 
+    // Split large bounds into real point queries so Airplanes.Live can cover the visible area honestly.
     private fun fetch_airplanes_live(bounds: FeedBounds, own_lat: Double, own_lon: Double): FeedResult {
         val plan = airplanes_live_query_plan(bounds)
         val merged = linkedMapOf<String, FeedAircraft>()
@@ -192,6 +198,7 @@ class AircraftFeedClient(private val user_agent: String) {
         return fetch_airplanes_live_path(path, own_lat, own_lon)
     }
 
+    // All Airplanes.Live REST calls pass through the shared rate limiter and report failure instead of inventing data.
     private fun fetch_airplanes_live_path(path: String, own_lat: Double, own_lon: Double): FeedResult {
         var connection: HttpURLConnection? = null
         return try {
@@ -251,6 +258,7 @@ class AircraftFeedClient(private val user_agent: String) {
 
     private fun url_encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
+    // Build a bounded grid of point queries; mark partial coverage when the viewport is too large for one pass.
     private fun airplanes_live_query_plan(bounds: FeedBounds): AirplanesLiveQueryPlan {
         val normalized = bounds.normalized()
         val center_lat = (normalized.min_lat + normalized.max_lat) / 2.0
@@ -309,6 +317,7 @@ class AircraftFeedClient(private val user_agent: String) {
         }
     }
 
+    // Translate OpenSky arrays into the app feed model while leaving missing fields null.
     private fun parse_open_sky_aircraft(json: JSONObject, own_lat: Double, own_lon: Double): List<FeedAircraft> {
         val rows = json.optJSONArray("states") ?: JSONArray()
         val parsed = mutableListOf<FeedAircraft>()
@@ -340,6 +349,7 @@ class AircraftFeedClient(private val user_agent: String) {
         return parsed.sortedBy { it.distance_m }
     }
 
+    // Translate Airplanes.Live objects into the app feed model without filling missing source fields.
     private fun parse_airplanes_live_aircraft(json: JSONObject, own_lat: Double, own_lon: Double): List<FeedAircraft> {
         val now_sec = json.opt_double_or_null("now")?.let { normalize_epoch_seconds(it) } ?: (System.currentTimeMillis() / 1000.0)
         val rows = json.optJSONArray("aircraft") ?: json.optJSONArray("ac") ?: JSONArray()
@@ -415,6 +425,7 @@ class AircraftFeedClient(private val user_agent: String) {
         }
     }
 
+    // When two feeds report the same aircraft, keep the one with the newest contact time.
     private fun newer_aircraft(existing: FeedAircraft?, incoming: FeedAircraft): FeedAircraft {
         if (existing == null) return incoming
         val existing_time = existing.last_contact_sec ?: existing.position_time_sec ?: 0.0

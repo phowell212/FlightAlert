@@ -25,6 +25,7 @@ interface FlightMapChromeHost {
     fun ellipsize(value: String, max_width: Float): String
 }
 
+// Draws shared map chrome: panels, controls, status labels, and theme treatments.
 class FlightMapChromeRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
@@ -40,6 +41,7 @@ class FlightMapChromeRenderer(
         return host.dp(style.visual_theme.style.control_corner_dp)
     }
 
+    // Choice buttons shrink text before ellipsizing so labels stay inside compact controls.
     fun draw_choice_button(
         canvas: Canvas,
         rect: RectF,
@@ -83,6 +85,7 @@ class FlightMapChromeRenderer(
         text_paint.textAlign = previous_align
     }
 
+    // Context controls are icon-only map actions that share one cockpit surface treatment.
     fun draw_context_control(
         canvas: Canvas,
         rect: RectF,
@@ -96,6 +99,7 @@ class FlightMapChromeRenderer(
         draw_control_surface(canvas, rect, with_alpha(colors.control_fill, alpha), stroke, false, stroke_width, style)
     }
 
+    // Draw the reusable control surface before icons or text are placed on top.
     fun draw_control_surface(
         canvas: Canvas,
         rect: RectF,
@@ -130,6 +134,7 @@ class FlightMapChromeRenderer(
         canvas.drawRoundRect(rect, radius, radius, stroke_paint)
     }
 
+    // Draw the reusable panel surface with theme texture and border applied consistently.
     fun draw_panel_surface(
         canvas: Canvas,
         rect: RectF,
@@ -162,6 +167,7 @@ class FlightMapChromeRenderer(
         canvas.drawRoundRect(rect, radius, radius, stroke_paint)
     }
 
+    // Modal backdrop dims the map while keeping the selected panel visually attached to the cockpit.
     fun draw_modal_backdrop(canvas: Canvas, w: Float, h: Float, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val alpha = when (style.visual_theme.style.treatment) {
@@ -175,6 +181,7 @@ class FlightMapChromeRenderer(
         canvas.drawRect(0f, 0f, w, h, paint)
     }
 
+    // No-location state is intentionally plain: without real ownship location, the map and traffic stay unavailable.
     fun draw_no_location_state(
         canvas: Canvas,
         w: Float,
@@ -198,6 +205,7 @@ class FlightMapChromeRenderer(
         canvas.drawText("No map or aircraft will be shown until real location data is available.", w / 2f, h * 0.45f + host.dp(24f), text_paint)
     }
 
+    // Top status combines source truth, alert status, and scale into one quick-read card.
     fun draw_top_status(
         canvas: Canvas,
         rect: RectF,
@@ -234,12 +242,14 @@ class FlightMapChromeRenderer(
         draw_scale_label(canvas, right_status_left, rect.top + host.dp(45f), host.dp(116f), host.dp(17f), scale_label, style)
     }
 
+    // Recenter uses the same context-control surface as path controls so the top toolbar stays predictable.
     fun draw_recenter_button(canvas: Canvas, rect: RectF, style: FlightMapChromeStyle) {
         val color = style.visual_theme.colors.accent_green
         draw_context_control(canvas, rect, color, style)
         draw_locate_icon(canvas, rect.centerX(), rect.centerY(), color)
     }
 
+    // Path buttons choose their icon from the command label while keeping the styling caller-controlled.
     fun draw_flight_path_button(
         canvas: Canvas,
         rect: RectF,
@@ -255,6 +265,7 @@ class FlightMapChromeRenderer(
         }
     }
 
+    // Settings button keeps text plus icon because it is a top-level panel opener.
     fun draw_settings_button(canvas: Canvas, bounds: RectF, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
@@ -269,6 +280,7 @@ class FlightMapChromeRenderer(
         canvas.drawText("Settings", bounds.centerX(), bounds.bottom - host.dp(6f), text_paint)
     }
 
+    // Filters button changes label and accent only when a filter is actively changing visible traffic.
     fun draw_filters_button(canvas: Canvas, bounds: RectF, active: Boolean, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
@@ -452,6 +464,7 @@ class FlightMapChromeRenderer(
         text_paint.isFakeBoldText = false
     }
 
+    // Control treatments add theme texture without changing the control's hit rectangle or label contract.
     private fun draw_control_treatment(
         canvas: Canvas,
         rect: RectF,
@@ -569,6 +582,7 @@ class FlightMapChromeRenderer(
         }
     }
 
+    // Panel treatments are visual-only layers that keep map/provider attribution and data states untouched.
     private fun draw_panel_treatment(canvas: Canvas, rect: RectF, radius: Float, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
@@ -662,6 +676,7 @@ class FlightMapChromeRenderer(
         }
     }
 
+    // Radar-grid texture is centered evenly so decorative lines do not bunch up on resized panels.
     private fun draw_even_radar_grid(canvas: Canvas, rect: RectF) {
         val inset = host.dp(2f)
         val step = host.dp(RADAR_GRID_SPACING_DP)

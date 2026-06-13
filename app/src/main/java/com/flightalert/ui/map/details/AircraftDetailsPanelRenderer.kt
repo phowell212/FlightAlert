@@ -8,6 +8,7 @@ import android.graphics.RectF
 import com.flightalert.settings.FlightAlertSettings.ThemeTreatment
 import com.flightalert.settings.FlightAlertSettings.VisualTheme
 import com.flightalert.ui.map.ScreenPoint
+import com.flightalert.ui.map.photo.AircraftPhotoGalleryItem
 import com.flightalert.ui.map.photo.PhotoEvidence
 import com.flightalert.ui.map.details.UsageStats
 import java.util.Locale
@@ -63,6 +64,12 @@ data class AircraftPhotoEvidencePanelState(
     val evidence: PhotoEvidence?
 ) : AircraftDetailsPanelContent
 
+data class AircraftPhotoGalleryPanelState(
+    val items: List<AircraftPhotoGalleryItem>,
+    val status: String,
+    val loading: Boolean
+) : AircraftDetailsPanelContent
+
 data class AircraftDetailsDrawResult(
     val scroll_y: Float,
     val max_scroll_y: Float
@@ -77,12 +84,14 @@ interface AircraftDetailsPanelChrome {
     fun draw_choice_button(canvas: Canvas, rect: RectF, label: String, selected: Boolean)
 }
 
+// Draws the selected-aircraft modal; FlightMapView provides state and this object owns all panel geometry.
 class AircraftDetailsPanelRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
     private val text_paint: Paint,
     private val chrome: AircraftDetailsPanelChrome
 ) {
+    // Dispatch one details-panel state to the matching drawing branch and return scroll bounds to FlightMapView.
     fun draw_panel(
         canvas: Canvas,
         w: Float,
@@ -99,9 +108,11 @@ class AircraftDetailsPanelRenderer(
                 AircraftDetailsDrawResult(0f, 0f)
             }
             is AircraftPhotoEvidencePanelState -> draw_photo_evidence_panel(canvas, rect, style, state, content)
+            is AircraftPhotoGalleryPanelState -> draw_photo_gallery_panel(canvas, rect, style, state, content)
         }
     }
 
+    // Center the details modal differently for wide and portrait layouts without changing content state.
     fun panel_bounds(w: Float, h: Float, wide_layout: Boolean): RectF {
         val margin = dp(14)
         val width = if (wide_layout) min(dp(800), w - margin * 2f) else w - margin * 2f
@@ -133,6 +144,7 @@ class AircraftDetailsPanelRenderer(
         return RectF(panel.left + dp(150), panel.bottom - dp(58), panel.left + dp(286), panel.bottom - dp(18))
     }
 
+    // The current photo hit area matches the rendered photo, not the whole photo/status column.
     fun current_photo_bounds(panel: RectF, wide_layout: Boolean, has_photo: Boolean): RectF {
         return if (wide_layout) {
             val left = RectF(panel.left + dp(18), panel.top + dp(78), panel.left + panel.width() * 0.38f, panel.bottom - dp(18))
@@ -142,6 +154,21 @@ class AircraftDetailsPanelRenderer(
         }
     }
 
+    fun gallery_item_bounds(panel: RectF, index: Int, wide_layout: Boolean): RectF {
+        val columns = if (wide_layout) 3 else 2
+        val gap = dp(12)
+        val left = panel.left + dp(18)
+        val top = panel.top + dp(82)
+        val width = (panel.width() - dp(36) - gap * (columns - 1)) / columns
+        val height = if (wide_layout) dp(122) else dp(142)
+        val row = index / columns
+        val column = index % columns
+        val x = left + column * (width + gap)
+        val y = top + row * (height + gap)
+        return RectF(x, y, x + width, y + height)
+    }
+
+    // Draw the normal details mode: title, exact/representative photo status, metadata rows, and impact entry.
     private fun draw_main_panel(
         canvas: Canvas,
         rect: RectF,
@@ -209,6 +236,7 @@ class AircraftDetailsPanelRenderer(
         return result
     }
 
+    // Wide layouts split details into photo plus two row columns so long metadata stays scannable.
     private fun draw_wide_details(
         canvas: Canvas,
         rect: RectF,
@@ -242,6 +270,7 @@ class AircraftDetailsPanelRenderer(
         return maxOf(photo_rect.bottom, y_a, y_b)
     }
 
+    // Draw environmental impact only from prepared presenter rows so missing aircraft data stays unavailable.
     private fun draw_impact_panel(
         canvas: Canvas,
         rect: RectF,
@@ -320,6 +349,7 @@ class AircraftDetailsPanelRenderer(
         return y + dp(70)
     }
 
+    // Draw trace-derived usage stats, or an honest unavailable message when no real trace supports it.
     private fun draw_usage_panel(
         canvas: Canvas,
         rect: RectF,
@@ -387,6 +417,7 @@ class AircraftDetailsPanelRenderer(
         return y + dp(28)
     }
 
+    // Draw a small seven-day chart from trace buckets without implying broader historical coverage.
     private fun draw_usage_graph(canvas: Canvas, rect: RectF, stats: UsageStats, style: AircraftDetailsPanelStyle) {
         if (rect.height() < dp(96) || rect.width() < dp(180)) return
         paint.style = Paint.Style.FILL
@@ -447,6 +478,7 @@ class AircraftDetailsPanelRenderer(
         }
     }
 
+    // Draw proof for search-engine photos so investigable images remain auditable to the user.
     private fun draw_photo_evidence_panel(
         canvas: Canvas,
         rect: RectF,
@@ -515,6 +547,71 @@ class AircraftDetailsPanelRenderer(
         return result
     }
 
+    private fun draw_photo_gallery_panel(
+        canvas: Canvas,
+        rect: RectF,
+        style: AircraftDetailsPanelStyle,
+        state: AircraftDetailsPanelState,
+        content: AircraftPhotoGalleryPanelState
+    ): AircraftDetailsDrawResult {
+        chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
+        chrome.draw_choice_button(canvas, close_button_bounds(rect), "Back", false)
+
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = true
+        text_paint.textSize = sp(21)
+        text_paint.color = style.visual_theme.colors.text
+        canvas.drawText("Photo gallery", rect.left + dp(18), rect.top + dp(38), text_paint)
+
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(12)
+        text_paint.color = style.visual_theme.colors.muted
+        canvas.drawText(chrome.ellipsize(content.status, rect.width() - dp(36)), rect.left + dp(18), rect.top + dp(62), text_paint)
+
+        val clip = content_bounds(rect)
+        if (content.items.isEmpty()) {
+            val message = if (content.loading) content.status else "No real gallery photos available from checked sources."
+            draw_centered_message(canvas, message, clip.inset_copy(dp(18), dp(18)), style)
+            return AircraftDetailsDrawResult(0f, 0f)
+        }
+
+        val checkpoint = canvas.save()
+        canvas.clipRect(clip)
+        canvas.translate(0f, -state.scroll_y)
+        content.items.forEachIndexed { index, item ->
+            val item_rect = gallery_item_bounds(rect, index, state.wide_layout)
+            draw_gallery_item(canvas, item_rect, item, style)
+        }
+        canvas.restoreToCount(checkpoint)
+
+        val last = gallery_item_bounds(rect, content.items.lastIndex, state.wide_layout)
+        val result = scroll_result(last.bottom - clip.top + dp(18), clip.height(), state.scroll_y)
+        draw_scroll_indicator(canvas, clip, result, style)
+        return result
+    }
+
+    private fun draw_gallery_item(
+        canvas: Canvas,
+        rect: RectF,
+        item: AircraftPhotoGalleryItem,
+        style: AircraftDetailsPanelStyle
+    ) {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = true
+        text_paint.textSize = sp(10)
+        text_paint.color = style.visual_theme.colors.text
+        canvas.drawText(chrome.ellipsize(item.title, rect.width()), rect.left, rect.top + dp(10), text_paint)
+        val photo_rect = RectF(rect.left, rect.top + dp(16), rect.right, rect.bottom)
+        draw_photo_block(canvas, photo_rect, AircraftDetailsPhotoState(item.bitmap, item.caption), style)
+        if (item.evidence != null) {
+            paint.style = Paint.Style.FILL
+            paint.color = with_alpha(style.visual_theme.colors.accent_blue, 176)
+            canvas.drawCircle(rect.right - dp(12), rect.top + dp(28), dp(5), paint)
+        }
+        text_paint.isFakeBoldText = false
+    }
+
+    // Draw either the real fetched bitmap or the honest photo status message in the same reserved area.
     private fun draw_photo_block(
         canvas: Canvas,
         photo_rect: RectF,
@@ -537,6 +634,7 @@ class AircraftDetailsPanelRenderer(
         }
     }
 
+    // Draw one metadata row with wrapping and clipping so long values do not overlap nearby content.
     private fun draw_adaptive_detail_row(
         canvas: Canvas,
         rect: RectF,
@@ -718,6 +816,7 @@ class AircraftDetailsPanelRenderer(
         canvas.drawText(display, left, y, text_paint)
     }
 
+    // Make wrapped text lines predictable, including splitting very long words that would otherwise overflow.
     private fun wrapped_text_lines(value: String, width: Float, max_lines: Int): List<String> {
         val words = value.split(Regex("\\s+")).filter { it.isNotBlank() }
         if (words.isEmpty()) return emptyList()
@@ -782,6 +881,7 @@ class AircraftDetailsPanelRenderer(
         return RectF(panel.left, panel.top, panel.right, panel.bottom)
     }
 
+    // Return corrected scroll values to FlightMapView so touch scrolling and drawing stay in sync.
     private fun scroll_result(content_height: Float, viewport_height: Float, requested_scroll_y: Float): AircraftDetailsDrawResult {
         val max_scroll_y = max(0f, content_height - viewport_height)
         return AircraftDetailsDrawResult(

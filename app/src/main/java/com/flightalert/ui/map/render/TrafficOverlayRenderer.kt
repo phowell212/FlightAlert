@@ -55,6 +55,7 @@ interface TrafficOverlayChrome {
     fun request_animation_frame()
 }
 
+// Draws aircraft and ownship overlays from prepared display state without fetching or changing traffic data.
 class TrafficOverlayRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
@@ -65,6 +66,7 @@ class TrafficOverlayRenderer(
     private var marker_dot_blend = 0f
     private var last_marker_blend_frame_ms = 0L
 
+    // Draw visible aircraft, smoothly blending dense traffic into dots while keeping selected traffic readable.
     fun draw_aircraft(
         canvas: Canvas,
         state: TrafficOverlayState,
@@ -91,6 +93,7 @@ class TrafficOverlayRenderer(
         }
     }
 
+    // Draw the device position marker separately so ownship never competes with feed aircraft styling.
     fun draw_ownship(
         canvas: Canvas,
         state: OwnshipOverlayState,
@@ -138,6 +141,7 @@ class TrafficOverlayRenderer(
         )
     }
 
+    // Draw one aircraft sprite using the classifier shape and the current dot-to-symbol blend.
     private fun draw_aircraft_icon(
         canvas: Canvas,
         x: Float,
@@ -197,6 +201,7 @@ class TrafficOverlayRenderer(
         stroke_paint.alpha = 255
     }
 
+    // Draw labels only after map-source-specific placement decides they will not cover important UI.
     private fun draw_aircraft_label(
         canvas: Canvas,
         x: Float,
@@ -271,6 +276,7 @@ class TrafficOverlayRenderer(
         canvas.drawText(display_detail, text_x, chip.bottom - chrome.dp(7f), text_paint)
     }
 
+    // Satellite labels use shadowed text instead of chips so imagery stays visible underneath.
     private fun draw_satellite_aircraft_label(
         canvas: Canvas,
         x: Float,
@@ -313,6 +319,7 @@ class TrafficOverlayRenderer(
         canvas.drawText(detail, label_x, detail_y, text_paint)
     }
 
+    // Move labels away from top cards and controls instead of letting text collide with cockpit UI.
     private fun placed_aircraft_label_rect(preferred: RectF, state: TrafficOverlayState): RectF? {
         val margin = chrome.dp(4f)
         val result = RectF(preferred)
@@ -352,6 +359,7 @@ class TrafficOverlayRenderer(
         }
     }
 
+    // Clamp a candidate label to the map content rectangle before checking overlaps.
     private fun clamp_aircraft_label_rect(rect: RectF, margin: Float, state: TrafficOverlayState) {
         if (rect.right > state.content_width - margin) {
             rect.offset(state.content_width - margin - rect.right, 0f)
@@ -367,6 +375,7 @@ class TrafficOverlayRenderer(
         }
     }
 
+    // Street labels get theme-specific treatments while still carrying the same aircraft text.
     private fun draw_street_aircraft_label_treatment(
         canvas: Canvas,
         chip: RectF,
@@ -437,6 +446,7 @@ class TrafficOverlayRenderer(
         text_paint.isFakeBoldText = false
     }
 
+    // Style decisions stay here so label drawing can ask for one coherent chip treatment.
     private fun street_aircraft_label_style(aircraft_tint: Int, style: TrafficOverlayStyle): TrafficAircraftLabelStyle {
         val colors = style.visual_theme.colors
         return when (style.visual_theme.style.treatment) {
@@ -497,6 +507,7 @@ class TrafficOverlayRenderer(
         }
     }
 
+    // Smoothly morph dense/zoomed-out traffic into dots without popping through the wrong intermediate shape.
     private fun smoothed_aircraft_marker_dot_blend(state: TrafficOverlayState): Float {
         val visible_count = visible_aircraft_count(state)
         val target = aircraft_marker_dot_blend(visible_count, state.viewport)
@@ -521,6 +532,7 @@ class TrafficOverlayRenderer(
         return marker_dot_blend
     }
 
+    // Count only aircraft that are actually on screen so density scaling responds to the current viewport.
     private fun visible_aircraft_count(state: TrafficOverlayState): Int {
         var count = 0
         state.aircraft.forEach { item ->
@@ -532,6 +544,7 @@ class TrafficOverlayRenderer(
         return count
     }
 
+    // Blend toward dot markers when the map is zoomed out or traffic density is too high for labels.
     private fun aircraft_marker_dot_blend(count: Int, viewport: Viewport): Float {
         val zoom_dot_blend = 1f - smooth_step(AIRCRAFT_DOT_ZOOM_FULL, AIRCRAFT_DOT_ZOOM_SYMBOL, viewport.zoom.toFloat())
         val density_per_ten_thousand_px = count / max(1f, viewport.width * viewport.height / 10000f)
@@ -540,6 +553,7 @@ class TrafficOverlayRenderer(
         return smooth_step(0f, 1f, combined_blend)
     }
 
+    // Labels are intentionally limited so nearby aircraft remain visible and touch targets stay clear.
     private fun label_aircraft_count(marker_blend: Float, zoom: Double): Int {
         if (marker_blend > 0.35f) return 0
         return when {

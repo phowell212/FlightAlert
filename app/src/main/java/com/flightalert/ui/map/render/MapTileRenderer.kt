@@ -30,6 +30,7 @@ data class MapTileRenderStyle(
     val text: Int
 )
 
+// Draws and caches real map tiles; unavailable tiles are visibly unavailable, never fake imagery.
 class MapTileRenderer(
     private val context: Context,
     private val executor: Executor,
@@ -44,6 +45,7 @@ class MapTileRenderer(
     private val tile_cache = linkedMapOf<String, Bitmap>()
     private val requested_tiles = mutableSetOf<String>()
 
+    // Walk the visible tile grid, draw cached imagery immediately, and request missing tiles in the background.
     fun draw_tiles(
         canvas: Canvas,
         viewport: Viewport,
@@ -100,6 +102,7 @@ class MapTileRenderer(
         synchronized(requested_tiles) { requested_tiles.clear() }
     }
 
+    // Memory cache is first, disk cache second, and network last.
     private fun tile_bitmap(z: Int, x: Int, y: Int, key: String, state: MapTileRenderState): Bitmap? {
         synchronized(tile_cache) {
             tile_cache[key]?.let { return it }
@@ -115,6 +118,7 @@ class MapTileRenderer(
         return null
     }
 
+    // Download one HTTPS tile off the UI thread, then redraw when real bitmap data is available.
     private fun request_tile(z: Int, x: Int, y: Int, key: String, state: MapTileRenderState) {
         synchronized(requested_tiles) {
             if (requested_tiles.contains(key)) return
@@ -168,6 +172,7 @@ class MapTileRenderer(
         return File(context.cacheDir, "${state.cache_key}_tiles/$z/$x/$y.png")
     }
 
+    // Fill missing tile space with a neutral unavailable tile while the real provider request is pending or failed.
     private fun draw_unavailable_tile(canvas: Canvas, x: Float, y: Float, size: Float, style: MapTileRenderStyle) {
         paint.style = Paint.Style.FILL
         paint.color = style.panel_alt

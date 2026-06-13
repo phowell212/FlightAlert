@@ -42,6 +42,7 @@ import com.flightalert.data.AviationGeoBounds
 import com.flightalert.data.AviationLayerClient
 import com.flightalert.data.FeedBounds
 import com.flightalert.data.FeedResult
+import com.flightalert.data.FeedSource
 import com.flightalert.data.FeedStatus
 import com.flightalert.data.FlightTrace
 import com.flightalert.data.FlightTraceClient
@@ -68,6 +69,7 @@ import com.flightalert.ui.map.details.AircraftDetailsRow
 import com.flightalert.ui.map.details.AircraftImpactPanelState
 import com.flightalert.ui.map.details.AircraftDetailsCoordinator
 import com.flightalert.ui.map.details.AircraftPhotoEvidencePanelState
+import com.flightalert.ui.map.details.AircraftPhotoGalleryPanelState
 import com.flightalert.ui.map.details.AircraftUsagePanelState
 import com.flightalert.ui.map.details.WebDetailLookupContext
 import com.flightalert.ui.map.impact.AircraftImpactEstimator
@@ -106,6 +108,7 @@ import com.flightalert.ui.map.panels.TrafficPanelRow
 import com.flightalert.ui.map.panels.TrafficPanelState
 import com.flightalert.ui.map.panels.TrafficPanelStyle
 import com.flightalert.ui.map.photo.AircraftPhotoFetcher
+import com.flightalert.ui.map.photo.AircraftPhotoGalleryItem
 import com.flightalert.ui.map.photo.AircraftPhotoResult
 import com.flightalert.ui.map.photo.PhotoEvidence
 import com.flightalert.ui.map.photo.PhotoQuality
@@ -165,6 +168,8 @@ class FlightMapView(
     private val stroke_paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val icon_path = Path()
     private val prefs: SharedPreferences = FlightAlertSettings.prefs(context)
+
+    // Wire renderers first; FlightMapView chooses order, while renderer objects own drawing details.
     private val layout = FlightMapLayout { value -> dp(value) }
     private val chrome_renderer = FlightMapChromeRenderer(
         paint = paint,
@@ -285,6 +290,8 @@ class FlightMapView(
     private val executor = Executors.newFixedThreadPool(4)
     private val alert_monitoring_controller = AlertMonitoringController(context)
     private val measurement_formatter = MapMeasurementFormatter { units }
+
+    // Keep source clients together so the coordinator can fetch traffic, details, photos, traces, and layers.
     private val map_tile_renderer = MapTileRenderer(
         context = context,
         executor = executor,
@@ -375,6 +382,7 @@ class FlightMapView(
     private val flight_path_requests = mutableSetOf<String>()
     private val aircraft_filter_controller = AircraftFilterController(prefs)
 
+    // Mirror persisted display and safety settings in memory so draw and tap handlers read one fast state.
     private var location_permission_granted = false
     private var latest_location: Location? = null
     private var zoom = read_stored_zoom()
@@ -393,6 +401,8 @@ class FlightMapView(
     private var priority_tracking_enabled = prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
     private var priority_range_feet = prefs.getFloat(FlightAlertSettings.KEY_PRIORITY_RANGE_FEET, FlightAlertSettings.DEFAULT_PRIORITY_RANGE_FEET)
     private var priority_range_circle_visible = prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_RANGE_CIRCLE_VISIBLE, FlightAlertSettings.DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE)
+
+    // Track which panel is open; Back and draw both use these flags to choose one visible branch.
     private var settings_open = false
     private var map_labels_open = false
     private var aviation_layers_open = false
@@ -409,8 +419,15 @@ class FlightMapView(
     private var aircraft_photo: Bitmap? = null
     private var aircraft_photo_status = "Photo unavailable"
     private var aircraft_photo_evidence: PhotoEvidence? = null
+    private var active_photo_evidence: PhotoEvidence? = null
     private var aircraft_photo_quality: PhotoQuality? = null
     private var photo_evidence_open = false
+    private var photo_gallery_open = false
+    private var aircraft_photo_gallery: List<AircraftPhotoGalleryItem> = emptyList()
+    private var aircraft_photo_gallery_status = "Photo gallery unavailable"
+    private var aircraft_photo_gallery_loading = false
+
+    // Async request tokens stop old network responses from replacing details for a newer selected aircraft.
     private var details_request_token = 0L
     private var route_diagnostic_key: String? = null
     private var aircraft_fetch_in_flight = false
@@ -429,6 +446,8 @@ class FlightMapView(
     private var military_origin_aircraft_id: String? = null
     private var military_origin_status = "Unavailable"
     private var military_origin_request_key: String? = null
+
+    // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
     private var down_y = 0f
     private var details_scroll_y = 0f
@@ -444,12 +463,15 @@ class FlightMapView(
     private var last_pinch_span = 0f
     private var last_pinch_focus_x = 0f
     private var last_pinch_focus_y = 0f
+
+    // Insets describe the safe drawing rectangle after Android bars, cutouts, and fold areas are removed.
     private var safe_inset_left = 0f
     private var safe_inset_top = 0f
     private var safe_inset_right = 0f
     private var safe_inset_bottom = 0f
 
     private val ticker = object : Runnable {
+        // Android's frame clock calls this before each redraw. Fetch slowly, animate every frame.
         override fun run() {
             val now = SystemClock.elapsedRealtime()
             if (now - last_ticker_fetch_ms >= AIRCRAFT_TICKER_FETCH_MS) {
@@ -461,6 +483,7 @@ class FlightMapView(
         }
     }
 
+    // Init the custom View settings Android needs before it can route keys, touches, and insets here.
     init {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -472,12 +495,14 @@ class FlightMapView(
         globe_web_aircraft_source?.set_enabled(globe_web_source_enabled)
     }
 
+    // MainActivity calls this from onResume; live location and the frame ticker start here.
     fun start() {
         start_location_updates()
         removeCallbacks(ticker)
         postOnAnimation(ticker)
     }
 
+    // MainActivity calls this from onPause; stop listeners that only matter while the map is visible.
     fun stop() {
         removeCallbacks(ticker)
         if (location_permission_granted) {
@@ -489,6 +514,7 @@ class FlightMapView(
         }
     }
 
+    // MainActivity owns the Android permission popup; this view owns what the map does with the answer.
     fun set_location_permission_granted(granted: Boolean) {
         if (location_permission_granted == granted) return
         location_permission_granted = granted
@@ -503,9 +529,16 @@ class FlightMapView(
         invalidate()
     }
 
+    // Close the top-most map overlay first. If nothing is open, let Android handle Back normally.
     fun handle_back_press(): Boolean {
         if (photo_evidence_open) {
             photo_evidence_open = false
+            active_photo_evidence = null
+            invalidate()
+            return true
+        }
+        if (photo_gallery_open) {
+            photo_gallery_open = false
             invalidate()
             return true
         }
@@ -543,6 +576,8 @@ class FlightMapView(
             }
             details_open = false
             photo_evidence_open = false
+            photo_gallery_open = false
+            active_photo_evidence = null
             usage_open = false
             environmental_impact_open = false
             invalidate()
@@ -576,6 +611,7 @@ class FlightMapView(
         return false
     }
 
+    // Android's LocationManager calls this with the device's real location fix.
     override fun onLocationChanged(location: Location) {
         latest_location = location
         map_status = "Loading map"
@@ -595,12 +631,14 @@ class FlightMapView(
         }
     }
 
+    // Android calls this after rotations, folds, and resizes. Refit the map to the new screen.
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         apply_initial_mavic_range_zoom_if_needed()
         request_deferred_aircraft_refresh()
     }
 
+    // Android calls this whenever the View is invalidated. Draw the whole cockpit in one ordered pass.
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         paint.style = Paint.Style.FILL
@@ -631,6 +669,7 @@ class FlightMapView(
             }
 
             draw_top_status(this, w, h)
+            // Draw the always-available map controls and traffic card after the map layers.
             draw_recenter_button(this, w, h)
             location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
             draw_settings_button(this, w, h)
@@ -641,6 +680,7 @@ class FlightMapView(
                 draw_modal_backdrop(this, w, h)
             }
             if (details_open) {
+                // Draw only the open overlay branch so the visible panel matches the current state object.
                 draw_aircraft_details_panel(this, w, h)
             }
             if (settings_open) {
@@ -662,6 +702,8 @@ class FlightMapView(
             }
         }
     }
+
+    // Android sends every touch here. Convert through safe insets, then route to pinch, drag, or tap.
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val x = content_x(event.x)
         val y = content_y(event.y)
@@ -749,6 +791,7 @@ class FlightMapView(
         return filters_open && filter_search_focused
     }
 
+    // Android asks for this when the filter box has focus. This small bridge turns keyboard text into filter text.
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         if (!filters_open || !filter_search_focused) return null
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
@@ -969,6 +1012,7 @@ class FlightMapView(
 
     private fun content_y(screen_y: Float): Float = screen_y - safe_inset_top
 
+    // Ask Android for available providers, seed from last known fixes, then subscribe to live fixes.
     private fun start_location_updates() {
         if (!has_location_permission()) {
             location_permission_granted = false
@@ -1009,6 +1053,7 @@ class FlightMapView(
         return candidate.time > current.time || candidate.accuracy < current.accuracy
     }
 
+    // Make the camera: follow mode keeps the user under the focus point, manual mode keeps the dragged map centered.
     private fun viewport_for(location: Location, w: Float, h: Float): Viewport {
         val center_lat = if (following_location) location.latitude else manual_center_lat ?: location.latitude
         val center_lon = if (following_location) location.longitude else manual_center_lon ?: location.longitude
@@ -1031,6 +1076,7 @@ class FlightMapView(
         return if (following_location) location.longitude else manual_center_lon ?: location.longitude
     }
 
+    // Ask the tile renderer to draw real map imagery and return the honest map status.
     private fun draw_map_tiles(canvas: Canvas, viewport: Viewport) {
         map_status = map_tile_renderer.draw_tiles(
             canvas = canvas,
@@ -1059,6 +1105,7 @@ class FlightMapView(
         return priority_tracker_open || (alerts_enabled && priority_range_circle_visible)
     }
 
+    // Draw the configured horizontal alert radius; vertical separation stays in the alert math, not this flat ring.
     private fun draw_priority_range_circle(canvas: Canvas, viewport: Viewport, location: Location, outline_only: Boolean = false) {
         if (!should_draw_priority_range_circle()) return
         val ownship = lat_lon_to_world(location.latitude, location.longitude, viewport.zoom)
@@ -1086,6 +1133,7 @@ class FlightMapView(
         canvas.drawCircle(cx, cy, radius_px, stroke_paint)
     }
 
+    // Draw cached real aviation layers only after the viewport request has produced source data.
     private fun draw_aviation_layers(canvas: Canvas, viewport: Viewport) {
         val snapshot = aviation_layer_controller.snapshot ?: return
         val visible_bounds = bounds_for_viewport(viewport)?.to_aviation_geo_bounds() ?: return
@@ -1121,6 +1169,7 @@ class FlightMapView(
         )
     }
 
+    // Draw a selected aircraft's real trace; the controller decides whether previous legs are visible.
     private fun draw_selected_flight_path(canvas: Canvas, viewport: Viewport) {
         val state = selected_flight_path_render_state() ?: return
         flight_path_renderer.draw_selected_path(canvas, viewport, state, flight_path_render_style())
@@ -1159,6 +1208,7 @@ class FlightMapView(
         aviation_layer_controller.request_if_needed(viewport, aviation_layer_visibility(), force)
     }
 
+    // Build one real feed request for the current viewport, then let AircraftTrafficFeed merge enabled sources.
     private fun request_visible_aircraft_if_needed(force: Boolean = false) {
         val location = latest_location ?: return
         if (!has_usable_viewport()) {
@@ -1185,6 +1235,7 @@ class FlightMapView(
         aircraft_traffic_feed.update_viewport(feed_bounds, viewport_center_lat(location), viewport_center_lon(location), zoom, feed_mode)
         val exact_search = aircraft_filter_controller.search_query.takeIf { it.isNotBlank() }
         executor.execute {
+            // Run network work off the UI thread; only the newest token may update map state.
             try {
                 aircraft_traffic_feed.fetch_aircraft(
                     feed_bounds = feed_bounds,
@@ -1208,6 +1259,7 @@ class FlightMapView(
         }
     }
 
+    // Convert the feed result into display aircraft, preserve selected state, and publish one map update.
     private fun apply_aircraft_feed_result(result: FeedResult, fetch_token: Long): Boolean {
         if (aircraft_fetch_token != fetch_token) return false
         if (result.status == FeedStatus.OK) {
@@ -1229,20 +1281,28 @@ class FlightMapView(
             } else {
                 "Live aircraft updated via ${result.source.display_name}$coverage"
             }
+            if (result.source == FeedSource.HYBRID && result.partial_coverage) {
+                schedule_visible_aircraft_refresh(HYBRID_WEB_SUPPLEMENT_RETRY_MS, force = true)
+            }
             postInvalidateOnAnimation()
             return true
         }
 
         aircraft_status = when {
+            result.source == FeedSource.AIRPLANES_LIVE_GLOBE && result.partial_coverage -> "Web aircraft feed loading"
             result.http_code != null -> "Aircraft feed unavailable: HTTP ${result.http_code}"
             result.status == FeedStatus.RATE_LIMITED -> "Aircraft feed rate limited"
             else -> "Aircraft feed unavailable"
+        }
+        if (result.source == FeedSource.AIRPLANES_LIVE_GLOBE && result.partial_coverage) {
+            schedule_visible_aircraft_refresh(HYBRID_WEB_SUPPLEMENT_RETRY_MS, force = true)
         }
         Log.d(TAG, "Aircraft feed ${result.source.display_name}: ${result.status} http=${result.http_code ?: "none"}")
         postInvalidateOnAnimation()
         return false
     }
 
+    // Coalesce forced refreshes so rapid gestures do not spam aircraft APIs.
     private fun schedule_visible_aircraft_refresh(delay_ms: Long, force: Boolean) {
         scheduled_aircraft_refresh_force = scheduled_aircraft_refresh_force || force
         if (aircraft_refresh_scheduled) return
@@ -1290,6 +1350,7 @@ class FlightMapView(
             height.toFloat() - safe_inset_top - safe_inset_bottom >= dp(180)
     }
 
+    // Fetch the selected aircraft's trace only after selection, then ignore stale responses if selection changed.
     private fun request_flight_path(icao24: String, force: Boolean = false) {
         val key = selected_path_controller.trace_request_key(icao24) ?: return
         if (!force && selected_path_controller.selected_trace_aircraft_id == key && selected_path_controller.trace != null) return
@@ -1377,6 +1438,7 @@ class FlightMapView(
         )
     }
 
+    // Expand fetch bounds to include alert and priority volumes even when the map is panned away.
     private fun Bounds.with_priority_bounds(location: Location): Bounds {
         var combined = this
         if (alerts_enabled) {
@@ -1416,6 +1478,7 @@ class FlightMapView(
         )
     }
 
+    // Build the renderer snapshot from filtered aircraft so drawing stays pure and hit-safe.
     private fun traffic_overlay_state(viewport: Viewport): TrafficOverlayState {
         return TrafficOverlayState(
             viewport = viewport,
@@ -1448,6 +1511,7 @@ class FlightMapView(
         )
     }
 
+    // When a path is open, keep context focused on selected and extreme aircraft instead of drawing the whole feed.
     private fun visible_aircraft_snapshot(): List<Aircraft> {
         val snapshot = filtered_aircraft_snapshot()
         if (!selected_path_controller.path_visible || !has_selected_flight_path()) return snapshot.with_selected_fallback()
@@ -1469,6 +1533,7 @@ class FlightMapView(
         chrome_renderer.draw_no_location_state(canvas, w, h, location_permission_granted, chrome_style())
     }
 
+    // Top status is the map's quick truth label: source state, alert state, and scale.
     private fun draw_top_status(canvas: Canvas, w: Float, h: Float) {
         val rect = top_status_bounds(w, h)
         chrome_renderer.draw_top_status(
@@ -1572,6 +1637,7 @@ class FlightMapView(
         return TrafficPanelStyle(visual_theme)
     }
 
+    // Traffic panel chooses one aircraft summary; renderers only receive prepared text and colors.
     private fun traffic_panel_state(): TrafficPanelState {
         val display = displayed_traffic()
         val target = display.aircraft
@@ -1652,6 +1718,7 @@ class FlightMapView(
         )
     }
     private fun ellipsize(value: String, max_width: Float): String {
+        if (text_paint.measureText(value) <= max_width) return value
         if (value.length <= 3) return value
         var end = value.length
         while (end > 3 && text_paint.measureText(value.substring(0, end) + "...") > max_width) {
@@ -1688,10 +1755,16 @@ class FlightMapView(
         )
     }
 
+    // Details panel is one shell with several content modes, so buttons swap state instead of changing screens.
     private fun details_panel_content() = when {
         environmental_impact_open -> aircraft_impact_panel_state()
         usage_open -> aircraft_usage_panel_state()
-        photo_evidence_open -> AircraftPhotoEvidencePanelState(aircraft_photo_evidence)
+        photo_evidence_open -> AircraftPhotoEvidencePanelState(active_photo_evidence)
+        photo_gallery_open -> AircraftPhotoGalleryPanelState(
+            items = aircraft_photo_gallery,
+            status = aircraft_photo_gallery_status,
+            loading = aircraft_photo_gallery_loading
+        )
         else -> aircraft_details_main_state()
     }
 
@@ -1706,6 +1779,7 @@ class FlightMapView(
         )
     }
 
+    // Build honest detail rows from live aircraft plus documented metadata; missing data stays unavailable.
     private fun aircraft_details_rows(aircraft: Aircraft, details: AircraftDetails?): List<AircraftDetailsRow> {
         val details_loading = is_details_loading_for(aircraft)
         val route_details = current_flight_route_details(details, aircraft)
@@ -2135,15 +2209,58 @@ class FlightMapView(
     }
 
     private fun handle_long_press(x: Float, y: Float): Boolean {
-        if (!details_open || usage_open || environmental_impact_open || photo_evidence_open) return false
+        if (!details_open || usage_open || environmental_impact_open || photo_evidence_open || photo_gallery_open) return false
         val aircraft = displayed_traffic().aircraft ?: return false
         val details = aircraft_details ?: return false
         val panel = details_panel_bounds(content_width(), content_height())
         if (!current_details_photo_bounds(panel, content_width(), content_height()).contains(x, y)) return false
-        request_photo_improvement(aircraft, details)
+        open_photo_gallery(aircraft, details)
         return true
     }
 
+    private fun open_photo_gallery(aircraft: Aircraft, details: AircraftDetails) {
+        val request_token = details_request_token
+        photo_gallery_open = true
+        photo_evidence_open = false
+        active_photo_evidence = null
+        details_scroll_y = 0f
+        details_max_scroll_y = 0f
+        aircraft_photo_gallery = emptyList()
+        aircraft_photo_gallery_loading = true
+        aircraft_photo_gallery_status = when (aircraft_feed_mode) {
+            FlightAlertSettings.AircraftFeedMode.WEB -> "Loading photos from Globe selected aircraft pane"
+            FlightAlertSettings.AircraftFeedMode.API -> "Loading exterior photos from API sources"
+            FlightAlertSettings.AircraftFeedMode.HYBRID -> "Loading exact API photos, then Globe and labeled representatives"
+        }
+        invalidate()
+        aircraft_details_coordinator.request_photo_gallery(
+            aircraft = aircraft,
+            details = details,
+            mode = aircraft_feed_mode,
+            globe_web_source_enabled = globe_web_source_enabled,
+            request_token = request_token,
+            is_current_request = ::is_current_details_request,
+            on_gallery = ::post_photo_gallery
+        )
+    }
+
+    private fun post_photo_gallery(
+        requested_id: String,
+        request_token: Long,
+        items: List<AircraftPhotoGalleryItem>
+    ) {
+        if (!is_current_details_request(requested_id, request_token)) return
+        aircraft_photo_gallery = items
+        aircraft_photo_gallery_loading = false
+        aircraft_photo_gallery_status = if (items.isEmpty()) {
+            "No real gallery photos available from checked sources"
+        } else {
+            "Tap a source-marked photo for proof and browser links"
+        }
+        invalidate()
+    }
+
+    // Route taps from open overlays down to the map so visible controls always win over aircraft hits.
     private fun handle_tap(x: Float, y: Float) {
         if (filters_open) {
             val panel = settings_panel_bounds(content_width(), content_height())
@@ -2185,7 +2302,7 @@ class FlightMapView(
 
         if (details_open) {
             val panel = details_panel_bounds(content_width(), content_height())
-            val evidence = aircraft_photo_evidence
+            val evidence = active_photo_evidence
             when {
                 environmental_impact_open && details_close_button_bounds(panel).contains(x, y) -> environmental_impact_open = false
                 environmental_impact_open -> Unit
@@ -2193,21 +2310,30 @@ class FlightMapView(
                 usage_open -> Unit
                 photo_evidence_open && details_close_button_bounds(panel).contains(x, y) -> {
                     photo_evidence_open = false
+                    active_photo_evidence = null
                     details_scroll_y = 0f
                 }
                 photo_evidence_open && evidence?.image_url?.isNotBlank() == true && photo_image_source_button_bounds(panel).contains(x, y) -> open_url(evidence.image_url)
                 photo_evidence_open && evidence?.page_url?.isNotBlank() == true && photo_page_source_button_bounds(panel).contains(x, y) -> open_url(evidence.page_url)
                 photo_evidence_open -> Unit
+                photo_gallery_open && details_close_button_bounds(panel).contains(x, y) -> {
+                    photo_gallery_open = false
+                    details_scroll_y = 0f
+                }
+                photo_gallery_open -> handle_photo_gallery_tap(panel, x, y)
                 details_close_button_bounds(panel).contains(x, y) -> {
                     details_open = false
                     aircraft_details_loading = false
                     photo_evidence_open = false
+                    photo_gallery_open = false
+                    active_photo_evidence = null
                     usage_open = false
                     environmental_impact_open = false
                 }
                 details_usage_button_bounds(panel).contains(x, y) -> displayed_traffic().aircraft?.let { open_aircraft_usage(it) }
                 details_impact_hit_bounds(panel).contains(x, y) -> displayed_traffic().aircraft?.let { open_aircraft_impact(it) }
                 aircraft_photo_evidence != null && current_details_photo_bounds(panel, content_width(), content_height()).contains(x, y) -> {
+                    active_photo_evidence = aircraft_photo_evidence
                     photo_evidence_open = true
                     details_scroll_y = 0f
                 }
@@ -2331,12 +2457,30 @@ class FlightMapView(
         }
     }
 
+    private fun handle_photo_gallery_tap(panel: RectF, x: Float, y: Float) {
+        val wide = is_wide_layout(content_width(), content_height())
+        aircraft_photo_gallery.forEachIndexed { index, item ->
+            val bounds = details_panel_renderer.gallery_item_bounds(panel, index, wide)
+            val displayed_bounds = RectF(bounds.left, bounds.top - details_scroll_y, bounds.right, bounds.bottom - details_scroll_y)
+            if (displayed_bounds.contains(x, y) && item.evidence != null) {
+                active_photo_evidence = item.evidence
+                photo_evidence_open = true
+                details_scroll_y = 0f
+                details_max_scroll_y = 0f
+                return
+            }
+        }
+    }
+
+    // Open the details shell and reset request state before asking the coordinator for real details and photos.
     private fun open_aircraft_details(aircraft: Aircraft) {
         select_aircraft(aircraft)
         details_open = true
         usage_open = false
         environmental_impact_open = false
         photo_evidence_open = false
+        photo_gallery_open = false
+        active_photo_evidence = null
         details_scroll_y = 0f
         details_max_scroll_y = 0f
         aircraft_details = null
@@ -2344,11 +2488,15 @@ class FlightMapView(
         aircraft_photo = null
         aircraft_photo_evidence = null
         aircraft_photo_quality = null
+        aircraft_photo_gallery = emptyList()
+        aircraft_photo_gallery_loading = false
+        aircraft_photo_gallery_status = "Photo gallery unavailable"
         aircraft_details_status = "Loading live aircraft details"
         aircraft_photo_status = "Loading exact-aircraft photo"
         request_aircraft_details(aircraft)
     }
 
+    // Open usage only after selection is stable, then request a real trace if no usable trace is loaded yet.
     private fun open_aircraft_usage(aircraft: Aircraft) {
         if (selected_path_controller.selected_aircraft_id != aircraft.icao24) {
             select_aircraft(aircraft)
@@ -2358,10 +2506,13 @@ class FlightMapView(
         usage_open = true
         environmental_impact_open = false
         photo_evidence_open = false
+        photo_gallery_open = false
+        active_photo_evidence = null
         details_scroll_y = 0f
         details_max_scroll_y = 0f
     }
 
+    // Open impact with the same trace-backed context as usage so carbon estimates do not pretend route data exists.
     private fun open_aircraft_impact(aircraft: Aircraft) {
         if (selected_path_controller.selected_aircraft_id != aircraft.icao24) {
             select_aircraft(aircraft)
@@ -2371,10 +2522,13 @@ class FlightMapView(
         environmental_impact_open = true
         usage_open = false
         photo_evidence_open = false
+        photo_gallery_open = false
+        active_photo_evidence = null
         details_scroll_y = 0f
         details_max_scroll_y = 0f
     }
 
+    // Selecting aircraft updates the path controller first, then details, path, and military-origin work fan out from it.
     private fun select_aircraft(aircraft: Aircraft) {
         selected_path_controller.select_aircraft(aircraft)
         route_diagnostic_key = null
@@ -2386,32 +2540,7 @@ class FlightMapView(
         request_flight_path(aircraft.icao24)
     }
 
-    private fun request_photo_improvement(aircraft: Aircraft, details: AircraftDetails) {
-        val request_token = details_request_token
-        val previous_status = aircraft_photo_status
-        val previous_quality = aircraft_photo_quality
-        aircraft_photo_status = "Checking for improved photo"
-        invalidate()
-        aircraft_details_coordinator.request_photo_improvement(
-            aircraft = aircraft,
-            details = details,
-            request_token = request_token,
-            previous_quality = previous_quality,
-            is_current_request = ::is_current_details_request,
-            on_improved_photo = { result ->
-                aircraft_photo = result.bitmap
-                aircraft_photo_status = result.note
-                aircraft_photo_evidence = result.evidence
-                aircraft_photo_quality = result.quality
-                invalidate()
-            },
-            on_not_improved = {
-                aircraft_photo_status = previous_status
-                invalidate()
-            }
-        )
-    }
-
+    // Details requests use tokens because registry, route, web, and photo lookups can finish in any order.
     private fun request_aircraft_details(aircraft: Aircraft) {
         val request_token = ++details_request_token
         aircraft_details_coordinator.request_aircraft_details(
@@ -2482,7 +2611,11 @@ class FlightMapView(
     private fun post_aircraft_photo_unavailable(requested_id: String, request_token: Long) {
         if (!is_current_details_request(requested_id, request_token)) return
         aircraft_photo = null
-        aircraft_photo_status = "Exact, representative, and search photos unavailable"
+        aircraft_photo_status = when (aircraft_feed_mode) {
+            FlightAlertSettings.AircraftFeedMode.WEB -> "Web source photo unavailable"
+            FlightAlertSettings.AircraftFeedMode.API -> "Exact, representative, and search photos unavailable"
+            FlightAlertSettings.AircraftFeedMode.HYBRID -> "Exact API, Globe, representative, and search photos unavailable"
+        }
         aircraft_photo_evidence = null
         aircraft_photo_quality = null
         invalidate()
@@ -2545,6 +2678,7 @@ class FlightMapView(
         }
     }
 
+    // Only show a path after a real trace has been retrieved for the selected aircraft.
     private fun show_selected_flight_path() {
         if (!selected_path_controller.show_path(displayed_traffic().aircraft)) return
         fit_selected_flight_path()
@@ -2555,6 +2689,7 @@ class FlightMapView(
         selected_path_controller.clear_trace()
     }
 
+    // Fit the camera to the approved real trace while keeping panels from covering the useful path area.
     private fun fit_selected_flight_path() {
         val bounds = selected_path_controller.bounds() ?: return
         val w = content_width()
@@ -2694,6 +2829,7 @@ class FlightMapView(
         invalidate()
     }
 
+    // Changing feed mode resets live source state so stale source snapshots do not carry across modes.
     private fun set_aircraft_feed_mode(mode: FlightAlertSettings.AircraftFeedMode) {
         if (aircraft_feed_mode == mode) return
         aircraft_feed_mode = mode
@@ -2852,6 +2988,7 @@ class FlightMapView(
         on_filters_changed()
     }
 
+    // Filter changes redraw the map and may clear selection if the selected aircraft no longer belongs.
     private fun on_filters_changed() {
         prune_selection_for_filters()
         invalidate()
@@ -2958,6 +3095,8 @@ class FlightMapView(
         if (details_open) {
             details_open = false
             photo_evidence_open = false
+            photo_gallery_open = false
+            active_photo_evidence = null
             usage_open = false
             environmental_impact_open = false
         }
@@ -2972,6 +3111,7 @@ class FlightMapView(
         )
     }
 
+    // Pack layout flags once so the layout object can stay focused on geometry instead of app state.
     private fun layout_state(): FlightMapLayoutState {
         return FlightMapLayoutState(
             following_location = following_location,
@@ -3256,6 +3396,7 @@ class FlightMapView(
         const val MAX_ZOOM = 21
         const val AIRCRAFT_REFRESH_MS = 15000L
         const val AIRCRAFT_FORCE_REFRESH_MS = 350L
+        const val HYBRID_WEB_SUPPLEMENT_RETRY_MS = 1200L
         const val AIRCRAFT_IN_FLIGHT_RETRY_MS = 180L
         const val AIRCRAFT_TICKER_FETCH_MS = 1000L
         const val PHOTO_LONG_PRESS_MS = 550L

@@ -12,10 +12,12 @@ import com.flightalert.ui.map.Aircraft
 import java.util.Locale
 import kotlin.math.max
 
+// Chooses and merges live aircraft sources so FlightMapView can ask for traffic without knowing source policy.
 class AircraftTrafficFeed(
     private val aircraft_feed_client: AircraftFeedClient,
     private val globe_web_aircraft_source: GlobeWebAircraftSource?
 ) {
+    // Keep the optional web source pointed at the same viewport as the visible map.
     fun update_viewport(
         feed_bounds: FeedBounds,
         center_lat: Double,
@@ -28,6 +30,7 @@ class AircraftTrafficFeed(
             ?.update_viewport(feed_bounds, center_lat, center_lon, zoom)
     }
 
+    // Fetch according to the selected source mode, reporting intermediate real results when hybrid data arrives in stages.
     fun fetch_aircraft(
         feed_bounds: FeedBounds,
         own_lat: Double,
@@ -40,17 +43,25 @@ class AircraftTrafficFeed(
         return when (feed_mode) {
             FlightAlertSettings.AircraftFeedMode.WEB -> {
                 globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
-                    ?: aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
+                    ?: FeedResult(
+                        status = FeedStatus.UNAVAILABLE,
+                        source = FeedSource.AIRPLANES_LIVE_GLOBE,
+                        partial_coverage = true
+                    )
             }
             FlightAlertSettings.AircraftFeedMode.API -> {
                 aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
             }
             FlightAlertSettings.AircraftFeedMode.HYBRID -> {
+                val first_globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+                if (first_globe_result?.status == FeedStatus.OK) {
+                    on_intermediate_result(first_globe_result)
+                }
                 val api_result = aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
                 if (api_result.status == FeedStatus.OK) {
                     on_intermediate_result(api_result)
                 }
-                val globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+                val globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search) ?: first_globe_result
                 when {
                     api_result.status == FeedStatus.OK && globe_result?.status == FeedStatus.OK -> {
                         merge_hybrid_aircraft_feeds(api_result, globe_result)
@@ -61,18 +72,24 @@ class AircraftTrafficFeed(
                     api_result.status != FeedStatus.OK -> {
                         api_result
                     }
-                    else -> null
+                    else -> api_result.copy(
+                        source = FeedSource.HYBRID,
+                        partial_coverage = true
+                    )
                 }
             }
         }
     }
 
+    // Convert provider feed rows into map aircraft without inventing missing fields.
     fun map_aircraft(result: FeedResult): List<Aircraft> {
         return result.aircraft.map { it.to_map_aircraft() }
     }
 
+    // Turn feed coverage into short UI text so partial coverage stays visible to the user.
     fun coverage_label(result: FeedResult): String {
         return when {
+            result.source == FeedSource.HYBRID && result.partial_coverage -> " (loading web supplement)"
             result.query_count > 1 && result.partial_coverage -> " (${result.query_count} areas, partial wide-area coverage)"
             result.query_count > 1 -> " (${result.query_count} areas)"
             result.partial_coverage -> " (partial wide-area coverage)"
@@ -80,6 +97,7 @@ class AircraftTrafficFeed(
         }
     }
 
+    // Merge API position data with web metadata by aircraft key, keeping source uncertainty in the result.
     private fun merge_hybrid_aircraft_feeds(api_result: FeedResult, globe_result: FeedResult): FeedResult {
         val merged = linkedMapOf<String, FeedAircraft>()
         api_result.aircraft.forEach { item ->
@@ -110,6 +128,7 @@ class AircraftTrafficFeed(
         )
     }
 
+    // Prefer real aircraft identifiers for merges, falling back to coarse position only when no ID exists.
     private fun FeedAircraft.hybrid_feed_key(): String {
         val hex = icao24.trim().trimStart('~').lowercase(Locale.US)
         if (hex.isNotBlank()) return "hex:$hex"
@@ -117,6 +136,7 @@ class AircraftTrafficFeed(
         return "pos:${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}:${callsign.trim().uppercase(Locale.US)}"
     }
 
+    // Keep the shared Aircraft model as a direct translation of feed data with nullable unknowns preserved.
     private fun FeedAircraft.to_map_aircraft(): Aircraft {
         return Aircraft(
             icao24 = icao24,

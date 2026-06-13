@@ -10,6 +10,7 @@ import android.view.View
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.Locale
@@ -45,7 +46,14 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
     @Volatile
     private var latest: GlobeSnapshot? = null
 
+    @Volatile
+    private var pending_detail_request: GlobeDetailRequest? = null
+
+    @Volatile
+    private var latest_detail: GlobeDetailSnapshot? = null
+
     private val extractor = object : Runnable {
+        // The hidden WebView is polled on a timer because the globe page owns its own fetch cadence.
         override fun run() {
             if (!running) return
             extract_aircraft()
@@ -57,6 +65,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         configure_web_view()
     }
 
+    // MainActivity tells the source when the app is visible; source_enabled still decides whether it runs.
     fun start() {
         host_resumed = true
         start_if_allowed()
@@ -73,6 +82,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         web_view.destroy()
     }
 
+    // Settings can turn the globe source on and off without rebuilding the reusable WebView.
     fun set_enabled(enabled: Boolean) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             handler.post { set_enabled(enabled) }
@@ -88,6 +98,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         }
     }
 
+    // Store the requested viewport as a generation so old globe snapshots cannot satisfy a new map view.
     fun update_viewport(bounds: FeedBounds, center_lat: Double, center_lon: Double, zoom: Double) {
         if (!source_enabled || destroyed) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -110,6 +121,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         if (loaded && running) apply_viewport(next)
     }
 
+    // Return a feed result only when the hidden page has fresh data for the current viewport.
     fun latest_snapshot(bounds: FeedBounds, own_lat: Double, own_lon: Double, exact_search: String?): FeedResult? {
         if (!source_enabled || destroyed) return null
         val viewport = pending_viewport ?: return null
@@ -137,6 +149,52 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         )
     }
 
+    fun request_aircraft_details(icao24: String, callsign: String?, registration: String?) {
+        if (!source_enabled || destroyed) return
+        val clean_icao = icao24.trim().trimStart('~').lowercase(Locale.US)
+        if (!MODE_S_OR_NON_ICAO.matches(clean_icao)) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { request_aircraft_details(icao24, callsign, registration) }
+            return
+        }
+        val request = GlobeDetailRequest(
+            icao24 = clean_icao,
+            callsign = callsign?.trim()?.takeIf { it.isNotBlank() },
+            registration = registration?.trim()?.takeIf { it.isNotBlank() },
+            requested_elapsed_ms = SystemClock.elapsedRealtime()
+        )
+        pending_detail_request = request
+        latest_detail = latest_detail?.takeIf { detail -> detail.matches(request) && detail.is_fresh() }
+        if (loaded && running) apply_detail_request(request)
+    }
+
+    fun latest_aircraft_details(icao24: String, callsign: String?, registration: String?): AircraftDetails? {
+        if (!source_enabled || destroyed) return null
+        val request = GlobeDetailRequest(
+            icao24 = icao24.trim().trimStart('~').lowercase(Locale.US),
+            callsign = callsign?.trim()?.takeIf { it.isNotBlank() },
+            registration = registration?.trim()?.takeIf { it.isNotBlank() },
+            requested_elapsed_ms = 0L
+        )
+        val detail = latest_detail ?: return null
+        if (!detail.matches(request) || !detail.is_fresh()) return null
+        return detail.details
+    }
+
+    fun latest_photo_hint(icao24: String, callsign: String?, registration: String?): GlobePhotoHint? {
+        if (!source_enabled || destroyed) return null
+        val request = GlobeDetailRequest(
+            icao24 = icao24.trim().trimStart('~').lowercase(Locale.US),
+            callsign = callsign?.trim()?.takeIf { it.isNotBlank() },
+            registration = registration?.trim()?.takeIf { it.isNotBlank() },
+            requested_elapsed_ms = 0L
+        )
+        val detail = latest_detail ?: return null
+        if (!detail.matches(request) || !detail.is_fresh()) return null
+        return detail.photo
+    }
+
+    // Start the page only when the app is resumed, the source is enabled, and the WebView still exists.
     private fun start_if_allowed() {
         if (destroyed || !source_enabled || !host_resumed || running) return
         running = true
@@ -147,6 +205,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             web_view.loadUrl("${AirplanesLiveHttp.GLOBE_BASE_URL}/")
         } else {
             pending_viewport?.let(::apply_viewport)
+            pending_detail_request?.let(::apply_detail_request)
         }
         handler.removeCallbacks(extractor)
         handler.postDelayed(extractor, FIRST_EXTRACT_DELAY_MS)
@@ -163,6 +222,8 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         if (clear_snapshot) {
             latest = null
             pending_viewport = null
+            pending_detail_request = null
+            latest_detail = null
             viewport_generation = 0L
             applied_viewport_generation = 0L
         }
@@ -174,6 +235,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         }
     }
 
+    // Make the WebView invisible and non-interactive; it is a source adapter, not an app screen.
     @SuppressLint("SetJavaScriptEnabled")
     private fun configure_web_view() {
         web_view.alpha = 0f
@@ -194,10 +256,12 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             override fun onPageFinished(view: WebView, url: String) {
                 loaded = source_enabled && url.startsWith(AirplanesLiveHttp.GLOBE_BASE_URL)
                 pending_viewport?.takeIf { loaded }?.let(::apply_viewport)
+                pending_detail_request?.takeIf { loaded }?.let(::apply_detail_request)
             }
         }
     }
 
+    // Push the map viewport into the globe page so its own real fetch code loads that area.
     private fun apply_viewport(viewport: GlobeViewport) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             handler.post { apply_viewport(viewport) }
@@ -236,6 +300,59 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         }
     }
 
+    private fun apply_detail_request(request: GlobeDetailRequest) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { apply_detail_request(request) }
+            return
+        }
+        if (!source_enabled || !loaded || !running) return
+        web_view.evaluateJavascript(detail_request_js(request), null)
+    }
+
+    private fun detail_request_js(request: GlobeDetailRequest): String {
+        val request_json = JSONObject()
+            .put("hex", request.icao24)
+            .put("callsign", request.callsign ?: JSONObject.NULL)
+            .put("registration", request.registration ?: JSONObject.NULL)
+            .put("requestedElapsedMs", request.requested_elapsed_ms)
+        return """
+            (function(request) {
+              try {
+                var globe = (typeof g !== 'undefined') ? g : null;
+                if (!globe || !request || !request.hex) return false;
+                var hex = String(request.hex).toLowerCase();
+                globe.flightAlertDetailRequest = request;
+                var plane = globe.planes && globe.planes[hex] ? globe.planes[hex] : null;
+                if (!plane && typeof PlaneObject === 'function') plane = new PlaneObject(hex);
+                if (!plane) return false;
+                if (typeof getTrace === 'function' && (!plane.fullTrace || !plane.recentTrace)) {
+                  getTrace(plane, hex, {noDeselect:true, follow:false});
+                }
+                if (typeof selectPlaneByHex === 'function') {
+                  selectPlaneByHex(hex, {noDeselect:true, follow:false, noFetch:true});
+                } else if (typeof select === 'function') {
+                  select(plane, {follow:false});
+                }
+                if (plane.checkForDB) plane.checkForDB();
+                if (!plane.dbinfoLoaded && plane.getAircraftData) plane.getAircraftData();
+                if (plane.routeCheck && plane.position) {
+                  var wasVisible = plane.visible;
+                  plane.visible = true;
+                  plane.routeCheck();
+                  plane.visible = wasVisible;
+                }
+                if (typeof routeDoLookup === 'function') routeDoLookup();
+                if (typeof refreshSelected === 'function') refreshSelected();
+                if (typeof refreshPhoto === 'function') refreshPhoto(plane);
+                return true;
+              } catch (e) {
+                return false;
+              }
+            })($request_json);
+        """.trimIndent()
+    }
+
+    // Read the page's current PlaneObject data and accept it only for the applied viewport generation.
     private fun extract_aircraft() {
         if (!source_enabled || !loaded || applied_viewport_generation == 0L) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -247,12 +364,14 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
             parse_snapshot(value, generation)?.let { snapshot ->
                 if (source_enabled && pending_viewport?.generation == snapshot.viewport_generation) {
                     latest = snapshot
+                    snapshot.detail?.let { latest_detail = it }
                 }
                 Log.d(TAG, "Globe web source: ${snapshot.aircraft.size} aircraft, partial=${snapshot.partial_coverage}")
             }
         }
     }
 
+    // Parse the JavaScript bridge envelope and reject empty or stale page data.
     private fun parse_snapshot(value: String?, viewport_generation: Long): GlobeSnapshot? {
         if (value.isNullOrBlank() || value == "null") return null
         return try {
@@ -271,18 +390,21 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                 val item = rows.optJSONObject(index) ?: continue
                 parse_aircraft(item, now_sec)?.let { parsed += it }
             }
+            val detail = json.optJSONObject("detail")?.let(::parse_detail)
             GlobeSnapshot(
                 aircraft = parsed,
                 epoch_sec = now_sec,
                 received_elapsed_ms = SystemClock.elapsedRealtime(),
                 partial_coverage = !json.optBoolean("first_fetch_done", false) || json.optInt("pending_fetches", 0) > 0,
-                viewport_generation = viewport_generation
+                viewport_generation = viewport_generation,
+                detail = detail
             )
         } catch (_: Exception) {
             null
         }
     }
 
+    // Map one globe aircraft object into the shared feed model while preserving nulls for missing fields.
     private fun parse_aircraft(item: JSONObject, now_sec: Double): FeedAircraft? {
         val lat = item.opt_double_or_null("lat") ?: return null
         val lon = item.opt_double_or_null("lon") ?: return null
@@ -333,6 +455,100 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         )
     }
 
+    private fun parse_detail(item: JSONObject): GlobeDetailSnapshot? {
+        val requested_hex = item.opt_string_or_null("requested_hex")?.trim()?.lowercase(Locale.US) ?: return null
+        val hex = item.opt_string_or_null("hex")?.trim()?.trimStart('~')?.lowercase(Locale.US) ?: requested_hex
+        if (hex != requested_hex) return null
+        val route_airports = parse_route_airports(item.optJSONArray("route_airports"))
+        val route = item.opt_string_or_null("route")
+        val route_source = item.opt_string_or_null("route_source")
+            ?.takeIf { route != null || route_airports.isNotEmpty() }
+        val source = listOfNotNull(
+            FeedSource.AIRPLANES_LIVE_GLOBE.display_name,
+            item.opt_string_or_null("trace_source")?.takeIf { item.optBoolean("trace_loaded", false) },
+            route_source
+        ).distinct().joinToString(" + ").ifEmpty { null }
+        val details = AircraftDetails(
+            icao24 = hex,
+            registration = normalized_registration(item.opt_string_or_null("registration")),
+            manufacturer = null,
+            type = first_present(
+                item.opt_string_or_null("description"),
+                item.opt_string_or_null("type_description")
+            ),
+            type_code = item.opt_string_or_null("type_code"),
+            owner = item.opt_string_or_null("owner_operator"),
+            manufactured_year = item.opt_string_or_null("year")?.take(4),
+            registry_source = source,
+            operator_code = item.opt_string_or_null("operator_code"),
+            route = route ?: route_airports
+                .mapNotNull { airport -> airport.icao.takeIf { it.isNotBlank() } }
+                .takeIf { it.size >= 2 }
+                ?.joinToString("-"),
+            route_updated_epoch_sec = item.opt_long_or_null("route_updated_epoch_sec"),
+            route_source = route_source,
+            origin_airport = route_airports.firstOrNull(),
+            destination_airport = route_airports.lastOrNull()?.takeIf { route_airports.size >= 2 }
+        )
+        val photo = item.optJSONObject("photo")?.let(::parse_photo_hint)
+        return GlobeDetailSnapshot(
+            request = GlobeDetailRequest(
+                icao24 = requested_hex,
+                callsign = item.opt_string_or_null("requested_callsign"),
+                registration = item.opt_string_or_null("requested_registration"),
+                requested_elapsed_ms = item.opt_long_or_null("requested_elapsed_ms") ?: 0L
+            ),
+            details = details,
+            photo = photo,
+            received_elapsed_ms = SystemClock.elapsedRealtime()
+        )
+    }
+
+    private fun parse_route_airports(rows: JSONArray?): List<AirportDetails> {
+        rows ?: return emptyList()
+        val airports = mutableListOf<AirportDetails>()
+        for (index in 0 until rows.length()) {
+            val item = rows.optJSONObject(index) ?: continue
+            val icao = item.opt_string_or_null("icao") ?: item.opt_string_or_null("icao_code") ?: continue
+            airports += AirportDetails(
+                icao = icao,
+                iata = item.opt_string_or_null("iata") ?: item.opt_string_or_null("iata_code"),
+                name = item.opt_string_or_null("name") ?: item.opt_string_or_null("airport"),
+                country_code = item.opt_string_or_null("country_code") ?: item.opt_string_or_null("country"),
+                region_name = item.opt_string_or_null("location") ?: item.opt_string_or_null("region_name"),
+                latitude = item.opt_double_or_null("lat") ?: item.opt_double_or_null("latitude"),
+                longitude = item.opt_double_or_null("lon") ?: item.opt_double_or_null("lng") ?: item.opt_double_or_null("longitude")
+            )
+        }
+        return airports
+    }
+
+    private fun parse_photo_hint(item: JSONObject): GlobePhotoHint? {
+        val image_url = item.opt_string_or_null("image_url")
+            ?.takeIf { it.startsWith("https://", ignoreCase = true) }
+            ?: return null
+        return GlobePhotoHint(
+            image_url = image_url,
+            page_url = item.opt_string_or_null("page_url")?.takeIf { it.startsWith("https://", ignoreCase = true) },
+            photographer = item.opt_string_or_null("photographer"),
+            source_name = item.opt_string_or_null("source_name") ?: "Airplanes.Live selected aircraft photo"
+        )
+    }
+
+    private fun GlobeDetailSnapshot.is_fresh(): Boolean {
+        return SystemClock.elapsedRealtime() - received_elapsed_ms <= MAX_DETAIL_AGE_MS
+    }
+
+    private fun GlobeDetailSnapshot.matches(request: GlobeDetailRequest): Boolean {
+        if (request.icao24.isNotBlank() && request.icao24 == this.request.icao24) return true
+        val requested_registration = normalized_registration(request.registration)
+        val detail_registration = normalized_registration(details.registration)
+        if (requested_registration != null && requested_registration == detail_registration) return true
+        val requested_callsign = request.callsign.compact_callsign()
+        val detail_callsign = this.request.callsign.compact_callsign()
+        return requested_callsign.isNotBlank() && requested_callsign == detail_callsign
+    }
+
     private fun FeedAircraft.with_distance_from(own_lat: Double, own_lon: Double): FeedAircraft {
         return copy(distance_m = distance_meters(own_lat, own_lon, lat, lon))
     }
@@ -376,7 +592,22 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         val epoch_sec: Double,
         val received_elapsed_ms: Long,
         val partial_coverage: Boolean,
-        val viewport_generation: Long
+        val viewport_generation: Long,
+        val detail: GlobeDetailSnapshot?
+    )
+
+    private data class GlobeDetailRequest(
+        val icao24: String,
+        val callsign: String?,
+        val registration: String?,
+        val requested_elapsed_ms: Long
+    )
+
+    private data class GlobeDetailSnapshot(
+        val request: GlobeDetailRequest,
+        val details: AircraftDetails,
+        val photo: GlobePhotoHint?,
+        val received_elapsed_ms: Long
     )
 
     private data class GlobeViewport(
@@ -409,6 +640,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         private const val EXTRACT_INTERVAL_MS = 2500L
         private const val FIRST_EXTRACT_DELAY_MS = 3500L
         private const val MAX_SNAPSHOT_AGE_MS = 9000L
+        private const val MAX_DETAIL_AGE_MS = 45000L
         private const val MAX_POSITION_AGE_SECONDS = 120.0
         private const val MIN_GLOBE_ZOOM = 2.0
         private const val MAX_GLOBE_ZOOM = 13.0
@@ -418,6 +650,7 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
         private const val KNOTS_TO_METERS_PER_SECOND = 0.514444
         private val MODE_S_OR_NON_ICAO = Regex("^[0-9a-f]{6,8}$")
 
+        // This script reads the page's own aircraft objects and wraps them in an auditable envelope for Kotlin.
         private val EXTRACT_AIRCRAFT_JS = """
             (function() {
               try {
@@ -456,8 +689,9 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                     flight: p.flight || p.name || null,
                     registration: p.registration || null,
                     manufacturer: p.manufacturer || p.manufacturerName || null,
-                    type_code: p.icao_type || null,
-                    description: p.desc || p.description || p.typeDescription || null,
+                    type_code: p.icaoType || p.icao_type || null,
+                    description: p.typeLong || p.desc || p.description || p.typeDescription || null,
+                    type_description: p.typeDescription || null,
                     category: p.category || null,
                     owner_operator: p.ownOp || p.owner_operator || p.operator || p.owner || null,
                     operator_code: p.ownOpCode || p.operator_code || null,
@@ -474,12 +708,117 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
                     source_type: p.dataSource || null
                   });
                 }
+                function cleaned_text(value) {
+                  if (value == null) return null;
+                  var text = String(value).replace(/\s+/g, " ").trim();
+                  if (!text || /^n\/a$/i.test(text) || /^unavailable$/i.test(text)) return null;
+                  return text;
+                }
+                function normalized_callsign_safe(value) {
+                  try {
+                    if (typeof normalized_callsign === "function") return normalized_callsign(value);
+                  } catch (e) {}
+                  return String(value || "").replace(/\s+/g, "").toUpperCase();
+                }
+                function dom_text(id) {
+                  try {
+                    var element = document.getElementById(id);
+                    return element ? cleaned_text(element.innerText || element.textContent) : null;
+                  } catch (e) {
+                    return null;
+                  }
+                }
+                function route_info_for(p) {
+                  var route = cleaned_text(p.routeString);
+                  var callsign = normalized_callsign_safe(p.name || p.flight || "");
+                  var cached = callsign && globe.route_cache ? globe.route_cache[callsign] : null;
+                  var airports = [];
+                  if (cached && cached._airports && cached._airports.length) {
+                    for (var ai = 0; ai < cached._airports.length; ai++) {
+                      var a = cached._airports[ai] || {};
+                      airports.push({
+                        icao: cleaned_text(a.icao),
+                        iata: cleaned_text(a.iata),
+                        name: cleaned_text(a.name || a.airport),
+                        location: cleaned_text(a.location || a.city || a.municipality),
+                        country_code: cleaned_text(a.country_code || a.country || a.countryiso2),
+                        lat: Number(a.lat != null ? a.lat : a.latitude),
+                        lon: Number(a.lon != null ? a.lon : (a.lng != null ? a.lng : a.longitude))
+                      });
+                    }
+                    if (!route) {
+                      route = airports.map(function(a) { return a.icao || a.iata; }).filter(Boolean).join("-");
+                    }
+                  }
+                  if (!route && SelectedPlane === p) route = dom_text("selected_route");
+                  return {
+                    route: route,
+                    route_source: (route || airports.length) ? "Airplanes.Live globe route cache" : null,
+                    route_updated_epoch_sec: cached && cached.tarNextUpdate ? Number(cached.tarNextUpdate) : null,
+                    route_airports: airports.filter(function(a) { return !!(a.icao || a.iata); })
+                  };
+                }
+                function photo_info_for(p) {
+                  var response = p.psAPIresponse || null;
+                  var photos = response ? (response.photos || response.images) : null;
+                  if (!photos || !photos.length) return null;
+                  var photo = photos[0] || {};
+                  var thumb = photo.thumbnail && (photo.thumbnail.src || photo.thumbnail);
+                  var imageUrl = cleaned_text(photo.image || photo.imageUrl || photo.src || thumb);
+                  var pageUrl = cleaned_text(photo.link || photo.url || photo.pageUrl);
+                  if (!imageUrl || imageUrl.indexOf("https://") !== 0) return null;
+                  return {
+                    image_url: imageUrl,
+                    page_url: pageUrl && pageUrl.indexOf("https://") === 0 ? pageUrl : null,
+                    photographer: cleaned_text(photo.photographer || photo.user),
+                    source_name: "Airplanes.Live selected aircraft photo"
+                  };
+                }
+                function detail_for_requested() {
+                  var request = globe.flightAlertDetailRequest || null;
+                  if (!request || !request.hex) return null;
+                  var requestedHex = String(request.hex).toLowerCase();
+                  var p = globe.planes && globe.planes[requestedHex] ? globe.planes[requestedHex] : null;
+                  if (!p && SelectedPlane && String(SelectedPlane.icao || "").toLowerCase() === requestedHex) p = SelectedPlane;
+                  if (!p) return null;
+                  var db_flags = 0;
+                  if (truthy_flag(p.military)) db_flags = db_flags | 1;
+                  if (truthy_flag(p.pia)) db_flags = db_flags | 4;
+                  if (truthy_flag(p.ladd)) db_flags = db_flags | 8;
+                  var trace = p.fullTrace || p.recentTrace || {};
+                  var route = route_info_for(p);
+                  return {
+                    requested_hex: requestedHex,
+                    requested_callsign: cleaned_text(request.callsign),
+                    requested_registration: cleaned_text(request.registration),
+                    requested_elapsed_ms: Number(request.requestedElapsedMs) || 0,
+                    hex: String(p.icao || requestedHex),
+                    flight: p.flight || p.name || null,
+                    registration: p.registration || trace.r || null,
+                    type_code: p.icaoType || trace.t || null,
+                    description: p.typeLong || trace.desc || p.typeDescription || null,
+                    type_description: p.typeDescription || null,
+                    owner_operator: p.ownOp || trace.ownOp || null,
+                    operator_code: p.ownOpCode || trace.ownOpCode || null,
+                    year: p.year || trace.year || null,
+                    db_flags: db_flags,
+                    dbinfo_loaded: !!p.dbinfoLoaded,
+                    trace_loaded: !!p.fullTrace,
+                    trace_source: p.fullTrace ? "Airplanes.Live trace_full" : (p.recentTrace ? "Airplanes.Live trace_recent" : null),
+                    route: route.route,
+                    route_source: route.route_source,
+                    route_updated_epoch_sec: route.route_updated_epoch_sec,
+                    route_airports: route.route_airports,
+                    photo: photo_info_for(p)
+                  };
+                }
                 return JSON.stringify({
                   ready: true,
                   now: now_sec,
                   first_fetch_done: !!(globe && globe.firstFetchDone),
                   pending_fetches: (typeof pendingFetches !== 'undefined') ? (Number(pendingFetches) || 0) : 0,
-                  aircraft: rows
+                  aircraft: rows,
+                  detail: detail_for_requested()
                 });
               } catch (e) {
                 return JSON.stringify({ready:false, reason:String(e && e.message || e)});
@@ -489,9 +828,20 @@ class GlobeWebAircraftSource(context: Context, private val user_agent: String) {
     }
 }
 
+data class GlobePhotoHint(
+    val image_url: String,
+    val page_url: String?,
+    val photographer: String?,
+    val source_name: String
+)
+
 private fun JSONObject.opt_string_or_null(key: String): String? {
     if (!has(key) || isNull(key)) return null
     return optString(key).trim().ifEmpty { null }
+}
+
+private fun JSONObject.opt_long_or_null(key: String): Long? {
+    return if (has(key) && !isNull(key)) optLong(key) else null
 }
 
 private fun JSONObject.opt_double_or_null(key: String): Double? {
@@ -510,6 +860,22 @@ private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Doub
     val delta_lon = Math.toRadians(lon2 - lon1)
     val a = sin(delta_lat / 2.0).pow(2.0) + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2.0).pow(2.0)
     return 2.0 * GLOBE_EARTH_RADIUS_M * atan2(sqrt(a), sqrt(max(0.0, 1.0 - a)))
+}
+
+private fun normalized_registration(value: String?): String? {
+    return value
+        ?.uppercase(Locale.US)
+        ?.replace(Regex("[^A-Z0-9-]"), "")
+        ?.trim('-')
+        ?.takeIf { it.isNotBlank() && it != "NA" }
+}
+
+private fun first_present(vararg values: String?): String? {
+    return values.firstOrNull { !it.isNullOrBlank() }
+}
+
+private fun String?.compact_callsign(): String {
+    return this?.replace(" ", "")?.uppercase(Locale.US).orEmpty()
 }
 
 private const val GLOBE_EARTH_RADIUS_M = 6371000.0

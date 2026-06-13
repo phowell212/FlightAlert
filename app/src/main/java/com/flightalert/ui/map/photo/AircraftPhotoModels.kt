@@ -36,6 +36,22 @@ data class SearchImageCandidate(
     val verification_text: String? = null
 )
 
+data class AircraftPhotoGalleryItem(
+    val bitmap: Bitmap,
+    val title: String,
+    val caption: String,
+    val evidence: PhotoEvidence?,
+    val quality: PhotoQuality,
+    val view_type: AircraftPhotoViewType
+)
+
+enum class AircraftPhotoViewType {
+    EXTERIOR,
+    INTERIOR,
+    COCKPIT,
+    CABIN
+}
+
 data class VerificationQuote(
     val text: String,
     val matched_terms: List<String>

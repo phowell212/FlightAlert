@@ -4,17 +4,21 @@ import com.flightalert.data.AircraftDetails
 import com.flightalert.data.AircraftDetailsClient
 import com.flightalert.data.AircraftMetadataSeed
 import com.flightalert.data.FeedAircraft
+import com.flightalert.data.FeedSource
+import com.flightalert.data.GlobePhotoHint
 import com.flightalert.data.GlobeWebAircraftSource
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.Aircraft
+import com.flightalert.ui.map.photo.AircraftPhotoGalleryItem
+import com.flightalert.ui.map.photo.AircraftPhotoGalleryMode
 import com.flightalert.ui.map.photo.AircraftPhotoFetcher
 import com.flightalert.ui.map.photo.AircraftPhotoResult
-import com.flightalert.ui.map.photo.PhotoQuality
 import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
+// Coordinates details, photo, and web seed lookups so FlightMapView only reacts to finished callbacks.
 class AircraftDetailsCoordinator(
     private val aircraft_details_client: AircraftDetailsClient,
     private val aircraft_photo_fetcher: AircraftPhotoFetcher,
@@ -24,6 +28,7 @@ class AircraftDetailsCoordinator(
     private val elapsed_realtime_ms: () -> Long,
     private val sleep_ms: (Long) -> Unit = { Thread.sleep(it) }
 ) {
+    // Start metadata and photo work around one selected aircraft, then post only callbacks that still match its token.
     fun request_aircraft_details(
         aircraft: Aircraft,
         mode: FlightAlertSettings.AircraftFeedMode,
@@ -46,6 +51,7 @@ class AircraftDetailsCoordinator(
         val photo_keys = mutableSetOf<String>()
         var merged_details: AircraftDetails? = null
 
+        // Wait for all real photo paths to fail before telling the UI no photo is available.
         fun maybe_post_final_photo_unavailable() {
             if (remaining.get() != 0 || photo_in_flight.get() != 0 || photo_found.get()) return
             post_to_main {
@@ -54,6 +60,7 @@ class AircraftDetailsCoordinator(
             }
         }
 
+        // Try exact aircraft photo first, then representative or source-labeled fallbacks inside AircraftPhotoFetcher.
         fun lookup_photo(details: AircraftDetails) {
             if (photo_found.get()) return
             val key = photo_lookup_key(aircraft, details)
@@ -63,7 +70,18 @@ class AircraftDetailsCoordinator(
                 return
             }
             photo_in_flight.incrementAndGet()
-            val photo = aircraft_photo_fetcher.fetch(aircraft, details)
+            val photo = when (mode) {
+                FlightAlertSettings.AircraftFeedMode.WEB -> {
+                    fetch_globe_photo(aircraft, globe_web_source_enabled)
+                        ?: AircraftPhotoResult.Unavailable("Web source photo unavailable")
+                }
+                FlightAlertSettings.AircraftFeedMode.API -> aircraft_photo_fetcher.fetch(aircraft, details)
+                FlightAlertSettings.AircraftFeedMode.HYBRID -> {
+                    aircraft_photo_fetcher.fetch_exact_aircraft_photo(aircraft, details)
+                        ?: fetch_globe_photo(aircraft, globe_web_source_enabled)
+                        ?: aircraft_photo_fetcher.fetch_fallback_photo(aircraft, details)
+                }
+            }
             photo_in_flight.decrementAndGet()
             when (photo) {
                 is AircraftPhotoResult.Found -> {
@@ -96,34 +114,36 @@ class AircraftDetailsCoordinator(
         }
     }
 
-    fun request_photo_improvement(
+    fun request_photo_gallery(
         aircraft: Aircraft,
         details: AircraftDetails,
+        mode: FlightAlertSettings.AircraftFeedMode,
+        globe_web_source_enabled: Boolean,
         request_token: Long,
-        previous_quality: PhotoQuality?,
         is_current_request: (String, Long) -> Boolean,
-        on_improved_photo: (AircraftPhotoResult.Found) -> Unit,
-        on_not_improved: () -> Unit
+        on_gallery: (String, Long, List<AircraftPhotoGalleryItem>) -> Unit
     ) {
         val requested_id = aircraft.icao24
         executor.execute {
-            val result = aircraft_photo_fetcher.fetch(aircraft, details)
+            val globe_hint = if (mode.uses_gallery_web_source()) {
+                fetch_globe_photo_hint(aircraft, globe_web_source_enabled, WEB_PHOTO_WAIT_MS)
+            } else {
+                null
+            }
+            val gallery_mode = when (mode) {
+                FlightAlertSettings.AircraftFeedMode.API -> AircraftPhotoGalleryMode.API_ONLY
+                FlightAlertSettings.AircraftFeedMode.WEB -> AircraftPhotoGalleryMode.WEB_ONLY
+                FlightAlertSettings.AircraftFeedMode.HYBRID -> AircraftPhotoGalleryMode.HYBRID
+            }
+            val items = aircraft_photo_fetcher.fetch_gallery(aircraft, details, globe_hint, gallery_mode)
             post_to_main {
                 if (!is_current_request(requested_id, request_token)) return@post_to_main
-                when (result) {
-                    is AircraftPhotoResult.Found -> {
-                        if (previous_quality == null || result.quality.rank > previous_quality.rank) {
-                            on_improved_photo(result)
-                        } else {
-                            on_not_improved()
-                        }
-                    }
-                    is AircraftPhotoResult.Unavailable -> on_not_improved()
-                }
+                on_gallery(requested_id, request_token, items)
             }
         }
     }
 
+    // Use current feed data as seed metadata, then enrich from documented registries and routes.
     private fun detail_candidates_for_aircraft(
         aircraft: Aircraft,
         mode: FlightAlertSettings.AircraftFeedMode,
@@ -138,25 +158,75 @@ class AircraftDetailsCoordinator(
         }
         return when (mode) {
             FlightAlertSettings.AircraftFeedMode.API -> listOf(api)
-            FlightAlertSettings.AircraftFeedMode.WEB -> listOf(web, api)
+            FlightAlertSettings.AircraftFeedMode.WEB -> listOf(web)
             FlightAlertSettings.AircraftFeedMode.HYBRID -> listOf(api, web)
         }
     }
 
+    // Ask the globe/web feed for matching metadata only inside the current lookup context.
     private fun fetch_web_feed_details(
         aircraft: Aircraft,
         lookup: WebDetailLookupContext?,
         globe_web_source_enabled: Boolean
     ): AircraftDetails? {
+        val source = globe_web_aircraft_source?.takeIf { globe_web_source_enabled } ?: return null
+        source.request_aircraft_details(aircraft.icao24, aircraft.callsign, aircraft.registration)
         val deadline = elapsed_realtime_ms() + WEB_DETAIL_WAIT_MS
+        var best_seed: AircraftMetadataSeed? = null
         while (elapsed_realtime_ms() <= deadline) {
-            val seed = find_web_metadata_seed(aircraft, lookup, globe_web_source_enabled)
-            if (seed != null) {
-                return aircraft_details_client.fetch_details(aircraft.icao24, aircraft.callsign, aircraft.registration, seed)
-            }
+            source.latest_aircraft_details(aircraft.icao24, aircraft.callsign, aircraft.registration)
+                ?.takeIf { has_aircraft_metadata(it) || it.route != null || it.origin_airport != null || it.destination_airport != null }
+                ?.let { return it }
+            best_seed = best_seed ?: find_web_metadata_seed(aircraft, lookup, globe_web_source_enabled)
+            sleep_ms(WEB_DETAIL_POLL_MS)
+        }
+        return best_seed?.let { details_from_web_seed(aircraft, it) }
+    }
+
+    private fun details_from_web_seed(aircraft: Aircraft, seed: AircraftMetadataSeed): AircraftDetails {
+        return AircraftDetails(
+            icao24 = aircraft.icao24.trim().trimStart('~').lowercase(Locale.US),
+            registration = normalized_registration(seed.registration ?: aircraft.registration),
+            manufacturer = seed.manufacturer?.clean_seed_value(),
+            type = seed.type?.clean_seed_value(),
+            type_code = seed.type_code?.clean_seed_value() ?: aircraft.type_code,
+            owner = seed.owner?.clean_seed_value(),
+            manufactured_year = seed.manufactured_year?.clean_seed_value()?.take(4),
+            registry_source = seed.source_name,
+            operator_code = seed.operator_code?.clean_seed_value(),
+            route = null,
+            route_updated_epoch_sec = null,
+            route_source = null,
+            origin_airport = null,
+            destination_airport = null
+        )
+    }
+
+    private fun fetch_globe_photo(
+        aircraft: Aircraft,
+        globe_web_source_enabled: Boolean
+    ): AircraftPhotoResult.Found? {
+        val hint = fetch_globe_photo_hint(aircraft, globe_web_source_enabled, WEB_PHOTO_WAIT_MS) ?: return null
+        return aircraft_photo_fetcher.fetch_globe_hint(hint) as? AircraftPhotoResult.Found
+    }
+
+    private fun fetch_globe_photo_hint(
+        aircraft: Aircraft,
+        globe_web_source_enabled: Boolean,
+        wait_ms: Long
+    ): GlobePhotoHint? {
+        val source = globe_web_aircraft_source?.takeIf { globe_web_source_enabled } ?: return null
+        source.request_aircraft_details(aircraft.icao24, aircraft.callsign, aircraft.registration)
+        val deadline = elapsed_realtime_ms() + wait_ms
+        while (elapsed_realtime_ms() <= deadline) {
+            source.latest_photo_hint(aircraft.icao24, aircraft.callsign, aircraft.registration)?.let { return it }
             sleep_ms(WEB_DETAIL_POLL_MS)
         }
         return null
+    }
+
+    private fun FlightAlertSettings.AircraftFeedMode.uses_gallery_web_source(): Boolean {
+        return this == FlightAlertSettings.AircraftFeedMode.WEB || this == FlightAlertSettings.AircraftFeedMode.HYBRID
     }
 
     private fun find_web_metadata_seed(
@@ -164,7 +234,9 @@ class AircraftDetailsCoordinator(
         lookup: WebDetailLookupContext?,
         globe_web_source_enabled: Boolean
     ): AircraftMetadataSeed? {
-        aircraft.metadata_seed?.takeIf { it.has_details }?.let { return it }
+        aircraft.metadata_seed
+            ?.takeIf { it.has_details && it.source_name == FeedSource.AIRPLANES_LIVE_GLOBE.display_name }
+            ?.let { return it }
         val source = globe_web_aircraft_source?.takeIf { globe_web_source_enabled } ?: return null
         val context = lookup ?: return null
         val searches = listOfNotNull(
@@ -212,6 +284,7 @@ class AircraftDetailsCoordinator(
         ).joinToString("|").ifBlank { aircraft.icao24.trim().lowercase(Locale.US) }
     }
 
+    // Prefer specific documented enrichment but keep live/feed seed values when enrichment is missing.
     private fun merge_aircraft_details(seed: AircraftDetails, enrichment: AircraftDetails): AircraftDetails {
         val source = listOfNotNull(seed.registry_source, enrichment.registry_source)
             .flatMap { it.split(" + ") }
@@ -246,6 +319,16 @@ class AircraftDetailsCoordinator(
             ?.takeIf { it.isNotBlank() }
     }
 
+    private fun String.clean_seed_value(): String? {
+        val cleaned = trim().trim('-').trim()
+        return cleaned.takeIf {
+            it.isNotBlank() &&
+                !it.equals("null", ignoreCase = true) &&
+                !it.equals("n/a", ignoreCase = true) &&
+                !it.equals("unavailable", ignoreCase = true)
+        }
+    }
+
     companion object {
         fun details_status(details: AircraftDetails, still_loading: Boolean): String {
             return when {
@@ -266,5 +349,6 @@ class AircraftDetailsCoordinator(
 
         private const val WEB_DETAIL_WAIT_MS = 9000L
         private const val WEB_DETAIL_POLL_MS = 350L
+        private const val WEB_PHOTO_WAIT_MS = 6000L
     }
 }

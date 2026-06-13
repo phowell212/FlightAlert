@@ -94,12 +94,14 @@ interface FlightMapPanelChrome {
     fun request_animation_frame()
 }
 
+// Draws settings, filters, layers, methodology, and priority panels from prepared state snapshots.
 class FlightMapPanelRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
     private val text_paint: Paint,
     private val chrome: FlightMapPanelChrome
 ) {
+    // Draw the main settings hub; subpanels own detailed choices but share this modal shell.
     fun draw_settings_panel(canvas: Canvas, w: Float, h: Float, style: FlightMapPanelStyle, state: SettingsPanelState) {
         paint.style = Paint.Style.FILL
         val rect = chrome.layout.settings_panel_bounds(w, h)
@@ -147,6 +149,7 @@ class FlightMapPanelRenderer(
         }
     }
 
+    // Draw map-label provider choices without implying label tiles are available for every map source.
     fun draw_map_labels_panel(canvas: Canvas, w: Float, h: Float, style: FlightMapPanelStyle, state: MapLabelsPanelState) {
         val rect = chrome.layout.settings_panel_bounds(w, h)
         val compact = chrome.layout.is_compact_settings_panel(rect)
@@ -182,6 +185,7 @@ class FlightMapPanelRenderer(
         canvas.drawText(source_text, rect.left + dp(18), source_y, text_paint)
     }
 
+    // Draw aviation layer toggles with source status visible before any layer is treated as available.
     fun draw_aviation_layers_panel(canvas: Canvas, w: Float, h: Float, style: FlightMapPanelStyle, state: AviationLayersPanelState) {
         val rect = chrome.layout.settings_panel_bounds(w, h)
         val compact = chrome.layout.is_compact_settings_panel(rect)
@@ -206,6 +210,7 @@ class FlightMapPanelRenderer(
         draw_layer_toggle_button(canvas, chrome.layout.layer_airport_labels_button_bounds(rect), "Airport labels", state.airport_labels_enabled, AviationLayerKind.AIRPORTS, state)
     }
 
+    // Draw methodology text and source buttons so impact numbers remain explained and auditable.
     fun draw_impact_methodology_panel(canvas: Canvas, w: Float, h: Float, style: FlightMapPanelStyle, state: ImpactMethodologyPanelState) {
         val rect = chrome.layout.settings_panel_bounds(w, h)
         val compact = chrome.layout.is_compact_settings_panel(rect)
@@ -237,6 +242,7 @@ class FlightMapPanelRenderer(
         }
     }
 
+    // Draw filters as explicit live-traffic filters, including search focus and current match summary.
     fun draw_filters_panel(canvas: Canvas, w: Float, h: Float, style: FlightMapPanelStyle, state: FiltersPanelState) {
         paint.style = Paint.Style.FILL
         val rect = chrome.layout.settings_panel_bounds(w, h)
@@ -266,6 +272,7 @@ class FlightMapPanelRenderer(
         canvas.drawText(state.stats_summary, rect.left + dp(18), stats_y, text_paint)
     }
 
+    // Draw alert-volume controls and the current priority queue without inventing aircraft status.
     fun draw_priority_tracker_panel(canvas: Canvas, w: Float, h: Float, style: FlightMapPanelStyle, state: PriorityTrackerPanelState) {
         paint.style = Paint.Style.FILL
         val rect = chrome.layout.priority_tracker_panel_bounds(w, h)
@@ -322,6 +329,7 @@ class FlightMapPanelRenderer(
         }
     }
 
+    // Compact settings splits display/map and safety/reference into columns instead of clipping controls.
     private fun draw_compact_settings_panel_contents(canvas: Canvas, rect: RectF, style: FlightMapPanelStyle, state: SettingsPanelState) {
         val left = chrome.layout.compact_settings_left_column(rect)
         val right = chrome.layout.compact_settings_right_column(rect)
@@ -353,6 +361,7 @@ class FlightMapPanelRenderer(
         canvas.drawText(label, x, y, text_paint)
     }
 
+    // Layer buttons include source state suffixes so unavailable or empty real layers are labeled honestly.
     private fun draw_layer_toggle_button(
         canvas: Canvas,
         rect: RectF,
@@ -418,6 +427,7 @@ class FlightMapPanelRenderer(
         return bottom + dp(12)
     }
 
+    // Search control owns the caret animation while FlightMapView owns actual text input.
     private fun draw_filter_search_control(canvas: Canvas, panel: RectF, style: FlightMapPanelStyle, state: FiltersPanelState) {
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
@@ -447,6 +457,7 @@ class FlightMapPanelRenderer(
         chrome.draw_choice_button(canvas, chrome.layout.filter_search_clear_button_bounds(panel), "Clear", false)
     }
 
+    // Portrait filters use one vertical list so long labels stay physically consistent.
     private fun draw_portrait_filters_panel_contents(canvas: Canvas, rect: RectF, state: FiltersPanelState) {
         draw_filter_cycle_row(canvas, chrome.layout.filter_aircraft_type_button_bounds(rect), "Type: ${state.aircraft_type_filter.short_label}", state.aircraft_type_filter != AircraftTypeFilter.ALL)
         draw_filter_cycle_row(canvas, chrome.layout.filter_altitude_button_bounds(rect), "Alt: ${state.altitude_filter.short_label}", state.altitude_filter != AltitudeFilter.ANY)
@@ -457,6 +468,7 @@ class FlightMapPanelRenderer(
         chrome.draw_choice_button(canvas, chrome.layout.filter_reset_button_bounds(rect), "Reset filters", state.filters_active)
     }
 
+    // Compact filters use two columns and shorter reset text to fit landscape-short devices.
     private fun draw_compact_filters_panel_contents(canvas: Canvas, rect: RectF, state: FiltersPanelState) {
         draw_filter_cycle_row(canvas, chrome.layout.filter_aircraft_type_button_bounds(rect), "Type: ${state.aircraft_type_filter.short_label}", state.aircraft_type_filter != AircraftTypeFilter.ALL)
         draw_filter_cycle_row(canvas, chrome.layout.filter_altitude_button_bounds(rect), "Alt: ${state.altitude_filter.short_label}", state.altitude_filter != AltitudeFilter.ANY)
@@ -471,6 +483,7 @@ class FlightMapPanelRenderer(
         chrome.draw_choice_button(canvas, bounds, label, selected)
     }
 
+    // Compact priority tracker keeps alert controls left and queue rows right.
     private fun draw_compact_priority_tracker_contents(canvas: Canvas, rect: RectF, style: FlightMapPanelStyle, state: PriorityTrackerPanelState) {
         val left_area = chrome.layout.priority_alert_control_area(rect)
         val right = chrome.layout.compact_settings_right_column(rect)

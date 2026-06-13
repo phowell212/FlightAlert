@@ -34,6 +34,8 @@ class AircraftAlertService : Service(), LocationListener {
     private val executor = Executors.newSingleThreadExecutor()
     private val aircraft_feed_client = AircraftFeedClient(USER_AGENT)
     private val active_hazards = linkedMapOf<String, AlertAircraft>()
+
+    // Settings changes immediately repoll or stop the watcher so notification state follows the configured volume.
     private val preference_listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key in ALERT_RELEVANT_PREF_KEYS) {
             if (!monitoring_enabled()) {
@@ -51,6 +53,7 @@ class AircraftAlertService : Service(), LocationListener {
     private var foreground_active = false
     private var next_poll_delay_ms = POLL_MS
 
+    // Android starts the service here; set up providers, channels, and the first poll.
     override fun onCreate() {
         super.onCreate()
         location_manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -70,6 +73,7 @@ class AircraftAlertService : Service(), LocationListener {
         return START_STICKY
     }
 
+    // Service teardown clears foreground state so no priority notification survives a stopped watcher.
     override fun onDestroy() {
         stopped = true
         if (::prefs.isInitialized) {
@@ -92,6 +96,7 @@ class AircraftAlertService : Service(), LocationListener {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // Keep a recent altitude briefly when Android sends a new horizontal fix without altitude.
     override fun onLocationChanged(location: Location) {
         val previous = latest_location
         latest_location = if (!location.hasAltitude() && previous?.hasAltitude() == true && location.time - previous.time < OWN_ALTITUDE_MAX_AGE_MS) {
@@ -106,6 +111,7 @@ class AircraftAlertService : Service(), LocationListener {
 
     override fun onProviderDisabled(provider: String) = Unit
 
+    // Seed from last known providers, then subscribe to GPS/network so alert math has real ownship position.
     private fun start_location_updates() {
         if (!has_location_permission()) return
         try {
@@ -136,6 +142,7 @@ class AircraftAlertService : Service(), LocationListener {
         Handler(mainLooper).postDelayed({ poll_aircraft() }, delay_ms)
     }
 
+    // One poll reads location, fetches real aircraft, recomputes hazards, then updates the persistent notification.
     private fun poll_aircraft() {
         if (polling || stopped) return
         if (!monitoring_enabled()) {
@@ -161,6 +168,7 @@ class AircraftAlertService : Service(), LocationListener {
                     return@execute
                 }
 
+                // The extreme list comes from the classifier; notification code never invents membership.
                 val current_hazards = if (alerts_enabled()) {
                     poll.aircraft.filter { it.is_hazard }.associateBy { it.icao24 }
                 } else {
@@ -181,6 +189,7 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
+    // Poll faster only while nearby or priority contacts could go stale soon.
     private fun next_poll_delay_for(aircraft: List<AlertAircraft>, has_hazard: Boolean, has_extreme_priority: Boolean): Long {
         val extreme_aircraft = aircraft.filter { it.is_extreme_priority }
         val hazard_aircraft = aircraft.filter { it.is_hazard }
@@ -203,6 +212,7 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
+    // Fetch enough live traffic to cover the configured alert/priority volume, then classify supported reports.
     private fun fetch_aircraft(location: Location): AlertPoll {
         val alert_distance_feet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_DISTANCE_FEET, FlightAlertSettings.DEFAULT_ALERT_DISTANCE_FEET)
         val alert_altitude_feet = prefs.getFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, FlightAlertSettings.DEFAULT_ALERT_ALTITUDE_FEET)
@@ -241,6 +251,7 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
+    // The persistent notification is tied directly to the non-empty extreme-priority list.
     private fun update_priority_notification(priority_aircraft: List<AlertAircraft>) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (!AlertAircraftClassifier.should_show_persistent_priority_notification(
@@ -322,6 +333,7 @@ class AircraftAlertService : Service(), LocationListener {
         )
     }
 
+    // Clean old notification IDs before using the new extreme-priority foreground notification.
     private fun clear_legacy_notifications() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (manager.activeNotifications.any { it.id == ONGOING_NOTIFICATION_ID }) {
@@ -379,6 +391,7 @@ class AircraftAlertService : Service(), LocationListener {
         return alerts_enabled() || priority_tracking_enabled()
     }
 
+    // Turn the alert radius into a provider query box around the device location.
     private fun bounds_around(location: Location, radius_meters: Double): Bounds {
         val radius_km = radius_meters / 1000.0
         val lat_delta = radius_km / 111.0
@@ -395,6 +408,7 @@ class AircraftAlertService : Service(), LocationListener {
         return FeedBounds(min_lat = min_lat, min_lon = min_lon, max_lat = max_lat, max_lon = max_lon)
     }
 
+    // Convert provider units into classifier inputs so 3D alert math stays in one object.
     private fun FeedAircraft.to_alert_aircraft(
         alert_distance_feet: Float,
         alert_altitude_feet: Float,

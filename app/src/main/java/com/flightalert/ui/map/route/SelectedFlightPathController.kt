@@ -9,6 +9,7 @@ import com.flightalert.ui.map.GeoPoint
 import com.flightalert.ui.map.traffic.AircraftPositionProjector
 import java.util.Locale
 
+// Owns selected aircraft trace state so FlightMapView can ask what to draw without editing trace internals.
 class SelectedFlightPathController(
     private val now_epoch_seconds: () -> Double,
     private val max_projection_seconds: Double,
@@ -44,6 +45,7 @@ class SelectedFlightPathController(
         return selected_aircraft_key == key.lowercase(Locale.US)
     }
 
+    // Selection clears visible path state first; a path returns only after a matching real trace is fetched.
     fun select_aircraft(aircraft: Aircraft) {
         selected_aircraft_id = aircraft.icao24
         selected_aircraft_snapshot = aircraft
@@ -66,6 +68,7 @@ class SelectedFlightPathController(
         return selected_aircraft_snapshot?.takeIf { it.icao24.lowercase(Locale.US) == key.lowercase(Locale.US) }
     }
 
+    // Accept trace responses only for the current key so old aircraft paths cannot appear.
     fun apply_trace_result(key: String, next_trace: FlightTrace?) {
         if (!is_selected_key(key)) return
         selected_trace_aircraft_id = if (next_trace != null) key.lowercase(Locale.US) else null
@@ -93,6 +96,7 @@ class SelectedFlightPathController(
         return true
     }
 
+    // Show the path only when the selected aircraft has real current trace segments.
     fun show_path(current_aircraft: Aircraft?): Boolean {
         if (!has_path()) return false
         current_aircraft?.let { selected_aircraft_snapshot = it }
@@ -126,6 +130,7 @@ class SelectedFlightPathController(
         return path_visible && has_previous_flights()
     }
 
+    // Current-flight segments are the default path; previous legs are a separate opt-in context.
     fun selected_segments(visible_only: Boolean): List<TraceSegment>? {
         if (visible_only && !path_visible) return null
         if (!has_path()) return null
@@ -138,6 +143,7 @@ class SelectedFlightPathController(
         return trace?.previous_segments?.takeIf { it.isNotEmpty() }
     }
 
+    // Fit uses only real trace points and the projected endpoint already approved by this controller.
     fun bounds(): Bounds? {
         val points = selected_path_points()?.toMutableList() ?: return null
         if (previous_flights_visible) previous_flight_points()?.let { points += it }
@@ -151,6 +157,7 @@ class SelectedFlightPathController(
         )
     }
 
+    // When a path is visible, pin the selected sprite to the trace/live endpoint chosen for that aircraft.
     fun display_position(aircraft: Aircraft): GeoPoint {
         return selected_path_display_endpoint(aircraft) ?: projected_aircraft_position(aircraft)
     }
