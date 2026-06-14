@@ -119,12 +119,28 @@ class TrafficPanelRenderer(
         text_paint.textSize = sp(13)
         text_paint.color = style.visual_theme.colors.muted
         content.compact_primary_values.forEachIndexed { index, value ->
-            draw_compact_value(canvas, rect, index, primary = true, y = y, value = value)
+            draw_compact_value(
+                canvas = canvas,
+                rect = rect,
+                index = index,
+                item_count = content.compact_primary_values.size,
+                primary = true,
+                y = y,
+                value = value
+            )
         }
 
         y += dp(24)
         content.compact_secondary_values.forEachIndexed { index, value ->
-            draw_compact_value(canvas, rect, index, primary = false, y = y, value = value)
+            draw_compact_value(
+                canvas = canvas,
+                rect = rect,
+                index = index,
+                item_count = content.compact_secondary_values.size,
+                primary = false,
+                y = y,
+                value = value
+            )
         }
         content.military_label?.let { label ->
             y += dp(22)
@@ -230,12 +246,13 @@ class TrafficPanelRenderer(
         canvas: Canvas,
         rect: RectF,
         index: Int,
+        item_count: Int,
         primary: Boolean,
         y: Float,
         value: String
     ) {
         val left = compact_column_x(rect, index, primary)
-        draw_fitted_left_text(canvas, value, left, y, compact_column_width(rect, index, primary), sp(13), sp(8))
+        draw_fitted_left_text(canvas, value, left, y, compact_column_width(rect, index, item_count, primary), sp(13), sp(8))
     }
 
     private fun compact_column_x(rect: RectF, index: Int, primary: Boolean): Float {
@@ -246,11 +263,11 @@ class TrafficPanelRenderer(
         }
     }
 
-    private fun compact_column_width(rect: RectF, index: Int, primary: Boolean): Float {
+    private fun compact_column_width(rect: RectF, index: Int, item_count: Int, primary: Boolean): Float {
         val left = compact_column_x(rect, index, primary)
         val next = when (index) {
             0 -> compact_column_x(rect, 1, primary)
-            1 -> compact_column_x(rect, 2, primary)
+            1 -> if (item_count <= 2) rect.right - dp(16) else compact_column_x(rect, 2, primary)
             else -> rect.right - dp(16)
         }
         return (next - left - dp(8)).coerceAtLeast(dp(24))

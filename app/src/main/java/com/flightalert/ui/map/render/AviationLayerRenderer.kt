@@ -13,6 +13,7 @@ import com.flightalert.data.AviationGeoBounds
 import com.flightalert.data.AviationLayerPoint
 import com.flightalert.data.AviationLayerSnapshot
 import com.flightalert.data.AviationOceanicTrack
+import com.flightalert.settings.FlightAlertSettings.ThemeTreatment
 import com.flightalert.ui.map.MapProjection
 import com.flightalert.ui.map.ScreenPoint
 import com.flightalert.ui.map.Viewport
@@ -31,11 +32,13 @@ data class AviationLayerStyle(
     val accent_orange: Int,
     val danger: Int,
     val accent_blue: Int,
+    val accent_green: Int,
     val accent_pink: Int,
     val accent_yellow: Int,
     val military_gray: Int,
     val panel: Int,
-    val text: Int
+    val text: Int,
+    val treatment: ThemeTreatment
 )
 
 class AviationLayerRenderer(
@@ -232,8 +235,8 @@ class AviationLayerRenderer(
                 features = prepared_restricted_airspaces,
                 visible_bounds = visible_bounds,
                 excluded_feature = selected_restricted_airspace,
-                stroke = style.accent_orange,
-                fill = style.danger,
+                stroke = restricted_airspace_stroke(style),
+                fill = restricted_airspace_fill(style),
                 label_limit = if (viewport.zoom >= 8.0) 6 else 3,
                 label_rects = layer_label_rects,
                 style = style,
@@ -528,12 +531,12 @@ class AviationLayerRenderer(
             ?: prepare_airspace_feature(feature)
             ?: return
         paint.style = Paint.Style.FILL
-        paint.color = with_alpha(style.danger, 42)
+        paint.color = with_alpha(restricted_airspace_fill(style), selected_restricted_airspace_fill_alpha(style))
         stroke_paint.style = Paint.Style.STROKE
         stroke_paint.strokeCap = Paint.Cap.ROUND
         stroke_paint.strokeJoin = Paint.Join.ROUND
         stroke_paint.strokeWidth = dp(3.0f)
-        stroke_paint.color = with_alpha(style.accent_yellow, 235)
+        stroke_paint.color = with_alpha(selected_restricted_airspace_stroke(style), 235)
         prepared.rings.forEach { ring ->
             draw_prepared_airspace_ring(canvas, viewport, ring, paint, stroke_paint)
         }
@@ -750,6 +753,47 @@ class AviationLayerRenderer(
             android.graphics.Color.green(color),
             android.graphics.Color.blue(color)
         )
+    }
+
+    private fun restricted_airspace_stroke(style: AviationLayerStyle): Int {
+        return when (style.treatment) {
+            ThemeTreatment.PLAIN -> style.accent_orange
+            ThemeTreatment.GLASS -> style.accent_pink
+            ThemeTreatment.RADAR_GRID -> style.accent_yellow
+            ThemeTreatment.DAYLIGHT_CARD -> style.accent_pink
+            ThemeTreatment.STORM_BAND -> style.accent_orange
+            ThemeTreatment.CRT_SCANLINE -> style.accent_green
+        }
+    }
+
+    private fun restricted_airspace_fill(style: AviationLayerStyle): Int {
+        return when (style.treatment) {
+            ThemeTreatment.PLAIN -> style.danger
+            ThemeTreatment.GLASS -> style.accent_blue
+            ThemeTreatment.RADAR_GRID -> style.danger
+            ThemeTreatment.DAYLIGHT_CARD -> style.danger
+            ThemeTreatment.STORM_BAND -> style.accent_pink
+            ThemeTreatment.CRT_SCANLINE -> style.danger
+        }
+    }
+
+    private fun selected_restricted_airspace_stroke(style: AviationLayerStyle): Int {
+        return when (style.treatment) {
+            ThemeTreatment.PLAIN -> style.accent_yellow
+            ThemeTreatment.GLASS -> style.accent_yellow
+            ThemeTreatment.RADAR_GRID -> style.accent_green
+            ThemeTreatment.DAYLIGHT_CARD -> style.accent_orange
+            ThemeTreatment.STORM_BAND -> style.accent_yellow
+            ThemeTreatment.CRT_SCANLINE -> style.accent_yellow
+        }
+    }
+
+    private fun selected_restricted_airspace_fill_alpha(style: AviationLayerStyle): Int {
+        return when (style.treatment) {
+            ThemeTreatment.DAYLIGHT_CARD -> 34
+            ThemeTreatment.GLASS -> 36
+            else -> 42
+        }
     }
 
     private data class PreparedAirspaceFeature(

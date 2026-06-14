@@ -195,7 +195,7 @@ class AircraftAlertService : Service(), LocationListener {
         val hazard_aircraft = aircraft.filter { it.is_hazard }
         val priority_aircraft = aircraft.filter { it.is_priority_range_aircraft }
         return when {
-            has_extreme_priority -> delay_until_stale(extreme_aircraft, EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS)
+            has_extreme_priority -> delay_until_stale(extreme_aircraft, AlertAircraftClassifier.EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS)
             has_hazard -> delay_until_stale(hazard_aircraft, PRIORITY_CONTACT_MAX_AGE_SECONDS)
             priority_aircraft.isNotEmpty() -> delay_until_stale(priority_aircraft, PRIORITY_CONTACT_MAX_AGE_SECONDS)
             else -> POLL_MS
@@ -473,7 +473,6 @@ class AircraftAlertService : Service(), LocationListener {
         const val EVENT_NOTIFICATION_ID_WINDOW = 200
         const val POLL_MS = 30000L
         const val PRIORITY_CONTACT_MAX_AGE_SECONDS = 10.0
-        const val EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS = 3.0
         const val STALE_CONTACT_RETRY_MS = 1000L
         const val MIN_QUERY_RADIUS_FEET = 10000.0
         const val ALERT_QUERY_MIN_PADDING_FEET = 5000.0

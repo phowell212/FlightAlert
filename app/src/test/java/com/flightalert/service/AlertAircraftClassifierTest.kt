@@ -62,6 +62,23 @@ class AlertAircraftClassifierTest {
     }
 
     @Test
+    fun stale_aircraft_inside_alert_volume_is_not_hazard_or_extreme_priority() {
+        val aircraft = classify(
+            distance_feet = 900.0,
+            altitude_feet = 500.0,
+            own_altitude_feet = 500.0,
+            alert_distance_feet = 1000f,
+            alert_altitude_feet = 150f,
+            priority_enabled = true,
+            contact_age_seconds = AlertAircraftClassifier.EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS + 0.1
+        )
+
+        assertNotNull(aircraft)
+        assertFalse(aircraft!!.is_hazard)
+        assertFalse(aircraft.is_extreme_priority)
+    }
+
+    @Test
     fun priority_range_aircraft_is_not_extreme_unless_it_is_inside_alert_volume() {
         val aircraft = classify(
             distance_feet = 1500.0,
@@ -127,7 +144,8 @@ class AlertAircraftClassifierTest {
         alert_distance_feet: Float,
         alert_altitude_feet: Float,
         priority_enabled: Boolean,
-        priority_range_feet: Float = 2000f
+        priority_range_feet: Float = 2000f,
+        contact_age_seconds: Double = 1.0
     ): AlertAircraft? {
         return AlertAircraftClassifier.classify(
             icao24 = "abc123",
@@ -135,7 +153,7 @@ class AlertAircraftClassifierTest {
             registration = "N12345",
             distance_meters = feet_to_meters(distance_feet),
             altitude_meters = feet_to_meters(altitude_feet),
-            last_contact_sec = NOW_EPOCH_SECONDS - 1.0,
+            last_contact_sec = NOW_EPOCH_SECONDS - contact_age_seconds,
             position_time_sec = null,
             own_altitude_feet = own_altitude_feet,
             alerts_enabled = true,

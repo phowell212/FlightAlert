@@ -17,6 +17,7 @@ data class AlertAircraft(
 )
 
 object AlertAircraftClassifier {
+    // The classifier is the single place that decides whether a live contact can enter the alert volume.
     fun classify(
         icao24: String,
         callsign: String,
@@ -35,13 +36,15 @@ object AlertAircraftClassifier {
     ): AlertAircraft? {
         val altitude_meters = altitude_meters ?: return null
         val contact_time = last_contact_sec ?: position_time_sec ?: return null
+        val contact_age_seconds = max(0.0, now_epoch_sec - contact_time)
         val distance_feet = meters_to_feet(distance_meters)
         val altitude_feet = meters_to_feet(altitude_meters)
         val vertical_separation_feet = own_altitude_feet?.let { abs(altitude_feet - it) }
+        val contact_is_fresh_for_alert = contact_age_seconds <= EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
         val is_inside_alert_range = distance_feet <= alert_distance_feet &&
             vertical_separation_feet != null &&
             vertical_separation_feet <= alert_altitude_feet
-        val is_alert_aircraft = alerts_enabled && is_inside_alert_range
+        val is_alert_aircraft = alerts_enabled && contact_is_fresh_for_alert && is_inside_alert_range
         return AlertAircraft(
             icao24 = icao24,
             callsign = callsign,
@@ -49,7 +52,7 @@ object AlertAircraftClassifier {
             distance_feet = distance_feet,
             altitude_feet = altitude_feet,
             vertical_separation_feet = vertical_separation_feet,
-            contact_age_seconds = max(0.0, now_epoch_sec - contact_time),
+            contact_age_seconds = contact_age_seconds,
             is_hazard = is_alert_aircraft,
             is_priority_range_aircraft = priority_enabled && distance_feet <= priority_range_feet,
             is_extreme_priority = is_alert_aircraft
@@ -65,6 +68,8 @@ object AlertAircraftClassifier {
     }
 
     private fun meters_to_feet(meters: Double): Double = meters * FEET_PER_METER
+
+    const val EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS = 3.0
 
     private const val FEET_PER_METER = 3.28084
 }
