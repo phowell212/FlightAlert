@@ -46,6 +46,13 @@ class AircraftMarkerMorphTest {
     }
 
     @Test
+    fun dot_size_never_shrinks_below_the_readable_scale_bar_transition_size() {
+        val far_zoom_scale = AircraftMarkerMorph.aircraft_dot_scale(3.0)
+
+        assertTrue(far_zoom_scale >= AircraftMarkerMorph.READABLE_DOT_SCALE_MIN)
+    }
+
+    @Test
     fun blended_icon_scale_has_no_large_zoom_step_discontinuities() {
         var previous = AircraftMarkerMorph.blended_icon_scale(
             zoom = 5.5,

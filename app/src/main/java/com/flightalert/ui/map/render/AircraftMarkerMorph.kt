@@ -51,7 +51,7 @@ object AircraftMarkerMorph {
             DOT_SCALE_TRANSITION_ZOOM_END,
             zoom.toFloat()
         )
-        return lerp(far_scale, DOT_SCALE_TRANSITION_MAX, transition_progress)
+        return max(READABLE_DOT_SCALE_MIN, lerp(far_scale, DOT_SCALE_TRANSITION_MAX, transition_progress))
     }
 
     fun blended_icon_scale(zoom: Double, dot_blend: Float): Float {
@@ -79,6 +79,7 @@ object AircraftMarkerMorph {
     const val SYMBOL_CROSSFADE_MIN_ZOOM = 5.4
     const val SYMBOL_ACTIVE_MIN_PROGRESS = 0.12f
     const val SYMBOL_IDLE_MIN_PROGRESS = 0.03f
+    const val READABLE_DOT_SCALE_MIN = 0.24f
 
     private const val SCALE_ZOOM_MIN = 5.6f
     private const val SCALE_ZOOM_MAX = 13.2f
