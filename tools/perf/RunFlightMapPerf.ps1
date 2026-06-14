@@ -6,6 +6,14 @@ param(
     [int]$SoakSeconds = 75,
     [switch]$RebuildHarness,
     [string]$CityName = "",
+    [ValidateSet("Current", "Street", "Satellite")]
+    [string]$MapSource = "Current",
+    [ValidateSet("Current", "On", "Off")]
+    [string]$RestrictedAirspaces = "Current",
+    [switch]$ClearSelection,
+    [switch]$SkipMap,
+    [switch]$SkipTraffic,
+    [switch]$SkipChrome,
     [string]$OutputName = ""
 )
 
@@ -130,13 +138,36 @@ try {
     }
     $runId = "perf-$safeCity-$Mode-$stamp-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 
-    Write-Host "Testing $($city.Name) at lat=$($city.Lat), lon=$($city.Lon), zoom=$Zoom with $Mode gestures. runId=$runId"
+    Write-Host "Testing $($city.Name) at lat=$($city.Lat), lon=$($city.Lon), zoom=$Zoom with $Mode gestures, map=$MapSource, restricted=$RestrictedAirspaces. runId=$runId"
     Invoke-Adb logcat -c | Out-Null
-    Invoke-Adb shell am start --display 0 --activity-single-top -n com.flightalert/.MainActivity `
-        --es com.flightalert.PERF_LAT $city.Lat `
-        --es com.flightalert.PERF_LON $city.Lon `
-        --es com.flightalert.PERF_ZOOM $Zoom `
-        --es com.flightalert.PERF_RUN_ID $runId | Out-Null
+    $startArgs = @(
+        "shell", "am", "start", "--display", "0", "--activity-single-top",
+        "-n", "com.flightalert/.MainActivity",
+        "--es", "com.flightalert.PERF_LAT", "$($city.Lat)",
+        "--es", "com.flightalert.PERF_LON", "$($city.Lon)",
+        "--es", "com.flightalert.PERF_ZOOM", "$Zoom",
+        "--es", "com.flightalert.PERF_RUN_ID", "$runId"
+    )
+    if ($MapSource -ne "Current") {
+        $startArgs += @("--es", "com.flightalert.PERF_MAP_SOURCE", $MapSource.ToUpperInvariant())
+    }
+    if ($RestrictedAirspaces -ne "Current") {
+        $restrictedValue = if ($RestrictedAirspaces -eq "On") { "true" } else { "false" }
+        $startArgs += @("--es", "com.flightalert.PERF_RESTRICTED_AIRSPACES_ENABLED", $restrictedValue)
+    }
+    if ($ClearSelection) {
+        $startArgs += @("--es", "com.flightalert.PERF_CLEAR_SELECTION", "true")
+    }
+    if ($SkipMap) {
+        $startArgs += @("--es", "com.flightalert.PERF_SKIP_MAP", "true")
+    }
+    if ($SkipTraffic) {
+        $startArgs += @("--es", "com.flightalert.PERF_SKIP_TRAFFIC", "true")
+    }
+    if ($SkipChrome) {
+        $startArgs += @("--es", "com.flightalert.PERF_SKIP_CHROME", "true")
+    }
+    Invoke-Adb @startArgs | Out-Null
     Assert-FlightAlertForeground
     Start-Sleep -Seconds 8
     Assert-FlightAlertForeground

@@ -121,14 +121,26 @@ object AircraftFilterEngine {
         is_hazard_aircraft: (Aircraft) -> Boolean
     ): FilterStats {
         val matched = aircraft.count { passes(it, filters, now_epoch_sec, distance_meters, is_hazard_aircraft) }
+        return stats_from_counts(
+            total = aircraft.size,
+            matched = matched,
+            filters = filters
+        )
+    }
+
+    fun stats_from_counts(
+        total: Int,
+        matched: Int,
+        filters: AircraftFilterState
+    ): FilterStats {
         val summary = when {
             is_normal_airborne_mode(filters) -> "$matched airborne aircraft in current feed"
-            !restricts_aircraft(filters) -> "${aircraft.size} live aircraft in current feed"
-            aircraft.isEmpty() -> "No live aircraft in current feed"
-            matched == 0 -> "0 of ${aircraft.size} live aircraft match filters"
-            else -> "$matched of ${aircraft.size} live aircraft match filters"
+            !restricts_aircraft(filters) -> "$total live aircraft in current feed"
+            total == 0 -> "No live aircraft in current feed"
+            matched == 0 -> "0 of $total live aircraft match filters"
+            else -> "$matched of $total live aircraft match filters"
         }
-        return FilterStats(aircraft.size, matched, summary)
+        return FilterStats(total, matched, summary)
     }
 
     fun passes(

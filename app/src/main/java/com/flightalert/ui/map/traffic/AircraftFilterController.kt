@@ -119,6 +119,14 @@ class AircraftFilterController(private val prefs: SharedPreferences) {
         )
     }
 
+    fun stats_from_counts(total: Int, matched: Int): FilterStats {
+        return AircraftFilterEngine.stats_from_counts(
+            total = total,
+            matched = matched,
+            filters = current_state()
+        )
+    }
+
     fun passes(
         aircraft: Aircraft,
         now_epoch_sec: Double,

@@ -12,7 +12,8 @@ internal class TrafficCacheController(
     private val aircraft_icao_key: (Aircraft) -> String,
     private val spatial_entry_for: (Aircraft, Double) -> TrafficSpatialEntry,
     private val alerts_enabled: () -> Boolean,
-    private val now_epoch_seconds: () -> Double
+    private val now_epoch_seconds: () -> Double,
+    private val now_elapsed_ms: () -> Long = { SystemClock.elapsedRealtime() }
 ) {
     private var traffic_cache_dirty = true
     private var cached_filtered_aircraft: List<Aircraft> = emptyList()
@@ -31,10 +32,11 @@ internal class TrafficCacheController(
         traffic_cache_dirty = true
     }
 
+    fun is_dirty(): Boolean {
+        return traffic_cache_dirty
+    }
+
     fun cached_traffic(): CachedTraffic {
-        if (traffic_cache_dirty) {
-            publish_cached_traffic(build_cached_traffic(all_aircraft_snapshot()))
-        }
         return current_cached_traffic()
     }
 
@@ -137,7 +139,7 @@ internal class TrafficCacheController(
             fill_velocities = fill_velocities,
             fill_motion_limits = fill_motion_limits,
             visible_count = outline_count / 2,
-            built_elapsed_ms = SystemClock.elapsedRealtime()
+            built_elapsed_ms = now_elapsed_ms()
         )
     }
 

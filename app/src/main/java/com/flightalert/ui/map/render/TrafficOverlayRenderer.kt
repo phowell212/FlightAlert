@@ -19,6 +19,8 @@ import com.flightalert.ui.map.Viewport
 import com.flightalert.ui.map.TileSource
 import com.flightalert.ui.map.traffic.AircraftSymbol
 import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -211,13 +213,13 @@ class TrafficOverlayRenderer(
         val base_scale = aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
+        val draw_outline = should_draw_batch_outline(base_scale)
         val colors = style.visual_theme.colors
         val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
         val old_cap = paint.strokeCap
         val transform_scale = batch.transform_scale.coerceAtLeast(0.001f)
         val repeat_spacing_px = batch.repeat_x_spacing * transform_scale
-        val repeat_start = if (batch.repeat_x_spacing > 0f) -1 else 0
-        val repeat_end = if (batch.repeat_x_spacing > 0f) 1 else 0
+        val repeat_range = visible_repeat_range(batch, viewport, transform_scale, repeat_spacing_px)
         val motion_elapsed_sec = if (batch.animate_motion && batch.built_elapsed_ms > 0L) {
             ((SystemClock.elapsedRealtime() - batch.built_elapsed_ms) / 1000f).coerceIn(0f, MAX_BATCH_MOTION_SECONDS)
         } else {
@@ -243,14 +245,14 @@ class TrafficOverlayRenderer(
                 scratch = animated_fill_points[group]
             )
         }
-        for (repeat in repeat_start..repeat_end) {
+        for (repeat in repeat_range.first..repeat_range.last) {
             val save_count = canvas.save()
             canvas.translate(batch.translation_x + repeat_spacing_px * repeat, batch.translation_y)
             canvas.scale(transform_scale, transform_scale)
             try {
                 paint.style = Paint.Style.STROKE
                 paint.strokeCap = Paint.Cap.ROUND
-                if (batch.outline_count > 0) {
+                if (draw_outline && batch.outline_count > 0) {
                     paint.strokeWidth = (batch_radius_px * 2f + outline_extra_px) / transform_scale
                     paint.color = with_alpha(colors.scrim, (150 * dot_alpha).round_to_int())
                     canvas.drawPoints(outline_draw_points, 0, batch.outline_count, paint)
@@ -286,6 +288,26 @@ class TrafficOverlayRenderer(
                 scrim = colors.scrim
             )
         }
+    }
+
+    private fun visible_repeat_range(
+        batch: TrafficDotBatchOverlayState,
+        viewport: Viewport,
+        transform_scale: Float,
+        repeat_spacing_px: Float
+    ): IntRange {
+        if (batch.repeat_x_spacing <= 0f || repeat_spacing_px <= 0f || !repeat_spacing_px.isFinite()) {
+            return 0..0
+        }
+        val world_width_px = batch.repeat_x_spacing * transform_scale
+        val min_repeat = ceil((-batch.translation_x - world_width_px) / repeat_spacing_px)
+            .toInt()
+            .coerceAtLeast(MIN_WORLD_REPEAT)
+        val max_repeat = floor((viewport.width - batch.translation_x) / repeat_spacing_px)
+            .toInt()
+            .coerceAtMost(MAX_WORLD_REPEAT)
+        if (min_repeat > max_repeat) return 0..0
+        return min_repeat..max_repeat
     }
 
     private fun animated_batch_points(
@@ -327,6 +349,7 @@ class TrafficOverlayRenderer(
         val base_scale = aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
+        val draw_outline = should_draw_batch_outline(base_scale)
         val colors = style.visual_theme.colors
         val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
         for (item in aircraft) {
@@ -341,7 +364,7 @@ class TrafficOverlayRenderer(
         val old_cap = paint.strokeCap
         paint.style = Paint.Style.STROKE
         paint.strokeCap = Paint.Cap.ROUND
-        if (dot_outline_count > 0) {
+        if (draw_outline && dot_outline_count > 0) {
             paint.strokeWidth = batch_radius_px * 2f + outline_extra_px
             paint.color = with_alpha(colors.scrim, (150 * dot_alpha).round_to_int())
             canvas.drawPoints(dot_outline_points, 0, dot_outline_count, paint)
@@ -973,6 +996,10 @@ class TrafficOverlayRenderer(
         return chrome.dp(BATCH_DOT_OUTLINE_EXTRA_DP) * AircraftMarkerMorph.batch_dot_outline_scale(dot_scale)
     }
 
+    private fun should_draw_batch_outline(dot_scale: Float): Boolean {
+        return dot_scale > BATCH_DOT_OUTLINE_MIN_VISIBLE_SCALE
+    }
+
     private fun dense_batch_dot_alpha(marker_blend: Float): Float {
         return AircraftMarkerMorph.dense_batch_dot_alpha(marker_blend)
     }
@@ -1087,9 +1114,12 @@ class TrafficOverlayRenderer(
         const val BATCH_DOT_RADIUS_DP = AIRCRAFT_DOT_RADIUS_DP
         const val BATCH_DOT_OUTLINE_EXTRA_DP = 1.25f
         const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
+        const val BATCH_DOT_OUTLINE_MIN_VISIBLE_SCALE = 0.30f
         const val SYMBOL_MASK_SIZE_DP = 72f
         const val SYMBOL_MASK_PROGRESS_STEPS = 48
         const val SYMBOL_MASK_CACHE_MAX_ENTRIES = 384
+        const val MIN_WORLD_REPEAT = -4
+        const val MAX_WORLD_REPEAT = 4
         const val DOT_BATCH_GROUP_COUNT = TrafficDotBatchOverlayState.GROUP_COUNT
     }
 }

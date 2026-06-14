@@ -265,9 +265,12 @@ internal class TrafficOverlayStateBuilder(
         return traffic_aircraft_overlay_state(selected, ScreenPoint(wrapped_x.toFloat(), world.y.toFloat()))
     }
 
-    private fun nearest_wrapped_world_x(x: Double, center_x: Double): Double {
+    private fun nearest_wrapped_world_x(
+        x: Double,
+        center_x: Double,
+        world_width: Double = TILE_SIZE.toDouble()
+    ): Double {
         var wrapped = x
-        val world_width = TILE_SIZE.toDouble()
         val half_world = world_width / 2.0
         while (wrapped - center_x > half_world) wrapped -= world_width
         while (wrapped - center_x < -half_world) wrapped += world_width
@@ -697,7 +700,9 @@ internal class TrafficOverlayStateBuilder(
     ): ScreenPoint {
         val elapsed = (now_epoch_sec - entry.projection_epoch_sec)
             .coerceIn(0.0, min(MAX_ESTIMATION_SECONDS, entry.projected_motion_remaining_sec))
-        val world_x = entry.world_x_zoom_zero + entry.projected_velocity_x_zoom_zero * elapsed
+        val raw_world_x = entry.world_x_zoom_zero + entry.projected_velocity_x_zoom_zero * elapsed
+        val center_x_zoom_zero = viewport.center_x / scale
+        val world_x = nearest_wrapped_world_x(raw_world_x, center_x_zoom_zero)
         val world_y = entry.world_y_zoom_zero + entry.projected_velocity_y_zoom_zero * elapsed
         return ScreenPoint(
             x = (world_x * scale - viewport.center_x + viewport.width / 2.0).toFloat(),
@@ -707,8 +712,10 @@ internal class TrafficOverlayStateBuilder(
 
     private fun screen_point_for(point: GeoPoint, viewport: Viewport): ScreenPoint {
         val world = lat_lon_to_world(point.lat, point.lon, viewport.zoom)
+        val world_width = TILE_SIZE.toDouble() * 2.0.pow(viewport.zoom)
+        val world_x = nearest_wrapped_world_x(world.x, viewport.center_x, world_width)
         return ScreenPoint(
-            x = (world.x - viewport.center_x + viewport.width / 2.0).toFloat(),
+            x = (world_x - viewport.center_x + viewport.width / 2.0).toFloat(),
             y = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
         )
     }

@@ -15,6 +15,7 @@ import com.flightalert.data.web.GlobeBinCraftAircraftSource
 import com.flightalert.service.AircraftAlertService
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.FlightMapView
+import com.flightalert.ui.map.TileSource
 
 // Activity stays intentionally thin: permissions, lifecycle, and the single custom map surface.
 class MainActivity : ComponentActivity() {
@@ -62,6 +63,7 @@ class MainActivity : ComponentActivity() {
         // Make the actual cockpit view. This is the main logic file Android will call to draw and handle input.
         val view = FlightMapView(this, globe_source)
         view.keepScreenOn = true
+        configure_high_refresh_rate()
         flight_map_view = view
         apply_debug_perf_viewport(intent)
 
@@ -122,6 +124,20 @@ class MainActivity : ComponentActivity() {
         window.isNavigationBarContrastEnforced = false
     }
 
+    @Suppress("DEPRECATION")
+    private fun configure_high_refresh_rate() {
+        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            windowManager.defaultDisplay
+        } ?: return
+        val fastest_mode = display.supportedModes.maxByOrNull { it.refreshRate } ?: return
+        if (fastest_mode.refreshRate <= 0f) return
+        window.attributes = window.attributes.apply {
+            preferredDisplayModeId = fastest_mode.modeId
+        }
+    }
+
     private fun request_location_permission_if_needed() {
         val granted = has_location_permission()
         flight_map_view?.set_location_permission_granted(granted)
@@ -171,14 +187,45 @@ class MainActivity : ComponentActivity() {
         val lon = intent.double_extra(EXTRA_PERF_LON, Double.NaN)
         val zoom = intent.double_extra(EXTRA_PERF_ZOOM, DEFAULT_PERF_ZOOM)
         val run_id = intent.getStringExtra(EXTRA_PERF_RUN_ID)
-        flight_map_view?.apply_debug_perf_viewport(lat, lon, zoom, run_id)
+        val map_source = intent.getStringExtra(EXTRA_PERF_MAP_SOURCE)
+            ?.let { value -> TileSource.entries.firstOrNull { it.name.equals(value, ignoreCase = true) } }
+        val restricted = intent.optional_boolean_extra(EXTRA_PERF_RESTRICTED_AIRSPACES_ENABLED)
+        val clear_selection = intent.optional_boolean_extra(EXTRA_PERF_CLEAR_SELECTION) == true
+        val skip_map = intent.optional_boolean_extra(EXTRA_PERF_SKIP_MAP) == true
+        val skip_traffic = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TRAFFIC) == true
+        val skip_chrome = intent.optional_boolean_extra(EXTRA_PERF_SKIP_CHROME) == true
+        flight_map_view?.apply_debug_perf_viewport(
+            lat = lat,
+            lon = lon,
+            target_zoom = zoom,
+            run_id = run_id,
+            perf_map_source = map_source,
+            perf_restricted_airspaces_enabled = restricted,
+            perf_clear_selection = clear_selection,
+            perf_skip_map = skip_map,
+            perf_skip_traffic = skip_traffic,
+            perf_skip_chrome = skip_chrome
+        )
     }
 
     private fun Intent.double_extra(name: String, fallback: Double): Double {
-        return when (val value = extras?.get(name)) {
-            is Number -> value.toDouble()
-            is String -> value.toDoubleOrNull() ?: fallback
-            else -> fallback
+        getStringExtra(name)?.toDoubleOrNull()?.let { return it }
+        return try {
+            getDoubleExtra(name, fallback)
+        } catch (_: ClassCastException) {
+            fallback
+        }
+    }
+
+    private fun Intent.optional_boolean_extra(name: String): Boolean? {
+        if (!hasExtra(name)) return null
+        getStringExtra(name)?.let { value ->
+            return value.equals("true", ignoreCase = true) || value == "1"
+        }
+        return try {
+            getBooleanExtra(name, false)
+        } catch (_: ClassCastException) {
+            null
         }
     }
 
@@ -193,6 +240,12 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PERF_LON = "com.flightalert.PERF_LON"
         const val EXTRA_PERF_ZOOM = "com.flightalert.PERF_ZOOM"
         const val EXTRA_PERF_RUN_ID = "com.flightalert.PERF_RUN_ID"
+        const val EXTRA_PERF_MAP_SOURCE = "com.flightalert.PERF_MAP_SOURCE"
+        const val EXTRA_PERF_RESTRICTED_AIRSPACES_ENABLED = "com.flightalert.PERF_RESTRICTED_AIRSPACES_ENABLED"
+        const val EXTRA_PERF_CLEAR_SELECTION = "com.flightalert.PERF_CLEAR_SELECTION"
+        const val EXTRA_PERF_SKIP_MAP = "com.flightalert.PERF_SKIP_MAP"
+        const val EXTRA_PERF_SKIP_TRAFFIC = "com.flightalert.PERF_SKIP_TRAFFIC"
+        const val EXTRA_PERF_SKIP_CHROME = "com.flightalert.PERF_SKIP_CHROME"
         const val DEFAULT_PERF_ZOOM = 4.2
     }
 }

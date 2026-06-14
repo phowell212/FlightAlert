@@ -6,6 +6,7 @@ import com.flightalert.data.api.AviationLayerClient
 import com.flightalert.data.AviationLayerKind
 import com.flightalert.data.AviationLayerSnapshot
 import com.flightalert.data.AviationLayerState
+import com.flightalert.data.AviationLayerStatus
 import com.flightalert.ui.map.MapProjection
 import com.flightalert.ui.map.Bounds
 import com.flightalert.ui.map.Viewport
@@ -22,7 +23,18 @@ class AviationLayerController(
     private val current_viewport: () -> Viewport?,
     private val visible_bounds: (Viewport) -> Bounds?,
     private val refresh_ms: Long,
-    private val bounds_padding_fraction: Double
+    private val bounds_padding_fraction: Double,
+    private val now_ms: () -> Long = { SystemClock.elapsedRealtime() },
+    private val fetch_layers: (AviationLayerBounds, Boolean, Boolean, Boolean, Boolean) -> AviationLayerSnapshot =
+        { bounds, include_atc_boundaries, include_restricted_airspaces, include_airports, include_oceanic_tracks ->
+            client.fetch_layers(
+                bounds = bounds,
+                include_atc_boundaries = include_atc_boundaries,
+                include_restricted_airspaces = include_restricted_airspaces,
+                include_airports = include_airports,
+                include_oceanic_tracks = include_oceanic_tracks
+            )
+        }
 ) {
     var snapshot: AviationLayerSnapshot? = null
         private set
@@ -47,31 +59,71 @@ class AviationLayerController(
         latest_visibility = visibility
         if (!has_enabled_layers(visibility)) {
             status_text = "Layers off"
+            request_warm_restricted_airspaces_if_needed(viewport)
             return
         }
         val query_bounds = layer_bounds_for_viewport(viewport) ?: return
         val visible_viewport_bounds = visible_bounds(viewport) ?: query_bounds
         val selection_key = selection_key(visibility)
-        val now = SystemClock.elapsedRealtime()
+        val now = now_ms()
         val needs_fetch = force ||
             snapshot == null ||
             selection_key != last_selection_key ||
             last_bounds?.contains(visible_viewport_bounds) != true ||
             now - last_fetch_ms >= refresh_ms
-        if (!needs_fetch || fetch_in_flight) return
+        if (!needs_fetch || fetch_in_flight) {
+            if (!needs_fetch) status_text = summary(snapshot, visibility)
+            return
+        }
 
+        status_text = "Loading aviation layers"
+        start_fetch(
+            query_bounds = query_bounds,
+            visibility = visibility,
+            selection_key = selection_key,
+            prefetch = false,
+            now = now
+        )
+    }
+
+    private fun request_warm_restricted_airspaces_if_needed(viewport: Viewport) {
+        val query_bounds = layer_bounds_for_viewport(viewport) ?: return
+        val visible_viewport_bounds = visible_bounds(viewport) ?: query_bounds
+        val visibility = WARM_RESTRICTED_AIRSPACES_VISIBILITY
+        val selection_key = selection_key(visibility)
+        val now = now_ms()
+        val needs_fetch = snapshot == null ||
+            selection_key != last_selection_key ||
+            last_bounds?.contains(visible_viewport_bounds) != true ||
+            now - last_fetch_ms >= refresh_ms
+        if (!needs_fetch || fetch_in_flight) return
+        start_fetch(
+            query_bounds = query_bounds,
+            visibility = visibility,
+            selection_key = selection_key,
+            prefetch = true,
+            now = now
+        )
+    }
+
+    private fun start_fetch(
+        query_bounds: Bounds,
+        visibility: AviationLayerVisibility,
+        selection_key: String,
+        prefetch: Boolean,
+        now: Long
+    ) {
         val requested_kinds = active_kinds(visibility)
         fetch_in_flight = true
         last_fetch_ms = now
-        status_text = "Loading aviation layers"
         run_in_background {
             val next_snapshot = try {
-                client.fetch_layers(
-                    bounds = query_bounds.to_aviation_layer_bounds(),
-                    include_atc_boundaries = visibility.atc_boundaries_enabled,
-                    include_restricted_airspaces = visibility.restricted_airspaces_enabled,
-                    include_airports = visibility.airport_labels_enabled,
-                    include_oceanic_tracks = visibility.oceanic_tracks_enabled
+                fetch_layers(
+                    query_bounds.to_aviation_layer_bounds(),
+                    visibility.atc_boundaries_enabled,
+                    visibility.restricted_airspaces_enabled,
+                    visibility.airport_labels_enabled,
+                    visibility.oceanic_tracks_enabled
                 )
             } catch (_: Exception) {
                 null
@@ -81,7 +133,8 @@ class AviationLayerController(
                     snapshot = next_snapshot,
                     requested_kinds = requested_kinds,
                     query_bounds = query_bounds,
-                    selection_key = selection_key
+                    selection_key = selection_key,
+                    prefetch = prefetch
                 )
             }
         }
@@ -90,11 +143,13 @@ class AviationLayerController(
     fun on_visibility_changed(visibility: AviationLayerVisibility) {
         latest_visibility = visibility
         if (!has_enabled_layers(visibility)) {
-            clear()
+            status_text = "Layers off"
+            current_viewport()?.let { request_warm_restricted_airspaces_if_needed(it) }
+            request_redraw()
             return
         }
-        status_text = "Loading aviation layers"
-        current_viewport()?.let { request_if_needed(it, visibility, force = true) }
+        status_text = summary(snapshot, visibility)
+        current_viewport()?.let { request_if_needed(it, visibility, force = false) }
     }
 
     fun clear() {
@@ -116,10 +171,12 @@ class AviationLayerController(
         snapshot: AviationLayerSnapshot?,
         requested_kinds: List<AviationLayerKind>,
         query_bounds: Bounds,
-        selection_key: String
+        selection_key: String,
+        prefetch: Boolean
     ) {
         fetch_in_flight = false
-        if (selection_key != selection_key(latest_visibility)) {
+        val latest_key = selection_key(latest_visibility)
+        if (selection_key != latest_key && !(prefetch && !has_enabled_layers(latest_visibility))) {
             last_fetch_ms = 0L
             status_text = if (has_enabled_layers(latest_visibility)) "Refreshing aviation layers" else "Layers off"
             current_viewport()?.let { request_if_needed(it, latest_visibility, force = true) }
@@ -136,17 +193,22 @@ class AviationLayerController(
             return
         }
 
+        val requested_kind_set = requested_kinds.toSet()
         val all_unavailable = requested_kinds.isNotEmpty() &&
             requested_kinds.all { snapshot.statuses[it]?.state == AviationLayerState.UNAVAILABLE }
         val previous = this.snapshot
         this.snapshot = if (all_unavailable && previous != null) {
-            previous.copy(statuses = snapshot.statuses, fetched_at_ms = snapshot.fetched_at_ms)
+            merge_layer_snapshot(previous, snapshot, emptySet())
         } else {
-            snapshot
+            previous?.let { merge_layer_snapshot(it, snapshot, requested_kind_set) } ?: snapshot
         }
         last_bounds = query_bounds
         last_selection_key = selection_key
-        status_text = summary(this.snapshot, latest_visibility, kept_last_good = all_unavailable && previous != null)
+        status_text = if (has_enabled_layers(latest_visibility)) {
+            summary(this.snapshot, latest_visibility, kept_last_good = all_unavailable && previous != null)
+        } else {
+            "Layers off"
+        }
         request_redraw()
     }
 
@@ -200,6 +262,57 @@ class AviationLayerController(
         }
     }
 
+    private fun merge_layer_snapshot(
+        previous: AviationLayerSnapshot,
+        fetched: AviationLayerSnapshot,
+        requested_kinds: Set<AviationLayerKind>
+    ): AviationLayerSnapshot {
+        return AviationLayerSnapshot(
+            atc_boundaries = merged_layer_data(
+                kind = AviationLayerKind.ATC_BOUNDARIES,
+                requested_kinds = requested_kinds,
+                fetched_statuses = fetched.statuses,
+                previous = previous.atc_boundaries,
+                fetched = fetched.atc_boundaries
+            ),
+            restricted_airspaces = merged_layer_data(
+                kind = AviationLayerKind.RESTRICTED_AIRSPACES,
+                requested_kinds = requested_kinds,
+                fetched_statuses = fetched.statuses,
+                previous = previous.restricted_airspaces,
+                fetched = fetched.restricted_airspaces
+            ),
+            airports = merged_layer_data(
+                kind = AviationLayerKind.AIRPORTS,
+                requested_kinds = requested_kinds,
+                fetched_statuses = fetched.statuses,
+                previous = previous.airports,
+                fetched = fetched.airports
+            ),
+            oceanic_tracks = merged_layer_data(
+                kind = AviationLayerKind.OCEANIC_TRACKS,
+                requested_kinds = requested_kinds,
+                fetched_statuses = fetched.statuses,
+                previous = previous.oceanic_tracks,
+                fetched = fetched.oceanic_tracks
+            ),
+            statuses = previous.statuses + fetched.statuses,
+            fetched_at_ms = fetched.fetched_at_ms
+        )
+    }
+
+    private fun <T> merged_layer_data(
+        kind: AviationLayerKind,
+        requested_kinds: Set<AviationLayerKind>,
+        fetched_statuses: Map<AviationLayerKind, AviationLayerStatus>,
+        previous: List<T>,
+        fetched: List<T>
+    ): List<T> {
+        if (kind !in requested_kinds) return previous
+        if (fetched_statuses[kind]?.state == AviationLayerState.UNAVAILABLE) return previous
+        return fetched
+    }
+
     private fun Bounds.to_aviation_layer_bounds(): AviationLayerBounds {
         return AviationLayerBounds(min_lat = min_lat, min_lon = min_lon, max_lat = max_lat, max_lon = max_lon)
     }
@@ -209,5 +322,14 @@ class AviationLayerController(
             min_lon <= other.min_lon &&
             max_lat >= other.max_lat &&
             max_lon >= other.max_lon
+    }
+
+    private companion object {
+        val WARM_RESTRICTED_AIRSPACES_VISIBILITY = AviationLayerVisibility(
+            restricted_airspaces_enabled = true,
+            atc_boundaries_enabled = false,
+            oceanic_tracks_enabled = false,
+            airport_labels_enabled = false
+        )
     }
 }

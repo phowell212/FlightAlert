@@ -8,6 +8,7 @@ import com.flightalert.ui.map.Viewport
 import com.flightalert.ui.map.WorldPoint
 import java.util.Locale
 import kotlin.math.min
+import kotlin.math.pow
 
 internal class TrafficScreenProjector(
     private val dp: (Float) -> Float,
@@ -30,7 +31,8 @@ internal class TrafficScreenProjector(
     ): ScreenPoint {
         val elapsed = (now_epoch_sec - entry.projection_epoch_sec)
             .coerceIn(0.0, min(max_estimation_seconds, entry.projected_motion_remaining_sec))
-        val world_x = entry.world_x_zoom_zero + entry.projected_velocity_x_zoom_zero * elapsed
+        val raw_world_x = entry.world_x_zoom_zero + entry.projected_velocity_x_zoom_zero * elapsed
+        val world_x = nearest_wrapped_world_x(raw_world_x, viewport.center_x / scale, world_width_zoom_zero)
         val world_y = entry.world_y_zoom_zero + entry.projected_velocity_y_zoom_zero * elapsed
         return ScreenPoint(
             x = (world_x * scale - viewport.center_x + viewport.width / 2.0).toFloat(),
@@ -40,8 +42,10 @@ internal class TrafficScreenProjector(
 
     fun screen_point_for(point: GeoPoint, viewport: Viewport): ScreenPoint {
         val world = MapProjection.lat_lon_to_world(point.lat, point.lon, viewport.zoom)
+        val world_width = world_width_zoom_zero * 2.0.pow(viewport.zoom)
+        val world_x = nearest_wrapped_world_x(world.x, viewport.center_x, world_width)
         return ScreenPoint(
-            x = (world.x - viewport.center_x + viewport.width / 2.0).toFloat(),
+            x = (world_x - viewport.center_x + viewport.width / 2.0).toFloat(),
             y = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
         )
     }
@@ -165,5 +169,13 @@ internal class TrafficScreenProjector(
         while (delta > half_world) delta -= world_width_zoom_zero
         while (delta < -half_world) delta += world_width_zoom_zero
         return delta
+    }
+
+    private fun nearest_wrapped_world_x(x: Double, center_x: Double, world_width: Double): Double {
+        var wrapped = x
+        val half_world = world_width / 2.0
+        while (wrapped - center_x > half_world) wrapped -= world_width
+        while (wrapped - center_x < -half_world) wrapped += world_width
+        return wrapped
     }
 }
