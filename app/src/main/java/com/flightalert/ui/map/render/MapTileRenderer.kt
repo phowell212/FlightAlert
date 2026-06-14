@@ -160,7 +160,7 @@ class MapTileRenderer(
                     loaded++
                 } else {
                     requested++
-                    request_satellite_parent_tiles(tile_zoom, tx, ty, state)
+                    request_parent_tiles(tile_zoom, tx, ty, state)
                     request_tile(tile_zoom, tx, ty, key, state)
                 }
                 visible_tile_item(visible_tile_count).set(
@@ -177,7 +177,7 @@ class MapTileRenderer(
             }
         }
 
-        val keep_interim_on_top = state.map_source == TileSource.SATELLITE && interim_available && requested > 0
+        val keep_interim_on_top = interim_available && requested > 0
         if (!keep_interim_on_top) {
             draw_visible_interim_tiles(canvas, viewport, now_ms)
         }
@@ -208,7 +208,7 @@ class MapTileRenderer(
                 ) {
                     needs_transition_redraw = true
                 }
-            } else if (!draw_satellite_fallback_tile(canvas, tile.z, tile.x, tile.y, state, tile_destination)) {
+            } else if (!draw_tile_fallback(canvas, tile.z, tile.x, tile.y, state, tile_destination)) {
                 draw_unavailable_tile(canvas, tile.screen_x, tile.screen_y, tile.tile_size_on_screen, style)
             }
         }
@@ -299,11 +299,11 @@ class MapTileRenderer(
         }
         val alpha = satellite_tile_alpha(key, now_ms)
         if (alpha < 0.999f) {
-            if (draw_satellite_fallback_tile(canvas, z, x, y, state, destination)) {
+            if (draw_tile_fallback(canvas, z, x, y, state, destination)) {
                 draw_tile_bitmap(canvas, bitmap, null, destination, alpha)
                 return true
             }
-            request_satellite_parent_tiles(z, x, y, state)
+            request_parent_tiles(z, x, y, state)
             if (allow_alpha_without_tile_fallback) {
                 draw_tile_bitmap(canvas, bitmap, null, destination, alpha)
                 return true
@@ -416,7 +416,7 @@ class MapTileRenderer(
         }
     }
 
-    private fun draw_satellite_fallback_tile(
+    private fun draw_tile_fallback(
         canvas: Canvas,
         z: Int,
         x: Int,
@@ -424,15 +424,14 @@ class MapTileRenderer(
         state: MapTileRenderState,
         destination: RectF
     ): Boolean {
-        if (state.map_source != TileSource.SATELLITE) return false
-        if (draw_satellite_parent_tile_fallback(canvas, z, x, y, state, destination)) {
+        if (draw_parent_tile_fallback(canvas, z, x, y, state, destination)) {
             return true
         }
-        return draw_satellite_child_tile_fallback(canvas, z, x, y, state, destination)
+        return draw_child_tile_fallback(canvas, z, x, y, state, destination)
     }
 
-    // Satellite zooms look better when a real lower-zoom tile remains visible until the exact tile arrives.
-    private fun draw_satellite_parent_tile_fallback(
+    // Real lower-zoom tiles keep the map continuous until the exact street/satellite tile arrives.
+    private fun draw_parent_tile_fallback(
         canvas: Canvas,
         z: Int,
         x: Int,
@@ -440,7 +439,7 @@ class MapTileRenderer(
         state: MapTileRenderState,
         destination: RectF
     ): Boolean {
-        if (state.map_source != TileSource.SATELLITE || z <= MIN_ZOOM) return false
+        if (z <= MIN_ZOOM) return false
         var fallback_z = z - 1
         while (fallback_z >= MIN_ZOOM) {
             val delta = z - fallback_z
@@ -470,7 +469,7 @@ class MapTileRenderer(
         return false
     }
 
-    private fun draw_satellite_child_tile_fallback(
+    private fun draw_child_tile_fallback(
         canvas: Canvas,
         z: Int,
         x: Int,
@@ -478,8 +477,8 @@ class MapTileRenderer(
         state: MapTileRenderState,
         destination: RectF
     ): Boolean {
-        if (state.map_source != TileSource.SATELLITE || z >= state.map_source.max_native_zoom) return false
-        val max_delta = (state.map_source.max_native_zoom - z).coerceAtMost(SATELLITE_CHILD_FALLBACK_MAX_DELTA)
+        if (z >= state.map_source.max_native_zoom) return false
+        val max_delta = (state.map_source.max_native_zoom - z).coerceAtMost(CHILD_FALLBACK_MAX_DELTA)
         for (delta in 1..max_delta) {
             val child_z = z + delta
             val scale = 1 shl delta
@@ -506,7 +505,7 @@ class MapTileRenderer(
                 if (missing_child) break
             }
             if (!missing_child && satellite_child_bitmap_buffer.size == scale * scale) {
-                draw_satellite_child_tiles(canvas, destination, satellite_child_bitmap_buffer, scale)
+                draw_child_tiles(canvas, destination, satellite_child_bitmap_buffer, scale)
                 satellite_child_bitmap_buffer.clear()
                 return true
             }
@@ -515,7 +514,7 @@ class MapTileRenderer(
         return false
     }
 
-    private fun draw_satellite_child_tiles(
+    private fun draw_child_tiles(
         canvas: Canvas,
         destination: RectF,
         children: List<Bitmap>,
@@ -564,13 +563,13 @@ class MapTileRenderer(
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
                 request_tile(tile_zoom, tx, ty, key, state)
-                request_satellite_parent_tiles(tile_zoom, tx, ty, state)
+                request_parent_tiles(tile_zoom, tx, ty, state)
             }
         }
     }
 
-    private fun request_satellite_parent_tiles(z: Int, x: Int, y: Int, state: MapTileRenderState) {
-        if (state.map_source != TileSource.SATELLITE || z <= MIN_ZOOM) return
+    private fun request_parent_tiles(z: Int, x: Int, y: Int, state: MapTileRenderState) {
+        if (z <= MIN_ZOOM) return
         val max_depth = (z - MIN_ZOOM).coerceAtMost(SATELLITE_PARENT_REQUEST_DEPTH)
         for (depth in 1..max_depth) {
             val parent_z = z - depth
@@ -713,7 +712,7 @@ class MapTileRenderer(
         const val SATELLITE_REQUEST_TILE_BUFFER = 1
         const val SATELLITE_BUFFER_REQUEST_THROTTLE_MS = 180L
         const val SATELLITE_PARENT_REQUEST_DEPTH = 4
-        const val SATELLITE_CHILD_FALLBACK_MAX_DELTA = 1
+        const val CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
         const val SATELLITE_TILE_ZOOM_FADE_MS = 420f
     }
