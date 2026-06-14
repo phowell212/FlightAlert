@@ -5,10 +5,12 @@ param(
     [double]$Zoom = 5.4,
     [int]$SoakSeconds = 75,
     [switch]$RebuildHarness,
+    [string]$CityName = "",
     [string]$OutputName = ""
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $adb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
@@ -41,11 +43,10 @@ function Assert-FlightAlertForeground {
     param([int]$TimeoutSeconds = 20)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        $activity = Invoke-Adb shell dumpsys activity activities
         $windows = Invoke-Adb shell dumpsys window windows
-        $foreground = ($activity -match "topResumedActivity.*com\.flightalert|ResumedActivity.*com\.flightalert") -or
-            ($windows -match "mCurrentFocus.*com\.flightalert")
-        if ($foreground) { return }
+        if ($windows -match "mCurrentFocus.*com\.flightalert|mFocusedApp.*com\.flightalert") { return }
+        $activity = Invoke-Adb shell dumpsys activity activities
+        if ($activity -match "topResumedActivity.*com\.flightalert|ResumedActivity.*com\.flightalert") { return }
         Start-Sleep -Milliseconds 300
     } while ((Get-Date) -lt $deadline)
     throw "Flight Alert is not foregrounded; refusing to test or screenshot the wrong app."
@@ -77,7 +78,7 @@ function Read-FrameStatsSummary {
 }
 
 function Get-FlightAlertLog {
-    Invoke-Adb logcat -d -t 5000 FlightAlert:D "*:S"
+    Invoke-Adb logcat -d -s FlightAlert:D "*:S"
 }
 
 function Assert-PerfRunOwnership {
@@ -108,10 +109,20 @@ try {
         Build-Harness
     }
     if ($Mode -ne "soak") {
-        Invoke-Adb push $localJar $jarPath | Out-Null
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $adb -s $Device push $localJar $jarPath 2>$null | Out-Null
+        $pushExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($pushExitCode -ne 0) { throw "Failed to push gesture harness to $Device." }
     }
 
-    $city = $cities | Get-Random
+    if ([string]::IsNullOrWhiteSpace($CityName)) {
+        $city = $cities | Get-Random
+    } else {
+        $city = $cities | Where-Object { $_.Name -ieq $CityName } | Select-Object -First 1
+        if (-not $city) { throw "Unknown perf city '$CityName'." }
+    }
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $safeCity = ($city.Name -replace "[^A-Za-z0-9]+", "-").Trim("-").ToLowerInvariant()
     if ([string]::IsNullOrWhiteSpace($OutputName)) {
@@ -122,9 +133,9 @@ try {
     Write-Host "Testing $($city.Name) at lat=$($city.Lat), lon=$($city.Lon), zoom=$Zoom with $Mode gestures. runId=$runId"
     Invoke-Adb logcat -c | Out-Null
     Invoke-Adb shell am start --display 0 --activity-single-top -n com.flightalert/.MainActivity `
-        --ef com.flightalert.PERF_LAT $city.Lat `
-        --ef com.flightalert.PERF_LON $city.Lon `
-        --ef com.flightalert.PERF_ZOOM $Zoom `
+        --es com.flightalert.PERF_LAT $city.Lat `
+        --es com.flightalert.PERF_LON $city.Lon `
+        --es com.flightalert.PERF_ZOOM $Zoom `
         --es com.flightalert.PERF_RUN_ID $runId | Out-Null
     Assert-FlightAlertForeground
     Start-Sleep -Seconds 8
@@ -150,7 +161,12 @@ try {
     $devicePng = "/sdcard/$OutputName.png"
     $localPng = Join-Path $outDir "$OutputName.png"
     Invoke-Adb shell screencap -p $devicePng | Out-Null
-    Invoke-Adb pull $devicePng $localPng | Out-Null
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $adb -s $Device pull $devicePng $localPng 2>$null | Out-Null
+    $pullExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorActionPreference
+    if ($pullExitCode -ne 0) { throw "Failed to pull screenshot from $Device." }
     Assert-FlightAlertForeground
 
     $logPath = Join-Path $outDir "$OutputName-logcat.txt"

@@ -33,18 +33,6 @@ data class MapTileRenderStyle(
     val text: Int
 )
 
-private data class TileFallback(
-    val bitmap: Bitmap,
-    val source_rect: Rect
-)
-
-private data class ChildTileFallback(
-    val bitmap: Bitmap,
-    val child_x: Int,
-    val child_y: Int,
-    val child_scale: Int
-)
-
 private data class InterimRasterTile(
     val cache_key: String,
     val z: Int,
@@ -71,6 +59,13 @@ class MapTileRenderer(
     private val interim_tiles = linkedMapOf<String, InterimRasterTile>()
     private val requested_tiles = mutableSetOf<String>()
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+    private val tile_destination = RectF()
+    private val interim_destination = RectF()
+    private val satellite_parent_source = Rect()
+    private val satellite_child_destination = RectF()
+    private val loaded_interim_tile_buffer = ArrayList<InterimRasterTile>(64)
+    private val visible_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
+    private val satellite_child_bitmap_buffer = ArrayList<Bitmap>(4)
     private var transition_cache_key: String? = null
     private var transition_map_source: TileSource? = null
     private var current_tile_zoom = Int.MIN_VALUE
@@ -104,7 +99,7 @@ class MapTileRenderer(
         update_tile_zoom_transition(tile_zoom, state, now_ms)
         request_satellite_buffer_tiles(tile_zoom, first_tile_x, last_tile_x, first_tile_y, last_tile_y, max_tile, state, now_ms)
         val interim_drawn = draw_interim_tiles(canvas, viewport, state, now_ms)
-        val loaded_interim_tiles = ArrayList<InterimRasterTile>()
+        loaded_interim_tile_buffer.clear()
         var loaded = 0
         var requested = 0
         var needs_transition_redraw = false
@@ -117,13 +112,13 @@ class MapTileRenderer(
                 val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
                 val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
                 val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
-                val destination = RectF(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
+                tile_destination.set(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
                 val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
                 if (bitmap != null) {
-                    if (draw_loaded_tile(canvas, bitmap, destination, tile_zoom, tx, ty, key, state, now_ms)) {
+                    if (draw_loaded_tile(canvas, bitmap, tile_destination, tile_zoom, tx, ty, key, state, now_ms)) {
                         needs_transition_redraw = true
                     }
-                    loaded_interim_tiles += InterimRasterTile(
+                    loaded_interim_tile_buffer += InterimRasterTile(
                         cache_key = state.cache_key,
                         z = tile_zoom,
                         x = tx,
@@ -134,7 +129,7 @@ class MapTileRenderer(
                     loaded++
                 } else {
                     requested++
-                    if (!draw_satellite_fallback_tile(canvas, tile_zoom, tx, ty, state, destination)) {
+                    if (!draw_satellite_fallback_tile(canvas, tile_zoom, tx, ty, state, tile_destination)) {
                         request_satellite_parent_tiles(tile_zoom, tx, ty, state)
                         if (!interim_drawn) {
                             draw_unavailable_tile(canvas, screen_x, screen_y, tile_size_on_screen, style)
@@ -144,9 +139,10 @@ class MapTileRenderer(
                 }
             }
         }
-        if (requested == 0 && loaded_interim_tiles.isNotEmpty()) {
-            replace_interim_tiles(loaded_interim_tiles)
+        if (requested == 0 && loaded_interim_tile_buffer.isNotEmpty()) {
+            replace_interim_tiles(loaded_interim_tile_buffer)
         }
+        loaded_interim_tile_buffer.clear()
         if (needs_transition_redraw) request_redraw()
 
         val label_note = if (state.map_source == TileSource.STREET && !state.map_labels_enabled) " no-label" else ""
@@ -221,18 +217,19 @@ class MapTileRenderer(
         now_ms: Long
     ): Boolean {
         prune_interim_tiles(now_ms)
-        val visible_tiles = ArrayList<InterimRasterTile>()
+        visible_interim_tile_buffer.clear()
         for (tile in interim_tiles.values) {
             if (tile.cache_key != state.cache_key) continue
             if (!interim_tile_intersects_viewport(tile, viewport)) continue
-            visible_tiles += tile
+            visible_interim_tile_buffer += tile
         }
-        if (visible_tiles.isEmpty()) return false
-        visible_tiles.sortBy { it.z }
-        for (tile in visible_tiles) {
+        if (visible_interim_tile_buffer.isEmpty()) return false
+        visible_interim_tile_buffer.sortBy { it.z }
+        for (tile in visible_interim_tile_buffer) {
             draw_interim_tile(canvas, tile, viewport)
             tile.last_used_ms = now_ms
         }
+        visible_interim_tile_buffer.clear()
         return true
     }
 
@@ -246,14 +243,14 @@ class MapTileRenderer(
         val repeat_end = floor((viewport.width - base_screen_x) / tile_world_width_at_zoom).toInt()
         for (repeat in repeat_start..repeat_end) {
             val screen_x = (base_screen_x + repeat * tile_world_width_at_zoom).toFloat()
-            val destination = RectF(
+            interim_destination.set(
                 screen_x,
                 screen_y,
                 screen_x + tile_size_on_screen,
                 screen_y + tile_size_on_screen
             )
-            if (!rect_intersects_viewport(destination, viewport)) continue
-            draw_tile_bitmap(canvas, tile.bitmap, null, destination, 1f)
+            if (!rect_intersects_viewport(interim_destination, viewport)) continue
+            draw_tile_bitmap(canvas, tile.bitmap, null, interim_destination, 1f)
         }
     }
 
@@ -278,7 +275,9 @@ class MapTileRenderer(
 
     private fun replace_interim_tiles(tiles: List<InterimRasterTile>) {
         interim_tiles.clear()
-        for (tile in tiles.takeLast(MAX_INTERIM_TILES)) {
+        val start = (tiles.size - MAX_INTERIM_TILES).coerceAtLeast(0)
+        for (index in start until tiles.size) {
+            val tile = tiles[index]
             val key = "${tile.cache_key}/${tile.z}/${tile.x}/${tile.y}"
             interim_tiles[key] = tile
         }
@@ -303,17 +302,22 @@ class MapTileRenderer(
         destination: RectF
     ): Boolean {
         if (state.map_source != TileSource.SATELLITE) return false
-        val parent = satellite_parent_tile_fallback(z, x, y, state)
-        if (parent != null) {
-            draw_tile_bitmap(canvas, parent.bitmap, parent.source_rect, destination, 1f)
+        if (draw_satellite_parent_tile_fallback(canvas, z, x, y, state, destination)) {
             return true
         }
         return draw_satellite_child_tile_fallback(canvas, z, x, y, state, destination)
     }
 
     // Satellite zooms look better when a real lower-zoom tile remains visible until the exact tile arrives.
-    private fun satellite_parent_tile_fallback(z: Int, x: Int, y: Int, state: MapTileRenderState): TileFallback? {
-        if (state.map_source != TileSource.SATELLITE || z <= MIN_ZOOM) return null
+    private fun draw_satellite_parent_tile_fallback(
+        canvas: Canvas,
+        z: Int,
+        x: Int,
+        y: Int,
+        state: MapTileRenderState,
+        destination: RectF
+    ): Boolean {
+        if (state.map_source != TileSource.SATELLITE || z <= MIN_ZOOM) return false
         var fallback_z = z - 1
         while (fallback_z >= MIN_ZOOM) {
             val delta = z - fallback_z
@@ -329,19 +333,18 @@ class MapTileRenderer(
                 val child_y = y % scale
                 val left = (child_x * src_width).coerceIn(0, bitmap.width - 1)
                 val top = (child_y * src_height).coerceIn(0, bitmap.height - 1)
-                return TileFallback(
-                    bitmap = bitmap,
-                    source_rect = Rect(
-                        left,
-                        top,
-                        (left + src_width).coerceAtMost(bitmap.width),
-                        (top + src_height).coerceAtMost(bitmap.height)
-                    )
+                satellite_parent_source.set(
+                    left,
+                    top,
+                    (left + src_width).coerceAtMost(bitmap.width),
+                    (top + src_height).coerceAtMost(bitmap.height)
                 )
+                draw_tile_bitmap(canvas, bitmap, satellite_parent_source, destination, 1f)
+                return true
             }
             fallback_z -= 1
         }
-        return null
+        return false
     }
 
     private fun draw_satellite_child_tile_fallback(
@@ -358,7 +361,7 @@ class MapTileRenderer(
             val child_z = z + delta
             val scale = 1 shl delta
             val max_child_tile = 1 shl child_z
-            val children = ArrayList<ChildTileFallback>(scale * scale)
+            satellite_child_bitmap_buffer.clear()
             var missing_child = false
             for (child_y_offset in 0 until scale) {
                 val child_y = y * scale + child_y_offset
@@ -375,36 +378,37 @@ class MapTileRenderer(
                         missing_child = true
                         break
                     }
-                    children += ChildTileFallback(
-                        bitmap = bitmap,
-                        child_x = child_x_offset,
-                        child_y = child_y_offset,
-                        child_scale = scale
-                    )
+                    satellite_child_bitmap_buffer += bitmap
                 }
                 if (missing_child) break
             }
-            if (!missing_child && children.size == scale * scale) {
-                draw_satellite_child_tiles(canvas, destination, children)
+            if (!missing_child && satellite_child_bitmap_buffer.size == scale * scale) {
+                draw_satellite_child_tiles(canvas, destination, satellite_child_bitmap_buffer, scale)
+                satellite_child_bitmap_buffer.clear()
                 return true
             }
         }
+        satellite_child_bitmap_buffer.clear()
         return false
     }
 
     private fun draw_satellite_child_tiles(
         canvas: Canvas,
         destination: RectF,
-        children: List<ChildTileFallback>
+        children: List<Bitmap>,
+        child_scale: Int
     ) {
         val width = destination.width()
         val height = destination.height()
-        for (child in children) {
-            val left = destination.left + child.child_x * width / child.child_scale
-            val top = destination.top + child.child_y * height / child.child_scale
-            val right = destination.left + (child.child_x + 1) * width / child.child_scale
-            val bottom = destination.top + (child.child_y + 1) * height / child.child_scale
-            draw_tile_bitmap(canvas, child.bitmap, null, RectF(left, top, right, bottom), 1f)
+        for (index in children.indices) {
+            val child_x = index % child_scale
+            val child_y = index / child_scale
+            val left = destination.left + child_x * width / child_scale
+            val top = destination.top + child_y * height / child_scale
+            val right = destination.left + (child_x + 1) * width / child_scale
+            val bottom = destination.top + (child_y + 1) * height / child_scale
+            satellite_child_destination.set(left, top, right, bottom)
+            draw_tile_bitmap(canvas, children[index], null, satellite_child_destination, 1f)
         }
     }
 
