@@ -1,5 +1,6 @@
 package com.flightalert.ui.map.render
 
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -17,9 +18,7 @@ import com.flightalert.ui.map.ScreenPoint
 import com.flightalert.ui.map.Viewport
 import com.flightalert.ui.map.TileSource
 import com.flightalert.ui.map.traffic.AircraftSymbol
-import com.flightalert.ui.map.traffic.AircraftSymbolClassifier
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -28,11 +27,42 @@ data class TrafficOverlayStyle(val visual_theme: VisualTheme)
 
 data class TrafficAircraftOverlayState(
     val aircraft: Aircraft,
-    val displayed_position: GeoPoint,
-    val screen_point: ScreenPoint?,
+    val screen_point: ScreenPoint,
+    val appearance_key: String,
     val color: Int,
-    val appearance_progress: Float
+    val appearance_progress: Float,
+    val symbol: AircraftSymbol,
+    val symbol_scale: Float,
+    val dot_group: Int
 )
+
+data class TrafficDotBatchOverlayState(
+    val outline_points: FloatArray,
+    val outline_count: Int,
+    val outline_velocities: FloatArray? = null,
+    val outline_motion_limits: FloatArray? = null,
+    val fill_points: Array<FloatArray>,
+    val fill_counts: IntArray,
+    val fill_velocities: Array<FloatArray>? = null,
+    val fill_motion_limits: Array<FloatArray>? = null,
+    val selected_aircraft: TrafficAircraftOverlayState?,
+    val visible_count: Int,
+    val transform_scale: Float = 1f,
+    val translation_x: Float = 0f,
+    val translation_y: Float = 0f,
+    val repeat_x_spacing: Float = 0f,
+    val built_elapsed_ms: Long = 0L,
+    val animate_motion: Boolean = false
+) {
+    companion object {
+        const val GROUP_LOW = 0
+        const val GROUP_MID = 1
+        const val GROUP_HIGH = 2
+        const val GROUP_MILITARY = 3
+        const val GROUP_UNKNOWN = 4
+        const val GROUP_COUNT = 5
+    }
+}
 
 data class TrafficOverlayState(
     val viewport: Viewport,
@@ -41,7 +71,8 @@ data class TrafficOverlayState(
     val map_source: TileSource,
     val content_width: Float,
     val content_height: Float,
-    val label_avoid_rects: List<RectF>
+    val label_avoid_rects: List<RectF>,
+    val dot_batch: TrafficDotBatchOverlayState? = null
 )
 
 data class OwnshipOverlayState(
@@ -65,12 +96,23 @@ class TrafficOverlayRenderer(
     private val path: Path,
     private val chrome: TrafficOverlayChrome
 ) {
-    private var marker_dot_blend = 0f
-    private var last_marker_blend_frame_ms = 0L
     private var dot_outline_points = FloatArray(0)
     private var dot_outline_count = 0
     private val dot_fill_points = Array(DOT_BATCH_GROUP_COUNT) { FloatArray(0) }
     private val dot_fill_counts = IntArray(DOT_BATCH_GROUP_COUNT)
+    private var animated_outline_points = FloatArray(0)
+    private val animated_fill_points = Array(DOT_BATCH_GROUP_COUNT) { FloatArray(0) }
+    private val symbol_mask_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        isFilterBitmap = true
+        isDither = true
+    }
+    private val symbol_mask_cache = object : LinkedHashMap<AircraftSymbolMaskKey, AircraftSymbolMask>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<AircraftSymbolMaskKey, AircraftSymbolMask>): Boolean {
+            val remove = size > SYMBOL_MASK_CACHE_MAX_ENTRIES
+            if (remove) eldest.value.recycle()
+            return remove
+        }
+    }
 
     // Draw visible aircraft, smoothly blending dense traffic into dots while keeping selected traffic readable.
     fun draw_aircraft(
@@ -78,86 +120,254 @@ class TrafficOverlayRenderer(
         state: TrafficOverlayState,
         style: TrafficOverlayStyle
     ) {
-        val drawable = ArrayList<DrawableTraffic>(min(state.aircraft.size, DRAWABLE_AIRCRAFT_INITIAL_CAPACITY))
-        for (item in state.aircraft) {
-            val selected = item.aircraft.appearance_key() == normalized_selected_aircraft_id(state.selected_aircraft_id)
-            val screen = item.screen_point ?: screen_point(item.displayed_position, state.viewport)
-            if (!is_on_screen(screen, state.viewport, aircraft_cull_padding(item, state.viewport.zoom, selected))) continue
-            drawable += DrawableTraffic(item, screen, selected)
-        }
-        val marker_blend = smoothed_aircraft_marker_dot_blend(drawable.size, state.viewport)
-        val label_count = label_aircraft_count(marker_blend, state.viewport.zoom)
-        if (marker_blend >= AIRCRAFT_BATCH_DOT_BLEND) {
-            draw_aircraft_dot_batch(canvas, drawable, state.viewport.zoom, style)
+        state.dot_batch?.let { batch ->
+            val marker_blend = smoothed_aircraft_marker_dot_blend(batch.visible_count, state.viewport)
+            val draw_symbols = state.aircraft.isNotEmpty() && marker_blend < AIRCRAFT_BATCH_DOT_BLEND
+            if (draw_symbols) {
+                val dot_alpha = dense_batch_dot_alpha(marker_blend)
+                draw_aircraft_dot_batch(
+                    canvas = canvas,
+                    aircraft = state.aircraft,
+                    selected_aircraft_id = state.selected_aircraft_id,
+                    viewport = state.viewport,
+                    style = style,
+                    alpha_multiplier = dot_alpha,
+                    draw_selected_overlay = false
+                )
+                draw_aircraft_symbols(
+                    canvas = canvas,
+                    aircraft = state.aircraft,
+                    selected_aircraft_id = state.selected_aircraft_id,
+                    viewport = state.viewport,
+                    style = style,
+                    marker_blend = marker_blend,
+                    label_avoid_state = state,
+                    draw_internal_dot = false
+                )
+            } else {
+                draw_prepared_aircraft_dot_batch(canvas, batch, state.viewport, style)
+            }
             return
         }
-        drawable.forEachIndexed { index, drawable_item ->
+        val marker_blend = smoothed_aircraft_marker_dot_blend(state.aircraft.size, state.viewport)
+        if (marker_blend >= AIRCRAFT_BATCH_DOT_BLEND) {
+            draw_aircraft_dot_batch(canvas, state.aircraft, state.selected_aircraft_id, state.viewport, style)
+            return
+        }
+        draw_aircraft_symbols(
+            canvas = canvas,
+            aircraft = state.aircraft,
+            selected_aircraft_id = state.selected_aircraft_id,
+            viewport = state.viewport,
+            style = style,
+            marker_blend = marker_blend,
+            label_avoid_state = state,
+            draw_internal_dot = true
+        )
+    }
+
+    private fun draw_aircraft_symbols(
+        canvas: Canvas,
+        aircraft: List<TrafficAircraftOverlayState>,
+        selected_aircraft_id: String?,
+        viewport: Viewport,
+        style: TrafficOverlayStyle,
+        marker_blend: Float,
+        label_avoid_state: TrafficOverlayState,
+        draw_internal_dot: Boolean
+    ) {
+        val normalized_selected_id = normalized_selected_aircraft_id(selected_aircraft_id)
+        val label_count = label_aircraft_count(marker_blend, viewport.zoom)
+        var drawn_count = 0
+        for (item in aircraft) {
+            val selected = item.appearance_key == normalized_selected_id
+            val screen = item.screen_point
+            if (!is_on_screen(screen, viewport, aircraft_cull_padding(item, viewport.zoom, selected))) continue
             draw_aircraft_icon(
                 canvas = canvas,
-                x = drawable_item.screen.x,
-                y = drawable_item.screen.y,
-                item = drawable_item.item,
-                selected = drawable_item.selected,
+                x = screen.x,
+                y = screen.y,
+                item = item,
+                selected = selected,
                 marker_blend = marker_blend,
-                viewport_zoom = state.viewport.zoom,
-                style = style
+                viewport_zoom = viewport.zoom,
+                style = style,
+                draw_internal_dot = draw_internal_dot
             )
-            if (index < label_count) {
-                draw_aircraft_label(canvas, drawable_item.screen.x, drawable_item.screen.y, drawable_item.item, state, style)
+            if (drawn_count < label_count) {
+                draw_aircraft_label(canvas, screen.x, screen.y, item, label_avoid_state, style)
+            }
+            drawn_count++
+        }
+    }
+
+    private fun draw_prepared_aircraft_dot_batch(
+        canvas: Canvas,
+        batch: TrafficDotBatchOverlayState,
+        viewport: Viewport,
+        style: TrafficOverlayStyle,
+        alpha_multiplier: Float = 1f
+    ) {
+        val base_scale = aircraft_dot_scale(viewport.zoom)
+        val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
+        val outline_extra_px = batch_dot_outline_extra_px(base_scale)
+        val colors = style.visual_theme.colors
+        val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
+        val old_cap = paint.strokeCap
+        val transform_scale = batch.transform_scale.coerceAtLeast(0.001f)
+        val repeat_spacing_px = batch.repeat_x_spacing * transform_scale
+        val repeat_start = if (batch.repeat_x_spacing > 0f) -1 else 0
+        val repeat_end = if (batch.repeat_x_spacing > 0f) 1 else 0
+        val motion_elapsed_sec = if (batch.animate_motion && batch.built_elapsed_ms > 0L) {
+            ((SystemClock.elapsedRealtime() - batch.built_elapsed_ms) / 1000f).coerceIn(0f, MAX_BATCH_MOTION_SECONDS)
+        } else {
+            0f
+        }
+        val outline_draw_points = animated_batch_points(
+            points = batch.outline_points,
+            velocities = batch.outline_velocities,
+            motion_limits = batch.outline_motion_limits,
+            count = batch.outline_count,
+            elapsed_sec = motion_elapsed_sec,
+            scratch = animated_outline_points
+        ).also { animated_outline_points = it }
+        for (group in 0 until TrafficDotBatchOverlayState.GROUP_COUNT) {
+            val count = batch.fill_counts[group]
+            if (count == 0) continue
+            animated_fill_points[group] = animated_batch_points(
+                points = batch.fill_points[group],
+                velocities = batch.fill_velocities?.get(group),
+                motion_limits = batch.fill_motion_limits?.get(group),
+                count = count,
+                elapsed_sec = motion_elapsed_sec,
+                scratch = animated_fill_points[group]
+            )
+        }
+        for (repeat in repeat_start..repeat_end) {
+            val save_count = canvas.save()
+            canvas.translate(batch.translation_x + repeat_spacing_px * repeat, batch.translation_y)
+            canvas.scale(transform_scale, transform_scale)
+            try {
+                paint.style = Paint.Style.STROKE
+                paint.strokeCap = Paint.Cap.ROUND
+                if (batch.outline_count > 0) {
+                    paint.strokeWidth = (batch_radius_px * 2f + outline_extra_px) / transform_scale
+                    paint.color = with_alpha(colors.scrim, (150 * dot_alpha).round_to_int())
+                    canvas.drawPoints(outline_draw_points, 0, batch.outline_count, paint)
+                }
+                paint.strokeWidth = batch_radius_px * 2f / transform_scale
+                for (group in 0 until TrafficDotBatchOverlayState.GROUP_COUNT) {
+                    val count = batch.fill_counts[group]
+                    if (count == 0) continue
+                    paint.color = with_scaled_alpha(batch_dot_group_color(group, colors), dot_alpha)
+                    canvas.drawPoints(animated_fill_points[group], 0, count, paint)
+                }
+            } finally {
+                canvas.restoreToCount(save_count)
+                paint.strokeCap = old_cap
+                paint.alpha = 255
             }
         }
+        batch.selected_aircraft?.let { item ->
+            val appear = item.appearance_progress.coerceIn(0f, 1f)
+            val icon_scale = aircraft_dot_scale(viewport.zoom) *
+                item.symbol_scale *
+                (0.18f + 0.82f * appear)
+            draw_aircraft_dot(
+                canvas = canvas,
+                x = item.screen_point.x * transform_scale + batch.translation_x,
+                y = item.screen_point.y * transform_scale + batch.translation_y,
+                icon_scale = icon_scale,
+                appear = appear,
+                color = item.color,
+                selected = true,
+                selected_color = colors.accent_green,
+                scrim = colors.scrim
+            )
+        }
+    }
+
+    private fun animated_batch_points(
+        points: FloatArray,
+        velocities: FloatArray?,
+        motion_limits: FloatArray?,
+        count: Int,
+        elapsed_sec: Float,
+        scratch: FloatArray
+    ): FloatArray {
+        if (elapsed_sec <= 0f || velocities == null || velocities.size < count) return points
+        val animated_points = ensure_point_capacity(scratch, count)
+        var index = 0
+        while (index < count) {
+            val point_elapsed_sec = if (motion_limits != null && motion_limits.size > index) {
+                min(elapsed_sec, motion_limits[index].coerceAtLeast(0f))
+            } else {
+                elapsed_sec
+            }
+            animated_points[index] = points[index] + velocities[index] * point_elapsed_sec
+            animated_points[index + 1] = points[index + 1] + velocities[index + 1] * point_elapsed_sec
+            index += 2
+        }
+        return animated_points
     }
 
     private fun draw_aircraft_dot_batch(
         canvas: Canvas,
-        drawable: List<DrawableTraffic>,
-        viewport_zoom: Double,
-        style: TrafficOverlayStyle
+        aircraft: List<TrafficAircraftOverlayState>,
+        selected_aircraft_id: String?,
+        viewport: Viewport,
+        style: TrafficOverlayStyle,
+        alpha_multiplier: Float = 1f,
+        draw_selected_overlay: Boolean = true
     ) {
         reset_dot_batch_buffers()
-        var selected_item: DrawableTraffic? = null
-        val base_scale = max(aircraft_icon_scale(viewport_zoom), AIRCRAFT_DOT_SCALE_FLOOR)
+        var selected_item: TrafficAircraftOverlayState? = null
+        val normalized_selected_id = normalized_selected_aircraft_id(selected_aircraft_id)
+        val base_scale = aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
+        val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
-        drawable.forEach { item ->
-            if (item.selected) selected_item = item
-            add_outline_dot(item.screen.x, item.screen.y)
-            add_fill_dot(batch_dot_group(item.item.aircraft), item.screen.x, item.screen.y)
+        val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
+        for (item in aircraft) {
+            val selected = item.appearance_key == normalized_selected_id
+            val screen = item.screen_point
+            if (!is_on_screen(screen, viewport, aircraft_cull_padding(item, viewport.zoom, selected))) continue
+            if (selected) selected_item = item
+            add_outline_dot(screen.x, screen.y)
+            add_fill_dot(item.dot_group, screen.x, screen.y)
         }
 
         val old_cap = paint.strokeCap
         paint.style = Paint.Style.STROKE
         paint.strokeCap = Paint.Cap.ROUND
         if (dot_outline_count > 0) {
-            paint.strokeWidth = batch_radius_px * 2f + chrome.dp(2.2f)
-            paint.color = with_alpha(colors.scrim, 150)
+            paint.strokeWidth = batch_radius_px * 2f + outline_extra_px
+            paint.color = with_alpha(colors.scrim, (150 * dot_alpha).round_to_int())
             canvas.drawPoints(dot_outline_points, 0, dot_outline_count, paint)
         }
         paint.strokeWidth = batch_radius_px * 2f
         for (group in 0 until DOT_BATCH_GROUP_COUNT) {
             val count = dot_fill_counts[group]
             if (count == 0) continue
-            paint.color = batch_dot_group_color(group, colors)
+            paint.color = with_scaled_alpha(batch_dot_group_color(group, colors), dot_alpha)
             canvas.drawPoints(dot_fill_points[group], 0, count, paint)
         }
         paint.strokeCap = old_cap
         paint.alpha = 255
 
+        if (!draw_selected_overlay) return
         selected_item?.let { item ->
-            val aircraft = item.item.aircraft
-            val symbol = AircraftSymbolClassifier.symbol_for(aircraft)
-            val type_scale = AircraftSymbolClassifier.size_multiplier(aircraft, symbol)
-            val appear = item.item.appearance_progress.coerceIn(0f, 1f)
-            val icon_scale = max(aircraft_icon_scale(viewport_zoom), AIRCRAFT_DOT_SCALE_FLOOR) *
-                type_scale *
+            val appear = item.appearance_progress.coerceIn(0f, 1f)
+            val icon_scale = aircraft_dot_scale(viewport.zoom) *
+                item.symbol_scale *
                 (0.18f + 0.82f * appear)
             draw_aircraft_dot(
                 canvas = canvas,
-                x = item.screen.x,
-                y = item.screen.y,
+                x = item.screen_point.x,
+                y = item.screen_point.y,
                 icon_scale = icon_scale,
                 appear = appear,
-                color = item.item.color,
+                color = item.color,
                 selected = true,
                 selected_color = colors.accent_green,
                 scrim = colors.scrim
@@ -245,19 +455,18 @@ class TrafficOverlayRenderer(
         selected: Boolean,
         marker_blend: Float,
         viewport_zoom: Double,
-        style: TrafficOverlayStyle
+        style: TrafficOverlayStyle,
+        draw_internal_dot: Boolean
     ) {
         val blend = marker_blend.coerceIn(0f, 1f)
         val appear = item.appearance_progress.coerceIn(0f, 1f)
-        val shape_progress = smooth_step(0f, 1f, 1f - blend)
+        val shape_progress = AircraftMarkerMorph.shape_progress(blend)
         val enter_scale = 0.18f + 0.82f * appear
         val alpha = (appear * 255).toInt().coerceIn(0, 255)
-        val symbol = AircraftSymbolClassifier.symbol_for(item.aircraft)
-        val type_scale = AircraftSymbolClassifier.size_multiplier(item.aircraft, symbol)
-        val icon_scale = max(
-            aircraft_icon_scale(viewport_zoom),
-            AIRCRAFT_DOT_SCALE_FLOOR * blend
-        ) * type_scale * enter_scale
+        val symbol = item.symbol
+        val type_scale = item.symbol_scale
+        val base_icon_scale = AircraftMarkerMorph.blended_icon_scale(viewport_zoom, blend)
+        val icon_scale = base_icon_scale * type_scale * enter_scale
         val colors = style.visual_theme.colors
         if (blend >= AIRCRAFT_FAST_DOT_BLEND) {
             draw_aircraft_dot(canvas, x, y, icon_scale, appear, item.color, selected, colors.accent_green, colors.scrim)
@@ -284,20 +493,103 @@ class TrafficOverlayRenderer(
                 canvas.drawCircle(x, y, chrome.dp(11f + 13f * shape_progress) * icon_scale, stroke_paint)
             }
 
-            canvas.withTranslation(x, y) {
-                scale(icon_scale, icon_scale)
-                if (item.aircraft.track_deg != null && symbol != AircraftSymbol.SURFACE) {
-                    rotate(item.aircraft.track_deg.toFloat())
+            if (!draw_internal_dot) {
+                draw_cached_aircraft_symbol(
+                    canvas = canvas,
+                    x = x,
+                    y = y,
+                    symbol = symbol,
+                    track_deg = item.aircraft.track_deg,
+                    icon_scale = icon_scale,
+                    shape_progress = shape_progress,
+                    fill = with_alpha(item.color, alpha),
+                    stroke = with_alpha(colors.scrim, (235 * appear).toInt().coerceIn(0, 235))
+                )
+            } else {
+                canvas.withTranslation(x, y) {
+                    scale(icon_scale, icon_scale)
+                    if (item.aircraft.track_deg != null && symbol != AircraftSymbol.SURFACE) {
+                        rotate(item.aircraft.track_deg.toFloat())
+                    }
+                    paint.color = with_alpha(item.color, alpha)
+                    stroke_paint.style = Paint.Style.STROKE
+                    stroke_paint.color = with_alpha(colors.scrim, (235 * appear).toInt().coerceIn(0, 235))
+                    stroke_paint.strokeWidth = chrome.dp(1.2f)
+                    AircraftSymbolRenderer.draw(this, symbol, shape_progress, paint, stroke_paint, chrome::dp)
                 }
-                paint.color = with_alpha(item.color, alpha)
-                stroke_paint.style = Paint.Style.STROKE
-                stroke_paint.color = with_alpha(colors.scrim, (235 * appear).toInt().coerceIn(0, 235))
-                stroke_paint.strokeWidth = chrome.dp(1.2f)
-                AircraftSymbolRenderer.draw(this, symbol, shape_progress, paint, stroke_paint, chrome::dp)
             }
         }
         paint.alpha = 255
         stroke_paint.alpha = 255
+    }
+
+    private fun draw_cached_aircraft_symbol(
+        canvas: Canvas,
+        x: Float,
+        y: Float,
+        symbol: AircraftSymbol,
+        track_deg: Double?,
+        icon_scale: Float,
+        shape_progress: Float,
+        fill: Int,
+        stroke: Int
+    ) {
+        val mask = aircraft_symbol_mask(symbol, shape_progress)
+        canvas.withTranslation(x, y) {
+            scale(icon_scale, icon_scale)
+            if (track_deg != null && symbol != AircraftSymbol.SURFACE) {
+                rotate(track_deg.toFloat())
+            }
+            val left = -mask.fill.width / 2f
+            val top = -mask.fill.height / 2f
+            symbol_mask_paint.color = fill
+            drawBitmap(mask.fill, left, top, symbol_mask_paint)
+            symbol_mask_paint.color = stroke
+            drawBitmap(mask.stroke, left, top, symbol_mask_paint)
+        }
+        symbol_mask_paint.alpha = 255
+    }
+
+    private fun aircraft_symbol_mask(symbol: AircraftSymbol, shape_progress: Float): AircraftSymbolMask {
+        val size_px = chrome.dp(SYMBOL_MASK_SIZE_DP).round_to_int().coerceAtLeast(1)
+        val progress_bucket = (shape_progress.coerceIn(0f, 1f) * SYMBOL_MASK_PROGRESS_STEPS)
+            .round_to_int()
+            .coerceIn(0, SYMBOL_MASK_PROGRESS_STEPS)
+        val key = AircraftSymbolMaskKey(symbol, progress_bucket, size_px)
+        symbol_mask_cache[key]?.let { return it }
+        val progress = progress_bucket / SYMBOL_MASK_PROGRESS_STEPS.toFloat()
+        val fill = Bitmap.createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
+        val stroke = Bitmap.createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
+        val fill_canvas = Canvas(fill)
+        val stroke_canvas = Canvas(stroke)
+        val center = size_px / 2f
+        val fill_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.WHITE
+        }
+        val transparent_fill_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.TRANSPARENT
+        }
+        val stroke_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = chrome.dp(1.2f)
+            color = Color.WHITE
+        }
+        val transparent_stroke_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = chrome.dp(1.2f)
+            color = Color.TRANSPARENT
+        }
+        fill_canvas.withTranslation(center, center) {
+            AircraftSymbolRenderer.draw(this, symbol, progress, fill_paint, transparent_stroke_paint, chrome::dp)
+        }
+        stroke_canvas.withTranslation(center, center) {
+            AircraftSymbolRenderer.draw(this, symbol, progress, transparent_fill_paint, stroke_paint, chrome::dp)
+        }
+        val mask = AircraftSymbolMask(fill, stroke)
+        symbol_mask_cache[key] = mask
+        return mask
     }
 
     private fun draw_aircraft_dot(
@@ -313,7 +605,7 @@ class TrafficOverlayRenderer(
     ) {
         val alpha = (appear * 255).toInt().coerceIn(0, 255)
         if (alpha <= 4) return
-        val radius = chrome.dp(5.3f) * icon_scale
+        val radius = chrome.dp(AIRCRAFT_DOT_RADIUS_DP) * icon_scale
         paint.style = Paint.Style.FILL
         paint.color = with_alpha(scrim, (112 * appear).toInt().coerceIn(0, 112))
         canvas.drawCircle(x + chrome.dp(1.5f) * icon_scale, y + chrome.dp(1.5f) * icon_scale, radius + chrome.dp(1.3f), paint)
@@ -647,37 +939,14 @@ class TrafficOverlayRenderer(
         }
     }
 
-    // Smoothly morph dense/zoomed-out traffic into dots without popping through the wrong intermediate shape.
+    // The zoom curve already eases the morph; following it directly keeps quick pinches visually locked to the map.
     private fun smoothed_aircraft_marker_dot_blend(visible_count: Int, viewport: Viewport): Float {
-        val target = aircraft_marker_dot_blend(visible_count, viewport)
-        val now = SystemClock.elapsedRealtime()
-        val last = last_marker_blend_frame_ms
-        last_marker_blend_frame_ms = now
-        if (last == 0L) {
-            marker_dot_blend = target
-            return marker_dot_blend
-        }
-
-        val dt = (now - last).coerceIn(0L, 50L).toFloat() / 1000f
-        val max_step = AIRCRAFT_MARKER_BLEND_UNITS_PER_SEC * dt
-        marker_dot_blend = when {
-            target > marker_dot_blend -> min(target, marker_dot_blend + max_step)
-            target < marker_dot_blend -> max(target, marker_dot_blend - max_step)
-            else -> marker_dot_blend
-        }
-        if (abs(marker_dot_blend - target) > 0.001f) {
-            chrome.request_animation_frame()
-        }
-        return marker_dot_blend
+        return aircraft_marker_dot_blend(visible_count, viewport)
     }
 
     // Blend toward dot markers when the map is zoomed out or traffic density is too high for labels.
     private fun aircraft_marker_dot_blend(count: Int, viewport: Viewport): Float {
-        val zoom_dot_blend = 1f - smooth_step(AIRCRAFT_DOT_ZOOM_FULL, AIRCRAFT_DOT_ZOOM_SYMBOL, viewport.zoom.toFloat())
-        val density_per_ten_thousand_px = count / max(1f, viewport.width * viewport.height / 10000f)
-        val density_dot_blend = smooth_step(AIRCRAFT_DOT_DENSITY_START, AIRCRAFT_DOT_DENSITY_FULL, density_per_ten_thousand_px)
-        val combined_blend = 1f - (1f - zoom_dot_blend) * (1f - density_dot_blend)
-        return smooth_step(0f, 1f, combined_blend)
+        return AircraftMarkerMorph.marker_dot_blend(count, viewport)
     }
 
     // Labels are intentionally limited so nearby aircraft remain visible and touch targets stay clear.
@@ -692,13 +961,24 @@ class TrafficOverlayRenderer(
     }
 
     private fun aircraft_icon_scale(zoom: Double): Float {
-        val zoom_progress = smooth_step(AIRCRAFT_SCALE_ZOOM_MIN, AIRCRAFT_SCALE_ZOOM_MAX, zoom.toFloat())
-        return AIRCRAFT_SCALE_MIN + (AIRCRAFT_SCALE_MAX - AIRCRAFT_SCALE_MIN) * zoom_progress
+        return AircraftMarkerMorph.aircraft_icon_scale(zoom)
+    }
+
+    private fun aircraft_dot_scale(zoom: Double): Float {
+        return AircraftMarkerMorph.aircraft_dot_scale(zoom)
+    }
+
+    private fun batch_dot_outline_extra_px(dot_scale: Float): Float {
+        return chrome.dp(BATCH_DOT_OUTLINE_EXTRA_DP) * AircraftMarkerMorph.batch_dot_outline_scale(dot_scale)
+    }
+
+    private fun dense_batch_dot_alpha(marker_blend: Float): Float {
+        return AircraftMarkerMorph.dense_batch_dot_alpha(marker_blend)
     }
 
     private fun aircraft_cull_padding(item: TrafficAircraftOverlayState, zoom: Double, selected: Boolean): Float {
-        val symbol = AircraftSymbolClassifier.symbol_for(item.aircraft)
-        val type_scale = AircraftSymbolClassifier.size_multiplier(item.aircraft, symbol)
+        val symbol = item.symbol
+        val type_scale = item.symbol_scale
         val shape_radius_dp = when (symbol) {
             AircraftSymbol.GLIDER -> 31f
             AircraftSymbol.AIRLINER -> 29f
@@ -708,12 +988,12 @@ class TrafficOverlayRenderer(
             AircraftSymbol.GENERAL_AVIATION -> 25f
         }
         val selected_ring_dp = if (selected) 17f else 0f
-        val max_icon_scale = max(aircraft_icon_scale(zoom), AIRCRAFT_DOT_SCALE_FLOOR)
+        val max_icon_scale = max(aircraft_dot_scale(zoom), aircraft_icon_scale(zoom))
         return chrome.dp((shape_radius_dp + selected_ring_dp) * type_scale * max_icon_scale + AIRCRAFT_CULL_EXTRA_DP)
     }
 
     private fun normalized_selected_aircraft_id(id: String?): String? {
-        return id?.trim()?.trimStart('~')?.lowercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { "hex:$it" }
+        return id?.trim()?.lowercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { "hex:$it" }
     }
 
     private fun screen_point(point: GeoPoint, viewport: Viewport): ScreenPoint {
@@ -751,32 +1031,24 @@ class TrafficOverlayRenderer(
         return Color.argb(alpha.coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
     }
 
-    private fun batch_dot_group(aircraft: Aircraft): Int {
-        if (aircraft.is_military) return DOT_GROUP_MILITARY
-        val altitude_feet = aircraft.altitude_m?.times(FEET_PER_METER)
-        return when {
-            altitude_feet == null -> DOT_GROUP_UNKNOWN
-            altitude_feet < 5000.0 -> DOT_GROUP_LOW
-            altitude_feet < 25000.0 -> DOT_GROUP_MID
-            else -> DOT_GROUP_HIGH
-        }
+    private fun with_scaled_alpha(color: Int, multiplier: Float): Int {
+        return Color.argb(
+            (Color.alpha(color) * multiplier.coerceIn(0f, 1f)).round_to_int().coerceIn(0, 255),
+            Color.red(color),
+            Color.green(color),
+            Color.blue(color)
+        )
     }
 
     private fun batch_dot_group_color(group: Int, colors: ThemeColors): Int {
         return when (group) {
-            DOT_GROUP_LOW -> colors.danger
-            DOT_GROUP_MID -> colors.accent_green
-            DOT_GROUP_HIGH -> colors.accent_blue
-            DOT_GROUP_MILITARY -> colors.military
+            TrafficDotBatchOverlayState.GROUP_LOW -> colors.danger
+            TrafficDotBatchOverlayState.GROUP_MID -> colors.accent_green
+            TrafficDotBatchOverlayState.GROUP_HIGH -> colors.accent_blue
+            TrafficDotBatchOverlayState.GROUP_MILITARY -> colors.military
             else -> colors.muted
         }
     }
-
-    private data class DrawableTraffic(
-        val item: TrafficAircraftOverlayState,
-        val screen: ScreenPoint,
-        val selected: Boolean
-    )
 
     private data class TrafficAircraftLabelStyle(
         val fill: Int,
@@ -788,29 +1060,35 @@ class TrafficOverlayRenderer(
         val stroke_width_dp: Float
     )
 
+    private data class AircraftSymbolMaskKey(
+        val symbol: AircraftSymbol,
+        val progress_bucket: Int,
+        val size_px: Int
+    )
+
+    private data class AircraftSymbolMask(
+        val fill: Bitmap,
+        val stroke: Bitmap
+    ) {
+        fun recycle() {
+            fill.recycle()
+            stroke.recycle()
+        }
+    }
+
     private companion object {
         const val LABEL_AIRCRAFT_COUNT = 4
-        const val AIRCRAFT_SCALE_ZOOM_MIN = 6.4f
-        const val AIRCRAFT_SCALE_ZOOM_MAX = 12.2f
-        const val AIRCRAFT_SCALE_MIN = 0.38f
-        const val AIRCRAFT_SCALE_MAX = 1.0f
-        const val AIRCRAFT_DOT_SCALE_FLOOR = 0.7f
-        const val AIRCRAFT_DOT_ZOOM_FULL = 6.0f
-        const val AIRCRAFT_DOT_ZOOM_SYMBOL = 10.0f
-        const val AIRCRAFT_DOT_DENSITY_START = 0.75f
-        const val AIRCRAFT_DOT_DENSITY_FULL = 2.4f
-        const val AIRCRAFT_MARKER_BLEND_UNITS_PER_SEC = 4.2f
         const val AIRCRAFT_CULL_EXTRA_DP = 24f
         const val AIRCRAFT_FAST_DOT_BLEND = 0.995f
         const val AIRCRAFT_BATCH_DOT_BLEND = 0.995f
-        const val DRAWABLE_AIRCRAFT_INITIAL_CAPACITY = 2048
-        const val BATCH_DOT_RADIUS_DP = 4.15f
-        const val DOT_GROUP_LOW = 0
-        const val DOT_GROUP_MID = 1
-        const val DOT_GROUP_HIGH = 2
-        const val DOT_GROUP_MILITARY = 3
-        const val DOT_GROUP_UNKNOWN = 4
-        const val DOT_BATCH_GROUP_COUNT = 5
-        const val FEET_PER_METER = 3.28084
+        const val MAX_BATCH_MOTION_SECONDS = 10f * 60f
+        const val AIRCRAFT_DOT_RADIUS_DP = 3.6f
+        const val BATCH_DOT_RADIUS_DP = AIRCRAFT_DOT_RADIUS_DP
+        const val BATCH_DOT_OUTLINE_EXTRA_DP = 1.25f
+        const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
+        const val SYMBOL_MASK_SIZE_DP = 72f
+        const val SYMBOL_MASK_PROGRESS_STEPS = 48
+        const val SYMBOL_MASK_CACHE_MAX_ENTRIES = 384
+        const val DOT_BATCH_GROUP_COUNT = TrafficDotBatchOverlayState.GROUP_COUNT
     }
 }

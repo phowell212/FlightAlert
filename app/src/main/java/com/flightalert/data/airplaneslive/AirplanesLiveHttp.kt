@@ -5,6 +5,7 @@ import java.net.HttpURLConnection
 internal object AirplanesLiveHttp {
     const val GLOBE_BASE_URL = "https://globe.airplanes.live"
     const val API_BASE_URL = "https://api.airplanes.live/v2"
+    const val STATIC_DB_BASE_URL = "https://static.airplanes.live/db"
 
     private const val BROWSER_USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +

@@ -5,3 +5,8 @@
 /local.properties
 /*.png
 /.idea/markdown.xml
+/tools/perf/classes/
+/tools/perf/dex/
+/tools/perf/mtclasses/
+/tools/perf/mtdex/
+/tools/perf/out/

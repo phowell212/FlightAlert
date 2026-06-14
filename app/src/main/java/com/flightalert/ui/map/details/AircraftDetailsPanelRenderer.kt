@@ -30,7 +30,9 @@ data class AircraftDetailsRow(
 
 data class AircraftDetailsPhotoState(
     val bitmap: Bitmap?,
-    val status: String
+    val status: String,
+    val previous_bitmap: Bitmap? = null,
+    val transition_progress: Float = 1f
 )
 
 data class AircraftDetailsPanelState(
@@ -638,9 +640,19 @@ class AircraftDetailsPanelRenderer(
         val radius = chrome.control_radius().coerceAtMost(dp(10))
         canvas.drawRoundRect(photo_rect, radius, radius, paint)
         val bitmap = photo.bitmap
+        paint.alpha = 255
         if (bitmap != null) {
-            val src = Rect(0, 0, bitmap.width, bitmap.height)
-            canvas.drawBitmap(bitmap, src, aspect_fit_rect(bitmap.width, bitmap.height, photo_rect), paint)
+            val previous = photo.previous_bitmap
+            val progress = photo.transition_progress.coerceIn(0f, 1f)
+            if (previous != null && progress < 0.999f) {
+                val eased = progress * progress * (3f - 2f * progress)
+                canvas.withClip(photo_rect) {
+                    draw_photo_bitmap(canvas, previous, photo_rect, -photo_rect.width() * eased * 0.42f)
+                    draw_photo_bitmap(canvas, bitmap, photo_rect, photo_rect.width() * (1f - eased))
+                }
+            } else {
+                draw_photo_bitmap(canvas, bitmap, photo_rect)
+            }
             draw_photo_caption(canvas, photo_rect, photo.status, style)
         } else {
             text_paint.textAlign = Paint.Align.CENTER
@@ -648,6 +660,13 @@ class AircraftDetailsPanelRenderer(
             text_paint.color = style.visual_theme.colors.muted
             draw_centered_wrapped_text(canvas, photo.status, photo_rect.inset_copy(dp(14), dp(8)))
         }
+    }
+
+    private fun draw_photo_bitmap(canvas: Canvas, bitmap: Bitmap, photo_rect: RectF, offset_x: Float = 0f) {
+        val src = Rect(0, 0, bitmap.width, bitmap.height)
+        val dest = aspect_fit_rect(bitmap.width, bitmap.height, photo_rect)
+        dest.offset(offset_x, 0f)
+        canvas.drawBitmap(bitmap, src, dest, paint)
     }
 
     // Draw one metadata row with wrapping and clipping so long values do not overlap nearby content.

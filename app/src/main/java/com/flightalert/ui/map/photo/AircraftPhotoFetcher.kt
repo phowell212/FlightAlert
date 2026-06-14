@@ -4,11 +4,13 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.flightalert.data.AircraftDetails
 import com.flightalert.data.airplaneslive.AirplanesLiveHttp
-import com.flightalert.data.web.GlobePhotoHint
 import com.flightalert.ui.map.Aircraft
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.LinkedHashMap
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
@@ -17,28 +19,14 @@ import org.json.JSONObject
 
 // Finds aircraft photos in an honesty ladder: exact first, labeled representative next, investigable last.
 class AircraftPhotoFetcher(private val user_agent: String) {
-    // Use the globe page's selected-aircraft photo only when the real image URL can be fetched.
-    fun fetch_globe_hint(hint: GlobePhotoHint): AircraftPhotoResult? {
-        val bitmap = fetch_bitmap(
-            url = hint.image_url,
-            referer = hint.page_url ?: AirplanesLiveHttp.GLOBE_BASE_URL
-        ) ?: return null
-        val photographer = hint.photographer?.takeIf { it.isNotBlank() }
-        val note = listOfNotNull(
-            "Exact aircraft photo from Globe selected pane",
-            photographer?.let { "image credit $it" }
-        ).joinToString("; ")
-        val evidence = hint.page_url?.let { page_url ->
-            PhotoEvidence(
-                source_name = hint.source_name,
-                image_url = hint.image_url,
-                page_url = page_url,
-                search_query = "Globe selected aircraft photo",
-                quote = photographer?.let { "Globe selected pane credited image to $it." } ?: "Globe selected pane returned this image URL for the selected aircraft.",
-                matched_terms = emptyList()
-            )
+    private val photo_cache = object : LinkedHashMap<String, CachedPhotoResult>(
+        PHOTO_CACHE_MAX_ENTRIES,
+        0.75f,
+        true
+    ) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedPhotoResult>): Boolean {
+            return size > PHOTO_CACHE_MAX_ENTRIES
         }
-        return AircraftPhotoResult.Found(bitmap, note, evidence, PhotoQuality.EXACT)
     }
 
     // Public photo lookup tries exact aircraft sources before any labeled fallback.
@@ -50,16 +38,22 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     // Exact photos require an aircraft identifier or matching registration from documented photo sources.
     fun fetch_exact_aircraft_photo(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult.Found? {
         val registration = normalized_registration(details.registration ?: aircraft.registration)
+        val cache_key = exact_photo_cache_key(aircraft, details, registration)
+        cached_photo(cache_key)?.let { return it }
+
+        fun found(photo: AircraftPhotoResult.Found): AircraftPhotoResult.Found {
+            cache_photo(cache_key, photo)
+            return photo
+        }
+
         fetch_adsb_db_photo_candidates(aircraft.icao24, registration).forEach { candidate ->
             fetch_bitmap(candidate.image_url, candidate.page_url)?.let { bitmap ->
-                return found_exact_photo(bitmap, candidate)
+                return found(found_exact_photo(bitmap, candidate))
             }
         }
-        if (registration != null) {
-            fetch_jet_photos_exact_candidates(registration).forEach { candidate ->
-                fetch_bitmap(candidate.image_url, candidate.page_url)?.let { bitmap ->
-                    return found_exact_photo(bitmap, candidate)
-                }
+        fetch_planespotters_selected_candidates(aircraft.icao24, registration, details.type_code ?: aircraft.type_code).forEach { candidate ->
+            fetch_bitmap(candidate.image_url, candidate.page_url)?.let { bitmap ->
+                return found(found_exact_photo(bitmap, candidate))
             }
         }
         val exact_sources = listOfNotNull(
@@ -69,19 +63,28 @@ class AircraftPhotoFetcher(private val user_agent: String) {
         exact_sources.forEach { api_url ->
             fetch_planespotters_photo_candidate(api_url)?.let { candidate ->
                 fetch_bitmap(candidate.image_url, candidate.page_url)?.let { bitmap ->
-                    return found_exact_photo(bitmap, candidate)
+                    return found(found_exact_photo(bitmap, candidate))
+                }
+            }
+        }
+        if (registration != null) {
+            fetch_jet_photos_exact_candidates(registration).forEach { candidate ->
+                fetch_bitmap(candidate.image_url, candidate.page_url)?.let { bitmap ->
+                    return found(found_exact_photo(bitmap, candidate))
                 }
             }
         }
         val hex_image_url = "https://hexdb.io/hex-image-thumb?hex=${aircraft.icao24.trim()}"
         fetch_bitmap(hex_image_url)?.let { bitmap ->
-            return found_exact_photo(
-                bitmap,
-                ExactPhotoCandidate(
-                    image_url = hex_image_url,
-                    source_name = "HexDB",
-                    page_url = hex_image_url,
-                    note = "Exact aircraft photo from HexDB"
+            return found(
+                found_exact_photo(
+                    bitmap,
+                    ExactPhotoCandidate(
+                        image_url = hex_image_url,
+                        source_name = "HexDB",
+                        page_url = hex_image_url,
+                        note = "Exact aircraft photo from HexDB"
+                    )
                 )
             )
         }
@@ -90,32 +93,25 @@ class AircraftPhotoFetcher(private val user_agent: String) {
 
     // Fallback photos must stay labeled as representative, verified search, or investigable search.
     fun fetch_fallback_photo(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult {
-        return fetch_representative_photo(details)
+        val cache_key = fallback_photo_cache_key(aircraft, details)
+        cached_photo(cache_key)?.let { return it }
+        val photo = fetch_representative_photo(details)
             ?: fetch_verified_generic_search_photo(aircraft, details)
             ?: fetch_investigable_search_photo(aircraft, details)
             ?: AircraftPhotoResult.Unavailable("Exact, representative, and search photos unavailable")
+        if (photo is AircraftPhotoResult.Found) cache_photo(cache_key, photo)
+        return photo
     }
 
     fun fetch_gallery(
         aircraft: Aircraft,
-        details: AircraftDetails,
-        globe_hint: GlobePhotoHint?,
-        mode: AircraftPhotoGalleryMode
+        details: AircraftDetails
     ): List<AircraftPhotoGalleryItem> {
         val items = mutableListOf<AircraftPhotoGalleryItem>()
-        if (mode != AircraftPhotoGalleryMode.WEB_ONLY) {
-            fetch_exact_aircraft_photo(aircraft, details)?.let {
-                items += it.to_gallery_item("Exact exterior", AircraftPhotoViewType.EXTERIOR)
-            }
+        fetch_exact_aircraft_photo(aircraft, details)?.let {
+            items += it.to_gallery_item("Exact exterior", AircraftPhotoViewType.EXTERIOR)
         }
-        globe_hint?.let { hint ->
-            (fetch_globe_hint(hint) as? AircraftPhotoResult.Found)?.let {
-                items += it.to_gallery_item("Globe exterior", AircraftPhotoViewType.EXTERIOR)
-            }
-        }
-        if (mode != AircraftPhotoGalleryMode.WEB_ONLY) {
-            items += fetch_representative_gallery_items(aircraft, details)
-        }
+        items += fetch_representative_gallery_items(aircraft, details)
         return items.distinctBy { it.evidence?.image_url ?: "${it.title}:${it.caption}" }.take(MAX_GALLERY_ITEMS)
     }
 
@@ -197,6 +193,47 @@ class AircraftPhotoFetcher(private val user_agent: String) {
         } finally {
             connection?.disconnect()
         }
+    }
+
+    // This mirrors tar1090's selected-aircraft photo query using direct HTTP.
+    private fun fetch_planespotters_selected_candidates(
+        icao24: String,
+        registration: String?,
+        type_code: String?
+    ): List<ExactPhotoCandidate> {
+        val hex = icao24.trim().trimStart('~').uppercase(Locale.US).takeIf { MODE_S_HEX.matches(it) } ?: return emptyList()
+        val url = StringBuilder("https://api.planespotters.net/pub/photos/hex/$hex")
+        val params = mutableListOf<String>()
+        registration?.takeIf { it.isNotBlank() }?.let { params += "reg=${URLEncoder.encode(it, "UTF-8")}" }
+        type_code?.trim()?.takeIf { it.isNotBlank() }?.let { params += "icaoType=${URLEncoder.encode(it, "UTF-8")}" }
+        if (params.isNotEmpty()) url.append("?").append(params.joinToString("&"))
+        val json = fetch_json_object(url.toString()) ?: return emptyList()
+        val photos = json.optJSONArray("photos") ?: json.optJSONArray("images") ?: return emptyList()
+        val candidates = mutableListOf<ExactPhotoCandidate>()
+            for (index in 0 until photos.length()) {
+                val photo = photos.optJSONObject(index) ?: continue
+                if (!is_exterior_candidate_text(photo.toString())) continue
+                val image_url = photo.optJSONObject("thumbnail")?.optString("src")?.takeIf { it.startsWith("https://", ignoreCase = true) }
+                    ?: photo.optString("thumbnail").takeIf { it.startsWith("https://", ignoreCase = true) }
+                    ?: photo.optString("image").takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?: photo.optString("imageUrl").takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?: continue
+            if (!is_allowed_https_image_url(image_url)) continue
+            val page_url = photo.optString("link").takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?: photo.optString("url").takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?: url.toString()
+            val photographer = photo.optString("photographer").trim().ifEmpty { photo.optString("user").trim() }
+            candidates += ExactPhotoCandidate(
+                image_url = image_url,
+                source_name = "PlaneSpotters",
+                page_url = page_url,
+                note = listOfNotNull(
+                    "Exact aircraft photo from PlaneSpotters",
+                    photographer.takeIf { it.isNotBlank() }?.let { "image credit $it" }
+                ).joinToString("; ")
+            )
+        }
+        return candidates.distinctBy { it.image_url }
     }
 
     // Representative photos are only same make/model examples and are labeled as not this exact aircraft.
@@ -670,12 +707,52 @@ class AircraftPhotoFetcher(private val user_agent: String) {
             if (!content_type.startsWith("image/", ignoreCase = true) && !IMAGE_URL_PATTERN.containsMatchIn(url)) {
                 return null
             }
-            BitmapFactory.decodeStream(connection.inputStream)
+            val bytes = read_image_bytes(connection.inputStream) ?: return null
+            decode_display_photo(bytes)
         } catch (_: Exception) {
             null
         } finally {
             connection?.disconnect()
         }
+    }
+
+    private fun read_image_bytes(input: InputStream): ByteArray? {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(16 * 1024)
+        var total = 0
+        input.use { stream ->
+            while (true) {
+                val read = stream.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > MAX_PHOTO_IMAGE_BYTES) return null
+                output.write(buffer, 0, read)
+            }
+        }
+        return output.toByteArray().takeIf { it.isNotEmpty() }
+    }
+
+    private fun decode_display_photo(bytes: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = photo_sample_size(bounds.outWidth, bounds.outHeight)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }
+
+    private fun photo_sample_size(width: Int, height: Int): Int {
+        var sample_size = 1
+        var sampled_width = width
+        var sampled_height = height
+        while (max(sampled_width, sampled_height) > PHOTO_DECODE_MAX_EDGE_PX) {
+            sample_size *= 2
+            sampled_width /= 2
+            sampled_height /= 2
+        }
+        return sample_size
     }
 
     // Walk nested photo API responses without assuming a specific field name for the first image.
@@ -738,7 +815,54 @@ class AircraftPhotoFetcher(private val user_agent: String) {
             ?.takeIf { it.isNotBlank() && it != "NA" }
     }
 
+    private fun exact_photo_cache_key(
+        aircraft: Aircraft,
+        details: AircraftDetails,
+        registration: String?
+    ): String {
+        return listOf(
+            "exact",
+            aircraft.icao24.trim().trimStart('~').uppercase(Locale.US),
+            registration.orEmpty(),
+            (details.type_code ?: aircraft.type_code).orEmpty().uppercase(Locale.US)
+        ).joinToString("|")
+    }
+
+    private fun fallback_photo_cache_key(aircraft: Aircraft, details: AircraftDetails): String {
+        return listOf(
+            "fallback",
+            aircraft.icao24.trim().trimStart('~').uppercase(Locale.US),
+            normalized_registration(details.registration ?: aircraft.registration).orEmpty(),
+            details.manufacturer.orEmpty().uppercase(Locale.US),
+            details.type.orEmpty().uppercase(Locale.US),
+            (details.type_code ?: aircraft.type_code).orEmpty().uppercase(Locale.US)
+        ).joinToString("|")
+    }
+
+    private fun cached_photo(key: String): AircraftPhotoResult.Found? {
+        val now = System.currentTimeMillis()
+        return synchronized(photo_cache) {
+            val cached = photo_cache[key] ?: return@synchronized null
+            if (now - cached.stored_at_ms > PHOTO_CACHE_MAX_AGE_MS) {
+                photo_cache.remove(key)
+                null
+            } else {
+                cached.photo
+            }
+        }
+    }
+
+    private fun cache_photo(key: String, photo: AircraftPhotoResult.Found) {
+        synchronized(photo_cache) {
+            photo_cache[key] = CachedPhotoResult(photo, System.currentTimeMillis())
+        }
+    }
+
     private companion object {
+        const val PHOTO_CACHE_MAX_ENTRIES = 32
+        const val PHOTO_CACHE_MAX_AGE_MS = 15L * 60L * 1000L
+        const val PHOTO_DECODE_MAX_EDGE_PX = 1200
+        const val MAX_PHOTO_IMAGE_BYTES = 8 * 1024 * 1024
         const val MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY = 4
         const val MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY = 5
         const val MAX_GALLERY_CANDIDATES_PER_QUERY = 4
@@ -756,13 +880,8 @@ class AircraftPhotoFetcher(private val user_agent: String) {
         val AIRCRAFT_TEXT = Regex("\\b(aircraft|airplane|aeroplane|airliner|jet|helicopter|rotorcraft)\\b", RegexOption.IGNORE_CASE)
         val COCKPIT_TEXT = Regex("\\b(cockpit|flight\\s*deck)\\b", RegexOption.IGNORE_CASE)
         val INTERIOR_TEXT = Regex("\\b(interior|cabin|seat|seats|seating|lavatory)\\b", RegexOption.IGNORE_CASE)
+        val MODE_S_HEX = Regex("^[0-9A-F]{6}$")
     }
-}
-
-enum class AircraftPhotoGalleryMode {
-    API_ONLY,
-    WEB_ONLY,
-    HYBRID
 }
 
 private data class ExactPhotoCandidate(
@@ -770,4 +889,9 @@ private data class ExactPhotoCandidate(
     val source_name: String,
     val page_url: String,
     val note: String
+)
+
+private data class CachedPhotoResult(
+    val photo: AircraftPhotoResult.Found,
+    val stored_at_ms: Long
 )

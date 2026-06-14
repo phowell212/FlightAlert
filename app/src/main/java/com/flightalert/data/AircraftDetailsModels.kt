@@ -29,6 +29,7 @@ data class AircraftDetails(
 
 object AircraftRouteSource {
     const val ADSBDB_CALLSIGN = "ADSBdb callsign"
+    const val ADSBIM_ROUTESET = "adsb.im routeset"
     const val HEXDB_CALLSIGN = "HexDB callsign"
 }
 

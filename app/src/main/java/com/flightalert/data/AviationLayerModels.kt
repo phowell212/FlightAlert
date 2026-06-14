@@ -61,6 +61,8 @@ data class AviationAirspaceFeature(
     val lower_limit: String?,
     val upper_limit: String?,
     val schedule: String?,
+    val city: String?,
+    val state: String?,
     val rings: List<List<AviationLayerPoint>>,
     val bounds: AviationGeoBounds
 )

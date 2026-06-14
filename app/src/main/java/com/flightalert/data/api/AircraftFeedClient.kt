@@ -375,7 +375,7 @@ class AircraftFeedClient(private val user_agent: String) {
             val item = rows.optJSONObject(index) ?: continue
             val lat = item.opt_double_or_null("lat") ?: item.optJSONObject("lastPosition")?.opt_double_or_null("lat") ?: continue
             val lon = item.opt_double_or_null("lon") ?: item.optJSONObject("lastPosition")?.opt_double_or_null("lon") ?: continue
-            val icao24 = item.optString("hex").trim().trimStart('~').lowercase(Locale.US)
+            val icao24 = item.optString("hex").trim().lowercase(Locale.US)
             val callsign = item.optString("flight").trim().ifEmpty { item.optString("r").trim().ifEmpty { icao24.ifEmpty { "Unknown" } } }
             val type_code = item.optString("t").trim().ifEmpty { null }
             val altitude_feet = item.opt_altitude_feet("alt_baro") ?: item.opt_altitude_feet("alt_geom")

@@ -1,15 +1,17 @@
 package com.flightalert
 
 import android.Manifest
+import android.content.res.Configuration
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.os.Bundle
-import android.view.ViewGroup
-import android.widget.FrameLayout
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import com.flightalert.data.web.GlobeWebAircraftSource
+import com.flightalert.data.web.GlobeBinCraftAircraftSource
 import com.flightalert.service.AircraftAlertService
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.FlightMapView
@@ -17,7 +19,7 @@ import com.flightalert.ui.map.FlightMapView
 // Activity stays intentionally thin: permissions, lifecycle, and the single custom map surface.
 class MainActivity : ComponentActivity() {
     private var flight_map_view: FlightMapView? = null
-    private var globe_web_aircraft_source: GlobeWebAircraftSource? = null
+    private var globe_bin_craft_aircraft_source: GlobeBinCraftAircraftSource? = null
 
     // Let Android show the permission popups, then hand the answer back to the map and alert service.
     private val location_permission_launcher = registerForActivityResult(
@@ -50,27 +52,20 @@ class MainActivity : ComponentActivity() {
             }
         )
 
-        // Make the hidden globe source first. It is a real aircraft source, not a visible app screen.
-        val globe_source = GlobeWebAircraftSource(this, APP_USER_AGENT)
+        // Make the globe source first. It uses lightweight binCraft HTTP for live wide-area inventory.
+        val globe_source = GlobeBinCraftAircraftSource(APP_USER_AGENT)
         globe_source.set_enabled(
             FlightAlertSettings.read_aircraft_feed_mode(this).uses_globe
         )
-        globe_web_aircraft_source = globe_source
+        globe_bin_craft_aircraft_source = globe_source
 
         // Make the actual cockpit view. This is the main logic file Android will call to draw and handle input.
         val view = FlightMapView(this, globe_source)
         view.keepScreenOn = true
         flight_map_view = view
+        apply_debug_perf_viewport(intent)
 
-        // Stack the invisible web source underneath the canvas map, then give that stack to Android.
-        val root = FrameLayout(this).apply {
-            addView(
-                globe_source.web_view,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            )
-            addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        }
-        setContentView(root)
+        setContentView(view)
 
         // Put keyboard focus on FlightMapView so emulator keys and filter typing land in the map controller.
         view.requestFocus()
@@ -78,12 +73,27 @@ class MainActivity : ComponentActivity() {
         request_notification_permission_if_needed()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        apply_debug_perf_viewport(intent)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        configure_system_bars()
+        flight_map_view?.let { view ->
+            view.requestLayout()
+            view.postInvalidateOnAnimation()
+        }
+    }
+
     // Android calls this whenever the app comes back on screen; restart live systems here.
     override fun onResume() {
         super.onResume()
         configure_system_bars()
         request_location_permission_if_needed()
-        globe_web_aircraft_source?.start()
+        globe_bin_craft_aircraft_source?.start()
         flight_map_view?.start()
         update_alert_service()
     }
@@ -91,14 +101,14 @@ class MainActivity : ComponentActivity() {
     // Android calls this when the app is leaving the foreground; stop screen-only work here.
     override fun onPause() {
         flight_map_view?.stop()
-        globe_web_aircraft_source?.stop()
+        globe_bin_craft_aircraft_source?.stop()
         super.onPause()
     }
 
-    // Android is tearing down the activity; destroy the WebView source so it does not keep a process alive.
+    // Android is tearing down the activity; stop the binCraft source worker.
     override fun onDestroy() {
-        globe_web_aircraft_source?.destroy()
-        globe_web_aircraft_source = null
+        globe_bin_craft_aircraft_source?.destroy()
+        globe_bin_craft_aircraft_source = null
         super.onDestroy()
     }
 
@@ -150,7 +160,39 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun apply_debug_perf_viewport(intent: Intent?) {
+        if (!is_debuggable_build() || intent == null) return
+        intent.extras?.keySet()
+            ?.filter { it.contains("PERF") }
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { keys -> Log.i(TAG, "Debug perf intent keys=${keys.joinToString()}") }
+        if (!intent.hasExtra(EXTRA_PERF_LAT) || !intent.hasExtra(EXTRA_PERF_LON)) return
+        val lat = intent.double_extra(EXTRA_PERF_LAT, Double.NaN)
+        val lon = intent.double_extra(EXTRA_PERF_LON, Double.NaN)
+        val zoom = intent.double_extra(EXTRA_PERF_ZOOM, DEFAULT_PERF_ZOOM)
+        val run_id = intent.getStringExtra(EXTRA_PERF_RUN_ID)
+        flight_map_view?.apply_debug_perf_viewport(lat, lon, zoom, run_id)
+    }
+
+    private fun Intent.double_extra(name: String, fallback: Double): Double {
+        return when (val value = extras?.get(name)) {
+            is Number -> value.toDouble()
+            is String -> value.toDoubleOrNull() ?: fallback
+            else -> fallback
+        }
+    }
+
+    private fun is_debuggable_build(): Boolean {
+        return (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    }
+
     private companion object {
         const val APP_USER_AGENT = "FlightAlertPrototype/0.1"
+        const val TAG = "FlightAlert"
+        const val EXTRA_PERF_LAT = "com.flightalert.PERF_LAT"
+        const val EXTRA_PERF_LON = "com.flightalert.PERF_LON"
+        const val EXTRA_PERF_ZOOM = "com.flightalert.PERF_ZOOM"
+        const val EXTRA_PERF_RUN_ID = "com.flightalert.PERF_RUN_ID"
+        const val DEFAULT_PERF_ZOOM = 4.2
     }
 }

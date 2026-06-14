@@ -50,6 +50,7 @@ class AlertAircraftClassifierTest {
             last_contact_sec = NOW_EPOCH_SECONDS,
             position_time_sec = null,
             own_altitude_feet = 500.0,
+            alerts_enabled = true,
             alert_distance_feet = 1000f,
             alert_altitude_feet = 150f,
             priority_enabled = true,
@@ -91,28 +92,28 @@ class AlertAircraftClassifierTest {
 
         assertTrue(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
-                priority_enabled = true,
+                alerts_enabled = true,
                 priority_aircraft = listOf(aircraft),
                 has_notification_permission = true
             )
         )
         assertFalse(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
-                priority_enabled = true,
+                alerts_enabled = true,
                 priority_aircraft = emptyList(),
                 has_notification_permission = true
             )
         )
         assertFalse(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
-                priority_enabled = false,
+                alerts_enabled = false,
                 priority_aircraft = listOf(aircraft),
                 has_notification_permission = true
             )
         )
         assertFalse(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
-                priority_enabled = true,
+                alerts_enabled = true,
                 priority_aircraft = listOf(aircraft),
                 has_notification_permission = false
             )
@@ -137,6 +138,7 @@ class AlertAircraftClassifierTest {
             last_contact_sec = NOW_EPOCH_SECONDS - 1.0,
             position_time_sec = null,
             own_altitude_feet = own_altitude_feet,
+            alerts_enabled = true,
             alert_distance_feet = alert_distance_feet,
             alert_altitude_feet = alert_altitude_feet,
             priority_enabled = priority_enabled,

@@ -103,7 +103,7 @@ class AviationLayerClient(private val user_agent: String) {
                     "&geometryType=esriGeometryEnvelope" +
                     "&inSR=4326" +
                     "&spatialRel=esriSpatialRelIntersects" +
-                    "&out_fields=${encode(out_fields)}" +
+                    "&outFields=${encode(out_fields)}" +
                     "&outSR=4326" +
                     "&returnGeometry=true" +
                     "&resultRecordCount=$max_records"
@@ -156,6 +156,8 @@ class AviationLayerClient(private val user_agent: String) {
                 lower_limit = altitude_label(properties, "LOWER"),
                 upper_limit = altitude_label(properties, "UPPER"),
                 schedule = properties.opt_clean_string("TIMESOFUSE"),
+                city = properties.opt_clean_string("CITY"),
+                state = properties.opt_clean_string("STATE"),
                 rings = rings,
                 bounds = rings.flatten().to_bounds()
             )

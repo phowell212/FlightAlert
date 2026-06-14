@@ -7,7 +7,15 @@ import com.flightalert.ui.map.GeoPoint
 
 data class AircraftDisplayPosition(
     val point: GeoPoint,
-    val projected: Boolean
+    val projected: Boolean,
+    val motion_remaining_seconds: Double = 0.0
+)
+
+data class AircraftProjectionMotion(
+    val speed_ms: Double,
+    val track_deg: Double,
+    val elapsed_seconds: Double,
+    val remaining_seconds: Double
 )
 
 object AircraftPositionProjector {
@@ -20,22 +28,55 @@ object AircraftPositionProjector {
         now_epoch_sec: Double,
         max_projection_seconds: Double
     ): AircraftDisplayPosition {
-        val speed = aircraft.velocity_ms
-        val track = aircraft.track_deg
-        val report_time = aircraft.position_time_sec ?: aircraft.last_contact_sec
         val reported = reported_position(aircraft)
-        if (speed == null || track == null || report_time == null || aircraft.on_ground == true) {
+        val motion = projection_motion(aircraft, now_epoch_sec, max_projection_seconds)
+        if (motion == null) {
             return AircraftDisplayPosition(reported, projected = false)
         }
 
-        val elapsed = (now_epoch_sec - report_time).coerceIn(0.0, max_projection_seconds)
-        if (elapsed <= 0.0 || speed <= 0.5) {
-            return AircraftDisplayPosition(reported, projected = false)
+        if (motion.elapsed_seconds <= 0.0) {
+            return AircraftDisplayPosition(
+                point = reported,
+                projected = false,
+                motion_remaining_seconds = motion.remaining_seconds
+            )
         }
 
         return AircraftDisplayPosition(
-            point = MapProjection.destination_point(aircraft.lat, aircraft.lon, track, speed * elapsed),
-            projected = true
+            point = MapProjection.destination_point(
+                aircraft.lat,
+                aircraft.lon,
+                motion.track_deg,
+                motion.speed_ms * motion.elapsed_seconds
+            ),
+            projected = true,
+            motion_remaining_seconds = motion.remaining_seconds
+        )
+    }
+
+    fun projection_motion(
+        aircraft: Aircraft,
+        now_epoch_sec: Double,
+        max_projection_seconds: Double
+    ): AircraftProjectionMotion? {
+        if (aircraft.on_ground == true || !aircraft.lat.isFinite() || !aircraft.lon.isFinite()) return null
+        if (!now_epoch_sec.isFinite() || !max_projection_seconds.isFinite() || max_projection_seconds <= 0.0) return null
+        val speed = aircraft.velocity_ms?.takeIf { it.isFinite() && it > MIN_PROJECTABLE_SPEED_MS && it <= MAX_PROJECTABLE_SPEED_MS } ?: return null
+        val track = normalized_track_degrees(aircraft.track_deg) ?: return null
+        val report_time = aircraft.position_time_sec?.takeIf { it.isFinite() } ?: return null
+        val raw_elapsed = now_epoch_sec - report_time
+        if (!raw_elapsed.isFinite()) return null
+        val elapsed = raw_elapsed.coerceAtLeast(0.0)
+        val remaining = if (raw_elapsed < 0.0) {
+            0.0
+        } else {
+            max_projection_seconds
+        }
+        return AircraftProjectionMotion(
+            speed_ms = speed,
+            track_deg = track,
+            elapsed_seconds = elapsed,
+            remaining_seconds = remaining
         )
     }
 
@@ -61,4 +102,12 @@ object AircraftPositionProjector {
             on_ground = aircraft.on_ground
         )
     }
+
+    private fun normalized_track_degrees(track_deg: Double?): Double? {
+        val track = track_deg?.takeIf { it.isFinite() } ?: return null
+        return ((track % 360.0) + 360.0) % 360.0
+    }
+
+    private const val MIN_PROJECTABLE_SPEED_MS = 0.5
+    private const val MAX_PROJECTABLE_SPEED_MS = 1_200.0
 }

@@ -123,7 +123,7 @@ class FlightMapPanelRenderer(
         draw_settings_section_label(canvas, rect.left + dp(18), rect.top + dp(230), "Map", style)
         chrome.draw_choice_button(canvas, chrome.layout.map_source_button_bounds(rect), if (state.map_source == TileSource.SATELLITE) "Satellite map" else "Street map", state.map_source == TileSource.SATELLITE)
         chrome.draw_choice_button(canvas, chrome.layout.map_labels_button_bounds(rect), if (state.map_labels_enabled) "Street labels on" else "Street labels off", state.map_labels_enabled)
-        chrome.draw_choice_button(canvas, chrome.layout.globe_web_source_button_bounds(rect), state.aircraft_feed_mode.display_name, true)
+        chrome.draw_choice_button(canvas, chrome.layout.globe_bin_craft_source_button_bounds(rect), state.aircraft_feed_mode.display_name, true)
         chrome.draw_choice_button(canvas, chrome.layout.aviation_layers_button_bounds(rect), "Aviation layers", state.aviation_layers_enabled)
 
         draw_settings_section_label(canvas, rect.left + dp(18), rect.top + dp(438), "Safety", style)
@@ -326,7 +326,7 @@ class FlightMapPanelRenderer(
         draw_settings_section_label(canvas, left.left, rect.top + dp(174), "Map", style)
         chrome.draw_choice_button(canvas, chrome.layout.map_source_button_bounds(rect), if (state.map_source == TileSource.SATELLITE) "Satellite" else "Street", state.map_source == TileSource.SATELLITE)
         chrome.draw_choice_button(canvas, chrome.layout.map_labels_button_bounds(rect), if (state.map_labels_enabled) "Labels on" else "Labels off", state.map_labels_enabled)
-        chrome.draw_choice_button(canvas, chrome.layout.globe_web_source_button_bounds(rect), state.aircraft_feed_mode.compact_name, true)
+        chrome.draw_choice_button(canvas, chrome.layout.globe_bin_craft_source_button_bounds(rect), state.aircraft_feed_mode.compact_name, true)
         chrome.draw_choice_button(canvas, chrome.layout.aviation_layers_button_bounds(rect), "Layers", state.aviation_layers_enabled)
 
         draw_settings_section_label(canvas, right.left, rect.top + dp(58), "Safety", style)

@@ -80,6 +80,8 @@ Keep one real project: one manifest, one root Gradle setup, and no duplicate gen
 
 Build and lint before release. Verify visual/UI changes on a connected device or emulator and use screenshots for comparison when useful.
 
+For map performance work, automated and manual panning/zooming tests must exercise dense aircraft regions around a fresh random major city center or busy corridor in North America or Europe on every pass, not open ocean, empty polar regions, unintended rural/upstate drift, or the launcher/home screen. Include quick pinch gestures plus horizontal, vertical, and diagonal pans over visible aircraft at multiple zoom levels.
+
 Delete temporary screenshots taken by agents afterward. Use bounded verify/fix loops: improve weak features, but do not get stuck forever and block pushing.
 
 ## 13. Security / Privacy

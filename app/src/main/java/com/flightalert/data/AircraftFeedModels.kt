@@ -46,7 +46,7 @@ data class FeedAircraft(
     val telemetry: AircraftTelemetry? = null
 ) {
     fun feed_key(): String {
-        val hex = icao24.trim().trimStart('~').lowercase(Locale.US)
+        val hex = icao24.trim().lowercase(Locale.US)
         if (hex.isNotBlank()) return "hex:$hex"
         registration?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { return "reg:$it" }
         callsign.trim().uppercase(Locale.US).takeIf { it.isNotBlank() }?.let { return "call:$it" }
@@ -192,7 +192,7 @@ enum class FeedStatus {
 enum class FeedSource(val display_name: String) {
     OPENSKY("OpenSky"),
     AIRPLANES_LIVE("Airplanes.Live"),
-    AIRPLANES_LIVE_GLOBE("Airplanes.Live globe web source"),
+    AIRPLANES_LIVE_GLOBE("Airplanes.Live binCraft globe feed"),
     HYBRID("Hybrid feed"),
     COMBINED("OpenSky + Airplanes.Live")
 }

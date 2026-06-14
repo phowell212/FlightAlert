@@ -167,7 +167,7 @@ class FlightMapChromeRenderer(
         canvas.drawRoundRect(rect, radius, radius, stroke_paint)
     }
 
-    // Modal backdrop dims the map while keeping the selected panel visually attached to the cockpit.
+        // Modal backdrop dims the map while keeping the active panel visually attached to the cockpit.
     fun draw_modal_backdrop(canvas: Canvas, w: Float, h: Float, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val alpha = when (style.visual_theme.style.treatment) {

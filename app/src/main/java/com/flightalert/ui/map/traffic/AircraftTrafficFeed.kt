@@ -1,23 +1,25 @@
 package com.flightalert.ui.map.traffic
 
+import android.os.SystemClock
 import com.flightalert.data.api.AircraftFeedClient
 import com.flightalert.data.FeedAircraft
 import com.flightalert.data.FeedBounds
 import com.flightalert.data.FeedResult
 import com.flightalert.data.FeedSource
 import com.flightalert.data.FeedStatus
-import com.flightalert.data.web.GlobeWebAircraftSource
+import com.flightalert.data.web.GlobeBinCraftAircraftSource
 import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.Aircraft
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
 
 // Chooses and merges live aircraft sources so FlightMapView can ask for traffic without knowing source policy.
 class AircraftTrafficFeed(
     private val aircraft_feed_client: AircraftFeedClient,
-    private val globe_web_aircraft_source: GlobeWebAircraftSource?
+    private val globe_bin_craft_aircraft_source: GlobeBinCraftAircraftSource?
 ) {
-    // Keep the optional web source pointed at the same viewport as the visible map.
+    // Keep the optional binCraft source pointed at the same broad inventory area as the visible map.
     fun update_viewport(
         feed_bounds: FeedBounds,
         center_lat: Double,
@@ -25,7 +27,7 @@ class AircraftTrafficFeed(
         zoom: Double,
         feed_mode: FlightAlertSettings.AircraftFeedMode
     ) {
-        globe_web_aircraft_source
+        globe_bin_craft_aircraft_source
             ?.takeIf { feed_mode.uses_globe }
             ?.update_viewport(feed_bounds, center_lat, center_lon, zoom)
     }
@@ -40,7 +42,7 @@ class AircraftTrafficFeed(
         feed_mode: FlightAlertSettings.AircraftFeedMode,
         on_intermediate_result: (FeedResult) -> Unit
     ): FeedResult? {
-        val globe_source = globe_web_aircraft_source?.takeIf { feed_mode.uses_globe }
+        val globe_source = globe_bin_craft_aircraft_source?.takeIf { feed_mode.uses_globe }
         return when (feed_mode) {
             FlightAlertSettings.AircraftFeedMode.WEB -> {
                 globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
@@ -54,16 +56,14 @@ class AircraftTrafficFeed(
                 aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
             }
             FlightAlertSettings.AircraftFeedMode.HYBRID -> {
-                // Hybrid keeps the web source as the wide-area inventory, then spends API queries on the safety bubble.
+                // Hybrid keeps binCraft as the wide-area inventory, then spends API queries on the safety bubble.
                 val targeted_api_bounds = safety_api_bounds ?: feed_bounds
                 val first_globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+                    ?: globe_source?.await_latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
                 if (first_globe_result?.status == FeedStatus.OK) {
                     on_intermediate_result(first_globe_result)
                 }
                 val api_result = aircraft_feed_client.fetch_aircraft(targeted_api_bounds, own_lat, own_lon, exact_search)
-                if (api_result.status == FeedStatus.OK && first_globe_result?.status != FeedStatus.OK) {
-                    on_intermediate_result(api_result.copy(source = FeedSource.HYBRID, partial_coverage = true))
-                }
                 val globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search) ?: first_globe_result
                 when {
                     api_result.status == FeedStatus.OK && globe_result?.status == FeedStatus.OK -> {
@@ -92,7 +92,7 @@ class AircraftTrafficFeed(
     // Turn feed coverage into short UI text so partial coverage stays visible to the user.
     fun coverage_label(result: FeedResult): String {
         return when {
-            result.source == FeedSource.HYBRID && result.partial_coverage -> " (loading web supplement)"
+            result.source == FeedSource.HYBRID && result.partial_coverage -> " (loading binCraft supplement)"
             result.query_count > 1 && result.partial_coverage -> " (${result.query_count} areas, partial wide-area coverage)"
             result.query_count > 1 -> " (${result.query_count} areas)"
             result.partial_coverage -> " (partial wide-area coverage)"
@@ -100,26 +100,19 @@ class AircraftTrafficFeed(
         }
     }
 
-    // Merge API position data with web metadata by aircraft key, keeping source uncertainty in the result.
+    // Keep globe/binCraft positions canonical, then fill missing metadata from the API safety query.
     private fun merge_hybrid_aircraft_feeds(api_result: FeedResult, globe_result: FeedResult): FeedResult {
         val merged = linkedMapOf<String, FeedAircraft>()
-        api_result.aircraft.forEach { item ->
+        globe_result.aircraft.forEach { item ->
             merged[item.hybrid_feed_key()] = item
         }
-        globe_result.aircraft.forEach { web_item ->
-            val key = web_item.hybrid_feed_key()
-            val api_item = merged[key]
-            merged[key] = if (api_item == null) {
-                web_item
+        api_result.aircraft.forEach { api_item ->
+            val key = api_item.hybrid_feed_key()
+            val globe_item = merged[key]
+            merged[key] = if (globe_item == null) {
+                api_item
             } else {
-                api_item.copy(
-                    registration = api_item.registration ?: web_item.registration,
-                    type_code = api_item.type_code ?: web_item.type_code,
-                    metadata = api_item.metadata ?: web_item.metadata,
-                    db_flags = api_item.db_flags ?: web_item.db_flags,
-                    category = api_item.category ?: web_item.category,
-                    telemetry = api_item.telemetry?.with_fallback(web_item.telemetry) ?: web_item.telemetry
-                )
+                merge_freshest_position_with_metadata(globe_item, api_item)
             }
         }
         return FeedResult(
@@ -132,12 +125,44 @@ class AircraftTrafficFeed(
         )
     }
 
+    private fun merge_freshest_position_with_metadata(globe_item: FeedAircraft, api_item: FeedAircraft): FeedAircraft {
+        val position_item = fresher_position_aircraft(globe_item, api_item)
+        val metadata_item = if (position_item === globe_item) api_item else globe_item
+        return position_item.copy(
+            callsign = position_item.callsign.takeUnless { it.isBlank() || it.equals("Unknown", ignoreCase = true) }
+                ?: metadata_item.callsign,
+            registration = position_item.registration ?: metadata_item.registration,
+            type_code = position_item.type_code ?: metadata_item.type_code,
+            metadata = position_item.metadata ?: metadata_item.metadata,
+            db_flags = position_item.db_flags ?: metadata_item.db_flags,
+            on_ground = position_item.on_ground ?: metadata_item.on_ground,
+            altitude_m = position_item.altitude_m ?: metadata_item.altitude_m,
+            velocity_ms = position_item.velocity_ms ?: metadata_item.velocity_ms,
+            track_deg = position_item.track_deg ?: metadata_item.track_deg,
+            vertical_rate_ms = position_item.vertical_rate_ms ?: metadata_item.vertical_rate_ms,
+            category = position_item.category ?: metadata_item.category,
+            distance_m = position_item.distance_m.takeIf { it > 0.0 } ?: metadata_item.distance_m,
+            telemetry = position_item.telemetry?.with_fallback(metadata_item.telemetry) ?: metadata_item.telemetry
+        )
+    }
+
     // Prefer real aircraft identifiers for merges, falling back to coarse position only when no ID exists.
     private fun FeedAircraft.hybrid_feed_key(): String {
-        val hex = icao24.trim().trimStart('~').lowercase(Locale.US)
+        val hex = icao24.trim().lowercase(Locale.US)
         if (hex.isNotBlank()) return "hex:$hex"
         registration?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { return "reg:$it" }
         return "pos:${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}:${callsign.trim().uppercase(Locale.US)}"
+    }
+
+    private fun fresher_position_aircraft(first: FeedAircraft, second: FeedAircraft): FeedAircraft {
+        val first_position_time = first.position_time_sec ?: first.last_contact_sec ?: 0.0
+        val second_position_time = second.position_time_sec ?: second.last_contact_sec ?: 0.0
+        if (abs(first_position_time - second_position_time) > POSITION_TIME_TIE_SECONDS) {
+            return if (second_position_time > first_position_time) second else first
+        }
+        val first_contact_time = first.last_contact_sec ?: first.position_time_sec ?: 0.0
+        val second_contact_time = second.last_contact_sec ?: second.position_time_sec ?: 0.0
+        return if (second_contact_time >= first_contact_time) second else first
     }
 
     // Keep the shared Aircraft model as a direct translation of feed data with nullable unknowns preserved.
@@ -174,5 +199,28 @@ class AircraftTrafficFeed(
 
     private companion object {
         const val DB_FLAG_MILITARY = 1
+        const val POSITION_TIME_TIE_SECONDS = 0.25
+        const val HYBRID_GLOBE_STARTUP_GRACE_MS = 900L
+        const val HYBRID_GLOBE_STARTUP_POLL_MS = 25L
+    }
+
+    private fun GlobeBinCraftAircraftSource.await_latest_snapshot(
+        feed_bounds: FeedBounds,
+        own_lat: Double,
+        own_lon: Double,
+        exact_search: String?
+    ): FeedResult? {
+        val deadline = SystemClock.elapsedRealtime() + HYBRID_GLOBE_STARTUP_GRACE_MS
+        var result = latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+        while (result?.status != FeedStatus.OK && SystemClock.elapsedRealtime() < deadline) {
+            try {
+                Thread.sleep(HYBRID_GLOBE_STARTUP_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return result
+            }
+            result = latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+        }
+        return result
     }
 }

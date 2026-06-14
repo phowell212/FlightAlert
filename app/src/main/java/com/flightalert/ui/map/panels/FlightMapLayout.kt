@@ -132,7 +132,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return RectF(panel.left + dp(18), panel.top + dp(284), panel.right - dp(18), panel.top + dp(318))
     }
 
-    fun globe_web_source_button_bounds(panel: RectF): RectF {
+    fun globe_bin_craft_source_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
             val left = compact_settings_left_column(panel)
             return RectF(left.left, panel.top + dp(242), left.right, panel.top + dp(268))

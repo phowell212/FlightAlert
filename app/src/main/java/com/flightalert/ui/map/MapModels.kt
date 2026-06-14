@@ -41,7 +41,7 @@ data class Aircraft(
     val telemetry: AircraftTelemetry? = null
 ) {
     fun appearance_key(): String {
-        val hex = icao24.trim().trimStart('~').lowercase(Locale.US)
+        val hex = icao24.trim().lowercase(Locale.US)
         if (hex.isNotBlank()) return "hex:$hex"
         registration?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { return "reg:$it" }
         callsign.trim().uppercase(Locale.US).takeIf { it.isNotBlank() }?.let { return "call:$it" }

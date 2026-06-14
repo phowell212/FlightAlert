@@ -17,7 +17,7 @@ object FlightAlertSettings {
     const val KEY_MAP_SOURCE = "map_source"
     const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
     const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
-    const val KEY_GLOBE_WEB_SOURCE_ENABLED = "globe_web_source_enabled"
+    const val KEY_GLOBE_BINCRAFT_SOURCE_ENABLED = "globe_bin_craft_source_enabled"
     const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
     const val KEY_LAYER_RESTRICTED_AIRSPACES_ENABLED = "layer_restricted_airspaces_enabled"
     const val KEY_LAYER_OCEANIC_TRACKS_ENABLED = "layer_oceanic_tracks_enabled"
@@ -36,7 +36,7 @@ object FlightAlertSettings {
     const val DEFAULT_PRIORITY_RANGE_FEET = 52800f
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
     const val DEFAULT_MAP_LABELS_ENABLED = true
-    const val DEFAULT_GLOBE_WEB_SOURCE_ENABLED = true
+    const val DEFAULT_GLOBE_BINCRAFT_SOURCE_ENABLED = true
     const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
     const val DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED = false
     const val DEFAULT_LAYER_OCEANIC_TRACKS_ENABLED = false
@@ -68,7 +68,7 @@ object FlightAlertSettings {
         val compact_name: String,
         val uses_globe: Boolean
     ) {
-        WEB("Web feed", "Web feed", true),
+        WEB("binCraft feed", "binCraft", true),
         API("API feed", "API feed", false),
         HYBRID("Hybrid feed", "Hybrid", true);
 
