@@ -125,10 +125,9 @@ class TrafficOverlayRenderer(
             val draw_symbols = state.aircraft.isNotEmpty() && marker_blend < AIRCRAFT_BATCH_DOT_BLEND
             if (draw_symbols) {
                 val dot_alpha = dense_batch_dot_alpha(marker_blend)
-                draw_aircraft_dot_batch(
+                draw_prepared_aircraft_dot_batch(
                     canvas = canvas,
-                    aircraft = state.aircraft,
-                    selected_aircraft_id = state.selected_aircraft_id,
+                    batch = batch,
                     viewport = state.viewport,
                     style = style,
                     alpha_multiplier = dot_alpha,
@@ -206,7 +205,8 @@ class TrafficOverlayRenderer(
         batch: TrafficDotBatchOverlayState,
         viewport: Viewport,
         style: TrafficOverlayStyle,
-        alpha_multiplier: Float = 1f
+        alpha_multiplier: Float = 1f,
+        draw_selected_overlay: Boolean = true
     ) {
         val base_scale = aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
@@ -268,6 +268,7 @@ class TrafficOverlayRenderer(
                 paint.alpha = 255
             }
         }
+        if (!draw_selected_overlay) return
         batch.selected_aircraft?.let { item ->
             val appear = item.appearance_progress.coerceIn(0f, 1f)
             val icon_scale = aircraft_dot_scale(viewport.zoom) *

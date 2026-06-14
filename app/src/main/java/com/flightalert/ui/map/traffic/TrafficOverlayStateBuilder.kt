@@ -389,15 +389,11 @@ internal class TrafficOverlayStateBuilder(
     ): Boolean {
         val now = now_elapsed_ms()
         val interacting = dense_dot_symbol_interacting(frame.interaction, now)
+        if (interacting) return false
         val symbol_progress = AircraftMarkerMorph.symbol_progress(
             AircraftMarkerMorph.marker_dot_blend(dot_batch.visible_count, frame.viewport)
         )
-        val min_symbol_progress = if (interacting) {
-            AircraftMarkerMorph.SYMBOL_ACTIVE_MIN_PROGRESS
-        } else {
-            AircraftMarkerMorph.SYMBOL_IDLE_MIN_PROGRESS
-        }
-        if (symbol_progress < min_symbol_progress) return false
+        if (symbol_progress < AircraftMarkerMorph.SYMBOL_IDLE_MIN_PROGRESS) return false
         return frame.viewport.zoom >= AircraftMarkerMorph.SYMBOL_CROSSFADE_MIN_ZOOM
     }
 
@@ -781,7 +777,7 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_DOT_BATCH_DENSITY_FULL = 2.4f
         const val DENSE_DOT_SYMBOL_GESTURE_MAX_AIRCRAFT = 1100
         const val DENSE_DOT_SYMBOL_CROSSFADE_MAX_AIRCRAFT = 1500
-        const val DENSE_DOT_SYMBOL_SETTLE_MS = 360L
+        const val DENSE_DOT_SYMBOL_SETTLE_MS = 96L
         const val DENSE_DOT_CACHE_ZOOM_EPSILON = 0.0001
         const val DENSE_DOT_CACHE_MAX_REUSE_DP = 420f
         const val DENSE_DOT_CACHE_INTERACTION_SETTLE_MS = 420L
