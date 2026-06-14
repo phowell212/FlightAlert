@@ -58,6 +58,7 @@ public class FlightMapGesturePerfTest {
             new MajorTrafficCity("Frankfurt", 50.04, 8.56),
             new MajorTrafficCity("Paris", 49.01, 2.55)
     };
+    private final java.util.ArrayList<Thread> scheduledCaptureThreads = new java.util.ArrayList<>();
 
     @Test
     public void launchOnly() throws Exception {
@@ -106,20 +107,26 @@ public class FlightMapGesturePerfTest {
     @Test
     public void zoomLowToHighSweep() throws Exception {
         MajorTrafficCity city = randomInlandTrafficCity();
-        UiObject2 app = startAppAtMajorTraffic(city, 4.8);
+        UiObject2 app = startAppAtMajorTraffic(city, 4.8, "SATELLITE");
         sleep(TRAFFIC_LOAD_WAIT_MS);
+        captureActiveDisplay("flightalert-perf-zoomLowToHighSweep-rest.png");
         clearPerfCounters();
 
         for (int i = 0; i < 10; i++) {
+            if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-motion-start.png", 120);
+            if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-motion-active-out.png", 120);
             smoothPinchOpen(app);
             sleep(170);
         }
         sleep(900);
         for (int i = 0; i < 9; i++) {
+            if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-reverse-start.png", 120);
+            if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-motion-active-in.png", 120);
             smoothPinchClose(app);
             sleep(170);
         }
         sleep(1200);
+        waitForScheduledCaptures();
         requireFlightAlertForeground();
         captureActiveDisplay("flightalert-perf-zoomLowToHighSweep.png");
         capturePerfArtifacts("zoomLowToHighSweep");
@@ -149,6 +156,10 @@ public class FlightMapGesturePerfTest {
     }
 
     private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom) throws Exception {
+        return startAppAtMajorTraffic(city, zoom, null);
+    }
+
+    private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom, String mapSource) throws Exception {
         System.out.println("Testing major traffic city: " + city.name);
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context context = instrumentation.getTargetContext();
@@ -156,17 +167,23 @@ public class FlightMapGesturePerfTest {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra("com.flightalert.PERF_LAT", Double.toString(city.lat))
                 .putExtra("com.flightalert.PERF_LON", Double.toString(city.lon))
-                .putExtra("com.flightalert.PERF_ZOOM", Double.toString(zoom));
+                .putExtra("com.flightalert.PERF_ZOOM", Double.toString(zoom))
+                .putExtra("com.flightalert.PERF_CLEAR_SELECTION", true);
+        if (mapSource != null) {
+            intent.putExtra("com.flightalert.PERF_MAP_SOURCE", mapSource);
+        }
         ActivityOptions options = ActivityOptions.makeBasic();
         options.setLaunchDisplayId(0);
         context.startActivity(intent, options.toBundle());
         instrumentation.waitForIdleSync();
+        acceptFlightAlertPermissionsIfPresent();
         waitForFlightAlertForeground();
         return flightAlertRoot();
     }
 
     private UiObject2 flightAlertRoot() throws Exception {
         UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        acceptFlightAlertPermissionsIfPresent();
         assertTrue("Flight Alert package did not appear", device.wait(Until.hasObject(By.pkg(PACKAGE_NAME)), 7000));
         UiObject2 app = device.findObject(By.pkg(PACKAGE_NAME));
         assertNotNull("Flight Alert root was not found", app);
@@ -181,6 +198,20 @@ public class FlightMapGesturePerfTest {
                 Math.max(460, metrics.heightPixels / 5)
         );
         return app;
+    }
+
+    private void acceptFlightAlertPermissionsIfPresent() throws Exception {
+        UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        for (int attempt = 0; attempt < 4; attempt++) {
+            UiObject2 permission = device.findObject(By.pkg("com.google.android.permissioncontroller"));
+            if (permission == null) return;
+            UiObject2 allow = permission.findObject(By.textContains("While using"));
+            if (allow == null) allow = permission.findObject(By.textContains("Allow"));
+            if (allow == null) allow = permission.findObject(By.textContains("OK"));
+            if (allow == null) return;
+            allow.click();
+            sleep(500);
+        }
     }
 
     private void warmUpZoom(UiObject2 app) throws Exception {
@@ -283,14 +314,17 @@ public class FlightMapGesturePerfTest {
     }
 
     private boolean isFlightAlertForeground() throws Exception {
-        String activity = runShell("dumpsys activity activities");
-        String activityLine = PACKAGE_NAME + "/" + PACKAGE_NAME + ".MainActivity";
-        String[] lines = activity.split("\\r?\\n");
+        String foreground = runShell("dumpsys activity activities") + "\n" + runShell("dumpsys window windows");
+        String fullActivityLine = PACKAGE_NAME + "/" + PACKAGE_NAME + ".MainActivity";
+        String shortActivityLine = PACKAGE_NAME + "/.MainActivity";
+        String[] lines = foreground.split("\\r?\\n");
         for (String line : lines) {
             if ((line.contains("mCurrentFocus=") ||
+                    line.contains("mFocusedApp=") ||
                     line.contains("topResumedActivity=") ||
+                    line.contains("mResumedActivity:") ||
                     line.contains("ResumedActivity:")) &&
-                    line.contains(activityLine)) {
+                    (line.contains(fullActivityLine) || line.contains(shortActivityLine))) {
                 return true;
             }
         }
@@ -299,6 +333,23 @@ public class FlightMapGesturePerfTest {
 
     private void captureActiveDisplay(String fileName) throws Exception {
         runShell("screencap -d 4630946481096930692 -p /sdcard/" + fileName);
+    }
+
+    private void scheduleActiveDisplayCapture(String fileName, long delayMs) throws Exception {
+        Thread thread = new Thread(() -> {
+            SystemClock.sleep(delayMs);
+            UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            device.takeScreenshot(new File("/sdcard/Download/" + fileName));
+        }, "flightalert-screencap-" + fileName);
+        scheduledCaptureThreads.add(thread);
+        thread.start();
+    }
+
+    private void waitForScheduledCaptures() throws InterruptedException {
+        for (Thread thread : scheduledCaptureThreads) {
+            thread.join(4000L);
+        }
+        scheduledCaptureThreads.clear();
     }
 
     private void capturePerfArtifacts(String testName) throws Exception {

@@ -63,11 +63,12 @@ class MainActivity : ComponentActivity() {
         // Make the actual cockpit view. This is the main logic file Android will call to draw and handle input.
         val view = FlightMapView(this, globe_source)
         view.keepScreenOn = true
-        configure_high_refresh_rate()
+        configure_high_refresh_rate(view)
         flight_map_view = view
         apply_debug_perf_viewport(intent)
 
         setContentView(view)
+        view.post { configure_high_refresh_rate(view) }
 
         // Put keyboard focus on FlightMapView so emulator keys and filter typing land in the map controller.
         view.requestFocus()
@@ -95,6 +96,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         configure_system_bars()
         request_location_permission_if_needed()
+        flight_map_view?.let { configure_high_refresh_rate(it) }
         globe_bin_craft_aircraft_source?.start()
         flight_map_view?.start()
         update_alert_service()
@@ -125,7 +127,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun configure_high_refresh_rate() {
+    private fun configure_high_refresh_rate(view: FlightMapView? = null) {
         val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             display
         } else {
@@ -135,6 +137,10 @@ class MainActivity : ComponentActivity() {
         if (fastest_mode.refreshRate <= 0f) return
         window.attributes = window.attributes.apply {
             preferredDisplayModeId = fastest_mode.modeId
+            preferredRefreshRate = fastest_mode.refreshRate
+        }
+        if (Build.VERSION.SDK_INT >= 35) {
+            view?.setRequestedFrameRate(fastest_mode.refreshRate)
         }
     }
 

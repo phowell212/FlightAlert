@@ -13,6 +13,7 @@ import com.flightalert.ui.map.TileSource
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executor
 import kotlin.math.floor
@@ -42,6 +43,37 @@ private data class InterimRasterTile(
     var last_used_ms: Long
 )
 
+private class VisibleMapTile {
+    var z: Int = 0
+    var x: Int = 0
+    var y: Int = 0
+    var key: String = ""
+    var screen_x: Float = 0f
+    var screen_y: Float = 0f
+    var tile_size_on_screen: Float = 0f
+    var bitmap: Bitmap? = null
+
+    fun set(
+        z: Int,
+        x: Int,
+        y: Int,
+        key: String,
+        screen_x: Float,
+        screen_y: Float,
+        tile_size_on_screen: Float,
+        bitmap: Bitmap?
+    ) {
+        this.z = z
+        this.x = x
+        this.y = y
+        this.key = key
+        this.screen_x = screen_x
+        this.screen_y = screen_y
+        this.tile_size_on_screen = tile_size_on_screen
+        this.bitmap = bitmap
+    }
+}
+
 // Draws and caches real map tiles; unavailable tiles are visibly unavailable, never fake imagery.
 class MapTileRenderer(
     private val context: Context,
@@ -54,7 +86,7 @@ class MapTileRenderer(
     private val report_status: (String) -> Unit,
     private val request_redraw: () -> Unit
 ) {
-    private val tile_cache = linkedMapOf<String, Bitmap>()
+    private val tile_cache = LinkedHashMap<String, Bitmap>(MAX_MEMORY_TILES, 0.75f, true)
     private val tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
     private val interim_tiles = linkedMapOf<String, InterimRasterTile>()
     private val requested_tiles = mutableSetOf<String>()
@@ -64,8 +96,10 @@ class MapTileRenderer(
     private val satellite_parent_source = Rect()
     private val satellite_child_destination = RectF()
     private val loaded_interim_tile_buffer = ArrayList<InterimRasterTile>(64)
+    private val visible_tile_buffer = ArrayList<VisibleMapTile>(64)
     private val visible_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
     private val satellite_child_bitmap_buffer = ArrayList<Bitmap>(4)
+    private var visible_tile_count = 0
     private var transition_cache_key: String? = null
     private var transition_map_source: TileSource? = null
     private var current_tile_zoom = Int.MIN_VALUE
@@ -98,8 +132,9 @@ class MapTileRenderer(
         val max_tile = 1 shl tile_zoom
         update_tile_zoom_transition(tile_zoom, state, now_ms)
         request_satellite_buffer_tiles(tile_zoom, first_tile_x, last_tile_x, first_tile_y, last_tile_y, max_tile, state, now_ms)
-        val interim_drawn = draw_interim_tiles(canvas, viewport, state, now_ms)
+        val interim_available = collect_visible_interim_tiles(viewport, state, now_ms)
         loaded_interim_tile_buffer.clear()
+        visible_tile_count = 0
         var loaded = 0
         var requested = 0
         var needs_transition_redraw = false
@@ -112,12 +147,8 @@ class MapTileRenderer(
                 val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
                 val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
                 val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
-                tile_destination.set(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
                 val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
                 if (bitmap != null) {
-                    if (draw_loaded_tile(canvas, bitmap, tile_destination, tile_zoom, tx, ty, key, state, now_ms)) {
-                        needs_transition_redraw = true
-                    }
                     loaded_interim_tile_buffer += InterimRasterTile(
                         cache_key = state.cache_key,
                         z = tile_zoom,
@@ -129,20 +160,69 @@ class MapTileRenderer(
                     loaded++
                 } else {
                     requested++
-                    if (!draw_satellite_fallback_tile(canvas, tile_zoom, tx, ty, state, tile_destination)) {
-                        request_satellite_parent_tiles(tile_zoom, tx, ty, state)
-                        if (!interim_drawn) {
-                            draw_unavailable_tile(canvas, screen_x, screen_y, tile_size_on_screen, style)
-                        }
-                    }
+                    request_satellite_parent_tiles(tile_zoom, tx, ty, state)
                     request_tile(tile_zoom, tx, ty, key, state)
                 }
+                visible_tile_item(visible_tile_count).set(
+                    z = tile_zoom,
+                    x = tx,
+                    y = ty,
+                    key = key,
+                    screen_x = screen_x,
+                    screen_y = screen_y,
+                    tile_size_on_screen = tile_size_on_screen,
+                    bitmap = bitmap
+                )
+                visible_tile_count++
             }
         }
+
+        val keep_interim_on_top = state.map_source == TileSource.SATELLITE && interim_available && requested > 0
+        if (!keep_interim_on_top) {
+            draw_visible_interim_tiles(canvas, viewport, now_ms)
+        }
+
+        for (index in 0 until visible_tile_count) {
+            val tile = visible_tile_buffer[index]
+            tile_destination.set(
+                tile.screen_x,
+                tile.screen_y,
+                tile.screen_x + tile.tile_size_on_screen,
+                tile.screen_y + tile.tile_size_on_screen
+            )
+            val bitmap = tile.bitmap
+            if (bitmap != null) {
+                if (
+                    draw_loaded_tile(
+                        canvas = canvas,
+                        bitmap = bitmap,
+                        destination = tile_destination,
+                        z = tile.z,
+                        x = tile.x,
+                        y = tile.y,
+                        key = tile.key,
+                        state = state,
+                        now_ms = now_ms,
+                        allow_alpha_without_tile_fallback = interim_available && !keep_interim_on_top
+                    )
+                ) {
+                    needs_transition_redraw = true
+                }
+            } else if (!draw_satellite_fallback_tile(canvas, tile.z, tile.x, tile.y, state, tile_destination)) {
+                draw_unavailable_tile(canvas, tile.screen_x, tile.screen_y, tile.tile_size_on_screen, style)
+            }
+        }
+
+        if (keep_interim_on_top) {
+            draw_visible_interim_tiles(canvas, viewport, now_ms)
+        }
+
         if (requested == 0 && loaded_interim_tile_buffer.isNotEmpty()) {
             replace_interim_tiles(loaded_interim_tile_buffer)
         }
         loaded_interim_tile_buffer.clear()
+        clear_visible_tile_items()
+        visible_interim_tile_buffer.clear()
         if (needs_transition_redraw) request_redraw()
 
         val label_note = if (state.map_source == TileSource.STREET && !state.map_labels_enabled) " no-label" else ""
@@ -153,6 +233,20 @@ class MapTileRenderer(
         }
     }
 
+    private fun visible_tile_item(index: Int): VisibleMapTile {
+        while (visible_tile_buffer.size <= index) {
+            visible_tile_buffer += VisibleMapTile()
+        }
+        return visible_tile_buffer[index]
+    }
+
+    private fun clear_visible_tile_items() {
+        for (index in 0 until visible_tile_count) {
+            visible_tile_buffer[index].bitmap = null
+        }
+        visible_tile_count = 0
+    }
+
     fun clear() {
         synchronized(tile_cache) {
             tile_cache.clear()
@@ -160,6 +254,16 @@ class MapTileRenderer(
         }
         interim_tiles.clear()
         synchronized(requested_tiles) { requested_tiles.clear() }
+        transition_cache_key = null
+        transition_map_source = null
+        current_tile_zoom = Int.MIN_VALUE
+        tile_zoom_direction = 0
+        tile_zoom_transition_started_ms = 0L
+        last_satellite_buffer_request_key = null
+        last_satellite_buffer_request_ms = 0L
+    }
+
+    fun reset_transitions() {
         transition_cache_key = null
         transition_map_source = null
         current_tile_zoom = Int.MIN_VALUE
@@ -186,7 +290,8 @@ class MapTileRenderer(
         y: Int,
         key: String,
         state: MapTileRenderState,
-        now_ms: Long
+        now_ms: Long,
+        allow_alpha_without_tile_fallback: Boolean = false
     ): Boolean {
         if (state.map_source != TileSource.SATELLITE) {
             draw_tile_bitmap(canvas, bitmap, null, destination, 1f)
@@ -199,6 +304,10 @@ class MapTileRenderer(
                 return true
             }
             request_satellite_parent_tiles(z, x, y, state)
+            if (allow_alpha_without_tile_fallback) {
+                draw_tile_bitmap(canvas, bitmap, null, destination, alpha)
+                return true
+            }
         }
         draw_tile_bitmap(canvas, bitmap, null, destination, 1f)
         return false
@@ -210,8 +319,7 @@ class MapTileRenderer(
         bitmap_paint.alpha = 255
     }
 
-    private fun draw_interim_tiles(
-        canvas: Canvas,
+    private fun collect_visible_interim_tiles(
         viewport: Viewport,
         state: MapTileRenderState,
         now_ms: Long
@@ -226,11 +334,20 @@ class MapTileRenderer(
         if (visible_interim_tile_buffer.isEmpty()) return false
         visible_interim_tile_buffer.sortBy { it.z }
         for (tile in visible_interim_tile_buffer) {
+            tile.last_used_ms = now_ms
+        }
+        return true
+    }
+
+    private fun draw_visible_interim_tiles(
+        canvas: Canvas,
+        viewport: Viewport,
+        now_ms: Long
+    ) {
+        for (tile in visible_interim_tile_buffer) {
             draw_interim_tile(canvas, tile, viewport)
             tile.last_used_ms = now_ms
         }
-        visible_interim_tile_buffer.clear()
-        return true
     }
 
     private fun draw_interim_tile(canvas: Canvas, tile: InterimRasterTile, viewport: Viewport) {
@@ -274,13 +391,11 @@ class MapTileRenderer(
     }
 
     private fun replace_interim_tiles(tiles: List<InterimRasterTile>) {
-        interim_tiles.clear()
-        val start = (tiles.size - MAX_INTERIM_TILES).coerceAtLeast(0)
-        for (index in start until tiles.size) {
-            val tile = tiles[index]
+        for (tile in tiles) {
             val key = "${tile.cache_key}/${tile.z}/${tile.x}/${tile.y}"
             interim_tiles[key] = tile
         }
+        prune_interim_tile_count()
     }
 
     private fun prune_interim_tiles(now_ms: Long) {
@@ -290,6 +405,14 @@ class MapTileRenderer(
             if (now_ms - entry.value.last_used_ms > RASTER_INTERIM_MAX_AGE_MS) {
                 iterator.remove()
             }
+        }
+        prune_interim_tile_count()
+    }
+
+    private fun prune_interim_tile_count() {
+        while (interim_tiles.size > MAX_INTERIM_TILES) {
+            val oldest_key = interim_tiles.entries.minByOrNull { it.value.last_used_ms }?.key ?: break
+            interim_tiles.remove(oldest_key)
         }
     }
 
@@ -583,10 +706,10 @@ class MapTileRenderer(
     private companion object {
         const val TILE_SIZE = 256
         const val MIN_ZOOM = 3
-        const val MAX_MEMORY_TILES = 260
+        const val MAX_MEMORY_TILES = 320
         const val MAX_INTERIM_TILES = 360
         const val TILE_CACHE_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
-        const val RASTER_INTERIM_MAX_AGE_MS = 12_000L
+        const val RASTER_INTERIM_MAX_AGE_MS = 45_000L
         const val SATELLITE_REQUEST_TILE_BUFFER = 1
         const val SATELLITE_BUFFER_REQUEST_THROTTLE_MS = 180L
         const val SATELLITE_PARENT_REQUEST_DEPTH = 4

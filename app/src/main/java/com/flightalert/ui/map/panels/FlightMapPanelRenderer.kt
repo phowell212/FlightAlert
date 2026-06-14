@@ -323,7 +323,7 @@ class FlightMapPanelRenderer(
         chrome.draw_choice_button(canvas, chrome.layout.metric_button_bounds(rect), "Kilometers / meters", state.units == UnitSystem.METRIC)
         chrome.draw_choice_button(canvas, chrome.layout.theme_button_bounds(rect), "Theme: ${style.visual_theme.short_name}", true)
 
-        draw_settings_section_label(canvas, left.left, rect.top + dp(174), "Map", style)
+        draw_settings_section_label(canvas, left.left, rect.top + dp(184), "Map", style)
         chrome.draw_choice_button(canvas, chrome.layout.map_source_button_bounds(rect), if (state.map_source == TileSource.SATELLITE) "Satellite" else "Street", state.map_source == TileSource.SATELLITE)
         chrome.draw_choice_button(canvas, chrome.layout.map_labels_button_bounds(rect), if (state.map_labels_enabled) "Labels on" else "Labels off", state.map_labels_enabled)
         chrome.draw_choice_button(canvas, chrome.layout.globe_bin_craft_source_button_bounds(rect), state.aircraft_feed_mode.compact_name, true)

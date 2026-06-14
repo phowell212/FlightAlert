@@ -58,7 +58,6 @@ class AviationLayerRenderer(
     private var settled_cache_canvas: Canvas? = null
     private var settled_cache_key: SettledLayerCacheKey? = null
     private val settled_cache_matrix = Matrix()
-    private var interaction_line_points = FloatArray(INTERACTION_LINE_BUFFER_INITIAL_FLOATS)
 
     fun draw_layers(
         canvas: Canvas,
@@ -335,16 +334,34 @@ class AviationLayerRenderer(
         val step = max(1, ring.size / max_points)
         val sampled_count = ring.indices.count { index -> index % step == 0 || index == ring.lastIndex }
         if (sampled_count < 3) return null
-        val points = FloatArray(sampled_count * 2)
-        var output = 0
+        val world_path = Path()
+        var point_index = 0
+        var min_x = Float.POSITIVE_INFINITY
+        var max_x = Float.NEGATIVE_INFINITY
+        var min_y = Float.POSITIVE_INFINITY
+        var max_y = Float.NEGATIVE_INFINITY
         ring.forEachIndexed { index, point ->
             if (index % step == 0 || index == ring.lastIndex) {
                 val world = MapProjection.lat_lon_to_world(point.lat, point.lon, 0.0)
-                points[output++] = world.x.toFloat()
-                points[output++] = world.y.toFloat()
+                val x = world.x.toFloat()
+                val y = world.y.toFloat()
+                if (point_index == 0) world_path.moveTo(x, y) else world_path.lineTo(x, y)
+                min_x = kotlin.math.min(min_x, x)
+                max_x = max(max_x, x)
+                min_y = kotlin.math.min(min_y, y)
+                max_y = max(max_y, y)
+                point_index++
             }
         }
-        return PreparedAirspaceRing(points = points, point_count = sampled_count)
+        world_path.close()
+        return PreparedAirspaceRing(
+            point_count = sampled_count,
+            path = world_path,
+            min_x = min_x,
+            max_x = max_x,
+            min_y = min_y,
+            max_y = max_y
+        )
     }
 
     private fun draw_airspace_layer(
@@ -432,93 +449,24 @@ class AviationLayerRenderer(
         val screen_offset_x = (-viewport.center_x + viewport.width / 2.0).toFloat()
         val screen_offset_y = (-viewport.center_y + viewport.height / 2.0).toFloat()
         var drawn_features = 0
-        var float_count = 0
         for (feature in features) {
             if (feature.source == excluded_feature || !feature.source.bounds.intersects(visible_bounds)) continue
             if (drawn_features >= MAX_DRAWN_AIRSPACE_FEATURES) break
             feature.interaction_rings.forEach { ring ->
-                float_count = append_interaction_ring_lines(
-                    ring = ring,
+                draw_prepared_airspace_ring_path(
+                    canvas = canvas,
                     viewport = viewport,
+                    ring = ring,
                     scale = scale,
                     world_span = world_span,
                     screen_offset_x = screen_offset_x,
                     screen_offset_y = screen_offset_y,
-                    float_count = float_count
+                    fill_paint = null,
+                    outline_paint = outline_paint
                 )
-                if (float_count >= INTERACTION_LINE_FLUSH_FLOATS) {
-                    canvas.drawLines(interaction_line_points, 0, float_count, outline_paint)
-                    float_count = 0
-                }
             }
             drawn_features++
         }
-        if (float_count > 0) {
-            canvas.drawLines(interaction_line_points, 0, float_count, outline_paint)
-        }
-    }
-
-    private fun append_interaction_ring_lines(
-        ring: PreparedAirspaceRing,
-        viewport: Viewport,
-        scale: Float,
-        world_span: Float,
-        screen_offset_x: Float,
-        screen_offset_y: Float,
-        float_count: Int
-    ): Int {
-        val points = ring.points
-        if (points.size < 6) return float_count
-        var output = float_count
-        var first_x = 0f
-        var first_y = 0f
-        var previous_x = 0f
-        var previous_y = 0f
-        var has_previous = false
-        var visible = false
-        var index = 0
-        while (index + 1 < points.size) {
-            var sx = points[index] * scale + screen_offset_x
-            while (sx < -world_span / 2f) sx += world_span
-            while (sx > viewport.width + world_span / 2f) sx -= world_span
-            val sy = points[index + 1] * scale + screen_offset_y
-            if (sx > -viewport.width * 0.5f &&
-                sx < viewport.width * 1.5f &&
-                sy > -viewport.height * 0.5f &&
-                sy < viewport.height * 1.5f
-            ) {
-                visible = true
-            }
-            if (has_previous) {
-                output = append_interaction_line(previous_x, previous_y, sx, sy, output)
-            } else {
-                first_x = sx
-                first_y = sy
-                has_previous = true
-            }
-            previous_x = sx
-            previous_y = sy
-            index += 2
-        }
-        if (!visible || !has_previous) return float_count
-        return append_interaction_line(previous_x, previous_y, first_x, first_y, output)
-    }
-
-    private fun append_interaction_line(x1: Float, y1: Float, x2: Float, y2: Float, float_count: Int): Int {
-        val next_count = float_count + 4
-        ensure_interaction_line_capacity(next_count)
-        interaction_line_points[float_count] = x1
-        interaction_line_points[float_count + 1] = y1
-        interaction_line_points[float_count + 2] = x2
-        interaction_line_points[float_count + 3] = y2
-        return next_count
-    }
-
-    private fun ensure_interaction_line_capacity(required: Int) {
-        if (required <= interaction_line_points.size) return
-        var next_size = interaction_line_points.size
-        while (next_size < required) next_size *= 2
-        interaction_line_points = interaction_line_points.copyOf(next_size)
     }
 
     private fun draw_selected_airspace(
@@ -551,36 +499,69 @@ class AviationLayerRenderer(
         fill_paint: Paint?,
         outline_paint: Paint
     ) {
-        val points = ring.points
-        if (points.size < 6) return
-        path.reset()
-        val scale = 2.0.pow(viewport.zoom)
-        val world_span = (TILE_SIZE * scale).toFloat()
+        val scale = 2.0.pow(viewport.zoom).toFloat()
+        if (scale <= 0f || !scale.isFinite()) return
+        val world_span = TILE_SIZE * scale
         val screen_offset_x = (-viewport.center_x + viewport.width / 2.0).toFloat()
         val screen_offset_y = (-viewport.center_y + viewport.height / 2.0).toFloat()
-        var index = 0
-        var point_index = 0
-        var visible = false
-        while (index + 1 < points.size) {
-            var sx = points[index] * scale.toFloat() + screen_offset_x
-            while (sx < -world_span / 2f) sx += world_span
-            while (sx > viewport.width + world_span / 2f) sx -= world_span
-            val sy = points[index + 1] * scale.toFloat() + screen_offset_y
-            if (sx > -viewport.width * 0.5f &&
-                sx < viewport.width * 1.5f &&
-                sy > -viewport.height * 0.5f &&
-                sy < viewport.height * 1.5f
-            ) {
-                visible = true
-            }
-            if (point_index == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
-            point_index++
-            index += 2
+        draw_prepared_airspace_ring_path(
+            canvas = canvas,
+            viewport = viewport,
+            ring = ring,
+            scale = scale,
+            world_span = world_span,
+            screen_offset_x = screen_offset_x,
+            screen_offset_y = screen_offset_y,
+            fill_paint = fill_paint,
+            outline_paint = outline_paint
+        )
+    }
+
+    private fun draw_prepared_airspace_ring_path(
+        canvas: Canvas,
+        viewport: Viewport,
+        ring: PreparedAirspaceRing,
+        scale: Float,
+        world_span: Float,
+        screen_offset_x: Float,
+        screen_offset_y: Float,
+        fill_paint: Paint?,
+        outline_paint: Paint
+    ) {
+        if (ring.point_count < 3 || scale <= 0f || !scale.isFinite()) return
+        val extended_left = -viewport.width * 0.5f
+        val extended_right = viewport.width * 1.5f
+        val extended_top = -viewport.height * 0.5f
+        val extended_bottom = viewport.height * 1.5f
+        val screen_top = ring.min_y * scale + screen_offset_y
+        val screen_bottom = ring.max_y * scale + screen_offset_y
+        if (screen_bottom < extended_top || screen_top > extended_bottom) return
+
+        val base_left = ring.min_x * scale + screen_offset_x
+        val base_right = ring.max_x * scale + screen_offset_x
+        var shift_x = 0f
+        var guard = 0
+        while (base_right + shift_x < extended_left && guard++ < MAX_WRAPPED_RING_COPIES) {
+            shift_x += world_span
         }
-        if (!visible) return
-        path.close()
-        if (fill_paint != null) canvas.drawPath(path, fill_paint)
-        canvas.drawPath(path, outline_paint)
+        guard = 0
+        val original_stroke_width = outline_paint.strokeWidth
+        outline_paint.strokeWidth = original_stroke_width / scale
+        try {
+            while (base_left + shift_x <= extended_right && guard++ < MAX_WRAPPED_RING_COPIES) {
+                if (base_right + shift_x >= extended_left) {
+                    canvas.save()
+                    canvas.translate(screen_offset_x + shift_x, screen_offset_y)
+                    canvas.scale(scale, scale)
+                    if (fill_paint != null) canvas.drawPath(ring.path, fill_paint)
+                    canvas.drawPath(ring.path, outline_paint)
+                    canvas.restore()
+                }
+                shift_x += world_span
+            }
+        } finally {
+            outline_paint.strokeWidth = original_stroke_width
+        }
     }
 
     private fun draw_airspace_label(
@@ -806,8 +787,12 @@ class AviationLayerRenderer(
     )
 
     private data class PreparedAirspaceRing(
-        val points: FloatArray,
-        val point_count: Int
+        val point_count: Int,
+        val path: Path,
+        val min_x: Float,
+        val max_x: Float,
+        val min_y: Float,
+        val max_y: Float
     )
 
     private data class SettledLayerCacheKey(
@@ -829,8 +814,7 @@ class AviationLayerRenderer(
         const val MAX_DRAWN_RINGS_PER_FEATURE = 4
         const val MAX_DRAWN_AIRSPACE_POINTS_PER_RING = 180
         const val MAX_DRAWN_AIRSPACE_POINTS_PER_RING_INTERACTION = 42
-        const val INTERACTION_LINE_BUFFER_INITIAL_FLOATS = 8192
-        const val INTERACTION_LINE_FLUSH_FLOATS = 16384
+        const val MAX_WRAPPED_RING_COPIES = 8
         const val MAX_TRANSFORMED_CACHE_ZOOM_DELTA = 1.6
         const val MAX_TRANSFORMED_CACHE_TRANSLATION_FRACTION = 0.65f
         const val MAX_DRAWN_AIRPORT_LABELS = 36

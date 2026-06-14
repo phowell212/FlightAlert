@@ -19,15 +19,20 @@ object AircraftMarkerMorph {
         width: Float,
         height: Float
     ): Float {
+        return zoom_marker_dot_blend(zoom)
+    }
+
+    fun zoom_marker_dot_blend(zoom: Double): Float {
         val zoom_dot_blend = 1f - smooth_step(DOT_ZOOM_FULL, DOT_ZOOM_SYMBOL, zoom.toFloat())
-        val density_per_ten_thousand_px = visible_count / max(1f, width * height / 10000f)
-        val density_dot_blend = smooth_step(DOT_DENSITY_START, DOT_DENSITY_FULL, density_per_ten_thousand_px)
-        val combined_blend = 1f - (1f - zoom_dot_blend) * (1f - density_dot_blend)
-        return smooth_step(0f, 1f, combined_blend)
+        return smooth_step(0f, 1f, zoom_dot_blend)
     }
 
     fun symbol_progress(dot_blend: Float): Float {
         return smooth_step(SYMBOL_BLEND_START, SYMBOL_BLEND_FULL, 1f - dot_blend)
+    }
+
+    fun symbol_visibility(dot_blend: Float): Float {
+        return smooth_step(SYMBOL_VISIBILITY_START, SYMBOL_VISIBILITY_FULL, symbol_progress(dot_blend))
     }
 
     fun dot_progress(dot_blend: Float): Float {
@@ -76,8 +81,7 @@ object AircraftMarkerMorph {
         return start + (end - start) * progress.coerceIn(0f, 1f)
     }
 
-    const val SYMBOL_CROSSFADE_MIN_ZOOM = 5.4
-    const val SYMBOL_ACTIVE_MIN_PROGRESS = 0.12f
+    const val SYMBOL_ACTIVE_MIN_PROGRESS = 0.03f
     const val SYMBOL_IDLE_MIN_PROGRESS = 0.03f
     const val READABLE_DOT_SCALE_MIN = 0.24f
 
@@ -94,10 +98,10 @@ object AircraftMarkerMorph {
     private const val DOT_SCALE_TRANSITION_ZOOM_END = 13.6f
     private const val DOT_ZOOM_FULL = 2.0f
     private const val DOT_ZOOM_SYMBOL = 13.6f
-    private const val DOT_DENSITY_START = 2.8f
-    private const val DOT_DENSITY_FULL = 9.8f
     private const val SYMBOL_BLEND_START = 0.0f
     private const val SYMBOL_BLEND_FULL = 0.78f
+    private const val SYMBOL_VISIBILITY_START = 0.0f
+    private const val SYMBOL_VISIBILITY_FULL = 0.26f
     private const val DOT_FADE_OUT_START = 0.0f
     private const val DOT_FADE_OUT_FULL = 0.86f
     private const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f

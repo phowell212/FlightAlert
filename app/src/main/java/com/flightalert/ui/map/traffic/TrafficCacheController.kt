@@ -4,6 +4,7 @@ import android.os.SystemClock
 import com.flightalert.ui.map.Aircraft
 import com.flightalert.ui.map.render.TrafficDotBatchOverlayState
 import kotlin.math.max
+import kotlin.math.sqrt
 
 internal class TrafficCacheController(
     private val all_aircraft_snapshot: () -> List<Aircraft>,
@@ -24,6 +25,7 @@ internal class TrafficCacheController(
     private var cached_hazard_present = false
     private var cached_extreme_priority_aircraft: List<Aircraft> = emptyList()
     private var cached_extreme_priority_keys: Set<String> = emptySet()
+    private var cached_max_projected_speed_zoom_zero = 0.0
 
     val total: Int
         get() = cached_aircraft_total
@@ -58,6 +60,7 @@ internal class TrafficCacheController(
             emptyList()
         }
         val priority_keys = priority_aircraft.mapTo(HashSet(priority_aircraft.size)) { aircraft_icao_key(it) }
+        val max_projected_speed = max_projected_speed_zoom_zero(entries)
         return CachedTraffic(
             aircraft = filtered,
             entries = entries,
@@ -66,7 +69,8 @@ internal class TrafficCacheController(
             total = all.size,
             hazard_present = priority_aircraft.isNotEmpty(),
             extreme_priority_aircraft = priority_aircraft,
-            extreme_priority_keys = priority_keys
+            extreme_priority_keys = priority_keys,
+            max_projected_speed_zoom_zero = max_projected_speed
         )
     }
 
@@ -79,6 +83,7 @@ internal class TrafficCacheController(
         cached_hazard_present = cache.hazard_present
         cached_extreme_priority_aircraft = cache.extreme_priority_aircraft
         cached_extreme_priority_keys = cache.extreme_priority_keys
+        cached_max_projected_speed_zoom_zero = cache.max_projected_speed_zoom_zero
         traffic_cache_dirty = false
     }
 
@@ -91,8 +96,21 @@ internal class TrafficCacheController(
             total = cached_aircraft_total,
             hazard_present = cached_hazard_present,
             extreme_priority_aircraft = cached_extreme_priority_aircraft,
-            extreme_priority_keys = cached_extreme_priority_keys
+            extreme_priority_keys = cached_extreme_priority_keys,
+            max_projected_speed_zoom_zero = cached_max_projected_speed_zoom_zero
         )
+    }
+
+    private fun max_projected_speed_zoom_zero(entries: List<TrafficSpatialEntry>): Double {
+        var max_squared = 0.0
+        for (entry in entries) {
+            if (entry.projected_motion_remaining_sec <= 0.0) continue
+            val dx = entry.projected_velocity_x_zoom_zero
+            val dy = entry.projected_velocity_y_zoom_zero
+            val speed_squared = dx * dx + dy * dy
+            if (speed_squared > max_squared) max_squared = speed_squared
+        }
+        return if (max_squared > 0.0) sqrt(max_squared) else 0.0
     }
 
     private fun build_world_dot_batch(entries: List<TrafficSpatialEntry>): TrafficWorldDotBatch {

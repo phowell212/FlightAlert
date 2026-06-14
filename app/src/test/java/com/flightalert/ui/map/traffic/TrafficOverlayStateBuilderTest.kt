@@ -15,7 +15,7 @@ import org.junit.Test
 
 class TrafficOverlayStateBuilderTest {
     @Test
-    fun active_dense_gestures_keep_every_aircraft_in_prepared_dots_without_symbol_states() {
+    fun active_dense_gestures_keep_prepared_dots_and_symbol_states_for_visual_parity() {
         val state = builder(now_elapsed_ms = 1_000L).traffic_overlay_state(
             frame(
                 interaction = TrafficOverlayInteraction(
@@ -28,7 +28,8 @@ class TrafficOverlayStateBuilderTest {
 
         assertNotNull(state.dot_batch)
         assertEquals(DENSE_AIRCRAFT_COUNT, state.dot_batch?.visible_count)
-        assertTrue(state.aircraft.isEmpty())
+        assertTrue(state.interaction_active)
+        assertTrue(state.aircraft.isNotEmpty())
     }
 
     @Test
@@ -53,6 +54,7 @@ class TrafficOverlayStateBuilderTest {
             dp = { it },
             aircraft_color = { Color.WHITE },
             aircraft_appearance_progress = { 1f },
+            aircraft_appearance = { null },
             display_aircraft_position = { aircraft, _ -> GeoPoint(aircraft.lat, aircraft.lon) },
             spatial_entry_for = { aircraft, now -> aircraft.entry(now) },
             lat_lon_to_world = { lat, lon, _ -> WorldPoint(lon, lat) },
@@ -112,7 +114,8 @@ class TrafficOverlayStateBuilderTest {
             total = aircraft.size,
             hazard_present = false,
             extreme_priority_aircraft = emptyList(),
-            extreme_priority_keys = emptySet()
+            extreme_priority_keys = emptySet(),
+            max_projected_speed_zoom_zero = 0.0
         )
     }
 

@@ -61,10 +61,10 @@ object AlertAircraftClassifier {
 
     fun should_show_persistent_priority_notification(
         alerts_enabled: Boolean,
-        priority_aircraft: List<AlertAircraft>,
+        extreme_priority_aircraft: List<AlertAircraft>,
         has_notification_permission: Boolean
     ): Boolean {
-        return alerts_enabled && priority_aircraft.isNotEmpty() && has_notification_permission
+        return alerts_enabled && extreme_priority_aircraft.any { it.is_extreme_priority } && has_notification_permission
     }
 
     private fun meters_to_feet(meters: Double): Double = meters * FEET_PER_METER

@@ -13,7 +13,8 @@ internal data class CachedTraffic(
     val total: Int,
     val hazard_present: Boolean,
     val extreme_priority_aircraft: List<Aircraft>,
-    val extreme_priority_keys: Set<String>
+    val extreme_priority_keys: Set<String>,
+    val max_projected_speed_zoom_zero: Double
 )
 
 internal data class TrafficSpatialEntry(

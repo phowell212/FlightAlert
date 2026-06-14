@@ -21,6 +21,25 @@ class AircraftMarkerMorphTest {
     }
 
     @Test
+    fun marker_blend_is_zoom_locked_not_density_locked() {
+        val zoom = 8.4
+        val sparse_blend = AircraftMarkerMorph.marker_dot_blend(
+            visible_count = 50,
+            zoom = zoom,
+            width = PHONE_WIDTH,
+            height = PHONE_HEIGHT
+        )
+        val dense_blend = AircraftMarkerMorph.marker_dot_blend(
+            visible_count = 6000,
+            zoom = zoom,
+            width = PHONE_WIDTH,
+            height = PHONE_HEIGHT
+        )
+
+        assertTrue("density changed the morph blend", kotlin.math.abs(sparse_blend - dense_blend) <= EPSILON)
+    }
+
+    @Test
     fun shape_transition_begins_before_the_dense_dot_batch_zoom_limit() {
         val blend = AircraftMarkerMorph.marker_dot_blend(
             visible_count = BUSY_VISIBLE_AIRCRAFT,

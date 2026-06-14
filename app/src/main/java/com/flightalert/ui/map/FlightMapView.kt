@@ -443,6 +443,7 @@ class FlightMapView(
         dp = { value -> dp(value) },
         aircraft_color = ::aircraft_color,
         aircraft_appearance_progress = ::aircraft_appearance_progress,
+        aircraft_appearance = ::aircraft_appearance,
         display_aircraft_position = ::display_aircraft_position,
         spatial_entry_for = ::spatial_entry_for,
         lat_lon_to_world = ::lat_lon_to_world,
@@ -538,6 +539,8 @@ class FlightMapView(
     private var debug_draw_perf_traffic_ns = 0L
     private var debug_draw_perf_chrome_ns = 0L
     private var debug_draw_perf_max_ns = 0L
+    private var debug_last_traffic_symbol_count = 0
+    private var debug_last_traffic_dot_count = 0
 
     // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
@@ -551,11 +554,13 @@ class FlightMapView(
     private var drag_started = false
     private var drag_blocked = false
     private var drag_start_center: WorldPoint? = null
+    private var map_touch_active = false
     private var pinch_in_progress = false
     private var last_pinch_span = 0f
     private var last_pinch_focus_x = 0f
     private var last_pinch_focus_y = 0f
     private var last_map_interaction_ms = 0L
+    private var last_traffic_draw_elapsed_ms = 0L
     private var zoom_preference_dirty = false
 
     // Insets describe the safe drawing rectangle after Android bars, cutouts, and fold areas are removed.
@@ -572,7 +577,9 @@ class FlightMapView(
                 last_ticker_fetch_ms = now
                 request_visible_aircraft_if_needed()
             }
-            postInvalidateOnAnimation()
+            if (should_redraw_from_ticker(now)) {
+                postInvalidateOnAnimation()
+            }
             postOnAnimation(this)
         }
     }
@@ -614,6 +621,32 @@ class FlightMapView(
                 location_permission_granted = false
             }
         }
+    }
+
+    private fun should_redraw_from_ticker(now_elapsed_ms: Long): Boolean {
+        if (map_touch_active || pinch_in_progress || drag_started) return true
+        if (has_active_aircraft_appearance(now_elapsed_ms)) return true
+        if (debug_perf_viewport_active && debug_perf_skip_traffic) return false
+        val last_draw = last_traffic_draw_elapsed_ms
+        if (last_draw <= 0L) return true
+        val elapsed_ms = now_elapsed_ms - last_draw
+        if (elapsed_ms <= 0L) return false
+        if (elapsed_ms >= AIRCRAFT_MOTION_REDRAW_MAX_INTERVAL_MS) return true
+        val viewport = current_interaction_viewport() ?: return false
+        if (viewport.zoom >= AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM) return true
+        val max_speed_zoom_zero = cached_traffic().max_projected_speed_zoom_zero
+        if (max_speed_zoom_zero <= 0.0 || !max_speed_zoom_zero.isFinite()) return false
+        val max_motion_px = max_speed_zoom_zero * 2.0.pow(viewport.zoom) * elapsed_ms / 1000.0
+        return max_motion_px >= AIRCRAFT_MOTION_REDRAW_MIN_PIXEL_DELTA
+    }
+
+    private fun has_active_aircraft_appearance(now_elapsed_ms: Long): Boolean {
+        synchronized(aircraft_appearances) {
+            for (appearance in aircraft_appearances.values) {
+                if (now_elapsed_ms - appearance.first_seen_ms < AIRCRAFT_APPEAR_DURATION_MS) return true
+            }
+        }
+        return false
     }
 
     // MainActivity owns the Android permission popup; this view owns what the map does with the answer.
@@ -735,7 +768,7 @@ class FlightMapView(
         perf_map_source?.let { source ->
             if (map_source != source) {
                 map_source = source
-                map_tile_renderer.clear()
+                map_tile_renderer.reset_transitions()
             }
         }
         perf_restricted_airspaces_enabled?.let { enabled ->
@@ -813,7 +846,9 @@ class FlightMapView(
                 "layerDraw=${debug_draw_perf_layer_draw_ns.ms(frames)} path=${debug_draw_perf_path_ns.ms(frames)} " +
                 "traffic=${debug_draw_perf_traffic_ns.ms(frames)} chrome=${debug_draw_perf_chrome_ns.ms(frames)} " +
                 "last=${total_ns.ms()} lastMap=${map_ns.ms()} lastLayerReq=${layer_request_ns.ms()} " +
-                "lastLayerDraw=${layer_draw_ns.ms()} lastPath=${path_ns.ms()} lastTraffic=${traffic_ns.ms()} lastChrome=${chrome_ns.ms()}"
+                "lastLayerDraw=${layer_draw_ns.ms()} lastPath=${path_ns.ms()} lastTraffic=${traffic_ns.ms()} lastChrome=${chrome_ns.ms()} " +
+                "symbols=$debug_last_traffic_symbol_count dots=$debug_last_traffic_dot_count " +
+                traffic_overlay_renderer.debug_last_symbol_cache_summary
         )
     }
 
@@ -973,7 +1008,22 @@ class FlightMapView(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val x = content_x(event.x)
         val y = content_y(event.y)
-        if (!settings_open && !details_session.details_open && !priority_tracker_open && !filters_open && event.pointerCount >= 2) {
+        if (
+            debug_perf_viewport_active &&
+            (event.actionMasked == MotionEvent.ACTION_DOWN ||
+                event.actionMasked == MotionEvent.ACTION_POINTER_DOWN ||
+                event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_POINTER_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL)
+        ) {
+            Log.d(
+                TAG,
+                "Debug perf touch action=${event.actionMasked} x=$x y=$y pointers=${event.pointerCount} " +
+                    "details=${details_session.details_open} settings=$settings_open latestLocation=${latest_location != null} " +
+                    "manualCenter=${manual_center_lat != null && manual_center_lon != null}"
+            )
+        }
+        if (!map_gesture_blocked_by_overlay() && event.pointerCount >= 2) {
             parent?.requestDisallowInterceptTouchEvent(true)
             when (event.actionMasked) {
                 MotionEvent.ACTION_POINTER_DOWN -> begin_pinch(event)
@@ -992,19 +1042,33 @@ class FlightMapView(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
+                val map_blocked = map_gesture_blocked_by_overlay()
+                val control_hit = is_overlay_or_control_hit(x, y)
+                map_touch_active = !map_blocked && !control_hit
+                if (debug_perf_viewport_active) {
+                    Log.d(
+                        TAG,
+                        "Debug perf touch down route x=$x y=$y mapBlocked=$map_blocked " +
+                            "controlHit=$control_hit mapTouchActive=$map_touch_active"
+                    )
+                }
+                if (map_touch_active) {
+                    mark_map_interaction()
+                    postInvalidateOnAnimation()
+                }
                 down_x = x
                 down_y = y
                 details_scroll_start_y = y
                 details_scroll_start_offset = details_scroll_y
                 drag_started = false
-                drag_blocked = is_overlay_or_control_hit(x, y)
-                drag_start_center = latest_location?.let { viewport_for(it, content_width(), content_height()) }?.let {
+                drag_blocked = !map_touch_active
+                drag_start_center = if (map_touch_active) current_interaction_viewport()?.let {
                     WorldPoint(it.center_x, it.center_y)
-                }
+                } else null
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (details_session.details_open && !settings_open && !priority_tracker_open && !filters_open && details_max_scroll_y > 0f) {
+                if (details_session.details_open && !debug_perf_hides_chrome() && !settings_open && !priority_tracker_open && !filters_open && details_max_scroll_y > 0f) {
                     val dy = y - details_scroll_start_y
                     if (!drag_started && abs(dy) > dp(6)) drag_started = true
                     if (drag_started) {
@@ -1013,7 +1077,7 @@ class FlightMapView(
                     }
                     return true
                 }
-                if (!settings_open && !details_session.details_open && !priority_tracker_open && !filters_open && !drag_blocked && drag_start_center != null && latest_location != null) {
+                if (!map_gesture_blocked_by_overlay() && !drag_blocked && drag_start_center != null) {
                     val dx = x - down_x
                     val dy = y - down_y
                     if (!drag_started && (abs(dx) > dp(8) || abs(dy) > dp(8))) {
@@ -1030,9 +1094,16 @@ class FlightMapView(
             }
             MotionEvent.ACTION_UP -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
-                if (drag_started) {
-                    mark_map_interaction()
-                    request_visible_aircraft_after_map_interaction()
+                map_touch_active = false
+                val was_dragging = drag_started
+                val was_dragging_map = drag_started && !drag_blocked
+                drag_started = false
+                drag_start_center = null
+                if (was_dragging) {
+                    if (was_dragging_map) {
+                        mark_map_interaction()
+                        request_visible_aircraft_after_map_interaction()
+                    }
                     return true
                 }
                 if (abs(x - down_x) > dp(12) || abs(y - down_y) > dp(12)) return true
@@ -1043,6 +1114,7 @@ class FlightMapView(
             }
             MotionEvent.ACTION_CANCEL -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
+                map_touch_active = false
                 drag_started = false
                 drag_start_center = null
                 return true
@@ -1053,6 +1125,18 @@ class FlightMapView(
     override fun performClick(): Boolean {
         super.performClick()
         return true
+    }
+
+    private fun map_gesture_blocked_by_overlay(): Boolean {
+        return settings_open || details_block_map_interaction() || priority_tracker_open || filters_open
+    }
+
+    private fun details_block_map_interaction(): Boolean {
+        return details_session.details_open && !debug_perf_hides_chrome()
+    }
+
+    private fun debug_perf_hides_chrome(): Boolean {
+        return debug_perf_viewport_active && debug_perf_skip_chrome
     }
 
     override fun onCheckIsTextEditor(): Boolean {
@@ -1143,6 +1227,7 @@ class FlightMapView(
     private fun begin_pinch(event: MotionEvent) {
         mark_map_interaction()
         pinch_in_progress = true
+        map_touch_active = true
         drag_started = false
         drag_blocked = true
         drag_start_center = null
@@ -1177,6 +1262,7 @@ class FlightMapView(
     private fun end_pinch() {
         mark_map_interaction()
         pinch_in_progress = false
+        map_touch_active = false
         last_pinch_span = 0f
         last_pinch_focus_x = 0f
         last_pinch_focus_y = 0f
@@ -1195,8 +1281,7 @@ class FlightMapView(
         new_focus_y: Float,
         persist_zoom: Boolean = true
     ) {
-        val location = latest_location ?: return
-        val old_viewport = viewport_for(location, content_width(), content_height())
+        val old_viewport = current_interaction_viewport() ?: return
         val anchor_geo = world_to_lat_lon(
             old_viewport.center_x - old_viewport.width / 2.0 + old_focus_x,
             old_viewport.center_y - old_viewport.height / 2.0 + old_focus_y,
@@ -1213,6 +1298,23 @@ class FlightMapView(
         zoom_preference_dirty = true
         if (persist_zoom) schedule_zoom_preference_save()
         postInvalidateOnAnimation()
+    }
+
+    private fun current_interaction_viewport(): Viewport? {
+        val w = content_width()
+        val h = content_height()
+        if (w <= 0f || h <= 0f) return null
+        latest_location?.let { location -> return viewport_for(location, w, h) }
+        val center_lat = manual_center_lat ?: return null
+        val center_lon = manual_center_lon ?: return null
+        val center = lat_lon_to_world(center_lat, center_lon, zoom)
+        return Viewport(
+            zoom = zoom,
+            center_x = center.x,
+            center_y = center.y,
+            width = w,
+            height = h
+        )
     }
 
     private fun schedule_zoom_preference_save() {
@@ -1428,6 +1530,8 @@ class FlightMapView(
 
     // Draw cached real aviation layers only after the viewport request has produced source data.
     private fun draw_aviation_layers(canvas: Canvas, viewport: Viewport) {
+        val visibility = aviation_layer_visibility()
+        if (!aviation_layer_controller.has_enabled_layers(visibility) && selected_restricted_airspace == null) return
         val snapshot = aviation_layer_controller.snapshot ?: return
         val visible_bounds = bounds_for_viewport(viewport)?.to_aviation_geo_bounds() ?: return
         aviation_layer_renderer.draw_layers(
@@ -1435,7 +1539,7 @@ class FlightMapView(
             viewport = viewport,
             snapshot = snapshot,
             visible_bounds = visible_bounds,
-            visibility = aviation_layer_visibility(),
+            visibility = visibility,
             style = aviation_layer_style(),
             selected_restricted_airspace = selected_restricted_airspace,
             interaction_active = aviation_layer_interacting(SystemClock.elapsedRealtime())
@@ -1688,6 +1792,10 @@ class FlightMapView(
         return smooth_step(0f, AIRCRAFT_APPEAR_DURATION_MS.toFloat(), elapsed.toFloat())
     }
 
+    private fun aircraft_appearance(aircraft: Aircraft): AircraftAppearance? {
+        return synchronized(aircraft_appearances) { aircraft_appearances[aircraft.appearance_key()] }
+    }
+
     private fun has_usable_viewport(): Boolean {
         return width > 0 &&
             height > 0 &&
@@ -1838,11 +1946,16 @@ class FlightMapView(
 
     private fun draw_traffic_overlay(canvas: Canvas, viewport: Viewport) {
         val state = traffic_overlay_state(viewport)
+        if (debug_perf_viewport_active) {
+            debug_last_traffic_symbol_count = state.aircraft.size
+            debug_last_traffic_dot_count = state.dot_batch?.visible_count ?: state.aircraft.size
+        }
         traffic_overlay_renderer.draw_aircraft(
             canvas = canvas,
             state = state,
             style = TrafficOverlayStyle(visual_theme)
         )
+        last_traffic_draw_elapsed_ms = SystemClock.elapsedRealtime()
         aircraft_details_prefetch_planner.schedule(
             state = state,
             details_open = details_session.details_open,
@@ -1897,7 +2010,8 @@ class FlightMapView(
         return TrafficOverlayInteraction(
             pinch_in_progress = pinch_in_progress,
             drag_started = drag_started,
-            last_map_interaction_ms = last_map_interaction_ms
+            last_map_interaction_ms = last_map_interaction_ms,
+            map_touch_active = map_touch_active
         )
     }
     private fun traffic_query_padding_px(viewport: Viewport): Float {
@@ -2880,7 +2994,8 @@ class FlightMapView(
     }
 
     private fun is_overlay_or_control_hit(x: Float, y: Float): Boolean {
-        if (settings_open || details_session.details_open || priority_tracker_open || filters_open) return true
+        if (settings_open || details_block_map_interaction() || priority_tracker_open || filters_open) return true
+        if (debug_perf_hides_chrome()) return false
         val w = content_width()
         val h = content_height()
         return (!following_location && recenter_button_bounds(w, h).contains(x, y)) ||
@@ -2922,7 +3037,7 @@ class FlightMapView(
 
     private fun toggle_map_source() {
         map_source = if (map_source == TileSource.STREET) TileSource.SATELLITE else TileSource.STREET
-        map_tile_renderer.clear()
+        map_tile_renderer.reset_transitions()
         prefs.edit { putString(FlightAlertSettings.KEY_MAP_SOURCE, map_source.name) }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
         invalidate()
@@ -2931,7 +3046,7 @@ class FlightMapView(
     private fun set_map_labels_enabled(enabled: Boolean) {
         if (map_labels_enabled == enabled) return
         map_labels_enabled = enabled
-        map_tile_renderer.clear()
+        map_tile_renderer.reset_transitions()
         prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_LABELS_ENABLED, map_labels_enabled) }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
         invalidate()

@@ -13,10 +13,21 @@ public final class MultiTouchGestureRunner {
 
     private final Object inputManager;
     private final Method injectInputEvent;
+    private final Method setDisplayId;
+    private final int displayId;
 
-    private MultiTouchGestureRunner() throws Exception {
+    private MultiTouchGestureRunner(int displayId) throws Exception {
+        this.displayId = displayId;
         inputManager = InputManager.class.getMethod("getInstance").invoke(null);
         injectInputEvent = InputManager.class.getMethod("injectInputEvent", android.view.InputEvent.class, int.class);
+        Method displayMethod = null;
+        try {
+            displayMethod = android.view.InputEvent.class.getDeclaredMethod("setDisplayId", int.class);
+            displayMethod.setAccessible(true);
+        } catch (NoSuchMethodException ignored) {
+            // Older Android API stubs hide this method; injection still works on single-display devices.
+        }
+        setDisplayId = displayMethod;
     }
 
     public static void main(String[] args) throws Exception {
@@ -26,7 +37,8 @@ public final class MultiTouchGestureRunner {
         String mode = args[0];
         int width = Integer.parseInt(args[1]);
         int height = Integer.parseInt(args[2]);
-        MultiTouchGestureRunner runner = new MultiTouchGestureRunner();
+        int displayId = args.length >= 4 ? Integer.parseInt(args[3]) : 0;
+        MultiTouchGestureRunner runner = new MultiTouchGestureRunner(displayId);
         if ("quick".equals(mode)) {
             runner.quickZoom(width, height);
         } else if ("pinch".equals(mode)) {
@@ -247,8 +259,14 @@ public final class MultiTouchGestureRunner {
                 SOURCE,
                 0
         );
+        if (setDisplayId != null) {
+            setDisplayId.invoke(event, displayId);
+        }
         try {
-            injectInputEvent.invoke(inputManager, event, INJECT_WAIT_FOR_FINISH);
+            Object result = injectInputEvent.invoke(inputManager, event, INJECT_WAIT_FOR_FINISH);
+            if (result instanceof Boolean && !((Boolean) result)) {
+                throw new IllegalStateException("InputManager rejected touch injection on display " + displayId);
+            }
         } finally {
             event.recycle();
         }

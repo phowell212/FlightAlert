@@ -106,33 +106,56 @@ class AlertAircraftClassifierTest {
             alert_altitude_feet = 150f,
             priority_enabled = true
         )!!
+        val nearby_non_extreme = classify(
+            distance_feet = 1500.0,
+            altitude_feet = 500.0,
+            own_altitude_feet = 500.0,
+            alert_distance_feet = 1000f,
+            alert_altitude_feet = 150f,
+            priority_enabled = true,
+            priority_range_feet = 2000f
+        )!!
 
         assertTrue(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
                 alerts_enabled = true,
-                priority_aircraft = listOf(aircraft),
+                extreme_priority_aircraft = listOf(aircraft),
                 has_notification_permission = true
             )
         )
         assertFalse(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
                 alerts_enabled = true,
-                priority_aircraft = emptyList(),
+                extreme_priority_aircraft = emptyList(),
                 has_notification_permission = true
             )
         )
         assertFalse(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
                 alerts_enabled = false,
-                priority_aircraft = listOf(aircraft),
+                extreme_priority_aircraft = listOf(aircraft),
                 has_notification_permission = true
             )
         )
         assertFalse(
             AlertAircraftClassifier.should_show_persistent_priority_notification(
                 alerts_enabled = true,
-                priority_aircraft = listOf(aircraft),
+                extreme_priority_aircraft = listOf(aircraft),
                 has_notification_permission = false
+            )
+        )
+        assertFalse(
+            AlertAircraftClassifier.should_show_persistent_priority_notification(
+                alerts_enabled = true,
+                extreme_priority_aircraft = listOf(nearby_non_extreme),
+                has_notification_permission = true
+            )
+        )
+        assertTrue(
+            AlertAircraftClassifier.should_show_persistent_priority_notification(
+                alerts_enabled = true,
+                extreme_priority_aircraft = listOf(nearby_non_extreme, aircraft),
+                has_notification_permission = true
             )
         )
     }

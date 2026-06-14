@@ -269,9 +269,11 @@ class AircraftAlertService : Service(), LocationListener {
     // The persistent notification is tied directly to the non-empty extreme-priority list.
     private fun update_priority_notification(priority_aircraft: List<AlertAircraft>) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        // Defensive filtering keeps the notification contract tied to classifier output, even if a caller passes nearby queue contacts.
+        val extreme_priority_aircraft = PriorityNotificationPresenter.extreme_priority_aircraft(priority_aircraft)
         if (!AlertAircraftClassifier.should_show_persistent_priority_notification(
                 alerts_enabled = alerts_enabled(),
-                priority_aircraft = priority_aircraft,
+                extreme_priority_aircraft = extreme_priority_aircraft,
                 has_notification_permission = has_notification_permission()
             )
         ) {
@@ -279,18 +281,10 @@ class AircraftAlertService : Service(), LocationListener {
             leave_foreground()
             return
         }
-        val body = priority_aircraft
-            .sortedWith(compareBy<AlertAircraft> { it.altitude_feet }.thenBy { it.distance_feet })
-            .take(4)
-            .joinToString("; ") { aircraft ->
-                val registration = aircraft.registration ?: "reg unavailable"
-                String.format(Locale.US, "%s %.0f ft", registration, aircraft.altitude_feet)
-            }
-        val suffix = if (priority_aircraft.size > 4) " +${priority_aircraft.size - 4} more" else ""
         val notification = build_notification(
             PRIORITY_CHANNEL_ID,
             "Extreme priority aircraft",
-            "$body$suffix",
+            PriorityNotificationPresenter.notification_body(extreme_priority_aircraft),
             true
         )
         try {

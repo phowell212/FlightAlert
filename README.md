@@ -2,7 +2,7 @@
 
 Flight Alert is a Kotlin Android app for drone pilots who want live, map-first awareness of nearby aircraft. It is supplemental situational awareness only, not a certified detect-and-avoid system.
 
-Current version: **1.4**
+Current version: **1.5**
 
 ## Highlights
 
@@ -69,10 +69,10 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 - Filters only change visible map traffic; alert monitoring continues against the full live feed.
 - CO2/impact values are estimates, not measured fuel burn.
 
-## 1.4 Verification
+## 1.5 Verification
 
-- `assembleDebug`, `testDebugUnitTest`, and `lintDebug` pass.
-- Emulator comparison covered the refactored `test` branch against `master` for the main map, Settings, Filters, aircraft details, and Priority tracker panels.
-- Web source mode was verified on a Samsung SM-F946U against 5 live Airplanes.Live aircraft; registration, type, owner/operator, and Globe photo retrieval matched the live source data for the sampled aircraft.
-- Persistent extreme-priority notification was verified with live aircraft data: it appears only while priority tracking has aircraft inside the configured 3D alert volume and clears when priority tracking is turned off.
-- The map coordinator was refactored so feature logic lives in focused Kotlin objects while preserving the existing styling and user experience.
+- `assembleDebug`, `assembleDebugAndroidTest`, `testDebugUnitTest`, and `lintDebug` pass on the release-prep tree.
+- Emulator visual/layout check covered the main street-map surface with real tiles, aircraft overlays, readable aircraft dots/outlines, and the current panel/theme treatment.
+- Physical phone `RFCX40KPN3B` passed `PriorityNotificationContractInstrumentedTest`, covering non-extreme contacts, extreme contacts, altitude text updates, and automatic notification clearing when the extreme-priority queue is empty.
+- Physical phone `RFCX40KPN3B` v1.5 low-zoom street/off shell-pan over New York City rendered 487 frames with 11 janky frames (2.26%), p50 7 ms, p95 10 ms, and p99 14 ms; same-run motion capture preserved real map imagery and aircraft dot outlines.
+- This pass kept the post-Optimizer/Artist map behavior intact while adding only light service/readability humanization and deterministic notification coverage.
