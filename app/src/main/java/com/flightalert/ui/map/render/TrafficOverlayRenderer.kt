@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Handler
@@ -163,12 +164,23 @@ class TrafficOverlayRenderer(
     private var symbol_overlay_async_key: AircraftSymbolOverlayCacheKey? = null
     private var symbol_overlay_async_result: AircraftSymbolOverlayAsyncResult? = null
     private var dot_overlay_bitmap: Bitmap? = null
+    private var dot_overlay_recording_bitmap: Bitmap? = null
     private var dot_overlay_key: DotOverlayCacheKey? = null
     private var dot_overlay_width = 0
     private var dot_overlay_height = 0
     private var dot_overlay_padding = 0f
     private var dot_overlay_center_x = Double.NaN
     private var dot_overlay_center_y = Double.NaN
+    private var dot_overlay_recording_key: DotOverlayCacheKey? = null
+    private var dot_overlay_recording_width = 0
+    private var dot_overlay_recording_height = 0
+    private var dot_overlay_recording_padding = 0f
+    private var dot_overlay_recording_center_x = Double.NaN
+    private var dot_overlay_recording_center_y = Double.NaN
+    private var dot_overlay_recording_phase = DOT_OVERLAY_RECORDING_PHASE_DONE
+    private var dot_overlay_recording_offset = 0
+    private var dot_overlay_recording_clear_y = 0
+    private val dot_overlay_clear_rect = Rect()
     private var debug_symbol_cache_miss_reason = "none"
     var debug_collect_detail_timing = false
     var debug_last_symbol_cache_summary: String = "symbolCache=none"
@@ -176,6 +188,8 @@ class TrafficOverlayRenderer(
     var debug_last_detail_timing_summary: String = ""
         private set
     private var debug_detail_dot_batch_ns = 0L
+    private var debug_detail_dot_cache_clear_ns = 0L
+    private var debug_detail_dot_cache_record_ns = 0L
     private var debug_detail_cache_attempt_ns = 0L
     private var debug_detail_direct_symbol_ns = 0L
     private var debug_detail_symbol_style_ns = 0L
@@ -413,6 +427,8 @@ class TrafficOverlayRenderer(
             return
         }
         debug_detail_dot_batch_ns = 0L
+        debug_detail_dot_cache_clear_ns = 0L
+        debug_detail_dot_cache_record_ns = 0L
         debug_detail_cache_attempt_ns = 0L
         debug_detail_direct_symbol_ns = 0L
         debug_detail_symbol_style_ns = 0L
@@ -426,6 +442,8 @@ class TrafficOverlayRenderer(
         if (!debug_collect_detail_timing) return
         debug_last_detail_timing_summary =
             " trafficDetail dotBatch=${debug_detail_dot_batch_ns.ms_debug()} " +
+                "dotCacheClear=${debug_detail_dot_cache_clear_ns.ms_debug()} " +
+                "dotCacheRecord=${debug_detail_dot_cache_record_ns.ms_debug()} " +
                 "cacheAttempt=${debug_detail_cache_attempt_ns.ms_debug()} " +
                 "directSymbols=${debug_detail_direct_symbol_ns.ms_debug()} " +
                 "symbolStyle=${debug_detail_symbol_style_ns.ms_debug()} " +
@@ -486,6 +504,33 @@ class TrafficOverlayRenderer(
         val height_px = ceil(viewport.height + padding * 2f).toInt().coerceAtLeast(1)
         val source_center_x = viewport.center_x + translation_x / scale
         val source_center_y = viewport.center_y + translation_y / scale
+        if (interaction_active && symbol_overlay_key == null) {
+            install_any_completed_symbol_overlay_recording()
+            if (symbol_overlay_key == null) {
+                debug_symbol_cache_miss_reason = if (symbol_overlay_recording_pending()) "recording" else "active_coverage"
+                return null
+            }
+        }
+        val dimensions_match = symbol_overlay_width == width_px &&
+            symbol_overlay_height == height_px
+        val center_matches =
+            abs(symbol_overlay_center_x - source_center_x) <= SYMBOL_OVERLAY_CENTER_EPSILON &&
+                abs(symbol_overlay_center_y - source_center_y) <= SYMBOL_OVERLAY_CENTER_EPSILON
+        val cache_translation_x = (symbol_overlay_center_x - viewport.center_x).toFloat()
+        val cache_translation_y = (symbol_overlay_center_y - viewport.center_y).toFloat()
+        val cache_left = cache_translation_x - padding * scale
+        val cache_top = cache_translation_y - padding * scale
+        val cache_right = cache_left + symbol_overlay_width * scale
+        val cache_bottom = cache_top + symbol_overlay_height * scale
+        val cache_intersects_viewport = dimensions_match &&
+            cache_right >= 0f &&
+            cache_bottom >= 0f &&
+            cache_left <= viewport.width &&
+            cache_top <= viewport.height
+        if (interaction_active && symbol_overlay_key != null && !cache_intersects_viewport) {
+            debug_symbol_cache_miss_reason = "active_coverage"
+            return null
+        }
         val appearance_bucket = aircraft_symbol_overlay_appearance_bucket(aircraft)
         if (appearance_bucket < SYMBOL_OVERLAY_APPEARANCE_READY_BUCKET) {
             debug_symbol_cache_miss_reason = "appearance"
@@ -504,24 +549,8 @@ class TrafficOverlayRenderer(
         if (interaction_active) {
             symbol_overlay_last_interaction_visual_key = visual_key
         }
-        val dimensions_match = symbol_overlay_width == width_px &&
-            symbol_overlay_height == height_px
-        val center_matches =
-            abs(symbol_overlay_center_x - source_center_x) <= SYMBOL_OVERLAY_CENTER_EPSILON &&
-                abs(symbol_overlay_center_y - source_center_y) <= SYMBOL_OVERLAY_CENTER_EPSILON
         val key_matches = symbol_overlay_key == key && dimensions_match && center_matches
         val visual_key_matches = symbol_overlay_key?.visual_key_matches(key) == true && dimensions_match
-        val cache_translation_x = (symbol_overlay_center_x - viewport.center_x).toFloat()
-        val cache_translation_y = (symbol_overlay_center_y - viewport.center_y).toFloat()
-        val cache_left = cache_translation_x - padding * scale
-        val cache_top = cache_translation_y - padding * scale
-        val cache_right = cache_left + symbol_overlay_width * scale
-        val cache_bottom = cache_top + symbol_overlay_height * scale
-        val cache_intersects_viewport = dimensions_match &&
-            cache_right >= 0f &&
-            cache_bottom >= 0f &&
-            cache_left <= viewport.width &&
-            cache_top <= viewport.height
         val active_key_matches = interaction_active &&
             cache_intersects_viewport &&
             visual_key_matches
@@ -692,6 +721,19 @@ class TrafficOverlayRenderer(
                 null
             }
         } ?: return
+        install_symbol_overlay_recording_result(result)
+    }
+
+    private fun install_any_completed_symbol_overlay_recording() {
+        val result = synchronized(symbol_overlay_async_lock) {
+            val pending = symbol_overlay_async_result ?: return
+            symbol_overlay_async_result = null
+            pending
+        }
+        install_symbol_overlay_recording_result(result)
+    }
+
+    private fun install_symbol_overlay_recording_result(result: AircraftSymbolOverlayAsyncResult) {
         val current = symbol_overlay_bitmap
         if (current != null && current !== result.bitmap && !current.isRecycled) {
             current.recycle()
@@ -1053,7 +1095,7 @@ class TrafficOverlayRenderer(
         val visual_key_matches = dot_overlay_key?.visual_key_matches(key) == true
         if (!key_matches && interaction_active && (!visual_key_matches || !cache_covers)) return false
         if (!key_matches && !interaction_active) {
-            record_dot_overlay_cache(
+            val recording_complete = advance_dot_overlay_cache_recording(
                 batch = batch,
                 viewport = viewport,
                 style = style,
@@ -1065,6 +1107,7 @@ class TrafficOverlayRenderer(
                 height_px = height_px,
                 key = key
             )
+            if (!recording_complete) return false
         }
         val bitmap = dot_overlay_bitmap ?: return false
         if (bitmap.isRecycled || dot_overlay_width != width_px || dot_overlay_height != height_px) return false
@@ -1094,7 +1137,7 @@ class TrafficOverlayRenderer(
             batch.transform_scale > 0f
     }
 
-    private fun record_dot_overlay_cache(
+    private fun advance_dot_overlay_cache_recording(
         batch: TrafficDotBatchOverlayState,
         viewport: Viewport,
         style: TrafficOverlayStyle,
@@ -1105,48 +1148,248 @@ class TrafficOverlayRenderer(
         width_px: Int,
         height_px: Int,
         key: DotOverlayCacheKey
-    ) {
-        val bitmap = reusable_dot_overlay_bitmap(width_px, height_px)
+    ): Boolean {
+        if (!dot_overlay_recording_matches(key, width_px, height_px, padding, viewport)) {
+            start_dot_overlay_cache_recording(key, width_px, height_px, padding, viewport)
+        }
+        val bitmap = dot_overlay_recording_bitmap ?: return false
+        if (bitmap.isRecycled) return false
+        val started_ns = SystemClock.elapsedRealtimeNanos()
         val recording_canvas = Canvas(bitmap)
         val cache_viewport = viewport.copy(width = width_px.toFloat(), height = height_px.toFloat())
         val cache_batch = batch.copy(
             translation_x = batch.translation_x + padding,
             translation_y = batch.translation_y + padding
         )
-        val old_cap = paint.strokeCap
-        draw_dot_batch_points(
-            canvas = recording_canvas,
-            batch = cache_batch,
-            viewport = cache_viewport,
-            colors = style.visual_theme.colors,
-            dot_alpha = dot_alpha,
-            batch_radius_px = batch_radius_px,
-            outline_extra_px = outline_extra_px,
-            outline_draw_points = batch.outline_points,
-            fill_draw_points = batch.fill_points,
-            old_cap = old_cap
-        )
+        while (dot_overlay_recording_phase != DOT_OVERLAY_RECORDING_PHASE_DONE) {
+            if (dot_overlay_recording_phase == DOT_OVERLAY_RECORDING_PHASE_CLEAR) {
+                val clear_start_ns = debug_detail_start_ns()
+                clear_next_dot_overlay_recording_chunk(recording_canvas)
+                debug_detail_dot_cache_clear_ns += debug_detail_elapsed_ns(clear_start_ns)
+            } else {
+                val record_start_ns = debug_detail_start_ns()
+                record_next_dot_overlay_chunk(
+                    canvas = recording_canvas,
+                    batch = cache_batch,
+                    viewport = cache_viewport,
+                    colors = style.visual_theme.colors,
+                    dot_alpha = dot_alpha,
+                    batch_radius_px = batch_radius_px,
+                    outline_extra_px = outline_extra_px
+                )
+                debug_detail_dot_cache_record_ns += debug_detail_elapsed_ns(record_start_ns)
+            }
+            if (SystemClock.elapsedRealtimeNanos() - started_ns >= DOT_OVERLAY_RECORDING_BUDGET_NS) break
+        }
+        if (dot_overlay_recording_phase != DOT_OVERLAY_RECORDING_PHASE_DONE) return false
+        install_completed_dot_overlay_recording(bitmap)
         dot_overlay_key = key
         dot_overlay_width = width_px
         dot_overlay_height = height_px
         dot_overlay_padding = padding
         dot_overlay_center_x = viewport.center_x
         dot_overlay_center_y = viewport.center_y
+        dot_overlay_recording_key = null
+        dot_overlay_recording_offset = 0
+        dot_overlay_recording_clear_y = 0
+        return true
     }
 
-    private fun reusable_dot_overlay_bitmap(width_px: Int, height_px: Int): Bitmap {
-        val current = dot_overlay_bitmap
+    private fun dot_overlay_recording_matches(
+        key: DotOverlayCacheKey,
+        width_px: Int,
+        height_px: Int,
+        padding: Float,
+        viewport: Viewport
+    ): Boolean {
+        return dot_overlay_recording_key == key &&
+            dot_overlay_recording_width == width_px &&
+            dot_overlay_recording_height == height_px &&
+            dot_overlay_recording_padding == padding &&
+            dot_overlay_recording_center_x == viewport.center_x &&
+            dot_overlay_recording_center_y == viewport.center_y
+    }
+
+    private fun start_dot_overlay_cache_recording(
+        key: DotOverlayCacheKey,
+        width_px: Int,
+        height_px: Int,
+        padding: Float,
+        viewport: Viewport
+    ) {
+        reusable_dot_overlay_recording_bitmap(width_px, height_px)
+        dot_overlay_recording_key = key
+        dot_overlay_recording_width = width_px
+        dot_overlay_recording_height = height_px
+        dot_overlay_recording_padding = padding
+        dot_overlay_recording_center_x = viewport.center_x
+        dot_overlay_recording_center_y = viewport.center_y
+        dot_overlay_recording_phase = DOT_OVERLAY_RECORDING_PHASE_CLEAR
+        dot_overlay_recording_offset = 0
+        dot_overlay_recording_clear_y = 0
+    }
+
+    private fun clear_next_dot_overlay_recording_chunk(canvas: Canvas) {
+        val width = dot_overlay_recording_width
+        val height = dot_overlay_recording_height
+        if (width <= 0 || height <= 0) {
+            advance_dot_overlay_recording_phase()
+            return
+        }
+        val top = dot_overlay_recording_clear_y.coerceIn(0, height)
+        if (top >= height) {
+            advance_dot_overlay_recording_phase()
+            return
+        }
+        val bottom = min(height, top + DOT_OVERLAY_RECORDING_CLEAR_ROWS)
+        dot_overlay_clear_rect.set(0, top, width, bottom)
+        val save_count = canvas.save()
+        try {
+            canvas.clipRect(dot_overlay_clear_rect)
+            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        } finally {
+            canvas.restoreToCount(save_count)
+        }
+        dot_overlay_recording_clear_y = bottom
+        if (dot_overlay_recording_clear_y >= height) {
+            advance_dot_overlay_recording_phase()
+        }
+    }
+
+    private fun record_next_dot_overlay_chunk(
+        canvas: Canvas,
+        batch: TrafficDotBatchOverlayState,
+        viewport: Viewport,
+        colors: ThemeColors,
+        dot_alpha: Float,
+        batch_radius_px: Float,
+        outline_extra_px: Float
+    ) {
+        while (dot_overlay_recording_phase != DOT_OVERLAY_RECORDING_PHASE_DONE) {
+            val phase = dot_overlay_recording_phase
+            val points = if (phase == DOT_OVERLAY_RECORDING_PHASE_OUTLINE) {
+                batch.outline_points
+            } else {
+                batch.fill_points[phase]
+            }
+            val total_count = if (phase == DOT_OVERLAY_RECORDING_PHASE_OUTLINE) {
+                batch.outline_count
+            } else {
+                batch.fill_counts[phase]
+            }
+            if (dot_overlay_recording_offset >= total_count || total_count <= 0) {
+                advance_dot_overlay_recording_phase()
+                continue
+            }
+            val remaining = total_count - dot_overlay_recording_offset
+            val chunk_count = min(remaining, DOT_OVERLAY_RECORDING_CHUNK_FLOATS).let { count ->
+                if (count % 2 == 0) count else count - 1
+            }
+            if (chunk_count <= 0) {
+                advance_dot_overlay_recording_phase()
+                continue
+            }
+            draw_dot_overlay_recording_points(
+                canvas = canvas,
+                batch = batch,
+                viewport = viewport,
+                colors = colors,
+                dot_alpha = dot_alpha,
+                batch_radius_px = batch_radius_px,
+                outline_extra_px = outline_extra_px,
+                phase = phase,
+                points = points,
+                offset = dot_overlay_recording_offset,
+                count = chunk_count
+            )
+            dot_overlay_recording_offset += chunk_count
+            if (dot_overlay_recording_offset >= total_count) {
+                advance_dot_overlay_recording_phase()
+            }
+            return
+        }
+    }
+
+    private fun advance_dot_overlay_recording_phase() {
+        dot_overlay_recording_offset = 0
+        dot_overlay_recording_phase = if (dot_overlay_recording_phase == DOT_OVERLAY_RECORDING_PHASE_CLEAR) {
+            DOT_OVERLAY_RECORDING_PHASE_OUTLINE
+        } else if (dot_overlay_recording_phase == DOT_OVERLAY_RECORDING_PHASE_OUTLINE) {
+            0
+        } else if (dot_overlay_recording_phase >= TrafficDotBatchOverlayState.GROUP_COUNT - 1) {
+            DOT_OVERLAY_RECORDING_PHASE_DONE
+        } else {
+            dot_overlay_recording_phase + 1
+        }
+    }
+
+    private fun draw_dot_overlay_recording_points(
+        canvas: Canvas,
+        batch: TrafficDotBatchOverlayState,
+        viewport: Viewport,
+        colors: ThemeColors,
+        dot_alpha: Float,
+        batch_radius_px: Float,
+        outline_extra_px: Float,
+        phase: Int,
+        points: FloatArray,
+        offset: Int,
+        count: Int
+    ) {
+        val old_cap = paint.strokeCap
+        val transform_scale = batch.transform_scale.coerceAtLeast(0.001f)
+        val repeat_spacing_px = batch.repeat_x_spacing * transform_scale
+        val repeat_range = visible_repeat_range(batch, viewport, transform_scale, repeat_spacing_px)
+        for (repeat in repeat_range.first..repeat_range.last) {
+            val save_count = canvas.save()
+            canvas.translate(batch.translation_x + repeat_spacing_px * repeat, batch.translation_y)
+            canvas.scale(transform_scale, transform_scale)
+            try {
+                paint.style = Paint.Style.STROKE
+                paint.strokeCap = Paint.Cap.ROUND
+                if (phase == DOT_OVERLAY_RECORDING_PHASE_OUTLINE) {
+                    paint.strokeWidth = (batch_radius_px * 2f + outline_extra_px) / transform_scale
+                    paint.color = with_alpha(colors.scrim, (150 * dot_alpha).round_to_int())
+                } else {
+                    paint.strokeWidth = batch_radius_px * 2f / transform_scale
+                    paint.color = with_scaled_alpha(batch_dot_group_color(phase, colors), dot_alpha)
+                }
+                canvas.drawPoints(points, offset, count, paint)
+            } finally {
+                canvas.restoreToCount(save_count)
+                paint.strokeCap = old_cap
+                paint.alpha = 255
+            }
+        }
+    }
+
+    private fun reusable_dot_overlay_recording_bitmap(width_px: Int, height_px: Int): Bitmap {
+        val current = dot_overlay_recording_bitmap
         if (current != null &&
             !current.isRecycled &&
             current.width == width_px &&
             current.height == height_px
         ) {
-            current.eraseColor(Color.TRANSPARENT)
             return current
         }
         current?.recycle()
         return Bitmap.createBitmap(width_px, height_px, Bitmap.Config.ARGB_8888).also { bitmap ->
-            dot_overlay_bitmap = bitmap
+            dot_overlay_recording_bitmap = bitmap
+        }
+    }
+
+    private fun install_completed_dot_overlay_recording(completed_bitmap: Bitmap) {
+        val previous_bitmap = dot_overlay_bitmap
+        dot_overlay_bitmap = completed_bitmap
+        dot_overlay_recording_bitmap = if (previous_bitmap != null &&
+            !previous_bitmap.isRecycled &&
+            previous_bitmap.width == completed_bitmap.width &&
+            previous_bitmap.height == completed_bitmap.height
+        ) {
+            previous_bitmap
+        } else {
+            previous_bitmap?.recycle()
+            null
         }
     }
 
@@ -1441,6 +1684,7 @@ class TrafficOverlayRenderer(
         val shape_progress = AircraftMarkerMorph.shape_progress(blend)
         val progress_bucket = aircraft_symbol_progress_bucket(shape_progress)
         val base_icon_scale = AircraftMarkerMorph.blended_icon_scale(viewport_zoom, blend)
+        val symbol_visibility = AircraftMarkerMorph.symbol_visibility(blend)
         val mask_resolution_scale = aircraft_symbol_mask_resolution_scale(base_icon_scale)
         val mask_size_px = aircraft_symbol_mask_size_px(mask_resolution_scale)
         java.util.Arrays.fill(frame_symbol_masks, null)
@@ -1457,7 +1701,7 @@ class TrafficOverlayRenderer(
             colors = style.visual_theme.colors,
             blend = blend,
             viewport_zoom = viewport_zoom,
-            symbol_visibility = AircraftMarkerMorph.symbol_visibility(blend),
+            symbol_visibility = symbol_visibility,
             base_icon_scale = base_icon_scale,
             mask_resolution_scale = mask_resolution_scale,
             shadow_offset_x_px = chrome.dp(2f + 1f * shape_progress),
@@ -1515,6 +1759,8 @@ class TrafficOverlayRenderer(
     private fun current_aircraft_appearance_progress_at(item: TrafficAircraftOverlayState, now_ms: Long): Float {
         if (item.appearance_first_seen_ms <= 0L) return item.appearance_progress.coerceIn(0f, 1f)
         val elapsed = now_ms - item.appearance_first_seen_ms - item.appearance_delay_ms
+        if (elapsed <= 0L) return 0f
+        if (elapsed >= AIRCRAFT_APPEAR_DURATION_MS) return 1f
         return smooth_step(0f, AIRCRAFT_APPEAR_DURATION_MS.toFloat(), elapsed.toFloat())
     }
 
@@ -1595,6 +1841,8 @@ class TrafficOverlayRenderer(
         stroke_canvas.withTranslation(center, center) {
             AircraftSymbolRenderer.draw(this, symbol, progress, transparent_fill_paint, stroke_paint, mask_dp)
         }
+        fill.prepareToDraw()
+        stroke.prepareToDraw()
         val mask = AircraftSymbolMask(fill, stroke)
         symbol_mask_cache[key] = mask
         return mask
@@ -2642,6 +2890,12 @@ class TrafficOverlayRenderer(
         const val DOT_OVERLAY_CACHE_MAX_PIXELS = 8_000_000f
         const val DOT_OVERLAY_SCALE_BUCKET = 1000f
         const val DOT_OVERLAY_ALPHA_BUCKET = 1000f
+        const val DOT_OVERLAY_RECORDING_PHASE_CLEAR = -2
+        const val DOT_OVERLAY_RECORDING_PHASE_OUTLINE = -1
+        const val DOT_OVERLAY_RECORDING_PHASE_DONE = TrafficDotBatchOverlayState.GROUP_COUNT
+        const val DOT_OVERLAY_RECORDING_CHUNK_FLOATS = 4096
+        const val DOT_OVERLAY_RECORDING_CLEAR_ROWS = 128
+        const val DOT_OVERLAY_RECORDING_BUDGET_NS = 1_600_000L
         const val MIN_WORLD_REPEAT = -4
         const val MAX_WORLD_REPEAT = 4
         const val DOT_BATCH_GROUP_COUNT = TrafficDotBatchOverlayState.GROUP_COUNT

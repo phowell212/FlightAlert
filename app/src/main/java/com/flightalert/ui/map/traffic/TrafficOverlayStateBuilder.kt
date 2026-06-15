@@ -1,6 +1,7 @@
 package com.flightalert.ui.map.traffic
 
 import android.graphics.RectF
+import android.os.SystemClock
 import com.flightalert.ui.map.Aircraft
 import com.flightalert.ui.map.AircraftAppearance
 import com.flightalert.ui.map.GeoPoint
@@ -14,6 +15,7 @@ import com.flightalert.ui.map.render.TrafficDotBatchOverlayState
 import com.flightalert.ui.map.render.TrafficOverlayState
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -40,6 +42,7 @@ internal data class TrafficOverlayFrame(
     val selection: TrafficOverlaySelection,
     val filters_restrict_aircraft: Boolean,
     val map_source: TileSource,
+    val visual_theme_key: Int,
     val content_width: Float,
     val content_height: Float,
     val label_avoid_rects: List<RectF>,
@@ -49,8 +52,8 @@ internal data class TrafficOverlayFrame(
 internal class TrafficOverlayStateBuilder(
     private val dp: (Float) -> Float,
     private val aircraft_color: (Aircraft) -> Int,
-    private val aircraft_appearance_progress: (Aircraft) -> Float,
-    private val aircraft_appearance: (Aircraft) -> AircraftAppearance?,
+    private val aircraft_appearance_progress: (String, Aircraft) -> Float,
+    private val aircraft_appearance: (String, Aircraft) -> AircraftAppearance?,
     private val display_aircraft_position: (Aircraft, Double) -> GeoPoint,
     private val spatial_entry_for: (Aircraft, Double) -> TrafficSpatialEntry,
     private val lat_lon_to_world: (Double, Double, Double) -> WorldPoint,
@@ -84,25 +87,45 @@ internal class TrafficOverlayStateBuilder(
     private var dense_symbol_cache_width = 0f
     private var dense_symbol_cache_height = 0f
     private var dense_symbol_cache_reuse_padding_px = 0f
+    private var dense_symbol_cache_grid: DenseSymbolStateGrid? = null
     private var dense_symbol_cache_selected_key: String? = null
     private var dense_symbol_cache_path_focus = false
     private var dense_symbol_cache_built_ms = 0L
+    var debug_collect_detail_timing = false
+    var debug_last_detail_timing_summary: String = ""
+        private set
+    private var debug_state_dot_batch_ns = 0L
+    private var debug_state_symbol_overlay_ns = 0L
+    private var debug_state_symbol_shift_ns = 0L
+    private var debug_state_symbol_query_ns = 0L
+    private var debug_state_symbol_filter_ns = 0L
+    private var debug_state_symbol_fallback_ns = 0L
+    private var debug_state_symbol_grid_ns = 0L
+    private var debug_state_symbol_cache_ns = 0L
+    private var debug_state_aircraft_pick_ns = 0L
+    private var debug_state_symbol_mode = "none"
 
     // Build the renderer snapshot from cached traffic so pan frames only cull and interpolate.
     fun traffic_overlay_state(frame: TrafficOverlayFrame): TrafficOverlayState {
+        reset_debug_detail_timing()
         val interaction_active = dense_dot_symbol_interacting(frame.interaction, now_elapsed_ms())
+        val dot_start_ns = debug_detail_start_ns()
         val dot_batch = dense_aircraft_dot_batch(frame)
+        debug_state_dot_batch_ns += debug_detail_elapsed_ns(dot_start_ns)
         val include_symbols = dot_batch == null || should_include_aircraft_symbols_with_dot_batch(frame, dot_batch)
         val adjusted_dot_batch = if (dot_batch != null && include_symbols && dot_batch.animate_motion) {
             dot_batch.copy(animate_motion = false)
         } else {
             dot_batch
         }
+        val symbol_start_ns = debug_detail_start_ns()
         val dense_symbol_overlay = if (include_symbols && dot_batch != null) {
             dense_dot_symbol_overlay(frame)
         } else {
             null
         }
+        debug_state_symbol_overlay_ns += debug_detail_elapsed_ns(symbol_start_ns)
+        val aircraft_start_ns = debug_detail_start_ns()
         val aircraft = if (include_symbols) {
             if (dot_batch == null) {
                 visible_aircraft_overlay_states(frame)
@@ -112,6 +135,7 @@ internal class TrafficOverlayStateBuilder(
         } else {
             emptyList()
         }
+        debug_state_aircraft_pick_ns += debug_detail_elapsed_ns(aircraft_start_ns)
         return traffic_overlay_state_from_entries(
             frame = frame,
             aircraft = aircraft,
@@ -120,7 +144,7 @@ internal class TrafficOverlayStateBuilder(
             aircraft_translation_x = dense_symbol_overlay?.translation_x ?: 0f,
             aircraft_translation_y = dense_symbol_overlay?.translation_y ?: 0f,
             interaction_active = interaction_active
-        )
+        ).also { finish_debug_detail_timing() }
     }
 
     fun traffic_overlay_state_for_aircraft(
@@ -301,7 +325,7 @@ internal class TrafficOverlayStateBuilder(
         val screen_x = (wrapped_x * scale - frame.viewport.center_x + frame.viewport.width / 2.0).toFloat()
         val screen_y = (world.y * scale - frame.viewport.center_y + frame.viewport.height / 2.0).toFloat()
         if (!screen_neighborhood_contains(screen_x, screen_y, selected = true, viewport = frame.viewport)) return null
-        return traffic_aircraft_overlay_state(selected, ScreenPoint(wrapped_x.toFloat(), world.y.toFloat()))
+        return traffic_aircraft_overlay_state(selected, ScreenPoint(wrapped_x.toFloat(), world.y.toFloat()), visual_theme_key = frame.visual_theme_key)
     }
 
     private fun nearest_wrapped_world_x(
@@ -447,10 +471,19 @@ internal class TrafficOverlayStateBuilder(
     private fun dense_dot_symbol_overlay(frame: TrafficOverlayFrame): DenseSymbolOverlay {
         val selected_key = frame.selection.selected_aircraft_key
         val path_focus = frame.selection.path_visible && frame.selection.has_selected_flight_path
-        shifted_dense_symbol_overlay(frame, selected_key, path_focus)?.let { return it }
+        val shift_start_ns = debug_detail_start_ns()
+        val shifted = shifted_dense_symbol_overlay(frame, selected_key, path_focus)
+        debug_state_symbol_shift_ns += debug_detail_elapsed_ns(shift_start_ns)
+        shifted?.let {
+            debug_state_symbol_mode = "shift"
+            return it
+        }
+        debug_state_symbol_mode = "build"
         val cache_reuse_padding_px = dense_symbol_cache_reuse_padding_px(frame.viewport)
         val states = dense_dot_symbol_overlay_states(frame, cache_reuse_padding_px)
+        val cache_start_ns = debug_detail_start_ns()
         cache_dense_symbol_overlay(frame, selected_key, path_focus, states, cache_reuse_padding_px)
+        debug_state_symbol_cache_ns += debug_detail_elapsed_ns(cache_start_ns)
         return DenseSymbolOverlay(states)
     }
 
@@ -468,6 +501,7 @@ internal class TrafficOverlayStateBuilder(
         if (!interaction_reuse && !idle_reuse) return null
         if (dense_symbol_cache_width != frame.viewport.width || dense_symbol_cache_height != frame.viewport.height) return null
         if (dense_symbol_cache_selected_key != selected_key || dense_symbol_cache_path_focus != path_focus) return null
+        if (zoom_changed) return null
         if ((source_changed || zoom_changed) && !interaction_reuse) return null
         if (zoom_changed && abs(zoom_delta) > DENSE_SYMBOL_CACHE_INTERACTION_ZOOM_STEPS) return null
         val transform_scale_double = 2.0.pow(zoom_delta)
@@ -486,12 +520,73 @@ internal class TrafficOverlayStateBuilder(
                 dense_symbol_cache_height * transform_scale_double / 2.0
             ).toFloat()
         if (!dense_symbol_cache_covers_viewport(frame.viewport, transform_scale, translation_x, translation_y)) return null
+        val states = if (interaction_reuse && abs(transform_scale - 1f) > DENSE_SYMBOL_VISIBLE_FILTER_SCALE_EPSILON) {
+            visible_scaled_dense_symbol_states(
+                states = dense_symbol_cache_states,
+                viewport = frame.viewport,
+                transform_scale = transform_scale,
+                translation_x = translation_x,
+                translation_y = translation_y
+            )
+        } else {
+            dense_symbol_cache_states
+        }
         return DenseSymbolOverlay(
-            states = dense_symbol_cache_states,
+            states = states,
             transform_scale = transform_scale,
             translation_x = translation_x,
             translation_y = translation_y
         )
+    }
+
+    private fun visible_scaled_dense_symbol_states(
+        states: List<TrafficAircraftOverlayState>,
+        viewport: Viewport,
+        transform_scale: Float,
+        translation_x: Float,
+        translation_y: Float
+    ): List<TrafficAircraftOverlayState> {
+        val grid = dense_symbol_cache_grid ?: return states
+        val padding = dense_symbol_max_render_padding_px(viewport.zoom) + dp(DENSE_SYMBOL_GRID_QUERY_EXTRA_DP)
+        val min_x = (-padding - translation_x) / transform_scale
+        val max_x = (viewport.width + padding - translation_x) / transform_scale
+        val min_y = (-padding - translation_y) / transform_scale
+        val max_y = (viewport.height + padding - translation_y) / transform_scale
+        return grid.query(min_x, min_y, max_x, max_y)
+    }
+
+    private fun dense_symbol_max_render_padding_px(zoom: Double): Float {
+        val max_icon_scale = max(AircraftMarkerMorph.aircraft_dot_scale(zoom), AircraftMarkerMorph.aircraft_icon_scale(zoom))
+        return dp((DENSE_SYMBOL_MAX_SHAPE_RADIUS_DP + DENSE_SYMBOL_SELECTED_RING_DP) * DENSE_SYMBOL_MAX_TYPE_SCALE * max_icon_scale + DENSE_SYMBOL_RENDER_CULL_EXTRA_DP)
+    }
+
+    private fun build_dense_symbol_cache_grid(states: List<TrafficAircraftOverlayState>): DenseSymbolStateGrid? {
+        if (states.isEmpty()) return null
+        var min_x = Float.POSITIVE_INFINITY
+        var min_y = Float.POSITIVE_INFINITY
+        var max_x = Float.NEGATIVE_INFINITY
+        var max_y = Float.NEGATIVE_INFINITY
+        for (item in states) {
+            val x = item.screen_point.x
+            val y = item.screen_point.y
+            if (x < min_x) min_x = x
+            if (y < min_y) min_y = y
+            if (x > max_x) max_x = x
+            if (y > max_y) max_y = y
+        }
+        if (!min_x.isFinite() || !min_y.isFinite() || !max_x.isFinite() || !max_y.isFinite()) return null
+        val cell_size = dp(DENSE_SYMBOL_GRID_CELL_DP).coerceAtLeast(1f)
+        val origin_x = floor(min_x / cell_size) * cell_size
+        val origin_y = floor(min_y / cell_size) * cell_size
+        val columns = (floor((max_x - origin_x) / cell_size).toInt() + 1).coerceAtLeast(1)
+        val rows = (floor((max_y - origin_y) / cell_size).toInt() + 1).coerceAtLeast(1)
+        val cells = Array(columns * rows) { ArrayList<TrafficAircraftOverlayState>() }
+        for (item in states) {
+            val column = floor((item.screen_point.x - origin_x) / cell_size).toInt().coerceIn(0, columns - 1)
+            val row = floor((item.screen_point.y - origin_y) / cell_size).toInt().coerceIn(0, rows - 1)
+            cells[row * columns + column].add(item)
+        }
+        return DenseSymbolStateGrid(origin_x, origin_y, cell_size, columns, rows, cells)
     }
 
     private fun cache_dense_symbol_overlay(
@@ -509,6 +604,9 @@ internal class TrafficOverlayStateBuilder(
         dense_symbol_cache_width = frame.viewport.width
         dense_symbol_cache_height = frame.viewport.height
         dense_symbol_cache_reuse_padding_px = reuse_padding_px
+        val grid_start_ns = debug_detail_start_ns()
+        dense_symbol_cache_grid = build_dense_symbol_cache_grid(states)
+        debug_state_symbol_grid_ns += debug_detail_elapsed_ns(grid_start_ns)
         dense_symbol_cache_selected_key = selected_key
         dense_symbol_cache_path_focus = path_focus
         dense_symbol_cache_built_ms = now_elapsed_ms()
@@ -518,6 +616,7 @@ internal class TrafficOverlayStateBuilder(
         dense_symbol_cache_aircraft = null
         dense_symbol_cache_states = emptyList()
         dense_symbol_cache_reuse_padding_px = 0f
+        dense_symbol_cache_grid = null
         dense_symbol_cache_built_ms = 0L
     }
 
@@ -573,22 +672,28 @@ internal class TrafficOverlayStateBuilder(
         val extreme_keys = frame.cache.extreme_priority_keys
         val path_focus = frame.selection.path_visible && frame.selection.has_selected_flight_path
         val scale = 2.0.pow(frame.viewport.zoom)
+        val query_start_ns = debug_detail_start_ns()
+        val query = frame.cache.spatial_index.query(frame.viewport, traffic_query_padding_px(frame.viewport) + extra_padding_px)
+        debug_state_symbol_query_ns += debug_detail_elapsed_ns(query_start_ns)
         val result = ArrayList<TrafficAircraftOverlayState>(VISIBLE_AIRCRAFT_INITIAL_CAPACITY)
         val seen_keys = HashSet<String>()
-        val query = frame.cache.spatial_index.query(frame.viewport, traffic_query_padding_px(frame.viewport) + extra_padding_px)
+        val filter_start_ns = debug_detail_start_ns()
         for (entry in query) {
             val item = entry.aircraft
             if (path_focus && !should_draw_aircraft_with_path_focus(item, selected_key, extreme_keys)) continue
             val screen = screen_point_for(entry, frame.viewport, scale, frame.now_epoch_sec)
             val selected = selected_key != null && aircraft_icao_key(item) == selected_key
             if (!screen_neighborhood_contains(screen.x, screen.y, selected, frame.viewport, extra_padding_px)) continue
-            val key = item.appearance_key()
-            if (seen_keys.add(key)) result += traffic_aircraft_overlay_state(item, screen, entry, scale)
+            val key = entry.appearance_key
+            if (seen_keys.add(key)) result += traffic_aircraft_overlay_state(item, screen, entry, scale, frame.visual_theme_key)
         }
+        debug_state_symbol_filter_ns += debug_detail_elapsed_ns(filter_start_ns)
+        val fallback_start_ns = debug_detail_start_ns()
         if (!path_focus) {
             add_missing_priority_symbol_states(result, seen_keys, frame, selected_key, extra_padding_px)
         }
         add_selected_symbol_state_fallback(result, seen_keys, frame, selected_key, extra_padding_px)
+        debug_state_symbol_fallback_ns += debug_detail_elapsed_ns(fallback_start_ns)
         return result
     }
 
@@ -635,7 +740,7 @@ internal class TrafficOverlayStateBuilder(
         val screen = screen_point_for(entry, frame.viewport, scale, frame.now_epoch_sec)
         val selected = selected_key != null && aircraft_icao_key(aircraft) == selected_key
         if (!screen_neighborhood_contains(screen.x, screen.y, selected, frame.viewport, extra_padding_px)) return null
-        return traffic_aircraft_overlay_state(aircraft, screen, entry, scale)
+        return traffic_aircraft_overlay_state(aircraft, screen, entry, scale, frame.visual_theme_key)
     }
 
     private data class DenseSymbolOverlay(
@@ -645,11 +750,93 @@ internal class TrafficOverlayStateBuilder(
         val translation_y: Float = 0f
     )
 
+    private data class DenseSymbolStateGrid(
+        val origin_x: Float,
+        val origin_y: Float,
+        val cell_size: Float,
+        val columns: Int,
+        val rows: Int,
+        val cells: Array<ArrayList<TrafficAircraftOverlayState>>
+    ) {
+        fun query(min_x: Float, min_y: Float, max_x: Float, max_y: Float): List<TrafficAircraftOverlayState> {
+            if (max_x < min_x || max_y < min_y || columns <= 0 || rows <= 0) return emptyList()
+            val start_column = floor((min_x - origin_x) / cell_size).toInt().coerceIn(0, columns - 1)
+            val end_column = floor((max_x - origin_x) / cell_size).toInt().coerceIn(0, columns - 1)
+            val start_row = floor((min_y - origin_y) / cell_size).toInt().coerceIn(0, rows - 1)
+            val end_row = floor((max_y - origin_y) / cell_size).toInt().coerceIn(0, rows - 1)
+            if (start_column > end_column || start_row > end_row) return emptyList()
+            var count = 0
+            for (row in start_row..end_row) {
+                val row_offset = row * columns
+                for (column in start_column..end_column) {
+                    count += cells[row_offset + column].size
+                }
+            }
+            if (count <= 0) return emptyList()
+            val result = ArrayList<TrafficAircraftOverlayState>(count)
+            for (row in start_row..end_row) {
+                val row_offset = row * columns
+                for (column in start_column..end_column) {
+                    result.addAll(cells[row_offset + column])
+                }
+            }
+            return result
+        }
+    }
+
     private fun dense_dot_symbol_interacting(interaction: TrafficOverlayInteraction, now: Long): Boolean {
         return interaction.pinch_in_progress ||
             interaction.map_touch_active ||
             interaction.drag_started ||
             now - interaction.last_map_interaction_ms <= DENSE_DOT_SYMBOL_SETTLE_MS
+    }
+
+    private fun reset_debug_detail_timing() {
+        if (!debug_collect_detail_timing) {
+            debug_last_detail_timing_summary = ""
+            return
+        }
+        debug_state_dot_batch_ns = 0L
+        debug_state_symbol_overlay_ns = 0L
+        debug_state_symbol_shift_ns = 0L
+        debug_state_symbol_query_ns = 0L
+        debug_state_symbol_filter_ns = 0L
+        debug_state_symbol_fallback_ns = 0L
+        debug_state_symbol_grid_ns = 0L
+        debug_state_symbol_cache_ns = 0L
+        debug_state_aircraft_pick_ns = 0L
+        debug_state_symbol_mode = "none"
+    }
+
+    private fun finish_debug_detail_timing() {
+        if (!debug_collect_detail_timing) return
+        debug_last_detail_timing_summary =
+            "stateDetail dotState=${debug_state_dot_batch_ns.ms_debug()} " +
+                "symOverlay=${debug_state_symbol_overlay_ns.ms_debug()} " +
+                "symMode=$debug_state_symbol_mode " +
+                "symShift=${debug_state_symbol_shift_ns.ms_debug()} " +
+                "symQuery=${debug_state_symbol_query_ns.ms_debug()} " +
+                "symFilter=${debug_state_symbol_filter_ns.ms_debug()} " +
+                "symFallback=${debug_state_symbol_fallback_ns.ms_debug()} " +
+                "symGrid=${debug_state_symbol_grid_ns.ms_debug()} " +
+                "symCache=${debug_state_symbol_cache_ns.ms_debug()} " +
+                "aircraftPick=${debug_state_aircraft_pick_ns.ms_debug()}"
+    }
+
+    private fun debug_detail_start_ns(): Long {
+        return if (debug_collect_detail_timing) SystemClock.elapsedRealtimeNanos() else 0L
+    }
+
+    private fun debug_detail_elapsed_ns(start_ns: Long): Long {
+        return if (debug_collect_detail_timing && start_ns > 0L) {
+            SystemClock.elapsedRealtimeNanos() - start_ns
+        } else {
+            0L
+        }
+    }
+
+    private fun Long.ms_debug(): String {
+        return String.format(Locale.US, "%.2fms", this / 1_000_000.0)
     }
 
     private fun visible_aircraft_overlay_states(frame: TrafficOverlayFrame): List<TrafficAircraftOverlayState> {
@@ -806,10 +993,10 @@ internal class TrafficOverlayStateBuilder(
         val y = screen.y
         if (!screen_neighborhood_contains(x, y, selected, frame.viewport, extra_padding_px)) return null
         add_dense_outline_dot(x, y, velocity_x, velocity_y, motion_limit_sec)
-        add_dense_fill_dot(TrafficDotGrouper.dot_group(aircraft), x, y, velocity_x, velocity_y, motion_limit_sec)
+        add_dense_fill_dot(spatial_entry.dot_group, x, y, velocity_x, velocity_y, motion_limit_sec)
         seen_keys?.add(aircraft.appearance_key())
         if (selected) {
-            return traffic_aircraft_overlay_state(aircraft, ScreenPoint(x, y))
+            return traffic_aircraft_overlay_state(aircraft, ScreenPoint(x, y), visual_theme_key = frame.visual_theme_key)
         }
         return null
     }
@@ -866,7 +1053,7 @@ internal class TrafficOverlayStateBuilder(
         val display_entry = entry ?: spatial_entry_for(aircraft, frame.now_epoch_sec)
         val display_screen = screen ?: screen_point_for(display_entry, frame.viewport, display_scale, frame.now_epoch_sec)
         if (!screen_neighborhood_contains(display_screen, aircraft, selected_key, frame.viewport)) return false
-        result += traffic_aircraft_overlay_state(aircraft, display_screen, display_entry, display_scale)
+        result += traffic_aircraft_overlay_state(aircraft, display_screen, display_entry, display_scale, frame.visual_theme_key)
         return extreme_priority_keys.contains(aircraft_icao_key(aircraft))
     }
 
@@ -874,21 +1061,23 @@ internal class TrafficOverlayStateBuilder(
         aircraft: Aircraft,
         screen: ScreenPoint,
         entry: TrafficSpatialEntry? = null,
-        scale: Double? = null
+        scale: Double? = null,
+        visual_theme_key: Int = 0
     ): TrafficAircraftOverlayState {
-        val symbol = AircraftSymbolClassifier.symbol_for(aircraft)
-        val appearance = aircraft_appearance(aircraft)
+        val appearance_key = entry?.appearance_key ?: aircraft.appearance_key()
+        val symbol = entry?.symbol ?: AircraftSymbolClassifier.symbol_for(aircraft)
+        val appearance = aircraft_appearance(appearance_key, aircraft)
         val motion_scale = scale?.takeIf { it.isFinite() && it > 0.0 }
         val motion_remaining_sec = entry?.projected_motion_remaining_sec?.toFloat()?.coerceAtLeast(0f) ?: 0f
         return TrafficAircraftOverlayState(
             aircraft = aircraft,
             screen_point = screen,
-            appearance_key = aircraft.appearance_key(),
-            color = aircraft_color(aircraft),
-            appearance_progress = aircraft_appearance_progress(aircraft),
+            appearance_key = appearance_key,
+            color = cached_aircraft_color(entry, aircraft, visual_theme_key),
+            appearance_progress = aircraft_appearance_progress(appearance_key, aircraft),
             symbol = symbol,
-            symbol_scale = AircraftSymbolClassifier.size_multiplier(aircraft, symbol),
-            dot_group = TrafficDotGrouper.dot_group(aircraft),
+            symbol_scale = entry?.symbol_scale ?: AircraftSymbolClassifier.size_multiplier(aircraft, symbol),
+            dot_group = entry?.dot_group ?: TrafficDotGrouper.dot_group(aircraft),
             screen_velocity_x_px_per_sec = if (entry != null && motion_scale != null) {
                 (entry.projected_velocity_x_zoom_zero * motion_scale).toFloat()
             } else {
@@ -904,6 +1093,17 @@ internal class TrafficOverlayStateBuilder(
             appearance_first_seen_ms = appearance?.first_seen_ms ?: 0L,
             appearance_delay_ms = appearance?.delay_ms ?: 0L
         )
+    }
+
+    private fun cached_aircraft_color(
+        entry: TrafficSpatialEntry?,
+        aircraft: Aircraft,
+        visual_theme_key: Int
+    ): Int {
+        if (entry != null && entry.color_theme_key == visual_theme_key) {
+            return entry.color
+        }
+        return aircraft_color(aircraft)
     }
 
     private fun should_draw_aircraft_with_path_focus(
@@ -1022,6 +1222,13 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_SYMBOL_CACHE_MAX_REUSE_DP = 180f
         const val DENSE_SYMBOL_CACHE_WIDE_COVERAGE_MAX_ZOOM = 6.0
         const val DENSE_SYMBOL_CACHE_WIDE_COVERAGE_REUSE_DP = 420f
+        const val DENSE_SYMBOL_VISIBLE_FILTER_SCALE_EPSILON = 0.0025f
+        const val DENSE_SYMBOL_GRID_CELL_DP = 180f
+        const val DENSE_SYMBOL_GRID_QUERY_EXTRA_DP = 180f
+        const val DENSE_SYMBOL_MAX_SHAPE_RADIUS_DP = 31f
+        const val DENSE_SYMBOL_SELECTED_RING_DP = 17f
+        const val DENSE_SYMBOL_MAX_TYPE_SCALE = 1.18f
+        const val DENSE_SYMBOL_RENDER_CULL_EXTRA_DP = 24f
         const val DENSE_SYMBOL_CACHE_INTERACTION_SETTLE_MS = 420L
         const val DENSE_SYMBOL_CACHE_INTERACTION_STALE_MS = 12_000L
         const val DENSE_SYMBOL_CACHE_IDLE_STALE_MS = 12_000L

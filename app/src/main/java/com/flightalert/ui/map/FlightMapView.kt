@@ -373,6 +373,7 @@ class FlightMapView(
     )
     private val aircraft = mutableListOf<Aircraft>()
     private val aircraft_appearances = mutableMapOf<String, AircraftAppearance>()
+    @Volatile private var aircraft_appearance_snapshot: Map<String, AircraftAppearance> = emptyMap()
     private val flight_trace_client = FlightTraceClient(USER_AGENT)
     private val aircraft_feed_client = AircraftFeedClient(USER_AGENT)
     private val aircraft_traffic_feed = AircraftTrafficFeed(aircraft_feed_client, globe_bin_craft_aircraft_source)
@@ -447,8 +448,8 @@ class FlightMapView(
     private val traffic_overlay_state_builder = TrafficOverlayStateBuilder(
         dp = { value -> dp(value) },
         aircraft_color = ::aircraft_color,
-        aircraft_appearance_progress = ::aircraft_appearance_progress,
-        aircraft_appearance = ::aircraft_appearance,
+        aircraft_appearance_progress = ::aircraft_appearance_progress_for_key,
+        aircraft_appearance = ::aircraft_appearance_for_key,
         display_aircraft_position = ::display_aircraft_position,
         spatial_entry_for = ::spatial_entry_for,
         lat_lon_to_world = ::lat_lon_to_world,
@@ -553,8 +554,10 @@ class FlightMapView(
     private var debug_draw_perf_traffic_ns = 0L
     private var debug_draw_perf_chrome_ns = 0L
     private var debug_draw_perf_max_ns = 0L
+    private var debug_draw_perf_max_detail_summary = ""
     private var debug_last_traffic_symbol_count = 0
     private var debug_last_traffic_dot_count = 0
+    private var debug_last_traffic_state_build_summary = ""
 
     // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
@@ -861,7 +864,10 @@ class FlightMapView(
         debug_draw_perf_path_ns += path_ns
         debug_draw_perf_traffic_ns += traffic_ns
         debug_draw_perf_chrome_ns += chrome_ns
-        debug_draw_perf_max_ns = max(debug_draw_perf_max_ns, total_ns)
+        if (total_ns >= debug_draw_perf_max_ns) {
+            debug_draw_perf_max_ns = total_ns
+            debug_draw_perf_max_detail_summary = debug_current_draw_detail_summary()
+        }
         if (debug_draw_perf_frames >= DEBUG_DRAW_PERF_LOG_INTERVAL || total_ns >= DEBUG_DRAW_PERF_SLOW_NS) {
             debug_log_draw_perf(total_ns, map_ns, layer_request_ns, layer_draw_ns, path_ns, traffic_ns, chrome_ns)
             reset_debug_draw_perf()
@@ -888,10 +894,20 @@ class FlightMapView(
                 "last=${total_ns.ms()} lastMap=${map_ns.ms()} lastLayerReq=${layer_request_ns.ms()} " +
                 "lastLayerDraw=${layer_draw_ns.ms()} lastPath=${path_ns.ms()} lastTraffic=${traffic_ns.ms()} lastChrome=${chrome_ns.ms()} " +
                 "symbols=$debug_last_traffic_symbol_count dots=$debug_last_traffic_dot_count " +
+                debug_last_traffic_state_build_summary +
                 map_tile_renderer.debug_last_tile_summary +
                 traffic_overlay_renderer.debug_last_symbol_cache_summary +
-                traffic_overlay_renderer.debug_last_detail_timing_summary
+                traffic_overlay_renderer.debug_last_detail_timing_summary +
+                " maxFrameDetail=${debug_draw_perf_max_detail_summary}"
         )
+    }
+
+    private fun debug_current_draw_detail_summary(): String {
+        return "symbols=$debug_last_traffic_symbol_count dots=$debug_last_traffic_dot_count " +
+            debug_last_traffic_state_build_summary +
+            map_tile_renderer.debug_last_tile_summary +
+            traffic_overlay_renderer.debug_last_symbol_cache_summary +
+            traffic_overlay_renderer.debug_last_detail_timing_summary
     }
 
     private fun reset_debug_draw_perf() {
@@ -904,6 +920,7 @@ class FlightMapView(
         debug_draw_perf_traffic_ns = 0L
         debug_draw_perf_chrome_ns = 0L
         debug_draw_perf_max_ns = 0L
+        debug_draw_perf_max_detail_summary = ""
     }
 
     private fun Long.ms(divisor: Int = 1): String {
@@ -1968,17 +1985,26 @@ class FlightMapView(
                     existing.copy(last_seen_ms = now)
                 }
             }
+            aircraft_appearance_snapshot = HashMap(aircraft_appearances)
         }
     }
 
     private fun aircraft_appearance_progress(aircraft: Aircraft): Float {
-        val appearance = synchronized(aircraft_appearances) { aircraft_appearances[aircraft.appearance_key()] } ?: return 1f
+        return aircraft_appearance_progress_for_key(aircraft.appearance_key(), aircraft)
+    }
+
+    private fun aircraft_appearance_progress_for_key(key: String, aircraft: Aircraft): Float {
+        val appearance = aircraft_appearance_snapshot[key] ?: return 1f
         val elapsed = SystemClock.elapsedRealtime() - appearance.first_seen_ms - appearance.delay_ms
         return smooth_step(0f, AIRCRAFT_APPEAR_DURATION_MS.toFloat(), elapsed.toFloat())
     }
 
     private fun aircraft_appearance(aircraft: Aircraft): AircraftAppearance? {
-        return synchronized(aircraft_appearances) { aircraft_appearances[aircraft.appearance_key()] }
+        return aircraft_appearance_for_key(aircraft.appearance_key(), aircraft)
+    }
+
+    private fun aircraft_appearance_for_key(key: String, aircraft: Aircraft): AircraftAppearance? {
+        return aircraft_appearance_snapshot[key]
     }
 
     private fun has_usable_viewport(): Boolean {
@@ -2149,8 +2175,21 @@ class FlightMapView(
     }
 
     private fun draw_traffic_overlay(canvas: Canvas, viewport: Viewport) {
-        traffic_overlay_renderer.debug_collect_detail_timing = debug_perf_viewport_active && debug_perf_traffic_detail_timing
+        val collect_traffic_detail_timing = debug_perf_viewport_active && debug_perf_traffic_detail_timing
+        traffic_overlay_renderer.debug_collect_detail_timing = collect_traffic_detail_timing
+        traffic_overlay_state_builder.debug_collect_detail_timing = collect_traffic_detail_timing
+        val state_start_ns = if (collect_traffic_detail_timing) {
+            SystemClock.elapsedRealtimeNanos()
+        } else {
+            0L
+        }
         val state = traffic_overlay_state(viewport)
+        debug_last_traffic_state_build_summary = if (state_start_ns > 0L) {
+            "stateBuild=${(SystemClock.elapsedRealtimeNanos() - state_start_ns).ms()} " +
+                traffic_overlay_state_builder.debug_last_detail_timing_summary + " "
+        } else {
+            ""
+        }
         if (debug_perf_viewport_active) {
             debug_last_traffic_symbol_count = state.aircraft.size
             debug_last_traffic_dot_count = state.dot_batch?.visible_count ?: state.aircraft.size
@@ -2194,6 +2233,7 @@ class FlightMapView(
             selection = traffic_overlay_selection(),
             filters_restrict_aircraft = filters_restrict_aircraft(),
             map_source = map_source,
+            visual_theme_key = visual_theme.hashCode(),
             content_width = content_width(),
             content_height = content_height(),
             label_avoid_rects = traffic_label_avoid_rects(),
@@ -3358,6 +3398,7 @@ class FlightMapView(
 
     private fun set_visual_theme(next: FlightAlertSettings.VisualTheme) {
         visual_theme = next
+        mark_traffic_cache_dirty()
         prefs.edit { putString(FlightAlertSettings.KEY_VISUAL_THEME, visual_theme.name) }
         setBackgroundColor(map_empty_color)
         apply_theme_typeface()
@@ -3667,6 +3708,9 @@ class FlightMapView(
             now_epoch_sec = now_epoch_sec,
             uses_path_endpoint = uses_path_endpoint,
             path_display_position = if (uses_path_endpoint) selected_path_controller.display_position(aircraft) else null
+        ).copy(
+            color = aircraft_color(aircraft),
+            color_theme_key = visual_theme.hashCode()
         )
     }
 

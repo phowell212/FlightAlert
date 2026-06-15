@@ -24,7 +24,13 @@ internal data class TrafficSpatialEntry(
     val projected_velocity_x_zoom_zero: Double,
     val projected_velocity_y_zoom_zero: Double,
     val projected_motion_remaining_sec: Double,
-    val projection_epoch_sec: Double
+    val projection_epoch_sec: Double,
+    val appearance_key: String = aircraft.appearance_key(),
+    val symbol: AircraftSymbol = AircraftSymbolClassifier.symbol_for(aircraft),
+    val symbol_scale: Float = AircraftSymbolClassifier.size_multiplier(aircraft, symbol),
+    val dot_group: Int = TrafficDotGrouper.dot_group(aircraft),
+    val color: Int = 0,
+    val color_theme_key: Int = 0
 )
 
 internal data class TrafficWorldDotBatch(
@@ -58,13 +64,15 @@ internal data class TrafficWorldDotBatch(
 }
 
 internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
-    private val cells = HashMap<Int, MutableList<TrafficSpatialEntry>>()
+    private val cells = arrayOfNulls<MutableList<TrafficSpatialEntry>>(CELL_COUNT * CELL_COUNT)
 
     init {
         entries.forEach { entry ->
             val column = (entry.world_x_zoom_zero / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
             val row = (entry.world_y_zoom_zero / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
-            cells.getOrPut(row * CELL_COUNT + column) { mutableListOf() } += entry
+            val index = row * CELL_COUNT + column
+            val cell = cells[index] ?: ArrayList<TrafficSpatialEntry>().also { cells[index] = it }
+            cell += entry
         }
     }
 
@@ -103,8 +111,9 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
         val min_row = (min_y / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
         val max_row = (max_y / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
         for (row in min_row..max_row) {
+            val row_offset = row * CELL_COUNT
             for (column in min_column..max_column) {
-                cells[row * CELL_COUNT + column]?.let(result::addAll)
+                cells[row_offset + column]?.let(result::addAll)
             }
         }
     }
@@ -115,7 +124,7 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
 
     private companion object {
         const val WORLD_SIZE = 256.0
-        const val CELL_COUNT = 96
+        const val CELL_COUNT = 192
         const val CELL_WORLD_SIZE = WORLD_SIZE / CELL_COUNT
     }
 }

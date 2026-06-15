@@ -1008,6 +1008,7 @@ public class FlightMapGesturePerfTest {
         builder.append("traffic_detail_timing=").append(currentPerfTrafficDetailTiming).append('\n');
         builder.append("focus=").append(centeredPerfGestureFocus ? "center-map" : "open-map").append('\n');
         builder.append("scale_bands=continent,country\n");
+        builder.append("country_phase_note=country launch zoom 5.4 intentionally pinches closed first, so active/quick screenshots can show country-to-global stress frames; do not treat those frames as pure city-centered country visual proof.\n");
         return builder.toString();
     }
 
