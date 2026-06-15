@@ -7,6 +7,7 @@ import kotlin.math.pow
 
 internal data class CachedTraffic(
     val aircraft: List<Aircraft>,
+    val nearest_aircraft: Aircraft?,
     val entries: List<TrafficSpatialEntry>,
     val spatial_index: TrafficSpatialIndex,
     val world_dot_batch: TrafficWorldDotBatch,

@@ -20,36 +20,41 @@ object AircraftImpactPresenter {
         details: AircraftDetails?,
         profile: ImpactProfile?,
         trace: ImpactTrace?,
+        trace_estimate: Any?,
         usage_trace: com.flightalert.data.FlightTrace?,
         details_loading: Boolean,
         trace_loading: Boolean,
         units: UnitSystem
     ): List<Pair<String, String>> {
-        val loading = details_loading || trace_loading || profile == null
+        val loading = details_loading || trace_loading
         return listOf(
             "Data basis" to data_basis(aircraft, details, details_loading),
             "Aircraft class" to (profile?.label ?: loading_or_unavailable(loading)),
             "Current trace" to current_trace_impact(trace, trace_loading, units),
-            "Trace CO2 estimate" to current_trace_carbon(profile, trace, loading),
-            "Observed intensity" to observed_carbon_intensity(profile, trace, loading, units),
+            "Observed CO2 estimate" to current_trace_carbon(profile, trace, trace_estimate, loading),
+            "Trace phases" to phase_summary(trace_estimate, trace_loading),
+            "Full-flight estimate" to full_flight_summary(trace_estimate, trace_loading),
+            "Observed intensity" to observed_carbon_intensity(profile, trace, trace_estimate, loading, units),
+            "Profile basis" to (profile?.profile_basis_label() ?: loading_or_unavailable(loading)),
             "Class CO2 rate" to (profile?.let { kg_range(it.low_co2_kg_per_hour(), it.high_co2_kg_per_hour()) } ?: loading_or_unavailable(loading)),
             "Class cruise context" to (profile?.cruise_intensity_label() ?: loading_or_unavailable(loading)),
             "Fuel and factor" to (profile?.fuel_and_factor_label() ?: loading_or_unavailable(loading)),
             "Live state" to live_state(aircraft, units),
             "Trace history" to trace_history_carbon(usage_trace, profile, trace_loading, loading),
             "Comparison" to (profile?.let { AircraftImpactEstimator.comparison(it) } ?: loading_or_unavailable(loading)),
-            "Score meaning" to "0-100 log scale for class CO2/hr intensity; trace distance/time does not inflate the score.",
+            "Score meaning" to "0-100 log scale for kg CO2/hr intensity; observed trace phases are used when available, otherwise profile rate.",
             "Lead / non-carbon" to lead_note(profile, loading),
+            "Passenger/load" to "Unavailable: passenger count and load factor are not inferred.",
             "Limits" to "No exact engine fuel flow, phase power, payload, SAF blend, contrails, NOx, or noise from the live feed.",
-            "Confidence" to confidence(profile, trace, loading, details)
+            "Confidence" to confidence(profile, trace, trace_estimate, loading, details)
         )
     }
 
     fun status(profile: ImpactProfile?, trace: ImpactTrace?, details_loading: Boolean, trace_loading: Boolean): String {
         return when {
-            profile != null && trace != null -> "Trace-derived time/distance with class fuel benchmark; not measured fuel flow"
+            profile != null && trace != null -> "Trace-derived time/distance with benchmark fuel profile; not measured fuel flow"
             profile != null && trace_loading -> "Loading real trace before estimating current-flight carbon"
-            profile != null -> "Class carbon-rate estimate; current trace unavailable"
+            profile != null -> "${profile.basis.display_name.replaceFirstChar { it.uppercase() }} carbon-rate estimate; current trace unavailable"
             details_loading -> "Loading aircraft metadata"
             else -> "Unavailable: aircraft type or fuel class is not supported"
         }
@@ -105,12 +110,56 @@ object AircraftImpactPresenter {
         return "${distance(trace.distance_m, units)}, ${AircraftUsageAnalyzer.format_hours(trace.hours)}, ${speed(trace.average_speed_ms, units)} avg from ${trace.source}"
     }
 
-    private fun current_trace_carbon(profile: ImpactProfile?, trace: ImpactTrace?, loading: Boolean): String {
+    private fun current_trace_carbon(
+        profile: ImpactProfile?,
+        trace: ImpactTrace?,
+        trace_estimate: Any?,
+        loading: Boolean
+    ): String {
+        val estimate = trace_estimate as? TraceImpactEstimate
+        if (estimate != null) {
+            return "${carbon_range(estimate.carbon)} over ${AircraftUsageAnalyzer.format_hours(estimate.hours)}"
+        }
         if (profile == null || trace == null) return loading_or_unavailable(loading)
         return "${carbon_range(profile.carbon_for_hours(trace.hours))} over ${AircraftUsageAnalyzer.format_hours(trace.hours)}"
     }
 
-    private fun observed_carbon_intensity(profile: ImpactProfile?, trace: ImpactTrace?, loading: Boolean, units: UnitSystem): String {
+    private fun phase_summary(trace_estimate: Any?, loading: Boolean): String {
+        if (loading) return "Loading"
+        val estimate = trace_estimate as? TraceImpactEstimate ?: return "Unavailable"
+        return estimate.phase_hours
+            .take(3)
+            .joinToString("; ") { "${it.phase.display_name} ${AircraftUsageAnalyzer.format_hours(it.hours)}" }
+            .ifEmpty { "Unavailable" }
+    }
+
+    private fun full_flight_summary(trace_estimate: Any?, loading: Boolean): String {
+        if (loading) return "Loading"
+        val estimate = trace_estimate as? TraceImpactEstimate ?: return "Unavailable"
+        val full = estimate.full_flight ?: return "Unavailable: route/progress not credible enough"
+        return "${carbon_range(full.carbon)} ${full.basis}"
+    }
+
+    private fun observed_carbon_intensity(
+        profile: ImpactProfile?,
+        trace: ImpactTrace?,
+        trace_estimate: Any?,
+        loading: Boolean,
+        units: UnitSystem
+    ): String {
+        val estimate = trace_estimate as? TraceImpactEstimate
+        if (estimate != null) {
+            if (estimate.distance_m <= 0.0) return "Unavailable"
+            val display_distance = units.distance_meters_to_display(estimate.distance_m)
+            if (display_distance <= 0.0) return "Unavailable"
+            return String.format(
+                Locale.US,
+                "%s-%s kg CO2/%s observed trace",
+                kg_decimal(estimate.carbon.low_kg / display_distance),
+                kg_decimal(estimate.carbon.high_kg / display_distance),
+                units.distance_label
+            )
+        }
         if (profile == null || trace == null) return loading_or_unavailable(loading)
         if (trace.distance_m <= 0.0) return "Unavailable"
         val carbon = profile.carbon_for_hours(trace.hours)
@@ -153,9 +202,18 @@ object AircraftImpactPresenter {
         }
     }
 
-    private fun confidence(profile: ImpactProfile?, trace: ImpactTrace?, loading: Boolean, details: AircraftDetails?): String {
+    private fun confidence(
+        profile: ImpactProfile?,
+        trace: ImpactTrace?,
+        trace_estimate: Any?,
+        loading: Boolean,
+        details: AircraftDetails?
+    ): String {
         if (profile == null) return loading_or_unavailable(loading)
-        val trace_text = trace?.let { "real trace, ${it.point_count} pts" } ?: "no current trace total"
+        val estimate = trace_estimate as? TraceImpactEstimate
+        val trace_text = estimate?.let { "${it.confidence.label}: ${it.confidence.basis}" }
+            ?: trace?.let { "real trace, ${it.point_count} pts" }
+            ?: "no current trace total"
         val source_note = when {
             details?.registry_source?.contains("Wikipedia", ignoreCase = true) == true ->
                 " Metadata includes broad internet fallback, so model confidence is lower than registry/API metadata."
@@ -163,7 +221,11 @@ object AircraftImpactPresenter {
                 " Metadata uses live web/feed aircraft fields before registry/API fallbacks."
             else -> ""
         }
-        return "${profile.confidence} Basis: $trace_text; class benchmark, not measured fuel.$source_note"
+        return "${profile.confidence} Basis: $trace_text; ${profile.basis.display_name}, not measured fuel.$source_note"
+    }
+
+    private fun ImpactProfile.profile_basis_label(): String {
+        return "${basis.display_name}; ${label}; exact fuel flow unavailable"
     }
 
     private fun distance(meters: Double, units: UnitSystem): String {

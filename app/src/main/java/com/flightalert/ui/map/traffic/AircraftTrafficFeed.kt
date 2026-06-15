@@ -199,9 +199,9 @@ class AircraftTrafficFeed(
 
     private companion object {
         const val DB_FLAG_MILITARY = 1
-        const val POSITION_TIME_TIE_SECONDS = 0.25
-        const val HYBRID_GLOBE_STARTUP_GRACE_MS = 900L
-        const val HYBRID_GLOBE_STARTUP_POLL_MS = 25L
+        const val POSITION_TIME_TIE_SECONDS = FlightAlertSettings.AircraftFeed.POSITION_TIME_TIE_SECONDS
+        const val HYBRID_GLOBE_STARTUP_GRACE_MS = FlightAlertSettings.AircraftFeed.HYBRID_GLOBE_STARTUP_GRACE_MS
+        const val HYBRID_GLOBE_STARTUP_POLL_MS = FlightAlertSettings.AircraftFeed.HYBRID_GLOBE_STARTUP_POLL_MS
     }
 
     private fun GlobeBinCraftAircraftSource.await_latest_snapshot(

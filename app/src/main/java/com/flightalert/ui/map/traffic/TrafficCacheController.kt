@@ -9,6 +9,7 @@ import kotlin.math.sqrt
 internal class TrafficCacheController(
     private val all_aircraft_snapshot: () -> List<Aircraft>,
     private val passes_aircraft_filters: (Aircraft, Double) -> Boolean,
+    private val distance_meters: (Aircraft) -> Double,
     private val is_hazard_aircraft: (Aircraft) -> Boolean,
     private val aircraft_icao_key: (Aircraft) -> String,
     private val spatial_entry_for: (Aircraft, Double) -> TrafficSpatialEntry,
@@ -18,6 +19,7 @@ internal class TrafficCacheController(
 ) {
     private var traffic_cache_dirty = true
     private var cached_filtered_aircraft: List<Aircraft> = emptyList()
+    private var cached_nearest_aircraft: Aircraft? = null
     private var cached_filtered_entries: List<TrafficSpatialEntry> = emptyList()
     private var cached_traffic_spatial_index = TrafficSpatialIndex(emptyList())
     private var cached_world_dot_batch = TrafficWorldDotBatch.empty()
@@ -46,10 +48,17 @@ internal class TrafficCacheController(
         val now_epoch_sec = now_epoch_seconds()
         val filtered = ArrayList<Aircraft>(all.size)
         val entries = ArrayList<TrafficSpatialEntry>(all.size)
+        var nearest: Aircraft? = null
+        var nearest_distance = Double.POSITIVE_INFINITY
         all.forEach { item ->
             if (passes_aircraft_filters(item, now_epoch_sec)) {
                 filtered += item
                 entries += spatial_entry_for(item, now_epoch_sec)
+                val distance = distance_meters(item)
+                if (distance.isFinite() && distance < nearest_distance) {
+                    nearest = item
+                    nearest_distance = distance
+                }
             }
         }
         val world_dot_batch = build_world_dot_batch(entries)
@@ -63,6 +72,7 @@ internal class TrafficCacheController(
         val max_projected_speed = max_projected_speed_zoom_zero(entries)
         return CachedTraffic(
             aircraft = filtered,
+            nearest_aircraft = nearest ?: filtered.firstOrNull(),
             entries = entries,
             spatial_index = TrafficSpatialIndex(entries),
             world_dot_batch = world_dot_batch,
@@ -76,6 +86,7 @@ internal class TrafficCacheController(
 
     fun publish_cached_traffic(cache: CachedTraffic) {
         cached_filtered_aircraft = cache.aircraft
+        cached_nearest_aircraft = cache.nearest_aircraft
         cached_filtered_entries = cache.entries
         cached_traffic_spatial_index = cache.spatial_index
         cached_world_dot_batch = cache.world_dot_batch
@@ -90,6 +101,7 @@ internal class TrafficCacheController(
     private fun current_cached_traffic(): CachedTraffic {
         return CachedTraffic(
             aircraft = cached_filtered_aircraft,
+            nearest_aircraft = cached_nearest_aircraft,
             entries = cached_filtered_entries,
             spatial_index = cached_traffic_spatial_index,
             world_dot_batch = cached_world_dot_batch,

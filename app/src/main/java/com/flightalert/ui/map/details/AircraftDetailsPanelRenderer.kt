@@ -57,6 +57,7 @@ data class AircraftImpactPanelState(
     val status: String,
     val show_trace_co2: Boolean,
     val co2_text: String,
+    val score_label: String,
     val score_text: String,
     val score_color: Int,
     val rows: List<AircraftDetailsRow>
@@ -143,7 +144,8 @@ class AircraftDetailsPanelRenderer(
     }
 
     fun impact_hit_bounds(panel: RectF): RectF {
-        return RectF(panel.left + dp(12), panel.bottom - dp(112), panel.right - dp(12), panel.bottom - dp(8))
+        val button = impact_button_bounds(panel)
+        return RectF(button.left - dp(4), button.top - dp(4), button.right + dp(4), button.bottom + dp(4))
     }
 
     fun photo_image_source_button_bounds(panel: RectF): RectF {
@@ -350,7 +352,7 @@ class AircraftDetailsPanelRenderer(
         text_paint.textSize = sp(10)
         text_paint.color = style.visual_theme.colors.muted
         canvas.drawText(if (content.show_trace_co2) "TRACE CO2 SO FAR" else "CLASS CO2 RATE", left, y, text_paint)
-        canvas.drawText("CLASS INTENSITY SCORE", rect.centerX() + dp(8), y, text_paint)
+        canvas.drawText(content.score_label, rect.centerX() + dp(8), y, text_paint)
 
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(19)

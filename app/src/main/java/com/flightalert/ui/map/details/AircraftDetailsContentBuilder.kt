@@ -6,6 +6,7 @@ import com.flightalert.ui.map.Aircraft
 import com.flightalert.ui.map.UnitSystem
 import com.flightalert.ui.map.impact.AircraftImpactEstimator
 import com.flightalert.ui.map.impact.AircraftImpactPresenter
+import com.flightalert.ui.map.impact.AircraftTraceImpactAnalyzer
 import com.flightalert.ui.map.impact.ImpactProfile
 import com.flightalert.ui.map.impact.ImpactTrace
 
@@ -26,6 +27,7 @@ internal class AircraftDetailsContentBuilder(
                 status = "Unavailable",
                 show_trace_co2 = false,
                 co2_text = "Unavailable",
+                score_label = "CARBON IMPACT SCORE",
                 score_text = "Unavailable",
                 score_color = muted_color(),
                 rows = emptyList()
@@ -36,9 +38,19 @@ internal class AircraftDetailsContentBuilder(
         val profile = AircraftImpactPresenter.profile_for(aircraft, details)
         val trace = current_impact_trace_for(aircraft)
         val trace_loading = is_flight_path_loading(aircraft)
+        val usage_trace = usage_trace_for(aircraft)
+        val trace_estimate = profile?.let {
+            AircraftTraceImpactAnalyzer.observed_estimate(it, usage_trace?.segments, details)
+        }
         val loading = details_loading || trace_loading
-        val score_text = profile?.let { "${AircraftImpactEstimator.score(it)} / 100" } ?: loading_or_unavailable(details_loading)
+        val score_value = when {
+            trace_estimate != null -> AircraftImpactEstimator.score_for_kg_per_hour(trace_estimate.average_kg_per_hour_mid)
+            profile != null -> AircraftImpactEstimator.score(profile)
+            else -> null
+        }
+        val score_text = score_value?.let { "$it / 100" } ?: loading_or_unavailable(details_loading)
         val co2_text = when {
+            trace_estimate != null -> AircraftImpactPresenter.carbon_range(trace_estimate.carbon)
             profile != null && trace != null -> AircraftImpactPresenter.carbon_range(profile.carbon_for_hours(trace.hours))
             trace_loading -> "Loading"
             profile != null -> AircraftImpactPresenter.kg_range(profile.low_co2_kg_per_hour(), profile.high_co2_kg_per_hour())
@@ -49,9 +61,20 @@ internal class AircraftDetailsContentBuilder(
             status = AircraftImpactPresenter.status(profile, trace, details_loading, trace_loading),
             show_trace_co2 = trace != null,
             co2_text = co2_text,
+            score_label = if (trace_estimate != null) "OBSERVED IMPACT SCORE" else "CLASS INTENSITY SCORE",
             score_text = score_text,
             score_color = if (profile == null) muted_color() else impact_score_color(profile),
-            rows = AircraftImpactPresenter.rows(aircraft, details, profile, trace, usage_trace_for(aircraft), details_loading, trace_loading, units())
+            rows = AircraftImpactPresenter.rows(
+                aircraft = aircraft,
+                details = details,
+                profile = profile,
+                trace = trace,
+                trace_estimate = trace_estimate,
+                usage_trace = usage_trace,
+                details_loading = details_loading,
+                trace_loading = trace_loading,
+                units = units()
+            )
                 .map { (label, value) -> AircraftDetailsRow(label, value) }
         )
     }

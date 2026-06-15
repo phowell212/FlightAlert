@@ -1,6 +1,7 @@
 package com.flightalert.ui.map
 
 import android.content.Context
+import com.flightalert.service.AlertAircraft
 import com.flightalert.service.AircraftAlertService
 
 class AlertMonitoringController(private val context: Context) {
@@ -10,5 +11,9 @@ class AlertMonitoringController(private val context: Context) {
         } else {
             AircraftAlertService.stop(context)
         }
+    }
+
+    fun publish_priority_snapshot(priority_aircraft: List<AlertAircraft>) {
+        AircraftAlertService.publish_priority_snapshot(context, priority_aircraft)
     }
 }

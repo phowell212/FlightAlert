@@ -39,6 +39,7 @@ object AircraftImpactEstimator {
         if (facts.category == 14 || text.contains("UAV") || text.contains("DRONE")) return null
         if (facts.category == 9 || code.startsWith("GL") || text.contains("GLIDER")) return null
         if (facts.on_ground == true && facts.category != null && facts.category in listOf(16, 17, 18, 19, 20)) return null
+        type_specific_profile(code)?.let { return it }
 
         return when {
             is_small_piston_aircraft(code, text) -> PISTON_SINGLE
@@ -59,7 +60,11 @@ object AircraftImpactEstimator {
     }
 
     fun score(profile: ImpactProfile): Int {
-        val normalized = ((log10(profile.mid_co2_kg_per_hour()) - log10(SCORE_MIN_KG_CO2_PER_HOUR)) /
+        return score_for_kg_per_hour(profile.mid_co2_kg_per_hour())
+    }
+
+    fun score_for_kg_per_hour(kg_per_hour: Double): Int {
+        val normalized = ((log10(kg_per_hour.coerceAtLeast(0.01)) - log10(SCORE_MIN_KG_CO2_PER_HOUR)) /
             (log10(SCORE_MAX_KG_CO2_PER_HOUR) - log10(SCORE_MIN_KG_CO2_PER_HOUR)))
             .coerceIn(0.0, 1.0)
         return (normalized * 100.0).roundToInt()
@@ -76,6 +81,11 @@ object AircraftImpactEstimator {
         return listOfNotNull(facts.feed_type_code, facts.details_type_code, facts.manufacturer, facts.model)
             .joinToString(" ")
             .uppercase(Locale.US)
+    }
+
+    private fun type_specific_profile(code: String): ImpactProfile? {
+        val compact = compact_impact_text(code)
+        return TYPE_SPECIFIC_PROFILES[compact]
     }
 
     private fun is_small_piston_aircraft(code: String, text: String): Boolean {
@@ -165,7 +175,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 8.0,
         high_gallons_per_hour = 18.0,
         cruise_knots = 125.0,
-        confidence = "Medium: type class is supported, exact engine/fuel flow is unavailable."
+        confidence = "Medium: type class is supported, exact engine/fuel flow is unavailable.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val PISTON_ROTOR = ImpactProfile(
         label = "Piston rotorcraft",
@@ -174,7 +185,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 10.0,
         high_gallons_per_hour = 22.0,
         cruise_knots = 95.0,
-        confidence = "Medium-low: rotorcraft fuel flow varies strongly by engine and mission."
+        confidence = "Medium-low: rotorcraft fuel flow varies strongly by engine and mission.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val TURBINE_ROTOR = ImpactProfile(
         label = "Turbine rotorcraft",
@@ -183,7 +195,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 60.0,
         high_gallons_per_hour = 220.0,
         cruise_knots = 130.0,
-        confidence = "Medium-low: rotorcraft fuel flow varies strongly by engine and mission."
+        confidence = "Medium-low: rotorcraft fuel flow varies strongly by engine and mission.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val TURBOPROP = ImpactProfile(
         label = "Turboprop or commuter aircraft",
@@ -192,7 +205,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 40.0,
         high_gallons_per_hour = 160.0,
         cruise_knots = 250.0,
-        confidence = "Medium: broad turbine-prop benchmark, not exact aircraft fuel flow."
+        confidence = "Medium: broad turbine-prop benchmark, not exact aircraft fuel flow.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val LIGHT_JET = ImpactProfile(
         label = "Business or light jet",
@@ -201,7 +215,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 90.0,
         high_gallons_per_hour = 350.0,
         cruise_knots = 410.0,
-        confidence = "Medium: type class is supported, exact engine/fuel flow is unavailable."
+        confidence = "Medium: type class is supported, exact engine/fuel flow is unavailable.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val REGIONAL = ImpactProfile(
         label = "Regional airline aircraft",
@@ -210,7 +225,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 220.0,
         high_gallons_per_hour = 650.0,
         cruise_knots = 430.0,
-        confidence = "Medium: class benchmark only; load factor and route phase are unavailable."
+        confidence = "Medium: class benchmark only; load factor and route phase are unavailable.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val NARROW_BODY = ImpactProfile(
         label = "Large narrow-body airliner",
@@ -219,7 +235,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 550.0,
         high_gallons_per_hour = 950.0,
         cruise_knots = 455.0,
-        confidence = "Medium: class benchmark only; load factor and route phase are unavailable."
+        confidence = "Medium: class benchmark only; load factor and route phase are unavailable.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val HEAVY = ImpactProfile(
         label = "Heavy transport or wide-body aircraft",
@@ -228,7 +245,8 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 1200.0,
         high_gallons_per_hour = 3200.0,
         cruise_knots = 485.0,
-        confidence = "Medium-low: heavy-aircraft fuel flow depends heavily on model, weight, and mission."
+        confidence = "Medium-low: heavy-aircraft fuel flow depends heavily on model, weight, and mission.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
     private val TACTICAL_JET = ImpactProfile(
         label = "High-performance tactical jet",
@@ -237,8 +255,57 @@ object AircraftImpactEstimator {
         low_gallons_per_hour = 700.0,
         high_gallons_per_hour = 2200.0,
         cruise_knots = 480.0,
-        confidence = "Low: military mission profile and power setting are unavailable."
+        confidence = "Low: military mission profile and power setting are unavailable.",
+        basis = ImpactProfileBasis.CLASS_BENCHMARK
     )
+
+    private val TYPE_SPECIFIC_PROFILES = listOf(
+        "C150" to typed_profile("C150", "Cessna 150", ImpactFuel.AVGAS, 5.0, 8.0, 95.0),
+        "C152" to typed_profile("C152", "Cessna 152", ImpactFuel.AVGAS, 5.0, 8.0, 100.0),
+        "C172" to typed_profile("C172", "Cessna 172", ImpactFuel.AVGAS, 7.0, 11.0, 120.0),
+        "C182" to typed_profile("C182", "Cessna 182", ImpactFuel.AVGAS, 11.0, 16.0, 135.0),
+        "PA28" to typed_profile("PA28", "Piper PA-28", ImpactFuel.AVGAS, 8.0, 13.0, 115.0),
+        "PA32" to typed_profile("PA32", "Piper PA-32", ImpactFuel.AVGAS, 13.0, 18.0, 140.0),
+        "PA34" to typed_profile("PA34", "Piper PA-34", ImpactFuel.AVGAS, 15.0, 22.0, 160.0),
+        "PA44" to typed_profile("PA44", "Piper PA-44", ImpactFuel.AVGAS, 14.0, 22.0, 155.0),
+        "SR20" to typed_profile("SR20", "Cirrus SR20", ImpactFuel.AVGAS, 10.0, 15.0, 150.0),
+        "SR22" to typed_profile("SR22", "Cirrus SR22", ImpactFuel.AVGAS, 14.0, 21.0, 175.0),
+        "R44" to typed_profile("R44", "Robinson R44", ImpactFuel.AVGAS, 12.0, 18.0, 95.0),
+        "C208" to typed_profile("C208", "Cessna 208", ImpactFuel.JET, 45.0, 75.0, 175.0),
+        "PC12" to typed_profile("PC12", "Pilatus PC-12", ImpactFuel.JET, 55.0, 85.0, 260.0),
+        "B350" to typed_profile("B350", "Beechcraft King Air 350", ImpactFuel.JET, 90.0, 135.0, 300.0),
+        "SF50" to typed_profile("SF50", "Cirrus Vision Jet", ImpactFuel.JET, 55.0, 85.0, 300.0),
+        "E75L" to typed_profile("E75L", "Embraer 175", ImpactFuel.JET, 400.0, 700.0, 430.0),
+        "E75S" to typed_profile("E75S", "Embraer 175", ImpactFuel.JET, 400.0, 700.0, 430.0),
+        "CRJ9" to typed_profile("CRJ9", "CRJ900", ImpactFuel.JET, 420.0, 720.0, 430.0),
+        "A319" to typed_profile("A319", "Airbus A319", ImpactFuel.JET, 520.0, 820.0, 455.0),
+        "A320" to typed_profile("A320", "Airbus A320", ImpactFuel.JET, 600.0, 950.0, 455.0),
+        "A321" to typed_profile("A321", "Airbus A321", ImpactFuel.JET, 700.0, 1100.0, 455.0),
+        "B738" to typed_profile("B738", "Boeing 737-800", ImpactFuel.JET, 620.0, 980.0, 455.0),
+        "B38M" to typed_profile("B38M", "Boeing 737 MAX 8", ImpactFuel.JET, 560.0, 900.0, 455.0),
+        "B77W" to typed_profile("B77W", "Boeing 777-300ER", ImpactFuel.JET, 2100.0, 3200.0, 490.0),
+        "A333" to typed_profile("A333", "Airbus A330-300", ImpactFuel.JET, 1700.0, 2700.0, 480.0)
+    ).associate { (code, profile) -> compact_impact_text(code) to profile }
+
+    private fun typed_profile(
+        code: String,
+        model: String,
+        fuel: ImpactFuel,
+        low_gph: Double,
+        high_gph: Double,
+        cruise_knots: Double
+    ): ImpactProfile {
+        return ImpactProfile(
+            label = "$model benchmark",
+            examples = code,
+            fuel = fuel,
+            low_gallons_per_hour = low_gph,
+            high_gallons_per_hour = high_gph,
+            cruise_knots = cruise_knots,
+            confidence = "Medium: ICAO type code matched a maintained fuel benchmark; exact engine, payload, and operator fuel flow are unavailable.",
+            basis = ImpactProfileBasis.TYPE_SPECIFIC
+        )
+    }
 
     private val SMALL_PISTON_PREFIXES = listOf(
         "AA5", "BE23", "BE33", "BE35", "BE36", "BE55", "BE56", "BE58", "BE76",
@@ -301,7 +368,8 @@ data class ImpactProfile(
     val low_gallons_per_hour: Double,
     val high_gallons_per_hour: Double,
     val cruise_knots: Double,
-    val confidence: String
+    val confidence: String,
+    val basis: ImpactProfileBasis
 ) {
     fun midpoint_gallons_per_hour(): Double = (low_gallons_per_hour + high_gallons_per_hour) / 2.0
 
@@ -335,6 +403,11 @@ data class ImpactProfile(
             fuel.co2_kg_per_gallon
         )
     }
+}
+
+enum class ImpactProfileBasis(val display_name: String) {
+    TYPE_SPECIFIC("type-specific benchmark"),
+    CLASS_BENCHMARK("class benchmark")
 }
 
 enum class ImpactFuel(val display_name: String, val co2_kg_per_gallon: Double) {

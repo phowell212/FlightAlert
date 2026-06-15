@@ -28,8 +28,8 @@ internal class AircraftDetailsRowsBuilder(
         val telemetry = enriched_details?.telemetry?.with_fallback(aircraft.telemetry) ?: aircraft.telemetry
         val rows = mutableListOf<AircraftDetailsRow>()
         rows += AircraftDetailsRow.section("Aircraft")
-        rows += AircraftDetailsRow("ICAO", aircraft.icao24.uppercase(Locale.US))
-        rows += AircraftDetailsRow("Hex", aircraft.icao24.uppercase(Locale.US))
+        rows += AircraftDetailsRow("Callsign", aircraft.callsign)
+        rows += AircraftDetailsRow("ICAO hex", aircraft.icao24.uppercase(Locale.US))
         rows += AircraftDetailsRow("Registration", enriched_details?.registration ?: aircraft.registration ?: loading_or_unavailable(details_loading))
         rows += AircraftDetailsRow("Registry country", registry_country_label(aircraft, enriched_details, details_loading))
         rows += AircraftDetailsRow("Owner/Operator", AircraftRoutePresenter.details_value(enriched_details?.owner, details_loading))

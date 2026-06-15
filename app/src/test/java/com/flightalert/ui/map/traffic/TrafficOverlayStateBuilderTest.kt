@@ -53,8 +53,8 @@ class TrafficOverlayStateBuilderTest {
         return TrafficOverlayStateBuilder(
             dp = { it },
             aircraft_color = { Color.WHITE },
-            aircraft_appearance_progress = { 1f },
-            aircraft_appearance = { null },
+            aircraft_appearance_progress = { _, _ -> 1f },
+            aircraft_appearance = { _, _ -> null },
             display_aircraft_position = { aircraft, _ -> GeoPoint(aircraft.lat, aircraft.lon) },
             spatial_entry_for = { aircraft, now -> aircraft.entry(now) },
             lat_lon_to_world = { lat, lon, _ -> WorldPoint(lon, lat) },
@@ -76,6 +76,7 @@ class TrafficOverlayStateBuilderTest {
             ),
             filters_restrict_aircraft = false,
             map_source = TileSource.STREET,
+            visual_theme_key = 0,
             content_width = PHONE_WIDTH,
             content_height = PHONE_HEIGHT,
             label_avoid_rects = emptyList(),
@@ -108,6 +109,7 @@ class TrafficOverlayStateBuilderTest {
         val entries = aircraft.map { it.entry(1_000.0) }
         return CachedTraffic(
             aircraft = aircraft,
+            nearest_aircraft = aircraft.firstOrNull(),
             entries = entries,
             spatial_index = TrafficSpatialIndex(entries),
             world_dot_batch = TrafficWorldDotBatch.empty(),

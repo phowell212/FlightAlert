@@ -232,7 +232,7 @@ class VisibleAircraftFeedController(
     }
 
     private companion object {
-        const val TAG = "FlightAlert"
-        const val GLOBE_SNAPSHOT_CADENCE_JITTER_MS = 150L
+        const val TAG = FlightAlertSettings.App.TAG
+        const val GLOBE_SNAPSHOT_CADENCE_JITTER_MS = FlightAlertSettings.AircraftFeed.GLOBE_SNAPSHOT_CADENCE_JITTER_MS
     }
 }

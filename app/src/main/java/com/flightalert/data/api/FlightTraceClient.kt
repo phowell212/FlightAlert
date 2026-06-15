@@ -4,6 +4,7 @@ import com.flightalert.data.FlightTrace
 import com.flightalert.data.TraceSegment
 import com.flightalert.data.TrackPoint
 import com.flightalert.data.airplaneslive.AirplanesLiveHttp
+import com.flightalert.settings.FlightAlertSettings
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -362,20 +363,20 @@ private const val FEET_PER_METER = 3.28084
 private const val TRACE_FLAG_NEW_LEG = 2
 private const val EARTH_RADIUS_M = 6371000.0
 private const val METERS_PER_NAUTICAL_MILE = 1852.0
-private const val MIN_TRACE_POINTS = 24
-private const val MIN_SEGMENT_POINTS = 8
-private const val MIN_TRACE_DURATION_SECONDS = 180L
-private const val MAX_TRACE_GAP_SECONDS = 900L
-private const val MAX_LIVE_APPEND_GAP_SECONDS = 3600L
-private const val SOURCE_CAN_BE_NEWER_SECONDS = 45L
-private const val MAX_LIVE_CONNECT_SPEED_KT = 950.0
-private const val MIN_LIVE_APPEND_DISTANCE_M = 120.0
-private const val MAX_LIVE_POINT_AGE_SECONDS = 180L
-private const val MAX_SOURCE_TRACE_AGE_SECONDS = 900L
-private const val MIN_MOVING_FLIGHT_SPEED_KT = 70.0
-private const val MIN_MOVING_FLIGHT_ALTITUDE_FT = 850.0
-private const val MAX_DEPARTURE_CONTEXT_SECONDS = 1200L
-private const val MAX_DEPARTURE_CONTEXT_DISTANCE_M = 15000.0
-private const val MIN_PREVIOUS_FLIGHT_DISTANCE_M = 5000.0
-private const val MIN_PREVIOUS_FLIGHT_ALTITUDE_FT = 450.0
-private const val MAX_PREVIOUS_FLIGHT_SEGMENTS = 8
+private const val MIN_TRACE_POINTS = FlightAlertSettings.FlightTrace.MIN_TRACE_POINTS
+private const val MIN_SEGMENT_POINTS = FlightAlertSettings.FlightTrace.MIN_SEGMENT_POINTS
+private const val MIN_TRACE_DURATION_SECONDS = FlightAlertSettings.FlightTrace.MIN_TRACE_DURATION_SECONDS
+private const val MAX_TRACE_GAP_SECONDS = FlightAlertSettings.FlightTrace.MAX_TRACE_GAP_SECONDS
+private const val MAX_LIVE_APPEND_GAP_SECONDS = FlightAlertSettings.FlightTrace.MAX_LIVE_APPEND_GAP_SECONDS
+private const val SOURCE_CAN_BE_NEWER_SECONDS = FlightAlertSettings.FlightTrace.SOURCE_CAN_BE_NEWER_SECONDS
+private const val MAX_LIVE_CONNECT_SPEED_KT = FlightAlertSettings.FlightTrace.MAX_LIVE_CONNECT_SPEED_KT
+private const val MIN_LIVE_APPEND_DISTANCE_M = FlightAlertSettings.FlightTrace.MIN_LIVE_APPEND_DISTANCE_M
+private const val MAX_LIVE_POINT_AGE_SECONDS = FlightAlertSettings.FlightTrace.MAX_LIVE_POINT_AGE_SECONDS
+private const val MAX_SOURCE_TRACE_AGE_SECONDS = FlightAlertSettings.FlightTrace.MAX_SOURCE_TRACE_AGE_SECONDS
+private const val MIN_MOVING_FLIGHT_SPEED_KT = FlightAlertSettings.FlightTrace.MIN_MOVING_FLIGHT_SPEED_KT
+private const val MIN_MOVING_FLIGHT_ALTITUDE_FT = FlightAlertSettings.FlightTrace.MIN_MOVING_FLIGHT_ALTITUDE_FT
+private const val MAX_DEPARTURE_CONTEXT_SECONDS = FlightAlertSettings.FlightTrace.MAX_DEPARTURE_CONTEXT_SECONDS
+private const val MAX_DEPARTURE_CONTEXT_DISTANCE_M = FlightAlertSettings.FlightTrace.MAX_DEPARTURE_CONTEXT_DISTANCE_M
+private const val MIN_PREVIOUS_FLIGHT_DISTANCE_M = FlightAlertSettings.FlightTrace.MIN_PREVIOUS_FLIGHT_DISTANCE_M
+private const val MIN_PREVIOUS_FLIGHT_ALTITUDE_FT = FlightAlertSettings.FlightTrace.MIN_PREVIOUS_FLIGHT_ALTITUDE_FT
+private const val MAX_PREVIOUS_FLIGHT_SEGMENTS = FlightAlertSettings.FlightTrace.MAX_PREVIOUS_FLIGHT_SEGMENTS

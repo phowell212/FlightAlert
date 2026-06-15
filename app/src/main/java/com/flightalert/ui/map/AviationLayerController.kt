@@ -7,6 +7,7 @@ import com.flightalert.data.AviationLayerKind
 import com.flightalert.data.AviationLayerSnapshot
 import com.flightalert.data.AviationLayerState
 import com.flightalert.data.AviationLayerStatus
+import com.flightalert.settings.FlightAlertSettings
 import com.flightalert.ui.map.MapProjection
 import com.flightalert.ui.map.Bounds
 import com.flightalert.ui.map.Viewport
@@ -340,7 +341,7 @@ class AviationLayerController(
     }
 
     private companion object {
-        const val TILE_SIZE = 256
+        const val TILE_SIZE = FlightAlertSettings.AviationLayer.TILE_SIZE
         val WARM_AVIATION_LAYERS_VISIBILITY = AviationLayerVisibility(
             restricted_airspaces_enabled = true,
             atc_boundaries_enabled = true,

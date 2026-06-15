@@ -50,7 +50,10 @@ import com.flightalert.data.FlightTrace
 import com.flightalert.data.api.FlightTraceClient
 import com.flightalert.data.web.GlobeBinCraftAircraftSource
 import com.flightalert.data.TraceSegment
+import com.flightalert.service.AlertAircraft
 import com.flightalert.service.AlertAircraftClassifier
+import com.flightalert.service.AlertPositionProjector
+import com.flightalert.service.ProjectedAlertPosition
 import com.flightalert.ui.map.traffic.AircraftFilterController
 import com.flightalert.ui.map.traffic.AircraftTrafficFeed
 import com.flightalert.ui.map.traffic.AircraftTypeFilter
@@ -401,6 +404,7 @@ class FlightMapView(
     private val traffic_cache_controller = TrafficCacheController(
         all_aircraft_snapshot = ::all_aircraft_snapshot,
         passes_aircraft_filters = ::passes_aircraft_filters,
+        distance_meters = ::reported_distance_meters,
         is_hazard_aircraft = ::is_hazard_aircraft,
         aircraft_icao_key = ::aircraft_icao_key,
         spatial_entry_for = ::spatial_entry_for,
@@ -511,7 +515,7 @@ class FlightMapView(
         coordinator = aircraft_details_coordinator,
         warm_requester = aircraft_details_warm_requester,
         feed_mode = { aircraft_feed_mode },
-        selected_aircraft = { displayed_traffic().aircraft },
+        selected_aircraft = { selected_path_controller.selected_aircraft_snapshot },
         select_aircraft = ::select_aircraft,
         has_selected_flight_path = ::has_selected_flight_path,
         is_flight_path_loading = ::is_flight_path_loading,
@@ -578,6 +582,8 @@ class FlightMapView(
     private var last_pinch_focus_y = 0f
     private var last_map_interaction_ms = 0L
     private var last_traffic_draw_elapsed_ms = 0L
+    private var last_priority_notification_snapshot_check_ms = 0L
+    private var last_priority_notification_snapshot_signature: String? = null
     private var zoom_preference_dirty = false
     private var deferred_aircraft_feed_publish: DeferredAircraftFeedPublish? = null
     private var deferred_aircraft_feed_publish_scheduled = false
@@ -596,6 +602,7 @@ class FlightMapView(
                 last_ticker_fetch_ms = now
                 request_visible_aircraft_if_needed()
             }
+            publish_priority_notification_snapshot_if_due(now)
             if (should_redraw_from_ticker(now)) {
                 postInvalidateOnAnimation()
             }
@@ -1825,6 +1832,7 @@ class FlightMapView(
             aircraft.addAll(parsed)
         }
         publish_prepared_traffic_cache(parsed_cache)
+        publish_priority_notification_snapshot(force = true)
         last_aircraft_data_epoch_sec = result.epoch_sec
         aircraft_status = if (parsed.isEmpty()) {
             "No aircraft reported in current map area (${result.source.display_name}$coverage)"
@@ -2788,10 +2796,12 @@ class FlightMapView(
             alert_altitude_label = telemetry_formatter.feet_setting(alert_altitude_feet),
             long_press_fill = priority_adjust_hold_fill_state(),
             aircraft_rows = priority_aircraft_snapshot().map { aircraft ->
+                val priority_position = alert_position_for(aircraft)
+                val estimate_note = if (priority_position.estimated) " est." else ""
                 PriorityAircraftPanelRow(
                     title = aircraft.registration ?: aircraft.callsign,
                     altitude = telemetry_formatter.altitude_value(aircraft.altitude_m),
-                    detail = "${telemetry_formatter.distance(reported_distance_meters(aircraft))}  ${telemetry_formatter.age(aircraft)}",
+                    detail = "${telemetry_formatter.distance(priority_position.distance_meters)}$estimate_note  ${telemetry_formatter.age(aircraft)}",
                     is_extreme = is_extreme_priority(aircraft)
                 )
             }
@@ -2848,16 +2858,39 @@ class FlightMapView(
                 details_session.photo_evidence_open ||
                 details_session.photo_gallery_open
             ) return false
-            val aircraft = displayed_traffic().aircraft ?: return false
-            val details = details_session.aircraft_details ?: return false
             val panel = details_panel_bounds(content_width(), content_height())
-            if (!current_details_photo_bounds(panel, content_width(), content_height()).contains(x, y)) return false
-            open_photo_gallery(aircraft, details)
-            return true
+            val aircraft = displayed_traffic().aircraft
+            val details = details_session.aircraft_details
+            if (
+                aircraft != null &&
+                details != null &&
+                current_details_photo_bounds(panel, content_width(), content_height()).contains(x, y)
+            ) {
+                open_photo_gallery(aircraft, details)
+                return true
+            }
+            return if (!panel.contains(x, y)) deselect_aircraft_for_nearest_traffic() else false
         }
+        if (handle_selected_aircraft_map_long_press(x, y)) return true
         if (settings_open || priority_tracker_open || filters_open || selected_restricted_airspace != null) return false
         val feature = restricted_airspace_at(x, y) ?: return false
         selected_restricted_airspace = feature
+        invalidate()
+        return true
+    }
+
+    private fun handle_selected_aircraft_map_long_press(x: Float, y: Float): Boolean {
+        if (selected_path_controller.selected_aircraft_id == null) return false
+        if (settings_open || priority_tracker_open || filters_open || selected_restricted_airspace != null) return false
+        if (is_overlay_or_control_hit(x, y)) return false
+        return deselect_aircraft_for_nearest_traffic()
+    }
+
+    private fun deselect_aircraft_for_nearest_traffic(): Boolean {
+        if (selected_path_controller.selected_aircraft_id == null) return false
+        details_session.close_details_shell()
+        selected_path_controller.clear_selection()
+        route_diagnostic_key = null
         invalidate()
         return true
     }
@@ -3494,6 +3527,7 @@ class FlightMapView(
         mark_traffic_cache_dirty()
         prefs.edit { putBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, alerts_enabled) }
         update_monitoring_service()
+        publish_priority_notification_snapshot(force = true)
     }
 
     private fun set_alert_distance_feet(next: Float) {
@@ -3501,6 +3535,7 @@ class FlightMapView(
         mark_traffic_cache_dirty()
         prefs.edit { putFloat(FlightAlertSettings.KEY_ALERT_DISTANCE_FEET, alert_distance_feet) }
         update_monitoring_service()
+        publish_priority_notification_snapshot(force = true)
         request_visible_aircraft_if_needed(force = true)
     }
 
@@ -3509,6 +3544,7 @@ class FlightMapView(
         mark_traffic_cache_dirty()
         prefs.edit { putFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, alert_altitude_feet) }
         update_monitoring_service()
+        publish_priority_notification_snapshot(force = true)
         request_visible_aircraft_if_needed(force = true)
     }
 
@@ -3692,6 +3728,44 @@ class FlightMapView(
         return traffic_cache_controller.cached_traffic()
     }
 
+    private fun publish_priority_notification_snapshot_if_due(now_elapsed_ms: Long) {
+        if (now_elapsed_ms - last_priority_notification_snapshot_check_ms < PRIORITY_NOTIFICATION_SNAPSHOT_CHECK_MS) return
+        last_priority_notification_snapshot_check_ms = now_elapsed_ms
+        publish_priority_notification_snapshot(force = false)
+    }
+
+    private fun publish_priority_notification_snapshot(force: Boolean = false) {
+        val priority_aircraft = projected_extreme_priority_alerts()
+        val signature = priority_notification_snapshot_signature(priority_aircraft)
+        if (!force && signature == last_priority_notification_snapshot_signature) return
+        if (signature.isEmpty() && last_priority_notification_snapshot_signature == null) return
+        last_priority_notification_snapshot_signature = signature
+        alert_monitoring_controller.publish_priority_snapshot(priority_aircraft)
+    }
+
+    private fun projected_extreme_priority_alerts(): List<AlertAircraft> {
+        if (!alerts_enabled) return emptyList()
+        val now_epoch_sec = aircraft_projection_epoch_seconds()
+        return all_aircraft_snapshot()
+            .asSequence()
+            .mapNotNull { aircraft -> alert_classification_for(aircraft, now_epoch_sec = now_epoch_sec) }
+            .filter { it.is_extreme_priority }
+            .sortedWith(compareBy<AlertAircraft> { it.altitude_feet }.thenBy { it.distance_feet })
+            .toList()
+    }
+
+    private fun priority_notification_snapshot_signature(priority_aircraft: List<AlertAircraft>): String {
+        if (priority_aircraft.isEmpty()) return ""
+        return priority_aircraft.joinToString("|") {
+            listOf(
+                it.icao24,
+                it.registration.orEmpty(),
+                it.altitude_feet.roundToInt().toString(),
+                it.is_estimated_position.toString()
+            ).joinToString(":")
+        }
+    }
+
     private fun publish_prepared_traffic_cache(cache: CachedTraffic) {
         traffic_cache_rebuild_token++
         traffic_cache_rebuild_pending = false
@@ -3835,27 +3909,36 @@ class FlightMapView(
     private fun map_obstacles(w: Float, h: Float): List<RectF> = layout.map_obstacles(w, h, layout_state())
     private fun is_wide_layout(w: Float, h: Float): Boolean = layout.is_wide_layout(w, h)
 
-    private fun nearest_aircraft(): Aircraft? = filtered_aircraft_snapshot().firstOrNull()
+    private fun nearest_aircraft(): Aircraft? = cached_traffic().nearest_aircraft
 
     private fun displayed_traffic(): TrafficDisplay {
-        val snapshot = cached_traffic().aircraft
-        val selected_id = selected_path_controller.selected_aircraft_id
-        val selected = selected_id?.let { id -> snapshot.firstOrNull { it.icao24 == id } }
-            ?: selected_path_controller.selected_aircraft_snapshot?.takeIf {
-                !filters_restrict_aircraft() && it.icao24 == selected_id
-            }
+        val cache = cached_traffic()
+        val selected_key = selected_path_controller.selected_aircraft_key
+        val selected = selected_key?.let { key ->
+            cache.aircraft.firstOrNull { aircraft_icao_key(it) == key }
+                ?: selected_path_controller.selected_snapshot_for_key(key).takeIf { !filters_restrict_aircraft() }
+        }
         return if (selected != null) {
             TrafficDisplay(selected, true)
         } else {
-            TrafficDisplay(snapshot.firstOrNull(), false)
+            TrafficDisplay(cache.nearest_aircraft, false)
         }
     }
 
     private fun priority_aircraft_snapshot(): List<Aircraft> {
         if (!priority_tracking_enabled) return emptyList()
+        val now_epoch_sec = aircraft_projection_epoch_seconds()
         return all_aircraft_snapshot()
-            .filter { reported_distance_meters(it) <= feet_to_meters(priority_range_feet.toDouble()) }
-            .sortedWith(compareByDescending<Aircraft> { is_extreme_priority(it) }.thenBy { it.altitude_m ?: Double.MAX_VALUE }.thenBy { reported_distance_meters(it) })
+            .map { aircraft -> aircraft to alert_position_for(aircraft, now_epoch_sec) }
+            .filter { (_, alert_position) -> alert_position.distance_meters <= feet_to_meters(priority_range_feet.toDouble()) }
+            .sortedWith(
+                compareByDescending<Pair<Aircraft, ProjectedAlertPosition>> {
+                    alert_classification_for(it.first, it.second, now_epoch_sec)?.is_extreme_priority == true
+                }
+                    .thenBy { it.first.altitude_m ?: Double.MAX_VALUE }
+                    .thenBy { it.second.distance_meters }
+            )
+            .map { it.first }
     }
 
     private fun display_aircraft_position(
@@ -3888,13 +3971,41 @@ class FlightMapView(
         )
     }
 
+    private fun alert_position_for(
+        aircraft: Aircraft,
+        now_epoch_sec: Double = aircraft_projection_epoch_seconds()
+    ): ProjectedAlertPosition {
+        val location = latest_location
+        if (location == null) {
+            return ProjectedAlertPosition(aircraft.distance_m, aircraft.altitude_m, estimated = false)
+        }
+        return AlertPositionProjector.projected_alert_position(
+            own_lat = location.latitude,
+            own_lon = location.longitude,
+            aircraft_lat = aircraft.lat,
+            aircraft_lon = aircraft.lon,
+            reported_distance_meters = aircraft.distance_m,
+            altitude_meters = aircraft.altitude_m,
+            velocity_ms = aircraft.velocity_ms,
+            track_deg = aircraft.track_deg,
+            vertical_rate_ms = aircraft.vertical_rate_ms,
+            position_time_sec = aircraft.position_time_sec,
+            last_contact_sec = aircraft.last_contact_sec,
+            now_epoch_sec = now_epoch_sec
+        )
+    }
+
     // The map asks the same classifier as the foreground service before calling an aircraft hazard/extreme.
-    private fun alert_classification_for(aircraft: Aircraft) = AlertAircraftClassifier.classify(
+    private fun alert_classification_for(
+        aircraft: Aircraft,
+        alert_position: ProjectedAlertPosition = alert_position_for(aircraft),
+        now_epoch_sec: Double = aircraft_projection_epoch_seconds()
+    ) = AlertAircraftClassifier.classify(
         icao24 = aircraft.icao24,
         callsign = aircraft.callsign,
         registration = aircraft.registration,
-        distance_meters = reported_distance_meters(aircraft),
-        altitude_meters = aircraft.altitude_m,
+        distance_meters = alert_position.distance_meters,
+        altitude_meters = alert_position.altitude_meters,
         last_contact_sec = aircraft.last_contact_sec,
         position_time_sec = aircraft.position_time_sec,
         own_altitude_feet = latest_location?.takeIf { it.hasAltitude() }?.altitude?.let { it * 3.28084 },
@@ -3903,7 +4014,8 @@ class FlightMapView(
         alert_altitude_feet = alert_altitude_feet,
         priority_enabled = priority_tracking_enabled,
         priority_range_feet = priority_range_feet,
-        now_epoch_sec = aircraft_projection_epoch_seconds()
+        now_epoch_sec = now_epoch_sec,
+        is_estimated_position = alert_position.estimated
     )
 
     private fun is_hazard_aircraft(aircraft: Aircraft): Boolean {

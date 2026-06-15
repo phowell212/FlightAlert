@@ -8,6 +8,7 @@ import com.flightalert.data.AircraftTelemetry
 import com.flightalert.data.AirportDetails
 import com.flightalert.data.FaaRegistryRecord
 import com.flightalert.data.airplaneslive.AirplanesLiveHttp
+import com.flightalert.settings.FlightAlertSettings
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -825,11 +826,11 @@ private fun JSONObject.opt_double_or_null(key: String): Double? {
 }
 
 private const val US_N_NUMBER_ICAO_START = 0xA00001L
-private const val HTTP_TOO_MANY_REQUESTS = 429
-private const val DETAILS_CACHE_MAX_AGE_MS = 10L * 60L * 1000L
-private const val DETAILS_CACHE_MAX_ENTRIES = 128
-private const val STATIC_DB_CACHE_MAX_ENTRIES = 10
-private const val TAG = "FlightAlert"
+private const val HTTP_TOO_MANY_REQUESTS = FlightAlertSettings.AircraftDetails.HTTP_TOO_MANY_REQUESTS
+private const val DETAILS_CACHE_MAX_AGE_MS = FlightAlertSettings.AircraftDetails.CACHE_MAX_AGE_MS
+private const val DETAILS_CACHE_MAX_ENTRIES = FlightAlertSettings.AircraftDetails.CACHE_MAX_ENTRIES
+private const val STATIC_DB_CACHE_MAX_ENTRIES = FlightAlertSettings.AircraftDetails.STATIC_DB_CACHE_MAX_ENTRIES
+private const val TAG = FlightAlertSettings.App.TAG
 private const val US_N_NUMBER_ICAO_END = 0xADF7C7L
 private const val FIRST_N_NUMBER_STRIDE = 101711
 private const val SECOND_N_NUMBER_STRIDE = 10111

@@ -413,12 +413,13 @@ class FlightMapPanelRenderer(
 
     private fun impact_methodology_items(): List<Pair<String, String>> {
         return listOf(
-            "Trace first" to "When a real trace is present, current-flight CO2 uses trace elapsed time and distance. App-session dots are never stored as a path.",
-            "Carbon math" to "CO2 range = benchmark gal/hr range x trace hours x EIA kg CO2/gal. Jet fuel uses 9.75; avgas uses 8.31.",
-            "Class score" to "0-100 is only class CO2/hr intensity on a log scale from 20 to 20,000 kg/hr. It is not a measured flight total.",
-            "Aircraft class" to "Live web/feed type is used first, then registry/API metadata, then named public-page fallback only for missing model text.",
-            "Context" to "The page also shows observed trace kg per mile/km and class cruise kg per nautical mile so the rate has scale.",
-            "Not claimed" to "No exact engine fuel flow, payload, phase power, SAF blend, contrails, NOx, noise, or passenger allocation is inferred."
+            "Trace first" to "Only real trace points from the aircraft source are used. App-session dots are never stored as a path.",
+            "Aircraft profile" to "Live web/feed type is tried first, then registry/API metadata. Known ICAO types use a type benchmark; otherwise class benchmarks are used.",
+            "Phase model" to "Observed legs are split into ground, climb, cruise, descent, low-level, or time-only using trace altitude, speed, and timestamps.",
+            "Carbon math" to "CO2 range = profile gal/hr x phase multiplier x trace hours x EIA kg CO2/gal. Jet fuel uses 9.75; avgas uses 8.31.",
+            "Score" to "0-100 is log-scaled kg CO2/hr. When a phase trace exists it scores observed intensity; otherwise it scores the profile rate.",
+            "Full flight" to "Shown only when real origin, destination, and trace progress are credible enough to route-scale the observed estimate.",
+            "Not claimed" to "No exact fuel flow, payload, passenger count, SAF blend, contrails, NOx, noise, or per-passenger allocation is inferred."
         )
     }
 

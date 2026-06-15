@@ -1,5 +1,6 @@
 package com.flightalert.service
 
+import com.flightalert.settings.FlightAlertSettings
 import java.util.Locale
 
 object PriorityNotificationPresenter {
@@ -24,5 +25,5 @@ object PriorityNotificationPresenter {
         return "$body$suffix"
     }
 
-    private const val MAX_LISTED_AIRCRAFT = 4
+    private const val MAX_LISTED_AIRCRAFT = FlightAlertSettings.PriorityNotification.MAX_LISTED_AIRCRAFT
 }

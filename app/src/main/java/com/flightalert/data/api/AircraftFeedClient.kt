@@ -8,6 +8,7 @@ import com.flightalert.data.FeedResult
 import com.flightalert.data.FeedSource
 import com.flightalert.data.FeedStatus
 import com.flightalert.data.airplaneslive.AirplanesLiveHttp
+import com.flightalert.settings.FlightAlertSettings
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -503,17 +504,17 @@ class AircraftFeedClient(private val user_agent: String) {
     }
 
     companion object {
-        private const val HTTP_TOO_MANY_REQUESTS = 429
-        private const val DEFAULT_OPENSKY_BACKOFF_SECONDS = 3600L
-        private const val DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS = 120L
-        private const val MIN_AIRPLANES_RADIUS_NM = 25.0
-        private const val MAX_AIRPLANES_RADIUS_NM = 250.0
-        private const val MAX_AIRPLANES_LIVE_QUERIES = 1
-        private const val AIRPLANES_GRID_CELL_RADIUS_FACTOR = 1.45
-        private const val AIRPLANES_QUERY_RADIUS_PADDING = 1.08
+        private const val HTTP_TOO_MANY_REQUESTS = FlightAlertSettings.AircraftFeed.HTTP_TOO_MANY_REQUESTS
+        private const val DEFAULT_OPENSKY_BACKOFF_SECONDS = FlightAlertSettings.AircraftFeed.DEFAULT_OPENSKY_BACKOFF_SECONDS
+        private const val DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS = FlightAlertSettings.AircraftFeed.DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS
+        private const val MIN_AIRPLANES_RADIUS_NM = FlightAlertSettings.AircraftFeed.MIN_AIRPLANES_RADIUS_NM
+        private const val MAX_AIRPLANES_RADIUS_NM = FlightAlertSettings.AircraftFeed.MAX_AIRPLANES_RADIUS_NM
+        private const val MAX_AIRPLANES_LIVE_QUERIES = FlightAlertSettings.AircraftFeed.MAX_AIRPLANES_LIVE_QUERIES
+        private const val AIRPLANES_GRID_CELL_RADIUS_FACTOR = FlightAlertSettings.AircraftFeed.AIRPLANES_GRID_CELL_RADIUS_FACTOR
+        private const val AIRPLANES_QUERY_RADIUS_PADDING = FlightAlertSettings.AircraftFeed.AIRPLANES_QUERY_RADIUS_PADDING
         private const val METERS_PER_NAUTICAL_MILE = 1852.0
         private const val FEET_PER_METER = 3.28084
-        private const val MAX_EXACT_SEARCH_CHARS = 18
+        private const val MAX_EXACT_SEARCH_CHARS = FlightAlertSettings.AircraftFeed.MAX_EXACT_SEARCH_CHARS
         private val EXACT_SEARCH_ALLOWED = Regex("^[A-Za-z0-9-]+$")
         private val MODE_S_HEX = Regex("^[0-9A-F]{6}$")
         private val CALLSIGN_SEARCH = Regex("^[A-Z0-9]{2,12}$")

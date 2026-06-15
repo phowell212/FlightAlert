@@ -252,8 +252,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
-        const val APP_USER_AGENT = "FlightAlertPrototype/0.1"
-        const val TAG = "FlightAlert"
+        const val APP_USER_AGENT = FlightAlertSettings.App.USER_AGENT
+        const val TAG = FlightAlertSettings.App.TAG
         const val EXTRA_PERF_LAT = "com.flightalert.PERF_LAT"
         const val EXTRA_PERF_LON = "com.flightalert.PERF_LON"
         const val EXTRA_PERF_ZOOM = "com.flightalert.PERF_ZOOM"
@@ -270,6 +270,6 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PERF_SKIP_CONTROLS = "com.flightalert.PERF_SKIP_CONTROLS"
         const val EXTRA_PERF_SKIP_TRAFFIC_PANEL = "com.flightalert.PERF_SKIP_TRAFFIC_PANEL"
         const val EXTRA_PERF_TRAFFIC_DETAIL_TIMING = "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING"
-        const val DEFAULT_PERF_ZOOM = 4.2
+        const val DEFAULT_PERF_ZOOM = FlightAlertSettings.PerfLaunch.DEFAULT_ZOOM
     }
 }
