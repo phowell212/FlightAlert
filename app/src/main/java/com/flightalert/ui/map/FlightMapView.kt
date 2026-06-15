@@ -536,6 +536,10 @@ class FlightMapView(
     private var debug_perf_skip_map = false
     private var debug_perf_skip_traffic = false
     private var debug_perf_skip_chrome = false
+    private var debug_perf_skip_top_status = false
+    private var debug_perf_skip_controls = false
+    private var debug_perf_skip_traffic_panel = false
+    private var debug_perf_traffic_detail_timing = false
     private var debug_perf_focus_open_map = false
     private var debug_perf_focus_applied = false
     private var debug_perf_target_lat: Double? = null
@@ -572,6 +576,8 @@ class FlightMapView(
     private var last_map_interaction_ms = 0L
     private var last_traffic_draw_elapsed_ms = 0L
     private var zoom_preference_dirty = false
+    private var deferred_aircraft_feed_publish: DeferredAircraftFeedPublish? = null
+    private var deferred_aircraft_feed_publish_scheduled = false
 
     // Insets describe the safe drawing rectangle after Android bars, cutouts, and fold areas are removed.
     private var safe_inset_left = 0f
@@ -772,7 +778,11 @@ class FlightMapView(
         perf_focus_open_map: Boolean = false,
         perf_skip_map: Boolean = false,
         perf_skip_traffic: Boolean = false,
-        perf_skip_chrome: Boolean = false
+        perf_skip_chrome: Boolean = false,
+        perf_skip_top_status: Boolean = false,
+        perf_skip_controls: Boolean = false,
+        perf_skip_traffic_panel: Boolean = false,
+        perf_traffic_detail_timing: Boolean = false
     ) {
         if (!lat.isFinite() || !lon.isFinite() || !target_zoom.isFinite()) return
         zoom = target_zoom.coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
@@ -805,6 +815,10 @@ class FlightMapView(
         debug_perf_skip_map = perf_skip_map
         debug_perf_skip_traffic = perf_skip_traffic
         debug_perf_skip_chrome = perf_skip_chrome
+        debug_perf_skip_top_status = perf_skip_top_status
+        debug_perf_skip_controls = perf_skip_controls
+        debug_perf_skip_traffic_panel = perf_skip_traffic_panel
+        debug_perf_traffic_detail_timing = perf_traffic_detail_timing
         debug_perf_focus_open_map = perf_focus_open_map
         debug_perf_focus_applied = false
         debug_perf_target_lat = lat.coerceIn(-85.0, 85.0)
@@ -819,7 +833,10 @@ class FlightMapView(
                 "zoom=$zoom mapSource=$map_source mapLabels=$map_labels_enabled restrictedAirspaces=$restricted_airspaces_layer_enabled " +
                 "targetLat=$debug_perf_target_lat targetLon=$debug_perf_target_lon focusOpenMap=$debug_perf_focus_open_map " +
                 "clearSelection=$perf_clear_selection skipMap=$debug_perf_skip_map " +
-                "skipTraffic=$debug_perf_skip_traffic skipChrome=$debug_perf_skip_chrome"
+                "skipTraffic=$debug_perf_skip_traffic skipChrome=$debug_perf_skip_chrome " +
+                "skipTopStatus=$debug_perf_skip_top_status skipControls=$debug_perf_skip_controls " +
+                "skipTrafficPanel=$debug_perf_skip_traffic_panel " +
+                "trafficDetailTiming=$debug_perf_traffic_detail_timing"
         )
         mark_traffic_cache_dirty()
         map_status = "Loading map"
@@ -871,7 +888,9 @@ class FlightMapView(
                 "last=${total_ns.ms()} lastMap=${map_ns.ms()} lastLayerReq=${layer_request_ns.ms()} " +
                 "lastLayerDraw=${layer_draw_ns.ms()} lastPath=${path_ns.ms()} lastTraffic=${traffic_ns.ms()} lastChrome=${chrome_ns.ms()} " +
                 "symbols=$debug_last_traffic_symbol_count dots=$debug_last_traffic_dot_count " +
-                traffic_overlay_renderer.debug_last_symbol_cache_summary
+                map_tile_renderer.debug_last_tile_summary +
+                traffic_overlay_renderer.debug_last_symbol_cache_summary +
+                traffic_overlay_renderer.debug_last_detail_timing_summary
         )
     }
 
@@ -979,13 +998,19 @@ class FlightMapView(
             if (debug_perf_viewport_active && debug_perf_skip_chrome) {
                 // Debug perf mask only; normal app launches never suppress visible chrome.
             } else if (!modal_open) {
-                draw_top_status(this, w, h)
-                // Draw the always-available map controls and traffic card after the map layers.
-                draw_recenter_button(this, w, h)
-                location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
-                draw_settings_button(this, w, h)
-                draw_filters_button(this, w, h)
-                draw_traffic_panel(this, w, h)
+                if (!debug_perf_skips_top_status()) {
+                    draw_top_status(this, w, h)
+                }
+                if (!debug_perf_skips_controls()) {
+                    // Draw the always-available map controls after the map layers.
+                    draw_recenter_button(this, w, h)
+                    location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
+                    draw_settings_button(this, w, h)
+                    draw_filters_button(this, w, h)
+                }
+                if (!debug_perf_skips_traffic_panel()) {
+                    draw_traffic_panel(this, w, h)
+                }
             } else {
                 draw_modal_backdrop(this, w, h)
             }
@@ -1168,6 +1193,18 @@ class FlightMapView(
 
     private fun debug_perf_hides_chrome(): Boolean {
         return debug_perf_viewport_active && debug_perf_skip_chrome
+    }
+
+    private fun debug_perf_skips_top_status(): Boolean {
+        return debug_perf_viewport_active && debug_perf_skip_top_status
+    }
+
+    private fun debug_perf_skips_controls(): Boolean {
+        return debug_perf_viewport_active && debug_perf_skip_controls
+    }
+
+    private fun debug_perf_skips_traffic_panel(): Boolean {
+        return debug_perf_viewport_active && debug_perf_skip_traffic_panel
     }
 
     override fun onCheckIsTextEditor(): Boolean {
@@ -1744,6 +1781,21 @@ class FlightMapView(
             postInvalidateOnAnimation()
             return
         }
+        if (should_defer_aircraft_feed_publish_for_interaction()) {
+            defer_aircraft_feed_publish(result, fetch_token, fetch_signature, parsed, parsed_cache)
+            return
+        }
+        publish_aircraft_feed_result_now(result, fetch_token, fetch_signature, parsed, parsed_cache)
+    }
+
+    private fun publish_aircraft_feed_result_now(
+        result: FeedResult,
+        fetch_token: Long,
+        fetch_signature: String,
+        parsed: List<Aircraft>,
+        parsed_cache: CachedTraffic
+    ) {
+        if (!is_current_aircraft_fetch(fetch_token, fetch_signature)) return
         update_aircraft_appearances(parsed)
         selected_path_controller.selected_aircraft_id?.let { selected_id ->
             parsed.firstOrNull { it.icao24 == selected_id }?.let { selected_path_controller.update_selected_aircraft(it) }
@@ -1766,6 +1818,54 @@ class FlightMapView(
             visible_aircraft_feed_controller.schedule_hybrid_supplement_refresh()
         }
         postInvalidateOnAnimation()
+    }
+
+    private fun should_defer_aircraft_feed_publish_for_interaction(): Boolean {
+        if (traffic_cache_controller.total < BINCRAFT_FEED_READY_AIRCRAFT_MIN) return false
+        return should_defer_aircraft_refresh_for_interaction(SystemClock.elapsedRealtime())
+    }
+
+    private fun defer_aircraft_feed_publish(
+        result: FeedResult,
+        fetch_token: Long,
+        fetch_signature: String,
+        parsed: List<Aircraft>,
+        parsed_cache: CachedTraffic
+    ) {
+        deferred_aircraft_feed_publish = DeferredAircraftFeedPublish(
+            result = result,
+            fetch_token = fetch_token,
+            fetch_signature = fetch_signature,
+            parsed = parsed,
+            parsed_cache = parsed_cache
+        )
+        schedule_deferred_aircraft_feed_publish()
+    }
+
+    private fun schedule_deferred_aircraft_feed_publish() {
+        if (deferred_aircraft_feed_publish_scheduled) return
+        deferred_aircraft_feed_publish_scheduled = true
+        val now = SystemClock.elapsedRealtime()
+        postDelayed({
+            deferred_aircraft_feed_publish_scheduled = false
+            flush_deferred_aircraft_feed_publish()
+        }, aircraft_refresh_delay_after_interaction(now))
+    }
+
+    private fun flush_deferred_aircraft_feed_publish() {
+        val pending = deferred_aircraft_feed_publish ?: return
+        if (should_defer_aircraft_feed_publish_for_interaction()) {
+            schedule_deferred_aircraft_feed_publish()
+            return
+        }
+        deferred_aircraft_feed_publish = null
+        publish_aircraft_feed_result_now(
+            result = pending.result,
+            fetch_token = pending.fetch_token,
+            fetch_signature = pending.fetch_signature,
+            parsed = pending.parsed,
+            parsed_cache = pending.parsed_cache
+        )
     }
 
     private fun should_keep_current_aircraft_for_partial_result(result: FeedResult, parsed_cache: CachedTraffic): Boolean {
@@ -2049,6 +2149,7 @@ class FlightMapView(
     }
 
     private fun draw_traffic_overlay(canvas: Canvas, viewport: Viewport) {
+        traffic_overlay_renderer.debug_collect_detail_timing = debug_perf_viewport_active && debug_perf_traffic_detail_timing
         val state = traffic_overlay_state(viewport)
         if (debug_perf_viewport_active) {
             debug_last_traffic_symbol_count = state.aircraft.size
@@ -3897,6 +3998,14 @@ class FlightMapView(
         val started_ms: Long,
         val duration_ms: Long,
         var fired: Boolean = false
+    )
+
+    private data class DeferredAircraftFeedPublish(
+        val result: FeedResult,
+        val fetch_token: Long,
+        val fetch_signature: String,
+        val parsed: List<Aircraft>,
+        val parsed_cache: CachedTraffic
     )
 
 }

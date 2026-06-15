@@ -1,6 +1,7 @@
 package com.flightalert.ui.map.render
 
 import android.graphics.Canvas
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
@@ -10,6 +11,7 @@ import android.graphics.Shader
 import com.flightalert.settings.FlightAlertSettings.ThemeTreatment
 import com.flightalert.settings.FlightAlertSettings.VisualTheme
 import com.flightalert.ui.map.ScaleLabel
+import java.util.LinkedHashMap
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.max
@@ -18,6 +20,23 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 data class FlightMapChromeStyle(val visual_theme: VisualTheme)
+
+private enum class ChromeSurfaceKind {
+    CONTROL,
+    PANEL
+}
+
+private data class ChromeSurfaceKey(
+    val kind: ChromeSurfaceKind,
+    val width: Int,
+    val height: Int,
+    val radius: Int,
+    val fill: Int,
+    val stroke: Int,
+    val stroke_width: Int,
+    val selected: Boolean,
+    val visual_theme: VisualTheme
+)
 
 interface FlightMapChromeHost {
     fun dp(value: Float): Float
@@ -33,6 +52,16 @@ class FlightMapChromeRenderer(
     private val path: Path,
     private val host: FlightMapChromeHost
 ) {
+    private val surface_cache_paint = Paint(Paint.DITHER_FLAG)
+    private val surface_cache_rect = RectF()
+    private val surface_cache = object : LinkedHashMap<ChromeSurfaceKey, Bitmap>(CHROME_SURFACE_CACHE_LIMIT, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ChromeSurfaceKey, Bitmap>): Boolean {
+            val remove = size > CHROME_SURFACE_CACHE_LIMIT
+            if (remove && !eldest.value.isRecycled) eldest.value.recycle()
+            return remove
+        }
+    }
+
     fun panel_radius(style: FlightMapChromeStyle): Float {
         return host.dp(style.visual_theme.style.panel_corner_dp)
     }
@@ -112,6 +141,53 @@ class FlightMapChromeRenderer(
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
         val radius = control_radius(style)
+        val stroke_width_px = host.dp(stroke_width_dp ?: theme_style.control_stroke_dp)
+        val fill_color = fill
+        if (
+            theme_style.treatment != ThemeTreatment.DAYLIGHT_CARD &&
+            draw_cached_surface(
+                canvas = canvas,
+                rect = rect,
+                key = ChromeSurfaceKey(
+                    kind = ChromeSurfaceKind.CONTROL,
+                    width = rect.width().roundToInt(),
+                    height = rect.height().roundToInt(),
+                    radius = radius.roundToInt(),
+                    fill = fill_color,
+                    stroke = stroke,
+                    stroke_width = stroke_width_px.roundToInt(),
+                    selected = selected,
+                    visual_theme = style.visual_theme
+                )
+            ) { cache_canvas, cache_rect ->
+                draw_control_surface_direct(
+                    canvas = cache_canvas,
+                    rect = cache_rect,
+                    fill = fill_color,
+                    stroke = stroke,
+                    selected = selected,
+                    stroke_width_px = stroke_width_px,
+                    style = style
+                )
+            }
+        ) {
+            return
+        }
+        draw_control_surface_direct(canvas, rect, fill_color, stroke, selected, stroke_width_px, style)
+    }
+
+    private fun draw_control_surface_direct(
+        canvas: Canvas,
+        rect: RectF,
+        fill: Int,
+        stroke: Int,
+        selected: Boolean,
+        stroke_width_px: Float,
+        style: FlightMapChromeStyle
+    ) {
+        val colors = style.visual_theme.colors
+        val theme_style = style.visual_theme.style
+        val radius = control_radius(style)
         if (theme_style.treatment == ThemeTreatment.DAYLIGHT_CARD) {
             paint.style = Paint.Style.FILL
             paint.color = with_alpha(colors.scrim, 28)
@@ -129,7 +205,7 @@ class FlightMapChromeRenderer(
         draw_control_treatment(canvas, rect, radius, stroke, selected, style)
 
         stroke_paint.style = Paint.Style.STROKE
-        stroke_paint.strokeWidth = host.dp(stroke_width_dp ?: theme_style.control_stroke_dp)
+        stroke_paint.strokeWidth = stroke_width_px
         stroke_paint.color = stroke
         canvas.drawRoundRect(rect, radius, radius, stroke_paint)
     }
@@ -140,6 +216,49 @@ class FlightMapChromeRenderer(
         rect: RectF,
         fill: Int? = null,
         alpha: Int? = null,
+        style: FlightMapChromeStyle
+    ) {
+        val colors = style.visual_theme.colors
+        val theme_style = style.visual_theme.style
+        val radius = panel_radius(style)
+        val fill_color = with_alpha(fill ?: colors.panel, alpha ?: theme_style.info_panel_alpha)
+        val stroke_width_px = host.dp(theme_style.panel_stroke_dp)
+        if (
+            theme_style.treatment != ThemeTreatment.DAYLIGHT_CARD &&
+            draw_cached_surface(
+                canvas = canvas,
+                rect = rect,
+                key = ChromeSurfaceKey(
+                    kind = ChromeSurfaceKind.PANEL,
+                    width = rect.width().roundToInt(),
+                    height = rect.height().roundToInt(),
+                    radius = radius.roundToInt(),
+                    fill = fill_color,
+                    stroke = colors.panel_stroke,
+                    stroke_width = stroke_width_px.roundToInt(),
+                    selected = false,
+                    visual_theme = style.visual_theme
+                )
+            ) { cache_canvas, cache_rect ->
+                draw_panel_surface_direct(
+                    canvas = cache_canvas,
+                    rect = cache_rect,
+                    fill_color = fill_color,
+                    stroke_width_px = stroke_width_px,
+                    style = style
+                )
+            }
+        ) {
+            return
+        }
+        draw_panel_surface_direct(canvas, rect, fill_color, stroke_width_px, style)
+    }
+
+    private fun draw_panel_surface_direct(
+        canvas: Canvas,
+        rect: RectF,
+        fill_color: Int,
+        stroke_width_px: Float,
         style: FlightMapChromeStyle
     ) {
         val colors = style.visual_theme.colors
@@ -157,14 +276,46 @@ class FlightMapChromeRenderer(
         }
 
         paint.style = Paint.Style.FILL
-        paint.color = with_alpha(fill ?: colors.panel, alpha ?: theme_style.info_panel_alpha)
+        paint.color = fill_color
         canvas.drawRoundRect(rect, radius, radius, paint)
         draw_panel_treatment(canvas, rect, radius, style)
 
         stroke_paint.style = Paint.Style.STROKE
-        stroke_paint.strokeWidth = host.dp(theme_style.panel_stroke_dp)
+        stroke_paint.strokeWidth = stroke_width_px
         stroke_paint.color = colors.panel_stroke
         canvas.drawRoundRect(rect, radius, radius, stroke_paint)
+    }
+
+    private fun draw_cached_surface(
+        canvas: Canvas,
+        rect: RectF,
+        key: ChromeSurfaceKey,
+        create_surface: (Canvas, RectF) -> Unit
+    ): Boolean {
+        if (key.width <= 0 || key.height <= 0) return false
+        val bitmap = synchronized(surface_cache) {
+            surface_cache[key]?.takeIf { !it.isRecycled } ?: create_surface_bitmap(key, create_surface)?.also {
+                surface_cache[key] = it
+            }
+        } ?: return false
+        surface_cache_rect.set(rect.left, rect.top, rect.right, rect.bottom)
+        canvas.drawBitmap(bitmap, null, surface_cache_rect, surface_cache_paint)
+        return true
+    }
+
+    private fun create_surface_bitmap(
+        key: ChromeSurfaceKey,
+        create_surface: (Canvas, RectF) -> Unit
+    ): Bitmap? {
+        val bitmap = try {
+            Bitmap.createBitmap(key.width, key.height, Bitmap.Config.ARGB_8888)
+        } catch (_: OutOfMemoryError) {
+            return null
+        }
+        val cache_canvas = Canvas(bitmap)
+        val local_rect = RectF(0f, 0f, key.width.toFloat(), key.height.toFloat())
+        create_surface(cache_canvas, local_rect)
+        return bitmap
     }
 
         // Modal backdrop dims the map while keeping the active panel visually attached to the cockpit.
@@ -735,6 +886,7 @@ class FlightMapChromeRenderer(
     }
 
     private companion object {
+        const val CHROME_SURFACE_CACHE_LIMIT = 48
         const val RADAR_GRID_SPACING_DP = 36f
     }
 }

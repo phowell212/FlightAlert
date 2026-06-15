@@ -60,26 +60,26 @@ function Invoke-PanCase {
     Write-Host ("[{0}/{1}] {2}: {3} z{4} {5}/{6} {7} {8} {9}ms" -f `
         $Index, $Total, $Case.City, $Case.Map, $Case.Zoom, $Case.Restricted, `
         $Case.Direction, $Case.Profile, $Case.Length, $Case.DurationMs)
-    $args = @(
-        "-Device", $Device,
-        "-Mode", "longpan",
-        "-CityName", $Case.City,
-        "-Zoom", $Case.Zoom,
-        "-MapSource", $Case.Map,
-        "-MapLabels", "On",
-        "-RestrictedAirspaces", $Case.Restricted,
-        "-PanDirection", $Case.Direction,
-        "-PanProfile", $Case.Profile,
-        "-PanLength", $Case.Length,
-        "-PanDurationMs", $Case.DurationMs,
-        "-TargetHz", $TargetHz,
-        "-ClearSelection",
-        "-OutputName", $outputName
-    )
-    if ($NoScreenshots) {
-        $args += "-NoScreenshots"
+    $runnerArgs = @{
+        Device = $Device
+        Mode = "longpan"
+        CityName = $Case.City
+        Zoom = $Case.Zoom
+        MapSource = $Case.Map
+        MapLabels = "On"
+        RestrictedAirspaces = $Case.Restricted
+        PanDirection = $Case.Direction
+        PanProfile = $Case.Profile
+        PanLength = $Case.Length
+        PanDurationMs = $Case.DurationMs
+        TargetHz = $TargetHz
+        ClearSelection = $true
+        OutputName = $outputName
     }
-    & $runner @args
+    if ($NoScreenshots) {
+        $runnerArgs.NoScreenshots = $true
+    }
+    & $runner @runnerArgs | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Pan matrix case failed: $($Case.Name)"
     }
@@ -176,10 +176,10 @@ function Export-MatrixSummary {
 $shortCases = @(
     New-Case "wide-dfw-street-off-fast" "Dallas-Fort Worth" 3.6 "Street" "Off" "Horizontal" "Steady" "Long" 1300
     New-Case "wide-dfw-satellite-off-fast" "Dallas-Fort Worth" 3.6 "Satellite" "Off" "Horizontal" "Steady" "Long" 1300
-    New-Case "country-london-street-off-pulse" "London" 5.4 "Street" "Off" "Horizontal" "Pulse" "Medium" 1700
-    New-Case "country-london-satellite-off-pulse" "London" 5.4 "Satellite" "Off" "Horizontal" "Pulse" "Medium" 1700
-    New-Case "transition-chicago-street-off-diagonal" "Chicago" 8.4 "Street" "Off" "DiagonalDown" "EaseIn" "Medium" 1500
-    New-Case "transition-chicago-satellite-off-diagonal" "Chicago" 8.4 "Satellite" "Off" "DiagonalUp" "EaseOut" "Medium" 1500
+    New-Case "country-london-street-off-horizontal" "London" 5.4 "Street" "Off" "Horizontal" "Steady" "Medium" 1400
+    New-Case "country-london-satellite-off-horizontal" "London" 5.4 "Satellite" "Off" "Horizontal" "Steady" "Medium" 1400
+    New-Case "transition-chicago-street-off-diagonal" "Chicago" 8.4 "Street" "Off" "DiagonalDown" "Steady" "Medium" 1300
+    New-Case "transition-chicago-satellite-off-diagonal" "Chicago" 8.4 "Satellite" "Off" "DiagonalUp" "Steady" "Medium" 1300
     New-Case "close-nyc-street-off-vertical" "New York City" 12.0 "Street" "Off" "Vertical" "Steady" "Medium" 1000
     New-Case "close-nyc-satellite-off-vertical" "New York City" 12.0 "Satellite" "Off" "Vertical" "Steady" "Medium" 1000
     New-Case "country-chicago-street-on-diagonal" "Chicago" 5.4 "Street" "On" "DiagonalDown" "Steady" "Long" 1300
@@ -189,13 +189,13 @@ $shortCases = @(
 $fullCases = @(
     New-Case "wide-dfw-street-off-fast" "Dallas-Fort Worth" 3.6 "Street" "Off" "Horizontal" "Steady" "Long" 1200
     New-Case "wide-dfw-satellite-on-diagonal" "Dallas-Fort Worth" 3.6 "Satellite" "On" "DiagonalDown" "Steady" "Long" 1200
-    New-Case "country-london-street-off-pulse" "London" 5.4 "Street" "Off" "Horizontal" "Pulse" "Medium" 1600
-    New-Case "country-london-satellite-off-pulse" "London" 5.4 "Satellite" "Off" "Horizontal" "Pulse" "Medium" 1600
+    New-Case "country-london-street-off-easein" "London" 5.4 "Street" "Off" "Horizontal" "EaseIn" "Medium" 1500
+    New-Case "country-london-satellite-off-easeout" "London" 5.4 "Satellite" "Off" "Horizontal" "EaseOut" "Medium" 1500
     New-Case "country-chicago-street-on-diagup" "Chicago" 5.4 "Street" "On" "DiagonalUp" "Steady" "Long" 1100
     New-Case "country-chicago-satellite-on-diagdown" "Chicago" 5.4 "Satellite" "On" "DiagonalDown" "Steady" "Long" 1100
     New-Case "country-newyork-street-off-fastshort" "New York City" 5.4 "Street" "Off" "Horizontal" "Steady" "Short" 650
     New-Case "transition-chicago-street-off-ease" "Chicago" 8.4 "Street" "Off" "DiagonalDown" "EaseIn" "Medium" 1400
-    New-Case "transition-chicago-satellite-on-pulse" "Chicago" 8.4 "Satellite" "On" "DiagonalUp" "Pulse" "Medium" 1400
+    New-Case "transition-chicago-satellite-on-diagup" "Chicago" 8.4 "Satellite" "On" "DiagonalUp" "Steady" "Medium" 1200
     New-Case "transition-chicago-street-on-vertical" "Chicago" 8.4 "Street" "On" "Vertical" "Steady" "Medium" 1000
     New-Case "close-nyc-street-off-vertical" "New York City" 12.0 "Street" "Off" "Vertical" "Steady" "Medium" 900
     New-Case "close-nyc-satellite-on-vertical" "New York City" 12.0 "Satellite" "On" "Vertical" "Steady" "Medium" 900
@@ -216,23 +216,23 @@ foreach ($case in $cases) {
 if ($IncludeCadenceSoak) {
     $outputName = "{0}-{1:00}-cadence-soak-country-london-street-off" -f $IterationLabel, $index
     Write-Host ("[{0}/{1}] Cadence soak: London z5.4 Street/Off 28s" -f $index, ($cases.Count + 1))
-    $args = @(
-        "-Device", $Device,
-        "-Mode", "soak",
-        "-SoakSeconds", "28",
-        "-CityName", "London",
-        "-Zoom", "5.4",
-        "-MapSource", "Street",
-        "-MapLabels", "On",
-        "-RestrictedAirspaces", "Off",
-        "-TargetHz", $TargetHz,
-        "-ClearSelection",
-        "-OutputName", $outputName
-    )
-    if ($NoScreenshots) {
-        $args += "-NoScreenshots"
+    $runnerArgs = @{
+        Device = $Device
+        Mode = "soak"
+        SoakSeconds = 28
+        CityName = "London"
+        Zoom = 5.4
+        MapSource = "Street"
+        MapLabels = "On"
+        RestrictedAirspaces = "Off"
+        TargetHz = $TargetHz
+        ClearSelection = $true
+        OutputName = $outputName
     }
-    & $runner @args
+    if ($NoScreenshots) {
+        $runnerArgs.NoScreenshots = $true
+    }
+    & $runner @runnerArgs | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Cadence soak failed."
     }

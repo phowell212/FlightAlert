@@ -9,8 +9,13 @@ param(
     [switch]$RecordVideo,
     [int]$VideoTimeLimitSeconds = 90,
     [string]$VideoDisplayId = "",
+    [string]$City = "",
     [switch]$SkipChrome,
-    [switch]$SkipTraffic
+    [switch]$SkipTopStatus,
+    [switch]$SkipControls,
+    [switch]$SkipTrafficPanel,
+    [switch]$SkipTraffic,
+    [switch]$TrafficDetailTiming
 )
 
 $ErrorActionPreference = "Stop"
@@ -175,11 +180,26 @@ Push-Location $repoRoot
 try {
     $gradleLog = Join-Path $outDir "$OutputName-gradle.txt"
     $runnerArgs = @("-Pandroid.testInstrumentationRunnerArguments.class=$testClass#$TestName")
+    if (-not [string]::IsNullOrWhiteSpace($City)) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.targetCity=$City"
+    }
     if ($SkipChrome) {
         $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipChrome=true"
     }
+    if ($SkipTopStatus) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipTopStatus=true"
+    }
+    if ($SkipControls) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipControls=true"
+    }
+    if ($SkipTrafficPanel) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipTrafficPanel=true"
+    }
     if ($SkipTraffic) {
         $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipTraffic=true"
+    }
+    if ($TrafficDetailTiming) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.trafficDetailTiming=true"
     }
     & $gradlew connectedDebugAndroidTest @runnerArgs --no-daemon 2>&1 | Tee-Object -FilePath $gradleLog
     $gradleExit = $LASTEXITCODE

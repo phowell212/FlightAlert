@@ -37,6 +37,8 @@ public class FlightMapGesturePerfTest {
     private static final long TRAFFIC_LOAD_WAIT_MS = 9000L;
     private static final int QUICK_PINCH_SPEED_PX_PER_SEC = 14000;
     private static final int SMOOTH_PINCH_SPEED_PX_PER_SEC = 3200;
+    private static final int HUMAN_TRANSITION_PINCH_STEPS = 24;
+    private static final long HUMAN_TRANSITION_PINCH_STEP_DELAY_MS = 14L;
     private static final int PAN_STEPS = 44;
     private static final MajorTrafficCity[] MAJOR_TRAFFIC_CITIES = new MajorTrafficCity[] {
             new MajorTrafficCity("New York City", 40.73, -73.93),
@@ -60,7 +62,12 @@ public class FlightMapGesturePerfTest {
     private double currentPerfZoom = Double.NaN;
     private String currentPerfMapSource = "";
     private boolean currentPerfSkipChrome = false;
+    private boolean currentPerfSkipTopStatus = false;
+    private boolean currentPerfSkipControls = false;
+    private boolean currentPerfSkipTrafficPanel = false;
     private boolean currentPerfSkipTraffic = false;
+    private boolean currentPerfTrafficDetailTiming = false;
+    private boolean centeredPerfGestureFocus = false;
 
     @Test
     public void launchOnly() throws Exception {
@@ -209,6 +216,16 @@ public class FlightMapGesturePerfTest {
         runCloseScaleZoomContinuity("SATELLITE", "closeScaleZoomContinuitySatellitePerf", false);
     }
 
+    @Test
+    public void satelliteTileTransitionBandContinuity() throws Exception {
+        runSatelliteTileTransitionBandContinuity("satelliteTileTransitionBandContinuity", true);
+    }
+
+    @Test
+    public void satelliteTileTransitionBandContinuityPerf() throws Exception {
+        runSatelliteTileTransitionBandContinuity("satelliteTileTransitionBandContinuityPerf", false);
+    }
+
     private void runZoomLowToHighSweep(String mapSource, String artifactName) throws Exception {
         MajorTrafficCity city = randomInlandTrafficCity();
         UiObject2 app = startAppAtMajorTraffic(city, 4.8, mapSource);
@@ -312,39 +329,44 @@ public class FlightMapGesturePerfTest {
     }
 
     private void runCountryScaleZoomContinuity(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
-        MajorTrafficCity city = randomMajorTrafficCity();
+        MajorTrafficCity city = randomInlandTrafficCity();
         boolean skipChrome = instrumentationBooleanArgument("skipChrome");
         boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
-        UiObject2 app = startAppAtMajorTraffic(city, 4.25, mapSource, skipChrome, skipTraffic);
-        sleep(TRAFFIC_LOAD_WAIT_MS);
-        if (captureScreenshots) {
-            captureActiveDisplay("flightalert-perf-" + artifactName + "-continent-rest.png");
-        }
-        clearPerfCounters();
+        centeredPerfGestureFocus = true;
+        try {
+            UiObject2 app = startAppAtMajorTraffic(city, 4.25, mapSource, skipChrome, skipTraffic, false);
+            sleep(TRAFFIC_LOAD_WAIT_MS);
+            if (captureScreenshots) {
+                captureActiveDisplay("flightalert-perf-" + artifactName + "-continent-rest.png");
+            }
+            clearPerfCounters();
 
-        runZoomContinuityPhase(app, artifactName, "continent", 3, true, captureScreenshots);
-        if (captureScreenshots) {
-            waitForScheduledCaptures();
-        }
-        requireFlightAlertForeground();
-        capturePerfArtifacts(artifactName + "-continent");
+            runZoomContinuityPhase(app, artifactName, "continent", 3, true, captureScreenshots);
+            if (captureScreenshots) {
+                waitForScheduledCaptures();
+            }
+            requireFlightAlertForeground();
+            capturePerfArtifacts(artifactName + "-continent");
 
-        app = startAppAtMajorTraffic(city, 5.4, mapSource, skipChrome, skipTraffic);
-        sleep(1400);
-        if (captureScreenshots) {
-            captureActiveDisplay("flightalert-perf-" + artifactName + "-country-rest.png");
-        }
-        clearPerfCounters();
-        runZoomContinuityPhase(app, artifactName, "country", 5, false, captureScreenshots);
+            app = startAppAtMajorTraffic(city, 5.4, mapSource, skipChrome, skipTraffic, false);
+            sleep(TRAFFIC_LOAD_WAIT_MS);
+            if (captureScreenshots) {
+                captureActiveDisplay("flightalert-perf-" + artifactName + "-country-rest.png");
+            }
+            clearPerfCounters();
+            runZoomContinuityPhase(app, artifactName, "country", 5, false, captureScreenshots);
 
-        sleep(900);
-        if (captureScreenshots) {
-            waitForScheduledCaptures();
-        }
-        requireFlightAlertForeground();
-        capturePerfArtifacts(artifactName + "-country");
-        if (captureScreenshots) {
-            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+            sleep(900);
+            if (captureScreenshots) {
+                waitForScheduledCaptures();
+            }
+            requireFlightAlertForeground();
+            capturePerfArtifacts(artifactName + "-country");
+            if (captureScreenshots) {
+                captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+            }
+        } finally {
+            centeredPerfGestureFocus = false;
         }
     }
 
@@ -426,6 +448,46 @@ public class FlightMapGesturePerfTest {
         }
     }
 
+    private void runSatelliteTileTransitionBandContinuity(String artifactName, boolean captureScreenshots) throws Exception {
+        MajorTrafficCity city = randomMajorTrafficCity();
+        boolean skipChrome = instrumentationBooleanArgument("skipChrome");
+        boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
+        UiObject2 app = startAppAtMajorTraffic(city, 5.88, "SATELLITE", skipChrome, skipTraffic);
+        sleep(5200);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
+        }
+        clearPerfCounters();
+
+        if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-pan-start.png", 120);
+        panSatelliteTransitionBand();
+        sleep(180);
+
+        if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-start.png", 120);
+        humanTransitionPinchOpen(app);
+        if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-active.png", 170);
+        humanTransitionPinchOpen(app);
+        sleep(220);
+
+        if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-start.png", 120);
+        humanTransitionPinchClose(app);
+        if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-active.png", 170);
+        humanTransitionPinchClose(app);
+        sleep(220);
+
+        if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-pan-after-zoom.png", 120);
+        panSatelliteTransitionBand();
+        sleep(900);
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
+        requireFlightAlertForeground();
+        capturePerfArtifacts(artifactName);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
+    }
+
     @Test
     public void panAcrossZoomLevels() throws Exception {
         MajorTrafficCity city = randomInlandTrafficCity();
@@ -462,12 +524,21 @@ public class FlightMapGesturePerfTest {
     }
 
     private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic) throws Exception {
+        return startAppAtMajorTraffic(city, zoom, mapSource, skipChrome, skipTraffic, true);
+    }
+
+    private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean focusOpenMap) throws Exception {
         System.out.println("Testing major traffic city: " + city.name);
         currentPerfCity = city;
         currentPerfZoom = zoom;
         currentPerfMapSource = mapSource == null ? "default" : mapSource;
         currentPerfSkipChrome = skipChrome;
         currentPerfSkipTraffic = skipTraffic;
+        currentPerfSkipTopStatus = instrumentationBooleanArgument("skipTopStatus");
+        currentPerfSkipControls = instrumentationBooleanArgument("skipControls");
+        currentPerfSkipTrafficPanel = instrumentationBooleanArgument("skipTrafficPanel");
+        boolean trafficDetailTiming = instrumentationBooleanArgument("trafficDetailTiming");
+        currentPerfTrafficDetailTiming = trafficDetailTiming;
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context context = instrumentation.getTargetContext();
         grantFlightAlertPermissions();
@@ -478,12 +549,24 @@ public class FlightMapGesturePerfTest {
                 .putExtra("com.flightalert.PERF_ZOOM", Double.toString(zoom))
                 .putExtra("com.flightalert.PERF_MAP_LABELS_ENABLED", true)
                 .putExtra("com.flightalert.PERF_CLEAR_SELECTION", true)
-                .putExtra("com.flightalert.PERF_FOCUS_OPEN_MAP", true);
+                .putExtra("com.flightalert.PERF_FOCUS_OPEN_MAP", focusOpenMap);
         if (skipChrome) {
             intent.putExtra("com.flightalert.PERF_SKIP_CHROME", "true");
         }
+        if (currentPerfSkipTopStatus) {
+            intent.putExtra("com.flightalert.PERF_SKIP_TOP_STATUS", "true");
+        }
+        if (currentPerfSkipControls) {
+            intent.putExtra("com.flightalert.PERF_SKIP_CONTROLS", "true");
+        }
+        if (currentPerfSkipTrafficPanel) {
+            intent.putExtra("com.flightalert.PERF_SKIP_TRAFFIC_PANEL", "true");
+        }
         if (skipTraffic) {
             intent.putExtra("com.flightalert.PERF_SKIP_TRAFFIC", "true");
+        }
+        if (trafficDetailTiming) {
+            intent.putExtra("com.flightalert.PERF_TRAFFIC_DETAIL_TIMING", "true");
         }
         if (mapSource != null) {
             intent.putExtra("com.flightalert.PERF_MAP_SOURCE", mapSource);
@@ -492,7 +575,7 @@ public class FlightMapGesturePerfTest {
         instrumentation.waitForIdleSync();
         acceptFlightAlertPermissionsIfPresent();
         if (!waitForFlightAlertForeground(8000L)) {
-            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic);
+            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, trafficDetailTiming, focusOpenMap);
             instrumentation.waitForIdleSync();
             acceptFlightAlertPermissionsIfPresent();
             assertTrue("Refusing to run gestures outside Flight Alert. Foreground was:\n" + foregroundDiagnostic(), waitForFlightAlertForeground(8000L));
@@ -513,6 +596,14 @@ public class FlightMapGesturePerfTest {
     }
 
     private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic) throws Exception {
+        launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, false);
+    }
+
+    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean trafficDetailTiming) throws Exception {
+        launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, trafficDetailTiming, true);
+    }
+
+    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean trafficDetailTiming, boolean focusOpenMap) throws Exception {
         StringBuilder command = new StringBuilder("am start -n ")
                 .append(PACKAGE_NAME).append("/.MainActivity")
                 .append(" --es com.flightalert.PERF_LAT ").append(city.lat)
@@ -520,12 +611,24 @@ public class FlightMapGesturePerfTest {
                 .append(" --es com.flightalert.PERF_ZOOM ").append(zoom)
                 .append(" --ez com.flightalert.PERF_MAP_LABELS_ENABLED true")
                 .append(" --ez com.flightalert.PERF_CLEAR_SELECTION true")
-                .append(" --ez com.flightalert.PERF_FOCUS_OPEN_MAP true");
+                .append(" --ez com.flightalert.PERF_FOCUS_OPEN_MAP ").append(focusOpenMap ? "true" : "false");
         if (skipChrome) {
             command.append(" --es com.flightalert.PERF_SKIP_CHROME true");
         }
+        if (currentPerfSkipTopStatus) {
+            command.append(" --es com.flightalert.PERF_SKIP_TOP_STATUS true");
+        }
+        if (currentPerfSkipControls) {
+            command.append(" --es com.flightalert.PERF_SKIP_CONTROLS true");
+        }
+        if (currentPerfSkipTrafficPanel) {
+            command.append(" --es com.flightalert.PERF_SKIP_TRAFFIC_PANEL true");
+        }
         if (skipTraffic) {
             command.append(" --es com.flightalert.PERF_SKIP_TRAFFIC true");
+        }
+        if (trafficDetailTiming) {
+            command.append(" --es com.flightalert.PERF_TRAFFIC_DETAIL_TIMING true");
         }
         if (mapSource != null) {
             command.append(" --es com.flightalert.PERF_MAP_SOURCE ").append(mapSource);
@@ -602,7 +705,24 @@ public class FlightMapGesturePerfTest {
         anchoredPinch(app, 0.28f, SMOOTH_PINCH_SPEED_PX_PER_SEC, false);
     }
 
+    private void humanTransitionPinchOpen(UiObject2 app) {
+        anchoredPinchWithCadence(app, 0.42f, true, HUMAN_TRANSITION_PINCH_STEPS, HUMAN_TRANSITION_PINCH_STEP_DELAY_MS);
+    }
+
+    private void humanTransitionPinchClose(UiObject2 app) {
+        anchoredPinchWithCadence(app, 0.42f, false, HUMAN_TRANSITION_PINCH_STEPS, HUMAN_TRANSITION_PINCH_STEP_DELAY_MS);
+    }
+
     private void anchoredPinch(UiObject2 app, float percent, int speedPxPerSecond, boolean open) {
+        android.graphics.Rect bounds = app.getVisibleBounds();
+        float shortSide = Math.max(1f, Math.min(bounds.width(), bounds.height()));
+        float innerRadius = Math.max(42f, shortSide * 0.055f);
+        float outerRadius = Math.max(innerRadius + 48f, shortSide * percent * 0.42f);
+        int steps = anchoredPinchSteps(innerRadius, outerRadius, speedPxPerSecond);
+        anchoredPinchWithCadence(app, percent, open, steps, 8L);
+    }
+
+    private void anchoredPinchWithCadence(UiObject2 app, float percent, boolean open, int steps, long stepDelayMs) {
         android.graphics.Rect bounds = app.getVisibleBounds();
         android.graphics.Point focus = anchoredMapFocus(app, bounds);
         float centerX = focus.x;
@@ -612,7 +732,7 @@ public class FlightMapGesturePerfTest {
         float outerRadius = Math.max(innerRadius + 48f, shortSide * percent * 0.42f);
         float startRadius = open ? innerRadius : outerRadius;
         float endRadius = open ? outerRadius : innerRadius;
-        int steps = anchoredPinchSteps(startRadius, endRadius, speedPxPerSecond);
+        int clampedSteps = Math.max(8, steps);
         long downTime = SystemClock.uptimeMillis();
 
         MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[] {
@@ -625,8 +745,8 @@ public class FlightMapGesturePerfTest {
         };
         injectMotion(downTime, downTime, MotionEvent.ACTION_DOWN, properties, coords, 1);
         injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_POINTER_DOWN | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT), properties, coords, 2);
-        for (int step = 1; step <= steps; step++) {
-            float t = step / (float) steps;
+        for (int step = 1; step <= clampedSteps; step++) {
+            float t = step / (float) clampedSteps;
             float eased = t * t * (3f - 2f * t);
             float radius = startRadius + (endRadius - startRadius) * eased;
             coords[0].x = centerX - radius;
@@ -634,7 +754,7 @@ public class FlightMapGesturePerfTest {
             coords[1].x = centerX + radius;
             coords[1].y = centerY;
             injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, properties, coords, 2);
-            sleep(8);
+            sleep(stepDelayMs);
         }
         injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_POINTER_UP | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT), properties, coords, 2);
         injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, properties, coords, 1);
@@ -647,6 +767,9 @@ public class FlightMapGesturePerfTest {
     }
 
     private android.graphics.Point anchoredMapFocus(UiObject2 app, android.graphics.Rect bounds) {
+        if (centeredPerfGestureFocus) {
+            return new android.graphics.Point(bounds.centerX(), bounds.centerY());
+        }
         float width = Math.max(1f, bounds.width());
         float height = Math.max(1f, bounds.height());
         float focusX;
@@ -780,6 +903,25 @@ public class FlightMapGesturePerfTest {
         sleep(70);
     }
 
+    private void panSatelliteTransitionBand() throws Exception {
+        UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        int width = device.getDisplayWidth();
+        int height = device.getDisplayHeight();
+        int left = Math.max(96, (int) (width * 0.22f));
+        int right = Math.min(width - 96, (int) (width * 0.58f));
+        int top = Math.max(180, (int) (height * 0.32f));
+        int middle = Math.max(220, (int) (height * 0.46f));
+        int bottom = Math.min(height - 240, (int) (height * 0.60f));
+        device.swipe(right, middle, left, middle, 34);
+        sleep(90);
+        device.swipe(left, middle, right, middle, 34);
+        sleep(90);
+        device.swipe(right, bottom, left, top, 38);
+        sleep(90);
+        device.swipe(left, top, right, bottom, 38);
+        sleep(90);
+    }
+
     private void clearPerfCounters() throws Exception {
         runShell("logcat -c");
         runShell("dumpsys gfxinfo " + PACKAGE_NAME + " reset");
@@ -859,8 +1001,12 @@ public class FlightMapGesturePerfTest {
         builder.append("last_launch_zoom=").append(currentPerfZoom).append('\n');
         builder.append("map_source=").append(currentPerfMapSource).append('\n');
         builder.append("skip_chrome=").append(currentPerfSkipChrome).append('\n');
+        builder.append("skip_top_status=").append(currentPerfSkipTopStatus).append('\n');
+        builder.append("skip_controls=").append(currentPerfSkipControls).append('\n');
+        builder.append("skip_traffic_panel=").append(currentPerfSkipTrafficPanel).append('\n');
         builder.append("skip_traffic=").append(currentPerfSkipTraffic).append('\n');
-        builder.append("focus=open-map\n");
+        builder.append("traffic_detail_timing=").append(currentPerfTrafficDetailTiming).append('\n');
+        builder.append("focus=").append(centeredPerfGestureFocus ? "center-map" : "open-map").append('\n');
         builder.append("scale_bands=continent,country\n");
         return builder.toString();
     }
@@ -935,11 +1081,38 @@ public class FlightMapGesturePerfTest {
     }
 
     private MajorTrafficCity randomMajorTrafficCity() {
-        return randomCityFrom(MAJOR_TRAFFIC_CITIES);
+        MajorTrafficCity fixed = fixedCityFromArguments(MAJOR_TRAFFIC_CITIES);
+        return fixed != null ? fixed : randomCityFrom(MAJOR_TRAFFIC_CITIES);
     }
 
     private MajorTrafficCity randomInlandTrafficCity() {
-        return randomCityFrom(INLAND_TRAFFIC_CITIES);
+        MajorTrafficCity fixed = fixedCityFromArguments(INLAND_TRAFFIC_CITIES);
+        return fixed != null ? fixed : randomCityFrom(INLAND_TRAFFIC_CITIES);
+    }
+
+    private MajorTrafficCity fixedCityFromArguments(MajorTrafficCity[] cities) {
+        String requested = InstrumentationRegistry.getArguments().getString("targetCity");
+        if (requested == null || requested.trim().isEmpty()) return null;
+        String key = normalizeCityName(requested);
+        for (MajorTrafficCity city : cities) {
+            if (normalizeCityName(city.name).equals(key)) return city;
+        }
+        if ("nyc".equals(key)) return findCity(cities, "New York City");
+        if ("dfw".equals(key)) return findCity(cities, "Dallas-Fort Worth");
+        if ("la".equals(key)) return findCity(cities, "Los Angeles");
+        return null;
+    }
+
+    private MajorTrafficCity findCity(MajorTrafficCity[] cities, String name) {
+        String key = normalizeCityName(name);
+        for (MajorTrafficCity city : cities) {
+            if (normalizeCityName(city.name).equals(key)) return city;
+        }
+        return null;
+    }
+
+    private String normalizeCityName(String value) {
+        return value.toLowerCase(java.util.Locale.US).replaceAll("[^a-z0-9]", "");
     }
 
     private MajorTrafficCity randomCityFrom(MajorTrafficCity[] cities) {

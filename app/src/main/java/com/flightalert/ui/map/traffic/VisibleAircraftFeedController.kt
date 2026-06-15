@@ -146,6 +146,10 @@ class VisibleAircraftFeedController(
         if (!has_location() || !has_usable_viewport()) return
         val now = SystemClock.elapsedRealtime()
         val startup_publish = current_total_aircraft() < ready_aircraft_min
+        if (!startup_publish && should_defer_for_interaction(now)) {
+            schedule_refresh(delay_after_interaction(now), force = true)
+            return
+        }
         if (!startup_publish && fetch_in_flight && now - last_fetch_elapsed_ms < api_grace_ms) return
         if (!startup_publish &&
             now - last_globe_snapshot_publish_elapsed_ms < globe_publish_interval_floor_ms()

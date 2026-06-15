@@ -448,7 +448,7 @@ internal class TrafficOverlayStateBuilder(
         val selected_key = frame.selection.selected_aircraft_key
         val path_focus = frame.selection.path_visible && frame.selection.has_selected_flight_path
         shifted_dense_symbol_overlay(frame, selected_key, path_focus)?.let { return it }
-        val cache_reuse_padding_px = dp(DENSE_SYMBOL_CACHE_MAX_REUSE_DP)
+        val cache_reuse_padding_px = dense_symbol_cache_reuse_padding_px(frame.viewport)
         val states = dense_dot_symbol_overlay_states(frame, cache_reuse_padding_px)
         cache_dense_symbol_overlay(frame, selected_key, path_focus, states, cache_reuse_padding_px)
         return DenseSymbolOverlay(states)
@@ -554,6 +554,15 @@ internal class TrafficOverlayStateBuilder(
             max_x <= dense_symbol_cache_width + padding &&
             min_y >= -padding &&
             max_y <= dense_symbol_cache_height + padding
+    }
+
+    private fun dense_symbol_cache_reuse_padding_px(viewport: Viewport): Float {
+        val padding_dp = if (viewport.zoom < DENSE_SYMBOL_CACHE_WIDE_COVERAGE_MAX_ZOOM) {
+            DENSE_SYMBOL_CACHE_WIDE_COVERAGE_REUSE_DP
+        } else {
+            DENSE_SYMBOL_CACHE_MAX_REUSE_DP
+        }
+        return dp(padding_dp)
     }
 
     private fun dense_dot_symbol_overlay_states(
@@ -1011,6 +1020,8 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_DOT_CACHE_INTERACTION_STALE_MS = 12_000L
         const val DENSE_DOT_CACHE_INTERACTION_ZOOM_STEPS = 3.4
         const val DENSE_SYMBOL_CACHE_MAX_REUSE_DP = 180f
+        const val DENSE_SYMBOL_CACHE_WIDE_COVERAGE_MAX_ZOOM = 6.0
+        const val DENSE_SYMBOL_CACHE_WIDE_COVERAGE_REUSE_DP = 420f
         const val DENSE_SYMBOL_CACHE_INTERACTION_SETTLE_MS = 420L
         const val DENSE_SYMBOL_CACHE_INTERACTION_STALE_MS = 12_000L
         const val DENSE_SYMBOL_CACHE_IDLE_STALE_MS = 12_000L

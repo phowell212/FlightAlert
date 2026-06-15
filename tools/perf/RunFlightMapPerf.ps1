@@ -21,7 +21,9 @@ param(
     [switch]$SkipMap,
     [switch]$SkipTraffic,
     [switch]$SkipChrome,
+    [switch]$TrafficDetailTiming,
     [switch]$NoScreenshots,
+    [switch]$NoForceStop,
     [int]$PanDurationMs = 4200,
     [double]$TargetHz = 120.0,
     [string]$OutputName = ""
@@ -251,9 +253,9 @@ function Invoke-ShellPanGesture {
     $left = [int]($w * 0.16)
     $right = [int]($w * 0.48)
     $centerX = [int]($w * 0.32)
-    $top = [int]($h * 0.36)
-    $middle = [int]($h * 0.57)
-    $bottom = [int]($h * 0.71)
+    $top = [int]($h * 0.30)
+    $middle = [int]($h * 0.45)
+    $bottom = [int]($h * 0.60)
 
     Invoke-Adb shell input swipe $right $middle $left $middle 600 | Out-Null
     Invoke-Adb shell input swipe $left $middle $right $middle 600 | Out-Null
@@ -276,9 +278,9 @@ function Invoke-LongPanGesture {
     $safeLeft = $w * 0.16
     $safeRight = $w * 0.48
     $centerX = [int]($w * 0.32)
-    $safeTop = $h * 0.36
-    $middle = [int]($h * 0.57)
-    $safeBottom = $h * 0.71
+    $safeTop = $h * 0.30
+    $safeBottom = $h * 0.60
+    $middle = [int](($safeTop + $safeBottom) / 2.0)
     $durationMs = [Math]::Max(250, $DurationMs)
     $lengthFactor = switch ($Length) {
         "Short" { 0.45 }
@@ -407,10 +409,16 @@ try {
         SkipMap = [bool]$SkipMap
         SkipTraffic = [bool]$SkipTraffic
         SkipChrome = [bool]$SkipChrome
+        TrafficDetailTiming = [bool]$TrafficDetailTiming
         Screenshots = -not [bool]$NoScreenshots
+        ForceStoppedBeforeLaunch = -not [bool]$NoForceStop
         TargetHz = $TargetHz
     } | ConvertTo-Json | Set-Content -Path $scenarioPath
     Invoke-Adb logcat -c | Out-Null
+    if (-not $NoForceStop) {
+        Invoke-Adb shell am force-stop com.flightalert | Out-Null
+        Start-Sleep -Milliseconds 300
+    }
     $startArgs = @(
         "shell", "am", "start", "--display", "0", "--activity-single-top",
         "-n", "com.flightalert/.MainActivity",
@@ -442,6 +450,9 @@ try {
     }
     if ($SkipChrome) {
         $startArgs += @("--es", "com.flightalert.PERF_SKIP_CHROME", "true")
+    }
+    if ($TrafficDetailTiming) {
+        $startArgs += @("--es", "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING", "true")
     }
     Invoke-Adb @startArgs | Out-Null
     Assert-FlightAlertForeground

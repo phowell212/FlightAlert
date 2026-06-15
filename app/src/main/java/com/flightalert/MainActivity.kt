@@ -202,6 +202,10 @@ class MainActivity : ComponentActivity() {
         val skip_map = intent.optional_boolean_extra(EXTRA_PERF_SKIP_MAP) == true
         val skip_traffic = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TRAFFIC) == true
         val skip_chrome = intent.optional_boolean_extra(EXTRA_PERF_SKIP_CHROME) == true
+        val skip_top_status = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TOP_STATUS) == true
+        val skip_controls = intent.optional_boolean_extra(EXTRA_PERF_SKIP_CONTROLS) == true
+        val skip_traffic_panel = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TRAFFIC_PANEL) == true
+        val traffic_detail_timing = intent.optional_boolean_extra(EXTRA_PERF_TRAFFIC_DETAIL_TIMING) == true
         flight_map_view?.apply_debug_perf_viewport(
             lat = lat,
             lon = lon,
@@ -214,7 +218,11 @@ class MainActivity : ComponentActivity() {
             perf_focus_open_map = focus_open_map,
             perf_skip_map = skip_map,
             perf_skip_traffic = skip_traffic,
-            perf_skip_chrome = skip_chrome
+            perf_skip_chrome = skip_chrome,
+            perf_skip_top_status = skip_top_status,
+            perf_skip_controls = skip_controls,
+            perf_skip_traffic_panel = skip_traffic_panel,
+            perf_traffic_detail_timing = traffic_detail_timing
         )
     }
 
@@ -258,6 +266,10 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PERF_SKIP_MAP = "com.flightalert.PERF_SKIP_MAP"
         const val EXTRA_PERF_SKIP_TRAFFIC = "com.flightalert.PERF_SKIP_TRAFFIC"
         const val EXTRA_PERF_SKIP_CHROME = "com.flightalert.PERF_SKIP_CHROME"
+        const val EXTRA_PERF_SKIP_TOP_STATUS = "com.flightalert.PERF_SKIP_TOP_STATUS"
+        const val EXTRA_PERF_SKIP_CONTROLS = "com.flightalert.PERF_SKIP_CONTROLS"
+        const val EXTRA_PERF_SKIP_TRAFFIC_PANEL = "com.flightalert.PERF_SKIP_TRAFFIC_PANEL"
+        const val EXTRA_PERF_TRAFFIC_DETAIL_TIMING = "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING"
         const val DEFAULT_PERF_ZOOM = 4.2
     }
 }
