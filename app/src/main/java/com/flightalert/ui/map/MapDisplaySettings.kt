@@ -1,5 +1,26 @@
 package com.flightalert.ui.map
 
+enum class ReferenceTileOverlay(
+    val cache_key: String,
+    val attribution: String,
+    private val service_path: String
+) {
+    WORLD_TRANSPORTATION(
+        cache_key = "esri_world_transportation",
+        attribution = "Esri World Transportation",
+        service_path = "Reference/World_Transportation"
+    ),
+    WORLD_BOUNDARIES_AND_PLACES(
+        cache_key = "esri_world_boundaries_places",
+        attribution = "Esri World Boundaries and Places, HERE, Garmin, OpenStreetMap contributors, GIS user community",
+        service_path = "Reference/World_Boundaries_and_Places"
+    );
+
+    fun tile_url(z: Int, x: Int, y: Int): String {
+        return "https://services.arcgisonline.com/ArcGIS/rest/services/$service_path/MapServer/tile/$z/$y/$x"
+    }
+}
+
 enum class TileSource(
     val base_cache_key: String,
     val display_name: String,
@@ -17,10 +38,28 @@ enum class TileSource(
         }
     }
 
+    fun reference_overlay_layers(labels_enabled: Boolean): List<ReferenceTileOverlay> {
+        return when (this) {
+            STREET -> emptyList()
+            SATELLITE -> if (labels_enabled) {
+                listOf(
+                    ReferenceTileOverlay.WORLD_TRANSPORTATION,
+                    ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES
+                )
+            } else {
+                emptyList()
+            }
+        }
+    }
+
     fun attribution_text(labels_enabled: Boolean): String {
         return when (this) {
             STREET -> if (labels_enabled) base_attribution else "CARTO no-label tiles, OpenStreetMap data"
-            SATELLITE -> base_attribution
+            SATELLITE -> if (labels_enabled) {
+                "$base_attribution; ${reference_overlay_layers(labels_enabled).joinToString("; ") { it.attribution }}"
+            } else {
+                base_attribution
+            }
         }
     }
 
@@ -34,6 +73,7 @@ enum class TileSource(
             SATELLITE -> "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
         }
     }
+
 }
 
 enum class UnitSystem(

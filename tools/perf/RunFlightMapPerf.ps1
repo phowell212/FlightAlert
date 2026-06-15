@@ -1,13 +1,20 @@
 param(
     [string]$Device = "RFCX40KPN3B",
-    [ValidateSet("pinch", "quick", "sweep", "stress", "select", "soak", "shellpan", "keyboardzoom")]
-    [string]$Mode = "stress",
+    [ValidateSet("soak", "shellpan", "longpan", "keyboardzoom")]
+    [string]$Mode = "longpan",
+    [ValidateSet("Horizontal", "Vertical", "DiagonalDown", "DiagonalUp")]
+    [string]$PanDirection = "Horizontal",
+    [ValidateSet("Steady", "EaseIn", "EaseOut", "Pulse")]
+    [string]$PanProfile = "Steady",
+    [ValidateSet("Short", "Medium", "Long")]
+    [string]$PanLength = "Long",
     [double]$Zoom = 5.4,
     [int]$SoakSeconds = 75,
-    [switch]$RebuildHarness,
     [string]$CityName = "",
     [ValidateSet("Current", "Street", "Satellite")]
     [string]$MapSource = "Current",
+    [ValidateSet("Current", "On", "Off")]
+    [string]$MapLabels = "Current",
     [ValidateSet("Current", "On", "Off")]
     [string]$RestrictedAirspaces = "Current",
     [switch]$ClearSelection,
@@ -15,6 +22,7 @@ param(
     [switch]$SkipTraffic,
     [switch]$SkipChrome,
     [switch]$NoScreenshots,
+    [int]$PanDurationMs = 4200,
     [string]$OutputName = ""
 )
 
@@ -23,11 +31,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $adb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
-$androidJar = Join-Path $env:LOCALAPPDATA "Android\Sdk\platforms\android-35\android.jar"
-$d8 = Join-Path $env:LOCALAPPDATA "Android\Sdk\build-tools\35.0.0\d8.bat"
 $outDir = Join-Path $PSScriptRoot "out"
-$jarPath = "/data/local/tmp/multitouch-gestures.jar"
-$localJar = Join-Path $outDir "multitouch-gestures.jar"
 
 $cities = @(
     @{ Name = "New York City"; Lat = 40.73; Lon = -73.93 },
@@ -105,20 +109,6 @@ function Get-ScreencapDisplayId {
         }
     }
     return $bestId
-}
-
-function Build-Harness {
-    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-    Remove-Item -Recurse -Force (Join-Path $PSScriptRoot "mtclasses"), (Join-Path $PSScriptRoot "mtdex") -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot "mtclasses"), (Join-Path $PSScriptRoot "mtdex") | Out-Null
-    javac -cp $androidJar -d (Join-Path $PSScriptRoot "mtclasses") (Join-Path $PSScriptRoot "MultiTouchGestureRunner.java")
-    if ($LASTEXITCODE -ne 0) { throw "Failed to compile MultiTouchGestureRunner.java." }
-    jar cf (Join-Path $outDir "multitouch-classes.jar") -C (Join-Path $PSScriptRoot "mtclasses") .
-    if ($LASTEXITCODE -ne 0) { throw "Failed to package MultiTouchGestureRunner classes." }
-    & $d8 --min-api 23 --classpath $androidJar --output (Join-Path $PSScriptRoot "mtdex") (Join-Path $outDir "multitouch-classes.jar")
-    if ($LASTEXITCODE -ne 0) { throw "Failed to dex MultiTouchGestureRunner." }
-    jar cf $localJar -C (Join-Path $PSScriptRoot "mtdex") classes.dex
-    if ($LASTEXITCODE -ne 0) { throw "Failed to package MultiTouchGestureRunner dex." }
 }
 
 function Read-FrameStatsSummary {
@@ -267,6 +257,91 @@ function Invoke-ShellPanGesture {
     Invoke-Adb shell input swipe $left $top $right $bottom 650 | Out-Null
 }
 
+function Invoke-LongPanGesture {
+    param(
+        [hashtable]$Display,
+        [string]$Direction,
+        [string]$Profile,
+        [string]$Length,
+        [int]$DurationMs
+    )
+    $w = [double]$Display.Width
+    $h = [double]$Display.Height
+    $safeLeft = $w * 0.16
+    $safeRight = $w * 0.48
+    $centerX = [int]($w * 0.32)
+    $safeTop = $h * 0.36
+    $middle = [int]($h * 0.57)
+    $safeBottom = $h * 0.71
+    $durationMs = [Math]::Max(250, $DurationMs)
+    $lengthFactor = switch ($Length) {
+        "Short" { 0.45 }
+        "Medium" { 0.72 }
+        default { 1.0 }
+    }
+    $halfX = (($safeRight - $safeLeft) * $lengthFactor) / 2.0
+    $halfY = (($safeBottom - $safeTop) * $lengthFactor) / 2.0
+    $left = [int]($centerX - $halfX)
+    $right = [int]($centerX + $halfX)
+    $top = [int]($middle - $halfY)
+    $bottom = [int]($middle + $halfY)
+
+    switch ($Direction) {
+        "Horizontal" { Invoke-PanProfile -StartX $right -StartY $middle -EndX $left -EndY $middle -DurationMs $durationMs -Profile $Profile }
+        "Vertical" { Invoke-PanProfile -StartX $centerX -StartY $bottom -EndX $centerX -EndY $top -DurationMs $durationMs -Profile $Profile }
+        "DiagonalDown" { Invoke-PanProfile -StartX $left -StartY $top -EndX $right -EndY $bottom -DurationMs $durationMs -Profile $Profile }
+        "DiagonalUp" { Invoke-PanProfile -StartX $left -StartY $bottom -EndX $right -EndY $top -DurationMs $durationMs -Profile $Profile }
+    }
+}
+
+function Invoke-PanProfile {
+    param(
+        [int]$StartX,
+        [int]$StartY,
+        [int]$EndX,
+        [int]$EndY,
+        [int]$DurationMs,
+        [string]$Profile
+    )
+    if ($Profile -eq "Steady") {
+        Invoke-Adb shell input swipe $StartX $StartY $EndX $EndY $DurationMs | Out-Null
+        return
+    }
+    $segments = switch ($Profile) {
+        "EaseIn" {
+            @(
+                @{ P = 0.22; T = 0.42 },
+                @{ P = 0.55; T = 0.33 },
+                @{ P = 1.00; T = 0.25 }
+            )
+        }
+        "EaseOut" {
+            @(
+                @{ P = 0.45; T = 0.25 },
+                @{ P = 0.78; T = 0.33 },
+                @{ P = 1.00; T = 0.42 }
+            )
+        }
+        default {
+            @(
+                @{ P = 0.38; T = 0.24 },
+                @{ P = 0.52; T = 0.52 },
+                @{ P = 1.00; T = 0.24 }
+            )
+        }
+    }
+    $lastX = $StartX
+    $lastY = $StartY
+    foreach ($segment in $segments) {
+        $nextX = [int]($StartX + ($EndX - $StartX) * [double]$segment.P)
+        $nextY = [int]($StartY + ($EndY - $StartY) * [double]$segment.P)
+        $segmentDurationMs = [Math]::Max(120, [int]($DurationMs * [double]$segment.T))
+        Invoke-Adb shell input swipe $lastX $lastY $nextX $nextY $segmentDurationMs | Out-Null
+        $lastX = $nextX
+        $lastY = $nextY
+    }
+}
+
 function Invoke-KeyboardZoomGesture {
     for ($i = 0; $i -lt 6; $i++) {
         Invoke-Adb shell input keyevent KEYCODE_PLUS | Out-Null
@@ -287,17 +362,6 @@ function Invoke-KeyboardZoomGesture {
 Push-Location $repoRoot
 try {
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-    if ($Mode -ne "soak" -and $Mode -ne "shellpan" -and $Mode -ne "keyboardzoom" -and ($RebuildHarness -or -not (Test-Path $localJar))) {
-        Build-Harness
-    }
-    if ($Mode -ne "soak" -and $Mode -ne "shellpan" -and $Mode -ne "keyboardzoom") {
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        & $adb -s $Device push $localJar $jarPath 2>$null | Out-Null
-        $pushExitCode = $LASTEXITCODE
-        $ErrorActionPreference = $previousErrorActionPreference
-        if ($pushExitCode -ne 0) { throw "Failed to push gesture harness to $Device." }
-    }
     $script:ScreencapDisplayId = Get-ScreencapDisplayId
 
     if ([string]::IsNullOrWhiteSpace($CityName)) {
@@ -313,7 +377,7 @@ try {
     }
     $runId = "perf-$safeCity-$Mode-$stamp-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 
-    Write-Host "Testing $($city.Name) at lat=$($city.Lat), lon=$($city.Lon), zoom=$Zoom with $Mode gestures, map=$MapSource, restricted=$RestrictedAirspaces. runId=$runId"
+    Write-Host "Testing $($city.Name) at lat=$($city.Lat), lon=$($city.Lon), zoom=$Zoom with $Mode gestures, direction=$PanDirection, profile=$PanProfile, length=$PanLength, durationMs=$PanDurationMs, map=$MapSource, labels=$MapLabels, restricted=$RestrictedAirspaces. runId=$runId"
     Invoke-Adb logcat -c | Out-Null
     $startArgs = @(
         "shell", "am", "start", "--display", "0", "--activity-single-top",
@@ -325,6 +389,10 @@ try {
     )
     if ($MapSource -ne "Current") {
         $startArgs += @("--es", "com.flightalert.PERF_MAP_SOURCE", $MapSource.ToUpperInvariant())
+    }
+    if ($MapLabels -ne "Current") {
+        $mapLabelsValue = if ($MapLabels -eq "On") { "true" } else { "false" }
+        $startArgs += @("--es", "com.flightalert.PERF_MAP_LABELS_ENABLED", $mapLabelsValue)
     }
     if ($RestrictedAirspaces -ne "Current") {
         $restrictedValue = if ($RestrictedAirspaces -eq "On") { "true" } else { "false" }
@@ -369,21 +437,23 @@ try {
         $display = Get-DisplaySize
         $screenshotJobs = @()
         if (-not $NoScreenshots) {
+            $motionLateDelayMs = if ($Mode -eq "longpan") { [Math]::Max(700, [int]($PanDurationMs * 0.80)) } else { 2750 }
             $screenshotJobs = @(
-                Schedule-DeviceScreenshot -Label "motion-start" -DelayMilliseconds 350
-                Schedule-DeviceScreenshot -Label "motion-active" -DelayMilliseconds 1600
-                Schedule-DeviceScreenshot -Label "motion-late" -DelayMilliseconds 2750
+                Schedule-DeviceScreenshot -Label "motion-start" -DelayMilliseconds ([Math]::Min(350, [Math]::Max(120, [int]($PanDurationMs * 0.18))))
+                Schedule-DeviceScreenshot -Label "motion-active" -DelayMilliseconds ([Math]::Max(450, [int]($PanDurationMs * 0.42)))
+                Schedule-DeviceScreenshot -Label "motion-late" -DelayMilliseconds $motionLateDelayMs
             )
         }
         Invoke-Adb shell dumpsys gfxinfo com.flightalert reset | Out-Null
         if ($Mode -eq "shellpan") {
             Invoke-ShellPanGesture -Display $display
+        } elseif ($Mode -eq "longpan") {
+            Invoke-LongPanGesture -Display $display -Direction $PanDirection -Profile $PanProfile -Length $PanLength -DurationMs $PanDurationMs
         } elseif ($Mode -eq "keyboardzoom") {
             Invoke-KeyboardZoomGesture
-        } else {
-            Invoke-Adb shell CLASSPATH=$jarPath app_process / com.flightalert.perf.MultiTouchGestureRunner $Mode $display.Width $display.Height | Out-Host
         }
-        Start-Sleep -Milliseconds 3800
+        $postGestureSleepMs = if ($Mode -eq "longpan") { 350 } else { 3800 }
+        Start-Sleep -Milliseconds $postGestureSleepMs
         if (-not $NoScreenshots) {
             $screenshotPaths += Complete-DeviceScreenshots -Jobs $screenshotJobs
         }

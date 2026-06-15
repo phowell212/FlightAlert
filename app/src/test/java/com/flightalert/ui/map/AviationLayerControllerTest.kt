@@ -28,54 +28,87 @@ class AviationLayerControllerTest {
         val loaded = controller.snapshot
 
         controller.on_visibility_changed(LAYERS_OFF)
-        assertSame(loaded, controller.snapshot)
         assertEquals("Layers off", controller.status_text)
-        assertEquals(1, fetches.size)
+        assertEquals(listOf(FetchFlags(restricted = true), ALL_LAYERS), fetches)
+        val warmed = controller.snapshot
+        assertEquals(listOf("restricted-2"), warmed?.restricted_airspaces?.map { it.name })
+        assertEquals(listOf("atc-2"), warmed?.atc_boundaries?.map { it.name })
+        assertEquals(listOf("airport-2"), warmed?.airports?.map { it.ident })
+        assertEquals(listOf("oceanic-2"), warmed?.oceanic_tracks?.map { it.name })
 
         controller.on_visibility_changed(RESTRICTED_ON)
-        assertSame(loaded, controller.snapshot)
-        assertEquals(1, fetches.size)
+        assertSame(warmed, controller.snapshot)
+        assertEquals(2, fetches.size)
         assertEquals("1 aviation layer loaded", controller.status_text)
     }
 
     @Test
-    fun layers_off_warms_real_restricted_airspace_data_without_enabling_display() {
+    fun layers_off_warms_real_aviation_layer_data_without_enabling_display() {
         val fetches = mutableListOf<FetchFlags>()
         val controller = controller(fetches)
 
         controller.request_if_needed(VIEWPORT, LAYERS_OFF)
 
-        assertEquals(listOf(FetchFlags(restricted = true)), fetches)
+        assertEquals(listOf(ALL_LAYERS), fetches)
         assertEquals("Layers off", controller.status_text)
         assertEquals(listOf("restricted-1"), controller.snapshot?.restricted_airspaces?.map { it.name })
+        assertEquals(listOf("atc-1"), controller.snapshot?.atc_boundaries?.map { it.name })
+        assertEquals(listOf("airport-1"), controller.snapshot?.airports?.map { it.ident })
+        assertEquals(listOf("oceanic-1"), controller.snapshot?.oceanic_tracks?.map { it.name })
     }
 
     @Test
-    fun restricted_warm_fetch_merges_with_other_cached_layer_data() {
+    fun all_layer_warm_fetch_keeps_real_cached_layer_data_available() {
         val fetches = mutableListOf<FetchFlags>()
         val controller = controller(fetches)
 
         controller.request_if_needed(VIEWPORT, ATC_ON)
         controller.on_visibility_changed(LAYERS_OFF)
 
-        assertEquals(listOf(FetchFlags(atc = true), FetchFlags(restricted = true)), fetches)
-        assertEquals(listOf("atc-1"), controller.snapshot?.atc_boundaries?.map { it.name })
+        assertEquals(listOf(FetchFlags(atc = true), ALL_LAYERS), fetches)
+        assertEquals(listOf("atc-2"), controller.snapshot?.atc_boundaries?.map { it.name })
         assertEquals(listOf("restricted-2"), controller.snapshot?.restricted_airspaces?.map { it.name })
+        assertEquals(listOf("airport-2"), controller.snapshot?.airports?.map { it.ident })
+        assertEquals(listOf("oceanic-2"), controller.snapshot?.oceanic_tracks?.map { it.name })
         assertEquals("Layers off", controller.status_text)
     }
 
-    private fun controller(fetches: MutableList<FetchFlags>): AviationLayerController {
+    @Test
+    fun wide_layer_viewports_fetch_world_longitude_bounds_instead_of_skipping_layers() {
+        val fetches = mutableListOf<FetchFlags>()
+        val fetched_bounds = mutableListOf<AviationLayerBounds>()
+        val controller = controller(
+            fetches = fetches,
+            fetched_bounds = fetched_bounds,
+            visible_bounds_provider = { null }
+        )
+
+        controller.request_if_needed(WIDE_VIEWPORT, RESTRICTED_ON)
+
+        assertEquals(listOf(FetchFlags(restricted = true)), fetches)
+        val bounds = fetched_bounds.single()
+        assertEquals(-180.0, bounds.min_lon, 0.0)
+        assertEquals(180.0, bounds.max_lon, 0.0)
+        assertTrue(bounds.min_lat < bounds.max_lat)
+    }
+
+    private fun controller(
+        fetches: MutableList<FetchFlags>,
+        fetched_bounds: MutableList<AviationLayerBounds>? = null,
+        visible_bounds_provider: (Viewport) -> Bounds? = { VISIBLE_BOUNDS }
+    ): AviationLayerController {
         return AviationLayerController(
             client = AviationLayerClient("test"),
             run_in_background = { task -> task() },
             post_to_main = { task -> task() },
             request_redraw = {},
             current_viewport = { VIEWPORT },
-            visible_bounds = { VISIBLE_BOUNDS },
+            visible_bounds = visible_bounds_provider,
             refresh_ms = 60_000L,
             bounds_padding_fraction = 0.5,
             now_ms = { 1_000L },
-            fetch_layers = { _: AviationLayerBounds, atc: Boolean, restricted: Boolean, airports: Boolean, oceanic: Boolean ->
+            fetch_layers = { bounds: AviationLayerBounds, atc: Boolean, restricted: Boolean, airports: Boolean, oceanic: Boolean ->
+                fetched_bounds?.add(bounds)
                 val flags = FetchFlags(atc = atc, restricted = restricted, airports = airports, oceanic = oceanic)
                 fetches += flags
                 snapshot(flags, fetches.size)
@@ -154,6 +187,13 @@ class AviationLayerControllerTest {
             width = 1080f,
             height = 1920f
         )
+        val WIDE_VIEWPORT = Viewport(
+            zoom = 3.0,
+            center_x = MapProjection.lat_lon_to_world(39.1, -96.0, 3.0).x,
+            center_y = MapProjection.lat_lon_to_world(39.1, -96.0, 3.0).y,
+            width = 2400f,
+            height = 1200f
+        )
         val VISIBLE_BOUNDS = Bounds(40.0, -74.5, 41.2, -72.9)
         val TEST_RING = listOf(
             AviationLayerPoint(40.6, -74.0),
@@ -170,5 +210,6 @@ class AviationLayerControllerTest {
         )
         val RESTRICTED_ON = LAYERS_OFF.copy(restricted_airspaces_enabled = true)
         val ATC_ON = LAYERS_OFF.copy(atc_boundaries_enabled = true)
+        val ALL_LAYERS = FetchFlags(atc = true, restricted = true, airports = true, oceanic = true)
     }
 }

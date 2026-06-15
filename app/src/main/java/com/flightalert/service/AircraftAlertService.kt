@@ -26,8 +26,13 @@ import com.flightalert.data.FeedStatus
 import com.flightalert.settings.FlightAlertSettings
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 // Foreground watcher for drone-flight safety: live position plus live aircraft feed, no stored tracks.
 class AircraftAlertService : Service(), LocationListener {
@@ -51,6 +56,7 @@ class AircraftAlertService : Service(), LocationListener {
     private var polling = false
     private var stopped = false
     private var foreground_active = false
+    private var priority_notification_showing = false
     private var next_poll_delay_ms = POLL_MS
 
     // Android starts the service here; set up providers, channels, and the first poll.
@@ -178,7 +184,12 @@ class AircraftAlertService : Service(), LocationListener {
                 active_hazards.putAll(current_hazards)
                 val extreme_priority = if (alerts_enabled()) poll.aircraft.filter { it.is_extreme_priority } else emptyList()
                 update_priority_notification(extreme_priority)
-                next_poll_delay_ms = next_poll_delay_for(poll.aircraft, current_hazards.isNotEmpty(), extreme_priority.isNotEmpty())
+                next_poll_delay_ms = next_poll_delay_for(
+                    aircraft = poll.aircraft,
+                    has_hazard = current_hazards.isNotEmpty(),
+                    has_extreme_priority = extreme_priority.isNotEmpty(),
+                    predictive_delay_ms = poll.next_predictive_poll_delay_ms
+                )
             } catch (_: Exception) {
                 update_priority_notification(emptyList())
                 next_poll_delay_ms = POLL_MS
@@ -190,16 +201,22 @@ class AircraftAlertService : Service(), LocationListener {
     }
 
     // Poll faster only while nearby or priority contacts could go stale soon.
-    private fun next_poll_delay_for(aircraft: List<AlertAircraft>, has_hazard: Boolean, has_extreme_priority: Boolean): Long {
+    private fun next_poll_delay_for(
+        aircraft: List<AlertAircraft>,
+        has_hazard: Boolean,
+        has_extreme_priority: Boolean,
+        predictive_delay_ms: Long? = null
+    ): Long {
         val extreme_aircraft = aircraft.filter { it.is_extreme_priority }
         val hazard_aircraft = aircraft.filter { it.is_hazard }
         val priority_aircraft = aircraft.filter { it.is_priority_range_aircraft }
-        return when {
+        val normal_delay = when {
             has_extreme_priority -> delay_until_stale(extreme_aircraft, AlertAircraftClassifier.EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS)
             has_hazard -> delay_until_stale(hazard_aircraft, PRIORITY_CONTACT_MAX_AGE_SECONDS)
             priority_aircraft.isNotEmpty() -> delay_until_stale(priority_aircraft, PRIORITY_CONTACT_MAX_AGE_SECONDS)
             else -> POLL_MS
         }
+        return predictive_delay_ms?.let { min(normal_delay, it) } ?: normal_delay
     }
 
     private fun delay_until_stale(aircraft: List<AlertAircraft>, max_age_seconds: Double): Long {
@@ -227,20 +244,33 @@ class AircraftAlertService : Service(), LocationListener {
         if (result.status != FeedStatus.OK) return AlertPoll(emptyList(), feed_available = false)
         val airborne_aircraft = result.aircraft.filter { it.on_ground != true }
         val unsupported_altitude_count = airborne_aircraft.count { it.altitude_m == null }
+        val now_epoch_sec = System.currentTimeMillis() / 1000.0
         return AlertPoll(
             aircraft = airborne_aircraft
                 .mapNotNull {
                     it.to_alert_aircraft(
+                        own_lat = location.latitude,
+                        own_lon = location.longitude,
                         alert_distance_feet = alert_distance_feet,
                         alert_altitude_feet = alert_altitude_feet,
                         own_altitude_feet = own_altitude_feet,
                         priority_enabled = priority_enabled,
-                        priority_range_feet = priority_range_feet
+                        priority_range_feet = priority_range_feet,
+                        now_epoch_sec = now_epoch_sec
                     )
                 }
                 .sortedBy { it.distance_feet },
             feed_available = true,
-            unsupported_altitude_count = unsupported_altitude_count
+            unsupported_altitude_count = unsupported_altitude_count,
+            next_predictive_poll_delay_ms = next_predictive_poll_delay_ms(
+                aircraft = airborne_aircraft,
+                own_lat = location.latitude,
+                own_lon = location.longitude,
+                own_altitude_feet = own_altitude_feet,
+                alert_distance_feet = alert_distance_feet,
+                alert_altitude_feet = alert_altitude_feet,
+                now_epoch_sec = now_epoch_sec
+            )
         )
     }
 
@@ -278,20 +308,29 @@ class AircraftAlertService : Service(), LocationListener {
             )
         ) {
             manager.cancel(PRIORITY_NOTIFICATION_ID)
+            priority_notification_showing = false
             leave_foreground()
             return
         }
+        val is_update = priority_notification_showing
         val notification = build_notification(
             PRIORITY_CHANNEL_ID,
             "Extreme priority aircraft",
             PriorityNotificationPresenter.notification_body(extreme_priority_aircraft),
-            true
+            ongoing = true,
+            silent = is_update
         )
         try {
-            startForeground(PRIORITY_NOTIFICATION_ID, notification)
-            foreground_active = true
+            if (foreground_active) {
+                notify_priority_fallback(manager, notification)
+            } else {
+                startForeground(PRIORITY_NOTIFICATION_ID, notification)
+                foreground_active = true
+            }
+            priority_notification_showing = true
         } catch (_: Exception) {
             notify_priority_fallback(manager, notification)
+            priority_notification_showing = true
         }
     }
 
@@ -301,14 +340,21 @@ class AircraftAlertService : Service(), LocationListener {
         manager.notify(PRIORITY_NOTIFICATION_ID, notification)
     }
 
-    private fun build_notification(channel_id: String, title: String, body: String, ongoing: Boolean): Notification {
+    @Suppress("DEPRECATION")
+    private fun build_notification(
+        channel_id: String,
+        title: String,
+        body: String,
+        ongoing: Boolean,
+        silent: Boolean = false
+    ): Notification {
         val pending_intent = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or immutable_flag()
         )
-        return Notification.Builder(this, channel_id)
+        val builder = Notification.Builder(this, channel_id)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle(title)
             .setContentText(body)
@@ -318,19 +364,32 @@ class AircraftAlertService : Service(), LocationListener {
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setPublicVersion(build_public_notification(channel_id, title, ongoing))
-            .build()
+            .setPublicVersion(build_public_notification(channel_id, title, ongoing, silent))
+        if (silent) {
+            builder
+                .setDefaults(0)
+                .setSound(null)
+                .setVibrate(null)
+        }
+        return builder.build()
     }
 
-    private fun build_public_notification(channel_id: String, title: String, ongoing: Boolean): Notification {
-        return Notification.Builder(this, channel_id)
+    @Suppress("DEPRECATION")
+    private fun build_public_notification(channel_id: String, title: String, ongoing: Boolean, silent: Boolean): Notification {
+        val builder = Notification.Builder(this, channel_id)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle(title)
             .setContentText("Flight Alert is monitoring live aircraft traffic.")
             .setOnlyAlertOnce(true)
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
-            .build()
+        if (silent) {
+            builder
+                .setDefaults(0)
+                .setSound(null)
+                .setVibrate(null)
+        }
+        return builder.build()
     }
 
     private fun ensure_channels() {
@@ -376,6 +435,7 @@ class AircraftAlertService : Service(), LocationListener {
     private fun remove_foreground_notification() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         foreground_active = false
+        priority_notification_showing = false
     }
 
     private fun has_location_permission(): Boolean {
@@ -419,18 +479,22 @@ class AircraftAlertService : Service(), LocationListener {
 
     // Convert provider units into classifier inputs so 3D alert math stays in one object.
     private fun FeedAircraft.to_alert_aircraft(
+        own_lat: Double,
+        own_lon: Double,
         alert_distance_feet: Float,
         alert_altitude_feet: Float,
         own_altitude_feet: Double?,
         priority_enabled: Boolean,
-        priority_range_feet: Float
+        priority_range_feet: Float,
+        now_epoch_sec: Double
     ): AlertAircraft? {
+        val projected = projected_alert_state(own_lat, own_lon, now_epoch_sec)
         return AlertAircraftClassifier.classify(
             icao24 = icao24,
             callsign = callsign,
             registration = registration,
-            distance_meters = distance_m,
-            altitude_meters = altitude_m,
+            distance_meters = projected.distance_meters,
+            altitude_meters = projected.altitude_meters,
             last_contact_sec = last_contact_sec,
             position_time_sec = position_time_sec,
             own_altitude_feet = own_altitude_feet,
@@ -439,8 +503,117 @@ class AircraftAlertService : Service(), LocationListener {
             alert_altitude_feet = alert_altitude_feet,
             priority_enabled = priority_enabled,
             priority_range_feet = priority_range_feet,
-            now_epoch_sec = System.currentTimeMillis() / 1000.0
+            now_epoch_sec = now_epoch_sec,
+            is_estimated_position = projected.estimated
         )
+    }
+
+    private fun next_predictive_poll_delay_ms(
+        aircraft: List<FeedAircraft>,
+        own_lat: Double,
+        own_lon: Double,
+        own_altitude_feet: Double?,
+        alert_distance_feet: Float,
+        alert_altitude_feet: Float,
+        now_epoch_sec: Double
+    ): Long? {
+        if (!alerts_enabled() || own_altitude_feet == null) return null
+        val alert_distance_m = feet_to_meters(alert_distance_feet.toDouble())
+        val alert_altitude_m = feet_to_meters(alert_altitude_feet.toDouble())
+        val own_altitude_m = feet_to_meters(own_altitude_feet)
+        var soonest_delay_ms: Long? = null
+        for (item in aircraft) {
+            if (!item.has_fresh_projectable_motion(now_epoch_sec) || item.altitude_m == null) continue
+            for (seconds_ahead in 1..ALERT_ENTRY_LOOKAHEAD_SECONDS) {
+                val state = item.projected_alert_state(own_lat, own_lon, now_epoch_sec + seconds_ahead)
+                val altitude_m = state.altitude_meters ?: continue
+                val vertical_separation_m = kotlin.math.abs(altitude_m - own_altitude_m)
+                if (state.distance_meters <= alert_distance_m && vertical_separation_m <= alert_altitude_m) {
+                    val delay_ms = ((seconds_ahead * 1000L) - ALERT_ENTRY_POLL_LEAD_MS)
+                        .coerceAtLeast(STALE_CONTACT_RETRY_MS)
+                    soonest_delay_ms = soonest_delay_ms?.let { min(it, delay_ms) } ?: delay_ms
+                    break
+                }
+            }
+        }
+        return soonest_delay_ms
+    }
+
+    private fun FeedAircraft.projected_alert_state(own_lat: Double, own_lon: Double, now_epoch_sec: Double): ProjectedAlertState {
+        val reported_distance = if (distance_m.isFinite() && distance_m > 0.0) {
+            distance_m
+        } else {
+            distance_meters(own_lat, own_lon, lat, lon)
+        }
+        val age_seconds = projection_age_seconds(now_epoch_sec)
+        if (age_seconds <= ALERT_PROJECTION_MIN_SECONDS || !has_projectable_motion()) {
+            return ProjectedAlertState(reported_distance, altitude_m, estimated = false)
+        }
+        val speed = velocity_ms ?: return ProjectedAlertState(reported_distance, altitude_m, estimated = false)
+        val track = normalized_degrees(track_deg) ?: return ProjectedAlertState(reported_distance, altitude_m, estimated = false)
+        val projected = advance_position(lat, lon, track, speed * age_seconds)
+        val projected_altitude = projected_altitude_meters(age_seconds)
+        return ProjectedAlertState(
+            distance_meters = distance_meters(own_lat, own_lon, projected.lat, projected.lon),
+            altitude_meters = projected_altitude,
+            estimated = true
+        )
+    }
+
+    private fun FeedAircraft.projected_altitude_meters(age_seconds: Double): Double? {
+        val altitude = altitude_m ?: return null
+        val vertical_rate = vertical_rate_ms?.takeIf { it.isFinite() && kotlin.math.abs(it) <= MAX_PROJECTABLE_VERTICAL_RATE_MS } ?: return altitude
+        return altitude + vertical_rate * age_seconds
+    }
+
+    private fun FeedAircraft.projection_age_seconds(now_epoch_sec: Double): Double {
+        val report_time = position_time_sec ?: last_contact_sec ?: return 0.0
+        return (now_epoch_sec - report_time)
+            .coerceAtLeast(0.0)
+            .coerceAtMost(ALERT_PROJECTION_MAX_SECONDS.toDouble())
+    }
+
+    private fun FeedAircraft.has_fresh_projectable_motion(now_epoch_sec: Double): Boolean {
+        val report_time = position_time_sec ?: last_contact_sec ?: return false
+        if (now_epoch_sec - report_time > ALERT_ENTRY_LOOKAHEAD_SECONDS + ALERT_PROJECTION_MAX_SECONDS) return false
+        return has_projectable_motion()
+    }
+
+    private fun FeedAircraft.has_projectable_motion(): Boolean {
+        val speed = velocity_ms ?: return false
+        return speed.isFinite() &&
+            speed in MIN_PROJECTABLE_ALERT_SPEED_MS..MAX_PROJECTABLE_ALERT_SPEED_MS &&
+            normalized_degrees(track_deg) != null
+    }
+
+    private fun advance_position(lat: Double, lon: Double, track_degrees: Double, distance_meters: Double): GeoPosition {
+        val bearing = Math.toRadians(track_degrees)
+        val lat_rad = Math.toRadians(lat)
+        val angular = distance_meters / EARTH_RADIUS_M
+        val projected_lat = lat_rad + angular * cos(bearing)
+        val projected_lon = Math.toRadians(lon) + angular * sin(bearing) / max(0.1, cos(lat_rad))
+        return GeoPosition(
+            lat = Math.toDegrees(projected_lat).coerceIn(-90.0, 90.0),
+            lon = normalize_lon_degrees(Math.toDegrees(projected_lon))
+        )
+    }
+
+    private fun normalized_degrees(value: Double?): Double? {
+        val degrees = value?.takeIf { it.isFinite() } ?: return null
+        return ((degrees % 360.0) + 360.0) % 360.0
+    }
+
+    private fun normalize_lon_degrees(value: Double): Double {
+        return ((value + 540.0) % 360.0) - 180.0
+    }
+
+    private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val radius = EARTH_RADIUS_M
+        val d_lat = Math.toRadians(lat2 - lat1)
+        val d_lon = Math.toRadians(lon2 - lon1)
+        val a = sin(d_lat / 2).pow(2.0) +
+            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(d_lon / 2).pow(2.0)
+        return 2 * radius * atan2(sqrt(a), sqrt(1 - a))
     }
 
     private fun feet_to_meters(feet: Double): Double = feet / 3.28084
@@ -451,10 +624,19 @@ class AircraftAlertService : Service(), LocationListener {
 
     private data class Bounds(val min_lat: Double, val min_lon: Double, val max_lat: Double, val max_lon: Double)
 
+    private data class GeoPosition(val lat: Double, val lon: Double)
+
+    private data class ProjectedAlertState(
+        val distance_meters: Double,
+        val altitude_meters: Double?,
+        val estimated: Boolean
+    )
+
     private data class AlertPoll(
         val aircraft: List<AlertAircraft>,
         val feed_available: Boolean,
-        val unsupported_altitude_count: Int = 0
+        val unsupported_altitude_count: Int = 0,
+        val next_predictive_poll_delay_ms: Long? = null
     )
 
     companion object {
@@ -468,6 +650,14 @@ class AircraftAlertService : Service(), LocationListener {
         const val POLL_MS = 30000L
         const val PRIORITY_CONTACT_MAX_AGE_SECONDS = 10.0
         const val STALE_CONTACT_RETRY_MS = 1000L
+        const val ALERT_ENTRY_LOOKAHEAD_SECONDS = 20
+        const val ALERT_ENTRY_POLL_LEAD_MS = 1200L
+        const val ALERT_PROJECTION_MAX_SECONDS = 8
+        const val ALERT_PROJECTION_MIN_SECONDS = 0.2
+        const val MIN_PROJECTABLE_ALERT_SPEED_MS = 8.0
+        const val MAX_PROJECTABLE_ALERT_SPEED_MS = 600.0
+        const val MAX_PROJECTABLE_VERTICAL_RATE_MS = 120.0
+        const val EARTH_RADIUS_M = 6371000.0
         const val MIN_QUERY_RADIUS_FEET = 10000.0
         const val ALERT_QUERY_MIN_PADDING_FEET = 5000.0
         const val ALERT_QUERY_RADIUS_MULTIPLIER = 1.25

@@ -195,8 +195,10 @@ class MainActivity : ComponentActivity() {
         val run_id = intent.getStringExtra(EXTRA_PERF_RUN_ID)
         val map_source = intent.getStringExtra(EXTRA_PERF_MAP_SOURCE)
             ?.let { value -> TileSource.entries.firstOrNull { it.name.equals(value, ignoreCase = true) } }
+        val map_labels = intent.optional_boolean_extra(EXTRA_PERF_MAP_LABELS_ENABLED)
         val restricted = intent.optional_boolean_extra(EXTRA_PERF_RESTRICTED_AIRSPACES_ENABLED)
         val clear_selection = intent.optional_boolean_extra(EXTRA_PERF_CLEAR_SELECTION) == true
+        val focus_open_map = intent.optional_boolean_extra(EXTRA_PERF_FOCUS_OPEN_MAP) == true
         val skip_map = intent.optional_boolean_extra(EXTRA_PERF_SKIP_MAP) == true
         val skip_traffic = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TRAFFIC) == true
         val skip_chrome = intent.optional_boolean_extra(EXTRA_PERF_SKIP_CHROME) == true
@@ -206,8 +208,10 @@ class MainActivity : ComponentActivity() {
             target_zoom = zoom,
             run_id = run_id,
             perf_map_source = map_source,
+            perf_map_labels_enabled = map_labels,
             perf_restricted_airspaces_enabled = restricted,
             perf_clear_selection = clear_selection,
+            perf_focus_open_map = focus_open_map,
             perf_skip_map = skip_map,
             perf_skip_traffic = skip_traffic,
             perf_skip_chrome = skip_chrome
@@ -247,8 +251,10 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PERF_ZOOM = "com.flightalert.PERF_ZOOM"
         const val EXTRA_PERF_RUN_ID = "com.flightalert.PERF_RUN_ID"
         const val EXTRA_PERF_MAP_SOURCE = "com.flightalert.PERF_MAP_SOURCE"
+        const val EXTRA_PERF_MAP_LABELS_ENABLED = "com.flightalert.PERF_MAP_LABELS_ENABLED"
         const val EXTRA_PERF_RESTRICTED_AIRSPACES_ENABLED = "com.flightalert.PERF_RESTRICTED_AIRSPACES_ENABLED"
         const val EXTRA_PERF_CLEAR_SELECTION = "com.flightalert.PERF_CLEAR_SELECTION"
+        const val EXTRA_PERF_FOCUS_OPEN_MAP = "com.flightalert.PERF_FOCUS_OPEN_MAP"
         const val EXTRA_PERF_SKIP_MAP = "com.flightalert.PERF_SKIP_MAP"
         const val EXTRA_PERF_SKIP_TRAFFIC = "com.flightalert.PERF_SKIP_TRAFFIC"
         const val EXTRA_PERF_SKIP_CHROME = "com.flightalert.PERF_SKIP_CHROME"

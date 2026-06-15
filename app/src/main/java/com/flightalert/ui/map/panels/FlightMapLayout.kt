@@ -98,16 +98,16 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
 
     fun imperial_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val left = compact_settings_left_column(panel)
-            return RectF(left.left, panel.top + dp(66), left.right, panel.top + dp(96))
+            val column = compact_settings_display_column(panel)
+            return RectF(column.left, panel.top + dp(66), column.right, panel.top + dp(96))
         }
         return RectF(panel.left + dp(18), panel.top + dp(88), panel.right - dp(18), panel.top + dp(122))
     }
 
     fun metric_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val left = compact_settings_left_column(panel)
-            return RectF(left.left, panel.top + dp(102), left.right, panel.top + dp(132))
+            val column = compact_settings_display_column(panel)
+            return RectF(column.left, panel.top + dp(102), column.right, panel.top + dp(132))
         }
         return RectF(panel.left + dp(18), panel.top + dp(130), panel.right - dp(18), panel.top + dp(164))
     }
@@ -118,48 +118,52 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
 
     fun map_source_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val left = compact_settings_left_column(panel)
-            return RectF(left.left, panel.top + dp(190), left.right, panel.top + dp(216))
+            val column = compact_settings_map_column(panel)
+            val top = if (is_wide_settings_hub_panel(panel)) panel.top + dp(66) else panel.top + dp(190)
+            return RectF(column.left, top, column.right, top + dp(30))
         }
         return RectF(panel.left + dp(18), panel.top + dp(244), panel.right - dp(18), panel.top + dp(278))
     }
 
     fun map_labels_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val left = compact_settings_left_column(panel)
-            return RectF(left.left, panel.top + dp(220), left.right, panel.top + dp(246))
+            val column = compact_settings_map_column(panel)
+            val top = if (is_wide_settings_hub_panel(panel)) panel.top + dp(102) else panel.top + dp(220)
+            return RectF(column.left, top, column.right, top + dp(30))
         }
         return RectF(panel.left + dp(18), panel.top + dp(284), panel.right - dp(18), panel.top + dp(318))
     }
 
     fun globe_bin_craft_source_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val left = compact_settings_left_column(panel)
-            return RectF(left.left, panel.top + dp(250), left.right, panel.top + dp(276))
+            val column = compact_settings_map_column(panel)
+            val top = if (is_wide_settings_hub_panel(panel)) panel.top + dp(138) else panel.top + dp(250)
+            return RectF(column.left, top, column.right, top + dp(30))
         }
         return RectF(panel.left + dp(18), panel.top + dp(324), panel.right - dp(18), panel.top + dp(358))
     }
 
     fun aviation_layers_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val left = compact_settings_left_column(panel)
-            return RectF(left.left, panel.top + dp(280), left.right, panel.top + dp(306))
+            val column = compact_settings_map_column(panel)
+            val top = if (is_wide_settings_hub_panel(panel)) panel.top + dp(174) else panel.top + dp(280)
+            return RectF(column.left, top, column.right, top + dp(30))
         }
         return RectF(panel.left + dp(18), panel.top + dp(364), panel.right - dp(18), panel.top + dp(398))
     }
 
     fun theme_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val left = compact_settings_left_column(panel)
-            return RectF(left.left, panel.top + dp(138), left.right, panel.top + dp(168))
+            val column = compact_settings_display_column(panel)
+            return RectF(column.left, panel.top + dp(138), column.right, panel.top + dp(168))
         }
         return RectF(panel.left + dp(18), panel.top + dp(168), panel.right - dp(18), panel.top + dp(202))
     }
 
     fun alerts_toggle_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val right = compact_settings_right_column(panel)
-            return RectF(right.left, panel.top + dp(66), right.right, panel.top + dp(96))
+            val column = compact_settings_safety_column(panel)
+            return RectF(column.left, panel.top + dp(66), column.right, panel.top + dp(96))
         }
         return RectF(panel.left + dp(18), panel.top + dp(452), panel.right - dp(18), panel.top + dp(486))
     }
@@ -198,16 +202,16 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
 
     fun priority_tracker_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val right = compact_settings_right_column(panel)
-            return RectF(right.left, panel.top + dp(102), right.right, panel.top + dp(132))
+            val column = compact_settings_safety_column(panel)
+            return RectF(column.left, panel.top + dp(102), column.right, panel.top + dp(132))
         }
         return RectF(panel.left + dp(18), panel.top + dp(492), panel.right - dp(18), panel.top + dp(526))
     }
 
     fun impact_methodology_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
-            val right = compact_settings_right_column(panel)
-            return RectF(right.left, panel.top + dp(166), right.right, panel.top + dp(196))
+            val column = compact_settings_safety_column(panel)
+            return RectF(column.left, panel.top + dp(166), column.right, panel.top + dp(196))
         }
         return RectF(panel.left + dp(18), panel.top + dp(580), panel.right - dp(18), panel.top + dp(614))
     }
@@ -393,7 +397,31 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
 
     // Compact settings means short landscape: use columns before shrinking text or clipping controls.
     fun is_compact_settings_panel(panel: RectF): Boolean {
-        return panel.width() > dp(620) && panel.height() < dp(380)
+        return panel.width() >= dp(520) && panel.height() < dp(380)
+    }
+
+    fun is_wide_settings_hub_panel(panel: RectF): Boolean {
+        return is_compact_settings_panel(panel) && panel.width() >= dp(760)
+    }
+
+    fun compact_settings_display_column(panel: RectF): RectF {
+        return if (is_wide_settings_hub_panel(panel)) compact_settings_hub_column(panel, 0) else compact_settings_left_column(panel)
+    }
+
+    fun compact_settings_map_column(panel: RectF): RectF {
+        return if (is_wide_settings_hub_panel(panel)) compact_settings_hub_column(panel, 1) else compact_settings_left_column(panel)
+    }
+
+    fun compact_settings_safety_column(panel: RectF): RectF {
+        return if (is_wide_settings_hub_panel(panel)) compact_settings_hub_column(panel, 2) else compact_settings_right_column(panel)
+    }
+
+    private fun compact_settings_hub_column(panel: RectF, index: Int): RectF {
+        val gap = dp(14)
+        val left = panel.left + dp(18)
+        val width = (panel.width() - dp(36) - gap * 2f) / 3f
+        val x = left + index.coerceIn(0, 2) * (width + gap)
+        return RectF(x, panel.top, x + width, panel.bottom)
     }
 
     fun compact_settings_left_column(panel: RectF): RectF {

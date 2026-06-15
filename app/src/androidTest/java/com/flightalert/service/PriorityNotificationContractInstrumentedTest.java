@@ -137,7 +137,8 @@ public class PriorityNotificationContractInstrumentedTest {
                 1.0,
                 extreme,
                 true,
-                extreme
+                extreme,
+                false
         );
     }
 }

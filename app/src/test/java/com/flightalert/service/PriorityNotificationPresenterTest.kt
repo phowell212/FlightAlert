@@ -37,11 +37,21 @@ class PriorityNotificationPresenterTest {
         assertTrue(body.endsWith("+1 more"))
     }
 
+    @Test
+    fun estimated_priority_notification_entries_are_labeled() {
+        val aircraft = alert_aircraft("EST1", "N-EST", altitude_feet = 1200.0, is_extreme = true, is_estimated_position = true)
+
+        val body = PriorityNotificationPresenter.notification_body(listOf(aircraft))
+
+        assertEquals("N-EST 1200 ft est.", body)
+    }
+
     private fun alert_aircraft(
         callsign: String,
         registration: String,
         altitude_feet: Double,
-        is_extreme: Boolean
+        is_extreme: Boolean,
+        is_estimated_position: Boolean = false
     ): AlertAircraft {
         return AlertAircraft(
             icao24 = callsign.lowercase(),
@@ -53,7 +63,8 @@ class PriorityNotificationPresenterTest {
             contact_age_seconds = 1.0,
             is_hazard = is_extreme,
             is_priority_range_aircraft = true,
-            is_extreme_priority = is_extreme
+            is_extreme_priority = is_extreme,
+            is_estimated_position = is_estimated_position
         )
     }
 }

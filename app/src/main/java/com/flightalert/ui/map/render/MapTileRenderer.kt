@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
+import com.flightalert.ui.map.ReferenceTileOverlay
 import com.flightalert.ui.map.Viewport
 import com.flightalert.ui.map.TileSource
 import java.io.File
@@ -16,6 +17,12 @@ import java.net.URL
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -23,9 +30,11 @@ import kotlin.math.roundToInt
 data class MapTileRenderState(
     val map_source: TileSource,
     val map_labels_enabled: Boolean,
-    val user_agent: String
+    val user_agent: String,
+    val interaction_active: Boolean = false
 ) {
     val cache_key: String = map_source.cache_key(map_labels_enabled)
+    val reference_overlay_layers: List<ReferenceTileOverlay> = map_source.reference_overlay_layers(map_labels_enabled)
 }
 
 data class MapTileRenderStyle(
@@ -42,6 +51,30 @@ private data class InterimRasterTile(
     val bitmap: Bitmap,
     var last_used_ms: Long
 )
+
+private enum class MapTileRequestPriority(val rank: Int) {
+    VISIBLE_EXACT(0),
+    VISIBLE_PARENT_FALLBACK(1),
+    VISIBLE_CHILD_PREFETCH(2),
+    VISIBLE_REFERENCE_PARENT_FALLBACK(3),
+    VISIBLE_REFERENCE_OVERLAY(4),
+    BUFFER_EXACT(5),
+    BUFFER_PARENT_FALLBACK(6),
+    REFERENCE_CHILD_PREFETCH(7)
+}
+
+private class PriorityTileRequest(
+    private val priority: MapTileRequestPriority,
+    private val sequence: Long,
+    private val work: () -> Unit
+) : Runnable, Comparable<PriorityTileRequest> {
+    override fun run() = work()
+
+    override fun compareTo(other: PriorityTileRequest): Int {
+        val priority_delta = priority.rank.compareTo(other.priority.rank)
+        return if (priority_delta != 0) priority_delta else sequence.compareTo(other.sequence)
+    }
+}
 
 private class VisibleMapTile {
     var z: Int = 0
@@ -89,7 +122,25 @@ class MapTileRenderer(
     private val tile_cache = LinkedHashMap<String, Bitmap>(MAX_MEMORY_TILES, 0.75f, true)
     private val tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
     private val interim_tiles = linkedMapOf<String, InterimRasterTile>()
-    private val requested_tiles = mutableSetOf<String>()
+    private val requested_tiles_lock = Any()
+    private val requested_tile_versions = mutableMapOf<String, Long>()
+    private val requested_tile_priorities = mutableMapOf<String, Int>()
+    private val tile_request_sequence = AtomicLong()
+    private val tile_request_worker_id = AtomicInteger()
+    private val tile_executor = ThreadPoolExecutor(
+        TILE_NETWORK_THREADS,
+        TILE_NETWORK_THREADS,
+        TILE_WORKER_KEEP_ALIVE_MS,
+        TimeUnit.MILLISECONDS,
+        PriorityBlockingQueue<Runnable>(),
+        ThreadFactory { runnable ->
+            Thread(runnable, "flightalert-map-tile-${tile_request_worker_id.incrementAndGet()}").apply {
+                isDaemon = true
+            }
+        }
+    ).apply {
+        allowCoreThreadTimeOut(true)
+    }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val tile_destination = RectF()
     private val interim_destination = RectF()
@@ -99,6 +150,11 @@ class MapTileRenderer(
     private val visible_tile_buffer = ArrayList<VisibleMapTile>(64)
     private val visible_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
     private val satellite_child_bitmap_buffer = ArrayList<Bitmap>(4)
+    private val tile_decode_options = ThreadLocal.withInitial {
+        BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+    }
     private var visible_tile_count = 0
     private var transition_cache_key: String? = null
     private var transition_map_source: TileSource? = null
@@ -124,6 +180,13 @@ class MapTileRenderer(
         val top_world = viewport.center_y - viewport.height / 2.0
         val tile_zoom = viewport.zoom.toInt().coerceIn(MIN_ZOOM, state.map_source.max_native_zoom)
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val allow_speculative_tile_requests = !state.interaction_active
+        val satellite_child_prefetch_ready = state.map_source == TileSource.SATELLITE &&
+            viewport.zoom - tile_zoom >= SATELLITE_CHILD_PREFETCH_MIN_FRACTION
+        val prefetch_satellite_child_tiles = satellite_child_prefetch_ready && allow_speculative_tile_requests
+        val prefetch_satellite_center_child_tiles = satellite_child_prefetch_ready && state.interaction_active
+        val viewport_center_x = viewport.width * 0.5f
+        val viewport_center_y = viewport.height * 0.5f
         val tile_world_scale = 1.0 / tile_to_viewport_scale
         val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
         val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt()
@@ -131,8 +194,7 @@ class MapTileRenderer(
         val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
         update_tile_zoom_transition(tile_zoom, state, now_ms)
-        request_satellite_buffer_tiles(tile_zoom, first_tile_x, last_tile_x, first_tile_y, last_tile_y, max_tile, state, now_ms)
-        val interim_available = collect_visible_interim_tiles(viewport, state, now_ms)
+        val interim_available = collect_visible_interim_tiles(viewport, state.cache_key, now_ms)
         loaded_interim_tile_buffer.clear()
         visible_tile_count = 0
         var loaded = 0
@@ -160,8 +222,23 @@ class MapTileRenderer(
                     loaded++
                 } else {
                     requested++
+                    request_tile(tile_zoom, tx, ty, key, state, priority = MapTileRequestPriority.VISIBLE_EXACT)
                     request_parent_tiles(tile_zoom, tx, ty, state)
-                    request_tile(tile_zoom, tx, ty, key, state)
+                }
+                if (
+                    prefetch_satellite_child_tiles ||
+                    (
+                        prefetch_satellite_center_child_tiles &&
+                            tile_contains_screen_point(
+                                screen_x = screen_x,
+                                screen_y = screen_y,
+                                tile_size = tile_size_on_screen,
+                                x = viewport_center_x,
+                                y = viewport_center_y
+                            )
+                        )
+                ) {
+                    request_child_tiles(tile_zoom, tx, ty, state)
                 }
                 visible_tile_item(visible_tile_count).set(
                     z = tile_zoom,
@@ -176,9 +253,17 @@ class MapTileRenderer(
                 visible_tile_count++
             }
         }
+        if (allow_speculative_tile_requests) {
+            request_satellite_buffer_tiles(tile_zoom, first_tile_x, last_tile_x, first_tile_y, last_tile_y, max_tile, state, now_ms)
+        }
 
-        val keep_interim_on_top = interim_available && requested > 0
-        if (!keep_interim_on_top) {
+        val interim_top_zoom = if (interim_available && requested > 0) {
+            coherent_interim_zoom_for_viewport(viewport)
+        } else {
+            null
+        }
+        val keep_interim_on_top = interim_top_zoom != null
+        if (interim_available && !keep_interim_on_top) {
             draw_visible_interim_tiles(canvas, viewport, now_ms)
         }
 
@@ -203,19 +288,21 @@ class MapTileRenderer(
                         key = tile.key,
                         state = state,
                         now_ms = now_ms,
-                        allow_alpha_without_tile_fallback = interim_available && !keep_interim_on_top
+                        allow_alpha_without_tile_fallback = interim_available && !keep_interim_on_top,
+                        interaction_active = state.interaction_active
                     )
                 ) {
                     needs_transition_redraw = true
                 }
-            } else if (!draw_tile_fallback(canvas, tile.z, tile.x, tile.y, state, tile_destination)) {
+            } else if (!draw_tile_fallback(canvas, tile.z, tile.x, tile.y, state.cache_key, state.map_source.max_native_zoom, tile_destination)) {
                 draw_unavailable_tile(canvas, tile.screen_x, tile.screen_y, tile.tile_size_on_screen, style)
             }
         }
 
         if (keep_interim_on_top) {
-            draw_visible_interim_tiles(canvas, viewport, now_ms)
+            draw_visible_interim_tiles(canvas, viewport, now_ms, interim_top_zoom)
         }
+        draw_reference_overlay_tiles(canvas, viewport, state, now_ms)
 
         if (requested == 0 && loaded_interim_tile_buffer.isNotEmpty()) {
             replace_interim_tiles(loaded_interim_tile_buffer)
@@ -225,12 +312,153 @@ class MapTileRenderer(
         visible_interim_tile_buffer.clear()
         if (needs_transition_redraw) request_redraw()
 
-        val label_note = if (state.map_source == TileSource.STREET && !state.map_labels_enabled) " no-label" else ""
+        val label_note = when {
+            state.map_source == TileSource.STREET && !state.map_labels_enabled -> " no-label"
+            state.reference_overlay_layers.isNotEmpty() -> " with labels"
+            else -> ""
+        }
         return if (requested == 0 && loaded > 0) {
             "${state.map_source.display_name}$label_note loaded"
         } else {
             "Loading ${state.map_source.display_name.lowercase(Locale.US)}$label_note tiles"
         }
+    }
+
+    private fun draw_reference_overlay_tiles(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: MapTileRenderState,
+        now_ms: Long
+    ) {
+        if (state.reference_overlay_layers.isEmpty()) return
+        state.reference_overlay_layers.forEach { overlay ->
+            draw_reference_overlay_layer(canvas, viewport, state, now_ms, overlay)
+        }
+    }
+
+    private fun draw_reference_overlay_layer(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: MapTileRenderState,
+        now_ms: Long,
+        overlay: ReferenceTileOverlay
+    ) {
+        val overlay_cache_key = overlay.cache_key
+        for (index in 0 until visible_tile_count) {
+            val tile = visible_tile_buffer[index]
+            val overlay_key = "$overlay_cache_key/${tile.z}/${tile.x}/${tile.y}"
+            val bitmap = tile_bitmap(tile.z, tile.x, tile.y, overlay_key, state, overlay_cache_key)
+            tile_destination.set(
+                tile.screen_x,
+                tile.screen_y,
+                tile.screen_x + tile.tile_size_on_screen,
+                tile.screen_y + tile.tile_size_on_screen
+            )
+            if (bitmap != null) {
+                loaded_interim_tile_buffer += InterimRasterTile(
+                    cache_key = overlay_cache_key,
+                    z = tile.z,
+                    x = tile.x,
+                    y = tile.y,
+                    bitmap = bitmap,
+                    last_used_ms = now_ms
+                )
+                draw_reference_overlay_bitmap(
+                    canvas = canvas,
+                    bitmap = bitmap,
+                    destination = tile_destination,
+                    z = tile.z,
+                    x = tile.x,
+                    y = tile.y,
+                    key = overlay_key,
+                    cache_key = overlay_cache_key,
+                    max_native_zoom = state.map_source.max_native_zoom,
+                    now_ms = now_ms,
+                    interaction_active = state.interaction_active
+                )
+            } else {
+                val drew_fallback = draw_retained_exact_tile(
+                    canvas = canvas,
+                    key = overlay_key,
+                    destination = tile_destination,
+                    now_ms = now_ms
+                ) || draw_tile_fallback(
+                    canvas = canvas,
+                    z = tile.z,
+                    x = tile.x,
+                    y = tile.y,
+                    cache_key = overlay_cache_key,
+                    max_native_zoom = state.map_source.max_native_zoom,
+                    destination = tile_destination
+                )
+                if (!drew_fallback) {
+                    request_parent_tiles(
+                        z = tile.z,
+                        x = tile.x,
+                        y = tile.y,
+                        state = state,
+                        cache_key = overlay_cache_key,
+                        url_for_tile = { z, x, y -> overlay.tile_url(z, x, y) },
+                        priority = MapTileRequestPriority.VISIBLE_REFERENCE_PARENT_FALLBACK
+                    )
+                }
+                request_tile(
+                    z = tile.z,
+                    x = tile.x,
+                    y = tile.y,
+                    key = overlay_key,
+                    state = state,
+                    cache_key = overlay_cache_key,
+                    url_override = overlay.tile_url(tile.z, tile.x, tile.y),
+                    priority = MapTileRequestPriority.VISIBLE_REFERENCE_OVERLAY
+                )
+                if (!state.interaction_active && viewport.zoom - tile.z >= SATELLITE_CHILD_PREFETCH_MIN_FRACTION) {
+                    request_child_tiles(
+                        z = tile.z,
+                        x = tile.x,
+                        y = tile.y,
+                        state = state,
+                        cache_key = overlay_cache_key,
+                        url_for_tile = { z, x, y -> overlay.tile_url(z, x, y) },
+                        priority = MapTileRequestPriority.REFERENCE_CHILD_PREFETCH
+                    )
+                }
+            }
+        }
+    }
+
+    private fun draw_reference_overlay_bitmap(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        destination: RectF,
+        z: Int,
+        x: Int,
+        y: Int,
+        key: String,
+        cache_key: String,
+        max_native_zoom: Int,
+        now_ms: Long,
+        interaction_active: Boolean
+    ) {
+        val alpha = satellite_tile_alpha(key, now_ms, interaction_active)
+        if (alpha < 0.999f) {
+            val drew_fallback = draw_tile_fallback(canvas, z, x, y, cache_key, max_native_zoom, destination)
+            draw_tile_bitmap(canvas, bitmap, null, destination, if (drew_fallback) alpha else 1f)
+            return
+        }
+        draw_tile_bitmap(canvas, bitmap, null, destination, 1f)
+    }
+
+    private fun draw_retained_exact_tile(
+        canvas: Canvas,
+        key: String,
+        destination: RectF,
+        now_ms: Long
+    ): Boolean {
+        val tile = interim_tiles[key] ?: return false
+        draw_tile_bitmap(canvas, tile.bitmap, null, destination, 1f)
+        tile.last_used_ms = now_ms
+        return true
     }
 
     private fun visible_tile_item(index: Int): VisibleMapTile {
@@ -253,7 +481,10 @@ class MapTileRenderer(
             tile_loaded_elapsed_ms.clear()
         }
         interim_tiles.clear()
-        synchronized(requested_tiles) { requested_tiles.clear() }
+        synchronized(requested_tiles_lock) {
+            requested_tile_versions.clear()
+            requested_tile_priorities.clear()
+        }
         transition_cache_key = null
         transition_map_source = null
         current_tile_zoom = Int.MIN_VALUE
@@ -273,12 +504,55 @@ class MapTileRenderer(
         last_satellite_buffer_request_ms = 0L
     }
 
-    // Memory cache is first, disk cache second, and network last.
-    private fun tile_bitmap(z: Int, x: Int, y: Int, key: String, state: MapTileRenderState): Bitmap? {
+    fun shutdown() {
+        tile_executor.shutdownNow()
+    }
+
+    // Memory cache is first. Visible tiles may synchronously decode fresh disk-cache hits so real cached imagery
+    // does not blank while the async request path catches up.
+    private fun tile_bitmap(
+        z: Int,
+        x: Int,
+        y: Int,
+        key: String,
+        state: MapTileRenderState,
+        cache_key: String = state.cache_key,
+        allow_disk_decode: Boolean = true
+    ): Bitmap? {
+        return tile_bitmap_for_cache_key(z, x, y, key, cache_key, allow_disk_decode)
+    }
+
+    private fun tile_bitmap_for_cache_key(
+        z: Int,
+        x: Int,
+        y: Int,
+        key: String,
+        cache_key: String,
+        allow_disk_decode: Boolean = true
+    ): Bitmap? {
+        memory_tile_bitmap(key)?.let { return it }
+        if (!allow_disk_decode) return null
+        val file = tile_file(z, x, y, cache_key)
+        if (!is_fresh_tile_file(file)) return null
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options()) ?: return null
         synchronized(tile_cache) {
-            tile_cache[key]?.let { return it }
+            tile_cache[key]?.let { existing ->
+                if (existing !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+                return existing
+            }
+            put_tile_in_memory(key, bitmap)
         }
-        return null
+        return bitmap
+    }
+
+    private fun memory_tile_bitmap(key: String): Bitmap? {
+        return synchronized(tile_cache) { tile_cache[key] }
+    }
+
+    private fun is_fresh_tile_file(file: File): Boolean {
+        return file.exists() &&
+            file.length() > 0L &&
+            System.currentTimeMillis() - file.lastModified() < TILE_CACHE_MAX_AGE_MS
     }
 
     private fun draw_loaded_tile(
@@ -291,15 +565,16 @@ class MapTileRenderer(
         key: String,
         state: MapTileRenderState,
         now_ms: Long,
-        allow_alpha_without_tile_fallback: Boolean = false
+        allow_alpha_without_tile_fallback: Boolean = false,
+        interaction_active: Boolean = false
     ): Boolean {
         if (state.map_source != TileSource.SATELLITE) {
             draw_tile_bitmap(canvas, bitmap, null, destination, 1f)
             return false
         }
-        val alpha = satellite_tile_alpha(key, now_ms)
+        val alpha = satellite_tile_alpha(key, now_ms, interaction_active)
         if (alpha < 0.999f) {
-            if (draw_tile_fallback(canvas, z, x, y, state, destination)) {
+            if (draw_tile_fallback(canvas, z, x, y, state.cache_key, state.map_source.max_native_zoom, destination)) {
                 draw_tile_bitmap(canvas, bitmap, null, destination, alpha)
                 return true
             }
@@ -321,13 +596,13 @@ class MapTileRenderer(
 
     private fun collect_visible_interim_tiles(
         viewport: Viewport,
-        state: MapTileRenderState,
+        cache_key: String,
         now_ms: Long
     ): Boolean {
         prune_interim_tiles(now_ms)
         visible_interim_tile_buffer.clear()
         for (tile in interim_tiles.values) {
-            if (tile.cache_key != state.cache_key) continue
+            if (tile.cache_key != cache_key) continue
             if (!interim_tile_intersects_viewport(tile, viewport)) continue
             visible_interim_tile_buffer += tile
         }
@@ -342,12 +617,70 @@ class MapTileRenderer(
     private fun draw_visible_interim_tiles(
         canvas: Canvas,
         viewport: Viewport,
-        now_ms: Long
+        now_ms: Long,
+        zoom_filter: Int? = null
     ) {
         for (tile in visible_interim_tile_buffer) {
+            if (zoom_filter != null && tile.z != zoom_filter) continue
             draw_interim_tile(canvas, tile, viewport)
             tile.last_used_ms = now_ms
         }
+    }
+
+    private fun coherent_interim_zoom_for_viewport(viewport: Viewport): Int? {
+        if (visible_interim_tile_buffer.isEmpty()) return null
+        var previous_zoom = Int.MIN_VALUE
+        for (index in visible_interim_tile_buffer.size - 1 downTo 0) {
+            val zoom = visible_interim_tile_buffer[index].z
+            if (zoom == previous_zoom) continue
+            previous_zoom = zoom
+            if (interim_zoom_covers_viewport(viewport, zoom)) return zoom
+        }
+        return null
+    }
+
+    private fun interim_zoom_covers_viewport(viewport: Viewport, zoom: Int): Boolean {
+        for (row in 0 until INTERIM_COVERAGE_SAMPLE_ROWS) {
+            val y = if (INTERIM_COVERAGE_SAMPLE_ROWS == 1) {
+                viewport.height * 0.5f
+            } else {
+                viewport.height * row / (INTERIM_COVERAGE_SAMPLE_ROWS - 1).toFloat()
+            }
+            for (column in 0 until INTERIM_COVERAGE_SAMPLE_COLUMNS) {
+                val x = if (INTERIM_COVERAGE_SAMPLE_COLUMNS == 1) {
+                    viewport.width * 0.5f
+                } else {
+                    viewport.width * column / (INTERIM_COVERAGE_SAMPLE_COLUMNS - 1).toFloat()
+                }
+                if (!interim_zoom_covers_point(viewport, zoom, x, y)) return false
+            }
+        }
+        return true
+    }
+
+    private fun interim_zoom_covers_point(viewport: Viewport, zoom: Int, x: Float, y: Float): Boolean {
+        for (index in visible_interim_tile_buffer.size - 1 downTo 0) {
+            val tile = visible_interim_tile_buffer[index]
+            if (tile.z != zoom) continue
+            if (interim_tile_covers_point(tile, viewport, x, y)) return true
+        }
+        return false
+    }
+
+    private fun interim_tile_covers_point(tile: InterimRasterTile, viewport: Viewport, x: Float, y: Float): Boolean {
+        val scale = 2.0.pow(viewport.zoom - tile.z)
+        val tile_size_on_screen = (TILE_SIZE * scale).toFloat()
+        val tile_world_width_at_zoom = TILE_SIZE * 2.0.pow(viewport.zoom)
+        val base_screen_x = (tile.x * TILE_SIZE * scale - viewport.center_x + viewport.width / 2.0).toFloat()
+        val screen_y = (tile.y * TILE_SIZE * scale - viewport.center_y + viewport.height / 2.0).toFloat()
+        if (y < screen_y || y > screen_y + tile_size_on_screen) return false
+        val repeat_start = floor((x - tile_size_on_screen - base_screen_x) / tile_world_width_at_zoom).toInt()
+        val repeat_end = floor((x - base_screen_x) / tile_world_width_at_zoom).toInt()
+        for (repeat in repeat_start..repeat_end) {
+            val screen_x = (base_screen_x + repeat * tile_world_width_at_zoom).toFloat()
+            if (x >= screen_x && x <= screen_x + tile_size_on_screen) return true
+        }
+        return false
     }
 
     private fun draw_interim_tile(canvas: Canvas, tile: InterimRasterTile, viewport: Viewport) {
@@ -390,6 +723,19 @@ class MapTileRenderer(
             rect.top <= viewport.height
     }
 
+    private fun tile_contains_screen_point(
+        screen_x: Float,
+        screen_y: Float,
+        tile_size: Float,
+        x: Float,
+        y: Float
+    ): Boolean {
+        return x >= screen_x &&
+            x <= screen_x + tile_size &&
+            y >= screen_y &&
+            y <= screen_y + tile_size
+    }
+
     private fun replace_interim_tiles(tiles: List<InterimRasterTile>) {
         for (tile in tiles) {
             val key = "${tile.cache_key}/${tile.z}/${tile.x}/${tile.y}"
@@ -421,13 +767,14 @@ class MapTileRenderer(
         z: Int,
         x: Int,
         y: Int,
-        state: MapTileRenderState,
+        cache_key: String,
+        max_native_zoom: Int,
         destination: RectF
     ): Boolean {
-        if (draw_parent_tile_fallback(canvas, z, x, y, state, destination)) {
+        if (draw_parent_tile_fallback(canvas, z, x, y, cache_key, destination)) {
             return true
         }
-        return draw_child_tile_fallback(canvas, z, x, y, state, destination)
+        return draw_child_tile_fallback(canvas, z, x, y, cache_key, max_native_zoom, destination)
     }
 
     // Real lower-zoom tiles keep the map continuous until the exact street/satellite tile arrives.
@@ -436,7 +783,7 @@ class MapTileRenderer(
         z: Int,
         x: Int,
         y: Int,
-        state: MapTileRenderState,
+        cache_key: String,
         destination: RectF
     ): Boolean {
         if (z <= MIN_ZOOM) return false
@@ -446,8 +793,8 @@ class MapTileRenderer(
             val scale = 1 shl delta
             val parent_x = x / scale
             val parent_y = y / scale
-            val parent_key = "${state.cache_key}/$fallback_z/$parent_x/$parent_y"
-            val bitmap = synchronized(tile_cache) { tile_cache[parent_key] }
+            val parent_key = "$cache_key/$fallback_z/$parent_x/$parent_y"
+            val bitmap = tile_bitmap_for_cache_key(fallback_z, parent_x, parent_y, parent_key, cache_key)
             if (bitmap != null) {
                 val src_width = (bitmap.width / scale).coerceAtLeast(1)
                 val src_height = (bitmap.height / scale).coerceAtLeast(1)
@@ -474,11 +821,12 @@ class MapTileRenderer(
         z: Int,
         x: Int,
         y: Int,
-        state: MapTileRenderState,
+        cache_key: String,
+        max_native_zoom: Int,
         destination: RectF
     ): Boolean {
-        if (z >= state.map_source.max_native_zoom) return false
-        val max_delta = (state.map_source.max_native_zoom - z).coerceAtMost(CHILD_FALLBACK_MAX_DELTA)
+        if (z >= max_native_zoom) return false
+        val max_delta = (max_native_zoom - z).coerceAtMost(CHILD_FALLBACK_MAX_DELTA)
         for (delta in 1..max_delta) {
             val child_z = z + delta
             val scale = 1 shl delta
@@ -494,8 +842,8 @@ class MapTileRenderer(
                 for (child_x_offset in 0 until scale) {
                     val child_x_raw = x * scale + child_x_offset
                     val child_x = ((child_x_raw % max_child_tile) + max_child_tile) % max_child_tile
-                    val child_key = "${state.cache_key}/$child_z/$child_x/$child_y"
-                    val bitmap = synchronized(tile_cache) { tile_cache[child_key] }
+                    val child_key = "$cache_key/$child_z/$child_x/$child_y"
+                    val bitmap = memory_tile_bitmap(child_key)
                     if (bitmap == null) {
                         missing_child = true
                         break
@@ -562,13 +910,21 @@ class MapTileRenderer(
                 if (ty in first_tile_y..last_tile_y && tx_raw in first_tile_x..last_tile_x) continue
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
-                request_tile(tile_zoom, tx, ty, key, state)
-                request_parent_tiles(tile_zoom, tx, ty, state)
+                request_tile(tile_zoom, tx, ty, key, state, priority = MapTileRequestPriority.BUFFER_EXACT)
+                request_parent_tiles(tile_zoom, tx, ty, state, priority = MapTileRequestPriority.BUFFER_PARENT_FALLBACK)
             }
         }
     }
 
-    private fun request_parent_tiles(z: Int, x: Int, y: Int, state: MapTileRenderState) {
+    private fun request_parent_tiles(
+        z: Int,
+        x: Int,
+        y: Int,
+        state: MapTileRenderState,
+        cache_key: String = state.cache_key,
+        url_for_tile: ((Int, Int, Int) -> String?)? = null,
+        priority: MapTileRequestPriority = MapTileRequestPriority.VISIBLE_PARENT_FALLBACK
+    ) {
         if (z <= MIN_ZOOM) return
         val max_depth = (z - MIN_ZOOM).coerceAtMost(SATELLITE_PARENT_REQUEST_DEPTH)
         for (depth in 1..max_depth) {
@@ -576,34 +932,93 @@ class MapTileRenderer(
             val scale = 1 shl depth
             val parent_x = x / scale
             val parent_y = y / scale
-            val parent_key = "${state.cache_key}/$parent_z/$parent_x/$parent_y"
-            if (tile_bitmap(parent_z, parent_x, parent_y, parent_key, state) == null) {
-                request_tile(parent_z, parent_x, parent_y, parent_key, state)
+            val parent_key = "$cache_key/$parent_z/$parent_x/$parent_y"
+            if (tile_bitmap(parent_z, parent_x, parent_y, parent_key, state, cache_key) == null) {
+                request_tile(
+                    z = parent_z,
+                    x = parent_x,
+                    y = parent_y,
+                    key = parent_key,
+                    state = state,
+                    cache_key = cache_key,
+                    url_override = url_for_tile?.invoke(parent_z, parent_x, parent_y),
+                    priority = priority
+                )
+            }
+        }
+    }
+
+    private fun request_child_tiles(
+        z: Int,
+        x: Int,
+        y: Int,
+        state: MapTileRenderState,
+        cache_key: String = state.cache_key,
+        url_for_tile: ((Int, Int, Int) -> String?)? = null,
+        priority: MapTileRequestPriority = MapTileRequestPriority.VISIBLE_CHILD_PREFETCH
+    ) {
+        if (state.map_source != TileSource.SATELLITE || z >= state.map_source.max_native_zoom) return
+        val child_z = z + 1
+        val max_child_tile = 1 shl child_z
+        for (child_y_offset in 0..1) {
+            val child_y = y * 2 + child_y_offset
+            if (child_y !in 0 until max_child_tile) continue
+            for (child_x_offset in 0..1) {
+                val child_x_raw = x * 2 + child_x_offset
+                val child_x = ((child_x_raw % max_child_tile) + max_child_tile) % max_child_tile
+                val child_key = "$cache_key/$child_z/$child_x/$child_y"
+                request_tile(
+                    z = child_z,
+                    x = child_x,
+                    y = child_y,
+                    key = child_key,
+                    state = state,
+                    cache_key = cache_key,
+                    url_override = url_for_tile?.invoke(child_z, child_x, child_y),
+                    priority = priority
+                )
             }
         }
     }
 
     // Download one HTTPS tile off the UI thread, then redraw when real bitmap data is available.
-    private fun request_tile(z: Int, x: Int, y: Int, key: String, state: MapTileRenderState) {
-        if (tile_bitmap(z, x, y, key, state) != null) return
-        synchronized(requested_tiles) {
-            if (requested_tiles.contains(key)) return
-            requested_tiles += key
+    private fun request_tile(
+        z: Int,
+        x: Int,
+        y: Int,
+        key: String,
+        state: MapTileRenderState,
+        cache_key: String = state.cache_key,
+        url_override: String? = null,
+        priority: MapTileRequestPriority = MapTileRequestPriority.VISIBLE_EXACT
+    ) {
+        if (tile_bitmap(z, x, y, key, state, cache_key) != null) return
+        val request_version = tile_request_sequence.incrementAndGet()
+        synchronized(requested_tiles_lock) {
+            val existing_priority = requested_tile_priorities[key]
+            if (existing_priority != null && existing_priority <= priority.rank) return
+            requested_tile_priorities[key] = priority.rank
+            requested_tile_versions[key] = request_version
         }
-        executor.execute {
+        tile_executor.execute(PriorityTileRequest(priority, request_version) {
+            synchronized(requested_tiles_lock) {
+                if (requested_tile_versions[key] != request_version) return@PriorityTileRequest
+            }
             var connection: HttpURLConnection? = null
+            var redrew_when_loaded = false
             try {
-                val file = tile_file(z, x, y, state)
+                val file = tile_file(z, x, y, cache_key)
                 if (file.exists() && file.length() > 0L && System.currentTimeMillis() - file.lastModified() < TILE_CACHE_MAX_AGE_MS) {
-                    val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+                    val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options())
                     if (bitmap != null) {
                         synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
-                        return@execute
+                        return@PriorityTileRequest
                     }
                 }
-                val url = https_url(state.map_source.tile_url(z, x, y, state.map_labels_enabled)) ?: run {
+                val url_value = url_override ?: state.map_source.tile_url(z, x, y, state.map_labels_enabled)
+                val url = https_url(url_value) ?: run {
                     report_status("Map tiles unavailable")
-                    return@execute
+                    return@PriorityTileRequest
                 }
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 8000
@@ -613,11 +1028,13 @@ class MapTileRenderer(
                 }
                 if (connection.responseCode == HttpURLConnection.HTTP_OK) {
                     val bytes = connection.inputStream.use { it.readBytes() }
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decode_options())
                     if (bitmap != null) {
+                        synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
+                        redrew_when_loaded = true
+                        request_redraw()
                         file.parentFile?.mkdirs()
                         file.writeBytes(bytes)
-                        synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
                     }
                 } else {
                     connection.errorStream?.close()
@@ -627,10 +1044,15 @@ class MapTileRenderer(
                 report_status("Map network unavailable")
             } finally {
                 connection?.disconnect()
-                synchronized(requested_tiles) { requested_tiles -= key }
-                request_redraw()
+                synchronized(requested_tiles_lock) {
+                    if (requested_tile_versions[key] == request_version) {
+                        requested_tile_versions.remove(key)
+                        requested_tile_priorities.remove(key)
+                    }
+                }
+                if (!redrew_when_loaded) request_redraw()
             }
-        }
+        })
     }
 
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
@@ -661,7 +1083,7 @@ class MapTileRenderer(
         }
     }
 
-    private fun satellite_tile_alpha(key: String, now_ms: Long): Float {
+    private fun satellite_tile_alpha(key: String, now_ms: Long, interaction_active: Boolean): Float {
         val loaded_at = tile_loaded_elapsed_ms[key] ?: 0L
         val load_alpha = if (loaded_at > 0L) {
             smooth_step(0f, 1f, ((now_ms - loaded_at).coerceAtLeast(0L).toFloat() / SATELLITE_TILE_FADE_MS))
@@ -681,8 +1103,19 @@ class MapTileRenderer(
         return t * t * (3f - 2f * t)
     }
 
-    private fun tile_file(z: Int, x: Int, y: Int, state: MapTileRenderState): File {
-        return File(context.cacheDir, "${state.cache_key}_tiles/$z/$x/$y.png")
+    private fun tile_file(z: Int, x: Int, y: Int, cache_key: String): File {
+        return File(context.cacheDir, "${cache_key}_tiles/$z/$x/$y.png")
+    }
+
+    private fun decode_options(): BitmapFactory.Options {
+        val options = tile_decode_options.get() ?: BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            tile_decode_options.set(this)
+        }
+        options.inJustDecodeBounds = false
+        options.inBitmap = null
+        options.inSampleSize = 1
+        return options
     }
 
     // Fill missing tile space with a neutral unavailable tile while the real provider request is pending or failed.
@@ -712,8 +1145,13 @@ class MapTileRenderer(
         const val SATELLITE_REQUEST_TILE_BUFFER = 1
         const val SATELLITE_BUFFER_REQUEST_THROTTLE_MS = 180L
         const val SATELLITE_PARENT_REQUEST_DEPTH = 4
+        const val SATELLITE_CHILD_PREFETCH_MIN_FRACTION = 0.58
         const val CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
         const val SATELLITE_TILE_ZOOM_FADE_MS = 420f
+        const val INTERIM_COVERAGE_SAMPLE_COLUMNS = 5
+        const val INTERIM_COVERAGE_SAMPLE_ROWS = 4
+        const val TILE_NETWORK_THREADS = 6
+        const val TILE_WORKER_KEEP_ALIVE_MS = 15_000L
     }
 }

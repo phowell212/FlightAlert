@@ -3,13 +3,14 @@ package com.flightalert.perf;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
-import android.app.ActivityOptions;
 import android.app.Instrumentation;
 import android.content.Context;
 import android.content.Intent;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -26,8 +27,8 @@ import org.junit.runner.RunWith;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 
 @RunWith(AndroidJUnit4.class)
@@ -43,22 +44,21 @@ public class FlightMapGesturePerfTest {
             new MajorTrafficCity("Los Angeles", 33.94, -118.40),
             new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04),
             new MajorTrafficCity("Atlanta", 33.64, -84.43),
-            new MajorTrafficCity("Toronto", 43.68, -79.63),
             new MajorTrafficCity("Mexico City", 19.44, -99.07),
             new MajorTrafficCity("London", 51.47, -0.45),
-            new MajorTrafficCity("Paris", 49.01, 2.55),
-            new MajorTrafficCity("Amsterdam", 52.31, 4.77),
-            new MajorTrafficCity("Frankfurt", 50.04, 8.56),
-            new MajorTrafficCity("Madrid", 40.49, -3.57)
+            new MajorTrafficCity("Paris", 49.01, 2.55)
     };
     private static final MajorTrafficCity[] INLAND_TRAFFIC_CITIES = new MajorTrafficCity[] {
             new MajorTrafficCity("Chicago", 41.88, -87.63),
             new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04),
             new MajorTrafficCity("Atlanta", 33.64, -84.43),
-            new MajorTrafficCity("Frankfurt", 50.04, 8.56),
+            new MajorTrafficCity("Mexico City", 19.44, -99.07),
             new MajorTrafficCity("Paris", 49.01, 2.55)
     };
     private final java.util.ArrayList<Thread> scheduledCaptureThreads = new java.util.ArrayList<>();
+    private MajorTrafficCity currentPerfCity = null;
+    private double currentPerfZoom = Double.NaN;
+    private String currentPerfMapSource = "";
 
     @Test
     public void launchOnly() throws Exception {
@@ -71,10 +71,31 @@ public class FlightMapGesturePerfTest {
 
     @Test
     public void quickZoomJumpsOverTraffic() throws Exception {
+        runQuickZoomJumpsOverTraffic("STREET", "quickZoomJumpsOverTrafficStreet", true);
+    }
+
+    @Test
+    public void quickZoomJumpsOverTrafficSatellite() throws Exception {
+        runQuickZoomJumpsOverTraffic("SATELLITE", "quickZoomJumpsOverTrafficSatellite", true);
+    }
+
+    @Test
+    public void quickZoomJumpsOverTrafficStreetPerf() throws Exception {
+        runQuickZoomJumpsOverTraffic("STREET", "quickZoomJumpsOverTrafficStreetPerf", false);
+    }
+
+    @Test
+    public void quickZoomJumpsOverTrafficSatellitePerf() throws Exception {
+        runQuickZoomJumpsOverTraffic("SATELLITE", "quickZoomJumpsOverTrafficSatellitePerf", false);
+    }
+
+    private void runQuickZoomJumpsOverTraffic(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
         MajorTrafficCity city = randomInlandTrafficCity();
-        UiObject2 app = startAppAtMajorTraffic(city, 5.4);
+        UiObject2 app = startAppAtMajorTraffic(city, 5.4, mapSource);
         sleep(TRAFFIC_LOAD_WAIT_MS);
-        captureActiveDisplay("flightalert-perf-quickZoomJumpsOverTraffic-before.png");
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-before.png");
+        }
         warmUpZoom(app);
         clearPerfCounters();
 
@@ -100,36 +121,305 @@ public class FlightMapGesturePerfTest {
         }
         sleep(1200);
         requireFlightAlertForeground();
-        captureActiveDisplay("flightalert-perf-quickZoomJumpsOverTraffic.png");
-        capturePerfArtifacts("quickZoomJumpsOverTraffic");
+        capturePerfArtifacts(artifactName);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
     }
 
     @Test
     public void zoomLowToHighSweep() throws Exception {
+        runZoomLowToHighSweep("SATELLITE", "zoomLowToHighSweepSatellite");
+    }
+
+    @Test
+    public void zoomLowToHighSweepStreet() throws Exception {
+        runZoomLowToHighSweep("STREET", "zoomLowToHighSweepStreet");
+    }
+
+    @Test
+    public void morphTransitionSweepStreet() throws Exception {
+        runMorphTransitionSweep("STREET", "morphTransitionSweepStreet", true);
+    }
+
+    @Test
+    public void morphTransitionSweepSatellite() throws Exception {
+        runMorphTransitionSweep("SATELLITE", "morphTransitionSweepSatellite", true);
+    }
+
+    @Test
+    public void morphTransitionSweepStreetPerf() throws Exception {
+        runMorphTransitionSweep("STREET", "morphTransitionSweepStreetPerf", false);
+    }
+
+    @Test
+    public void morphTransitionSweepSatellitePerf() throws Exception {
+        runMorphTransitionSweep("SATELLITE", "morphTransitionSweepSatellitePerf", false);
+    }
+
+    @Test
+    public void countryScaleZoomContinuityStreet() throws Exception {
+        runCountryScaleZoomContinuity("STREET", "countryScaleZoomContinuityStreet", true);
+    }
+
+    @Test
+    public void countryScaleZoomContinuitySatellite() throws Exception {
+        runCountryScaleZoomContinuity("SATELLITE", "countryScaleZoomContinuitySatellite", true);
+    }
+
+    @Test
+    public void countryScaleZoomContinuityStreetPerf() throws Exception {
+        runCountryScaleZoomContinuity("STREET", "countryScaleZoomContinuityStreetPerf", false);
+    }
+
+    @Test
+    public void countryScaleZoomContinuitySatellitePerf() throws Exception {
+        runCountryScaleZoomContinuity("SATELLITE", "countryScaleZoomContinuitySatellitePerf", false);
+    }
+
+    @Test
+    public void wideScaleZoomContinuityStreet() throws Exception {
+        runWideScaleZoomContinuity("STREET", "wideScaleZoomContinuityStreet", true);
+    }
+
+    @Test
+    public void wideScaleZoomContinuitySatellite() throws Exception {
+        runWideScaleZoomContinuity("SATELLITE", "wideScaleZoomContinuitySatellite", true);
+    }
+
+    @Test
+    public void wideScaleZoomContinuityStreetPerf() throws Exception {
+        runWideScaleZoomContinuity("STREET", "wideScaleZoomContinuityStreetPerf", false);
+    }
+
+    @Test
+    public void wideScaleZoomContinuitySatellitePerf() throws Exception {
+        runWideScaleZoomContinuity("SATELLITE", "wideScaleZoomContinuitySatellitePerf", false);
+    }
+
+    @Test
+    public void closeScaleZoomContinuitySatellite() throws Exception {
+        runCloseScaleZoomContinuity("SATELLITE", "closeScaleZoomContinuitySatellite", true);
+    }
+
+    @Test
+    public void closeScaleZoomContinuitySatellitePerf() throws Exception {
+        runCloseScaleZoomContinuity("SATELLITE", "closeScaleZoomContinuitySatellitePerf", false);
+    }
+
+    private void runZoomLowToHighSweep(String mapSource, String artifactName) throws Exception {
         MajorTrafficCity city = randomInlandTrafficCity();
-        UiObject2 app = startAppAtMajorTraffic(city, 4.8, "SATELLITE");
+        UiObject2 app = startAppAtMajorTraffic(city, 4.8, mapSource);
         sleep(TRAFFIC_LOAD_WAIT_MS);
-        captureActiveDisplay("flightalert-perf-zoomLowToHighSweep-rest.png");
+        captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
         clearPerfCounters();
 
         for (int i = 0; i < 10; i++) {
-            if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-motion-start.png", 120);
-            if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-motion-active-out.png", 120);
+            if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-start.png", 120);
+            if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-out.png", 120);
             smoothPinchOpen(app);
             sleep(170);
         }
         sleep(900);
         for (int i = 0; i < 9; i++) {
-            if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-reverse-start.png", 120);
-            if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-zoomLowToHighSweep-motion-active-in.png", 120);
+            if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-reverse-start.png", 120);
+            if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-in.png", 120);
             smoothPinchClose(app);
             sleep(170);
         }
         sleep(1200);
         waitForScheduledCaptures();
         requireFlightAlertForeground();
-        captureActiveDisplay("flightalert-perf-zoomLowToHighSweep.png");
-        capturePerfArtifacts("zoomLowToHighSweep");
+        captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        capturePerfArtifacts(artifactName);
+    }
+
+    private void runMorphTransitionSweep(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
+        MajorTrafficCity city = new MajorTrafficCity("Chicago", 41.88, -87.63);
+        UiObject2 app = startAppAtMajorTraffic(city, 7.55, mapSource);
+        sleep(TRAFFIC_LOAD_WAIT_MS);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
+        }
+        clearPerfCounters();
+
+        for (int i = 0; i < 7; i++) {
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-start.png", 120);
+            if (captureScreenshots && i == 3) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-out.png", 120);
+            gentlePinchOpen(app);
+            sleep(150);
+        }
+        sleep(450);
+        for (int i = 0; i < 7; i++) {
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-reverse-start.png", 120);
+            if (captureScreenshots && i == 3) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-in.png", 120);
+            gentlePinchClose(app);
+            sleep(150);
+        }
+        sleep(900);
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
+        requireFlightAlertForeground();
+        capturePerfArtifacts(artifactName);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
+    }
+
+    private void runWideScaleZoomContinuity(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
+        MajorTrafficCity city = new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04);
+        UiObject2 app = startAppAtMajorTraffic(city, 3.25, mapSource, true);
+        sleep(TRAFFIC_LOAD_WAIT_MS);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
+        }
+        clearPerfCounters();
+
+        for (int i = 0; i < 4; i++) {
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-start.png", 120);
+            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-active.png", 120);
+            smoothPinchOpen(app);
+            sleep(170);
+        }
+        sleep(260);
+        for (int i = 0; i < 4; i++) {
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-start.png", 120);
+            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-active.png", 120);
+            smoothPinchClose(app);
+            sleep(170);
+        }
+        sleep(260);
+        for (int cycle = 0; cycle < 3; cycle++) {
+            if (captureScreenshots && cycle == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-start.png", 80);
+            if (captureScreenshots && cycle == 1) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-active.png", 80);
+            quickPinchOpen(app);
+            sleep(90);
+            quickPinchClose(app);
+            sleep(110);
+        }
+        sleep(900);
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
+        requireFlightAlertForeground();
+        capturePerfArtifacts(artifactName);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
+    }
+
+    private void runCountryScaleZoomContinuity(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
+        MajorTrafficCity city = randomMajorTrafficCity();
+        UiObject2 app = startAppAtMajorTraffic(city, 4.25, mapSource);
+        sleep(TRAFFIC_LOAD_WAIT_MS);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-continent-rest.png");
+        }
+        clearPerfCounters();
+
+        runZoomContinuityPhase(app, artifactName, "continent", 3, true, captureScreenshots);
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
+        requireFlightAlertForeground();
+        capturePerfArtifacts(artifactName + "-continent");
+
+        app = startAppAtMajorTraffic(city, 5.4, mapSource);
+        sleep(1400);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-country-rest.png");
+        }
+        clearPerfCounters();
+        runZoomContinuityPhase(app, artifactName, "country", 5, false, captureScreenshots);
+
+        sleep(900);
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
+        requireFlightAlertForeground();
+        capturePerfArtifacts(artifactName + "-country");
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
+    }
+
+    private void runZoomContinuityPhase(UiObject2 app, String artifactName, String scaleName, int smoothCycles, boolean zoomInFirst, boolean captureScreenshots) throws Exception {
+        for (int i = 0; i < 5; i++) {
+            if (i >= smoothCycles) break;
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-motion-start-a.png", 120);
+            if (captureScreenshots && i == Math.max(1, smoothCycles / 2)) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-motion-active-a.png", 120);
+            if (zoomInFirst) {
+                smoothPinchOpen(app);
+            } else {
+                smoothPinchClose(app);
+            }
+            sleep(150);
+        }
+        sleep(300);
+        for (int i = 0; i < 5; i++) {
+            if (i >= smoothCycles) break;
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-reverse-start-b.png", 120);
+            if (captureScreenshots && i == Math.max(1, smoothCycles / 2)) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-motion-active-b.png", 120);
+            if (zoomInFirst) {
+                smoothPinchClose(app);
+            } else {
+                smoothPinchOpen(app);
+            }
+            sleep(150);
+        }
+        sleep(250);
+        for (int cycle = 0; cycle < 3; cycle++) {
+            if (captureScreenshots && cycle == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-quick-start.png", 80);
+            if (captureScreenshots && cycle == 1) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-quick-active.png", 80);
+            quickPinchClose(app);
+            sleep(85);
+            quickPinchOpen(app);
+            sleep(95);
+        }
+        requireFlightAlertForeground();
+    }
+
+    private void runCloseScaleZoomContinuity(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
+        MajorTrafficCity city = randomInlandTrafficCity();
+        UiObject2 app = startAppAtMajorTraffic(city, 11.6, mapSource);
+        sleep(TRAFFIC_LOAD_WAIT_MS);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
+        }
+        clearPerfCounters();
+
+        for (int i = 0; i < 4; i++) {
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-start.png", 120);
+            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-active.png", 120);
+            smoothPinchOpen(app);
+            sleep(170);
+        }
+        sleep(300);
+        for (int i = 0; i < 5; i++) {
+            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-start.png", 120);
+            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-active.png", 120);
+            smoothPinchClose(app);
+            sleep(150);
+        }
+        sleep(240);
+        for (int cycle = 0; cycle < 3; cycle++) {
+            if (captureScreenshots && cycle == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-start.png", 80);
+            if (captureScreenshots && cycle == 1) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-active.png", 80);
+            quickPinchClose(app);
+            sleep(90);
+            quickPinchOpen(app);
+            sleep(110);
+        }
+        sleep(900);
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
+        requireFlightAlertForeground();
+        capturePerfArtifacts(artifactName);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
     }
 
     @Test
@@ -160,25 +450,67 @@ public class FlightMapGesturePerfTest {
     }
 
     private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom, String mapSource) throws Exception {
+        return startAppAtMajorTraffic(city, zoom, mapSource, false);
+    }
+
+    private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome) throws Exception {
         System.out.println("Testing major traffic city: " + city.name);
+        currentPerfCity = city;
+        currentPerfZoom = zoom;
+        currentPerfMapSource = mapSource == null ? "default" : mapSource;
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context context = instrumentation.getTargetContext();
+        grantFlightAlertPermissions();
         Intent intent = new Intent(context, MainActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra("com.flightalert.PERF_LAT", Double.toString(city.lat))
                 .putExtra("com.flightalert.PERF_LON", Double.toString(city.lon))
                 .putExtra("com.flightalert.PERF_ZOOM", Double.toString(zoom))
-                .putExtra("com.flightalert.PERF_CLEAR_SELECTION", true);
+                .putExtra("com.flightalert.PERF_MAP_LABELS_ENABLED", true)
+                .putExtra("com.flightalert.PERF_CLEAR_SELECTION", true)
+                .putExtra("com.flightalert.PERF_FOCUS_OPEN_MAP", true);
+        if (skipChrome) {
+            intent.putExtra("com.flightalert.PERF_SKIP_CHROME", "true");
+        }
         if (mapSource != null) {
             intent.putExtra("com.flightalert.PERF_MAP_SOURCE", mapSource);
         }
-        ActivityOptions options = ActivityOptions.makeBasic();
-        options.setLaunchDisplayId(0);
-        context.startActivity(intent, options.toBundle());
+        context.startActivity(intent);
         instrumentation.waitForIdleSync();
         acceptFlightAlertPermissionsIfPresent();
-        waitForFlightAlertForeground();
+        if (!waitForFlightAlertForeground(8000L)) {
+            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome);
+            instrumentation.waitForIdleSync();
+            acceptFlightAlertPermissionsIfPresent();
+            assertTrue("Refusing to run gestures outside Flight Alert. Foreground was:\n" + foregroundDiagnostic(), waitForFlightAlertForeground(8000L));
+        }
         return flightAlertRoot();
+    }
+
+    private void grantFlightAlertPermissions() throws Exception {
+        runShell("pm grant " + PACKAGE_NAME + " android.permission.ACCESS_FINE_LOCATION >/dev/null 2>&1 || true");
+        runShell("pm grant " + PACKAGE_NAME + " android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true");
+        runShell("pm grant " + PACKAGE_NAME + " android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true");
+        runShell("appops set " + PACKAGE_NAME + " ACCESS_FINE_LOCATION allow >/dev/null 2>&1 || true");
+        runShell("appops set " + PACKAGE_NAME + " ACCESS_COARSE_LOCATION allow >/dev/null 2>&1 || true");
+    }
+
+    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome) throws Exception {
+        StringBuilder command = new StringBuilder("am start -n ")
+                .append(PACKAGE_NAME).append("/.MainActivity")
+                .append(" --es com.flightalert.PERF_LAT ").append(city.lat)
+                .append(" --es com.flightalert.PERF_LON ").append(city.lon)
+                .append(" --es com.flightalert.PERF_ZOOM ").append(zoom)
+                .append(" --ez com.flightalert.PERF_MAP_LABELS_ENABLED true")
+                .append(" --ez com.flightalert.PERF_CLEAR_SELECTION true")
+                .append(" --ez com.flightalert.PERF_FOCUS_OPEN_MAP true");
+        if (skipChrome) {
+            command.append(" --es com.flightalert.PERF_SKIP_CHROME true");
+        }
+        if (mapSource != null) {
+            command.append(" --es com.flightalert.PERF_MAP_SOURCE ").append(mapSource);
+        }
+        runShell(command.toString());
     }
 
     private UiObject2 flightAlertRoot() throws Exception {
@@ -227,19 +559,152 @@ public class FlightMapGesturePerfTest {
     }
 
     private void quickPinchOpen(UiObject2 app) {
-        app.pinchOpen(0.72f, QUICK_PINCH_SPEED_PX_PER_SEC);
+        anchoredPinch(app, 0.72f, QUICK_PINCH_SPEED_PX_PER_SEC, true);
     }
 
     private void quickPinchClose(UiObject2 app) {
-        app.pinchClose(0.72f, QUICK_PINCH_SPEED_PX_PER_SEC);
+        anchoredPinch(app, 0.72f, QUICK_PINCH_SPEED_PX_PER_SEC, false);
     }
 
     private void smoothPinchOpen(UiObject2 app) {
-        app.pinchOpen(0.64f, SMOOTH_PINCH_SPEED_PX_PER_SEC);
+        anchoredPinch(app, 0.64f, SMOOTH_PINCH_SPEED_PX_PER_SEC, true);
     }
 
     private void smoothPinchClose(UiObject2 app) {
-        app.pinchClose(0.64f, SMOOTH_PINCH_SPEED_PX_PER_SEC);
+        anchoredPinch(app, 0.64f, SMOOTH_PINCH_SPEED_PX_PER_SEC, false);
+    }
+
+    private void gentlePinchOpen(UiObject2 app) {
+        anchoredPinch(app, 0.28f, SMOOTH_PINCH_SPEED_PX_PER_SEC, true);
+    }
+
+    private void gentlePinchClose(UiObject2 app) {
+        anchoredPinch(app, 0.28f, SMOOTH_PINCH_SPEED_PX_PER_SEC, false);
+    }
+
+    private void anchoredPinch(UiObject2 app, float percent, int speedPxPerSecond, boolean open) {
+        android.graphics.Rect bounds = app.getVisibleBounds();
+        android.graphics.Point focus = anchoredMapFocus(app, bounds);
+        float centerX = focus.x;
+        float centerY = focus.y;
+        float shortSide = Math.max(1f, Math.min(bounds.width(), bounds.height()));
+        float innerRadius = Math.max(42f, shortSide * 0.055f);
+        float outerRadius = Math.max(innerRadius + 48f, shortSide * percent * 0.42f);
+        float startRadius = open ? innerRadius : outerRadius;
+        float endRadius = open ? outerRadius : innerRadius;
+        int steps = anchoredPinchSteps(startRadius, endRadius, speedPxPerSecond);
+        long downTime = SystemClock.uptimeMillis();
+
+        MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[] {
+                pointerProperties(0),
+                pointerProperties(1)
+        };
+        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[] {
+                pointerCoords(centerX - startRadius, centerY),
+                pointerCoords(centerX + startRadius, centerY)
+        };
+        injectMotion(downTime, downTime, MotionEvent.ACTION_DOWN, properties, coords, 1);
+        injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_POINTER_DOWN | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT), properties, coords, 2);
+        for (int step = 1; step <= steps; step++) {
+            float t = step / (float) steps;
+            float eased = t * t * (3f - 2f * t);
+            float radius = startRadius + (endRadius - startRadius) * eased;
+            coords[0].x = centerX - radius;
+            coords[0].y = centerY;
+            coords[1].x = centerX + radius;
+            coords[1].y = centerY;
+            injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, properties, coords, 2);
+            sleep(8);
+        }
+        injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_POINTER_UP | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT), properties, coords, 2);
+        injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, properties, coords, 1);
+    }
+
+    private int anchoredPinchSteps(float startRadius, float endRadius, int speedPxPerSecond) {
+        float travel = Math.abs(endRadius - startRadius);
+        float durationMs = travel * 1000f / Math.max(1, speedPxPerSecond);
+        return Math.max(8, Math.min(42, Math.round(durationMs / 8f)));
+    }
+
+    private android.graphics.Point anchoredMapFocus(UiObject2 app, android.graphics.Rect bounds) {
+        float width = Math.max(1f, bounds.width());
+        float height = Math.max(1f, bounds.height());
+        float focusX;
+        float focusY;
+        if (width > height * 1.15f) {
+            float margin = dp(12f);
+            float infoWidth = Math.min(dp(360f), Math.max(dp(300f), width * 0.32f));
+            float infoLeft = width - margin - infoWidth;
+            float top = margin + dp(66f);
+            float bottom = height - dp(44f) - dp(14f);
+            focusX = infoLeft * 0.5f;
+            focusY = top + Math.max(1f, bottom - top) * 0.5f;
+        } else {
+            float margin = dp(12f);
+            float top = margin + dp(66f);
+            float panelHeight = Math.min(dp(176f), Math.max(dp(152f), height * 0.24f));
+            float bottom = height - margin - panelHeight - dp(12f);
+            focusX = width * 0.5f;
+            focusY = top + Math.max(1f, bottom - top) * 0.5f;
+        }
+        focusX = Math.max(bounds.left + dp(72f), Math.min(bounds.right - dp(72f), bounds.left + focusX));
+        focusY = Math.max(bounds.top + dp(72f), Math.min(bounds.bottom - dp(72f), bounds.top + focusY));
+        return new android.graphics.Point(Math.round(focusX), Math.round(focusY));
+    }
+
+    private float dp(float value) {
+        return value * InstrumentationRegistry.getInstrumentation()
+                .getTargetContext()
+                .getResources()
+                .getDisplayMetrics()
+                .density;
+    }
+
+    private MotionEvent.PointerProperties pointerProperties(int id) {
+        MotionEvent.PointerProperties properties = new MotionEvent.PointerProperties();
+        properties.id = id;
+        properties.toolType = MotionEvent.TOOL_TYPE_FINGER;
+        return properties;
+    }
+
+    private MotionEvent.PointerCoords pointerCoords(float x, float y) {
+        MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
+        coords.x = x;
+        coords.y = y;
+        coords.pressure = 1f;
+        coords.size = 1f;
+        return coords;
+    }
+
+    private void injectMotion(
+            long downTime,
+            long eventTime,
+            int action,
+            MotionEvent.PointerProperties[] properties,
+            MotionEvent.PointerCoords[] coords,
+            int pointerCount
+    ) {
+        MotionEvent event = MotionEvent.obtain(
+                downTime,
+                eventTime,
+                action,
+                pointerCount,
+                properties,
+                coords,
+                0,
+                0,
+                1f,
+                1f,
+                0,
+                0,
+                InputDevice.SOURCE_TOUCHSCREEN,
+                0
+        );
+        try {
+            InstrumentationRegistry.getInstrumentation().getUiAutomation().injectInputEvent(event, true);
+        } finally {
+            event.recycle();
+        }
     }
 
     private void panMajorCityCorridor(int steps) throws Exception {
@@ -300,21 +765,22 @@ public class FlightMapGesturePerfTest {
         runShell("dumpsys gfxinfo " + PACKAGE_NAME + " reset");
     }
 
-    private void waitForFlightAlertForeground() throws Exception {
-        long deadline = SystemClock.uptimeMillis() + 7000L;
+    private boolean waitForFlightAlertForeground(long timeoutMs) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
         while (SystemClock.uptimeMillis() < deadline) {
-            if (isFlightAlertForeground()) return;
+            acceptFlightAlertPermissionsIfPresent();
+            if (isFlightAlertForeground()) return true;
             sleep(120);
         }
-        requireFlightAlertForeground();
+        return false;
     }
 
     private void requireFlightAlertForeground() throws Exception {
-        assertTrue("Refusing to run gestures outside Flight Alert", isFlightAlertForeground());
+        assertTrue("Refusing to run gestures outside Flight Alert. Foreground was:\n" + foregroundDiagnostic(), isFlightAlertForeground());
     }
 
     private boolean isFlightAlertForeground() throws Exception {
-        String foreground = runShell("dumpsys activity activities") + "\n" + runShell("dumpsys window windows");
+        String foreground = foregroundDiagnostic();
         String fullActivityLine = PACKAGE_NAME + "/" + PACKAGE_NAME + ".MainActivity";
         String shortActivityLine = PACKAGE_NAME + "/.MainActivity";
         String[] lines = foreground.split("\\r?\\n");
@@ -329,6 +795,10 @@ public class FlightMapGesturePerfTest {
             }
         }
         return false;
+    }
+
+    private String foregroundDiagnostic() throws Exception {
+        return runShell("dumpsys activity activities") + "\n" + runShell("dumpsys window windows");
     }
 
     private void captureActiveDisplay(String fileName) throws Exception {
@@ -353,21 +823,88 @@ public class FlightMapGesturePerfTest {
     }
 
     private void capturePerfArtifacts(String testName) throws Exception {
-        writeExternalText("flightalert-perf-" + testName + "-gfxinfo.txt", runShell("dumpsys gfxinfo " + PACKAGE_NAME));
-        writeExternalText("flightalert-perf-" + testName + "-activity.txt", runShell("dumpsys activity activities"));
-        writeExternalText("flightalert-perf-" + testName + "-logcat.txt", runShell("logcat -d -t 3000"));
+        writeTextArtifact("flightalert-perf-" + testName + "-target.txt", currentPerfTargetDescription());
+        writeShellArtifact("flightalert-perf-" + testName + "-gfxinfo.txt", "dumpsys gfxinfo " + PACKAGE_NAME);
+        writeShellArtifact("flightalert-perf-" + testName + "-framestats.txt", "dumpsys gfxinfo " + PACKAGE_NAME + " framestats");
+        writeShellArtifact("flightalert-perf-" + testName + "-activity.txt", "dumpsys activity activities");
+        writeShellArtifact("flightalert-perf-" + testName + "-logcat.txt", "logcat -d -t 3000");
     }
 
-    private void writeExternalText(String fileName, String value) throws IOException {
-        File directory = InstrumentationRegistry.getInstrumentation().getTargetContext().getExternalFilesDir(null);
+    private String currentPerfTargetDescription() {
+        MajorTrafficCity city = currentPerfCity;
+        StringBuilder builder = new StringBuilder();
+        builder.append("city=").append(city == null ? "unknown" : city.name).append('\n');
+        builder.append("lat=").append(city == null ? "unknown" : city.lat).append('\n');
+        builder.append("lon=").append(city == null ? "unknown" : city.lon).append('\n');
+        builder.append("last_launch_zoom=").append(currentPerfZoom).append('\n');
+        builder.append("map_source=").append(currentPerfMapSource).append('\n');
+        builder.append("focus=open-map\n");
+        builder.append("scale_bands=continent,country\n");
+        return builder.toString();
+    }
+
+    private void writeShellArtifact(String fileName, String command) throws IOException {
+        writeTextArtifact(fileName, runShell(command));
+    }
+
+    private void writeTextArtifact(String fileName, String value) throws IOException {
+        Context targetContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        IOException durableFailure = null;
+        try {
+            File file = writeTextFile(new File("/sdcard/Download"), fileName, value);
+            System.out.println("Wrote artifact: " + file.getAbsolutePath());
+            return;
+        } catch (IOException e) {
+            durableFailure = e;
+        }
+        try {
+            File file = writeTextFile(new File("/sdcard"), fileName, value);
+            System.out.println("Wrote artifact: " + file.getAbsolutePath());
+            return;
+        } catch (IOException e) {
+            durableFailure.addSuppressed(e);
+        }
+
+        IOException appFailure = null;
+        File externalDirectory = targetContext.getExternalFilesDir(null);
+        if (externalDirectory != null) {
+            try {
+                File file = writeTextFile(externalDirectory, fileName, value);
+                System.out.println("Wrote artifact: " + file.getAbsolutePath());
+                return;
+            } catch (IOException e) {
+                appFailure = e;
+            }
+        } else {
+            appFailure = new IOException("External files directory is unavailable");
+        }
+
+        try {
+            File file = writeTextFile(targetContext.getFilesDir(), fileName, value);
+            System.out.println("Wrote artifact: " + file.getAbsolutePath());
+        } catch (IOException fallbackFailure) {
+            if (durableFailure != null) {
+                fallbackFailure.addSuppressed(durableFailure);
+            }
+            if (appFailure != null) {
+                fallbackFailure.addSuppressed(appFailure);
+            }
+            throw fallbackFailure;
+        }
+    }
+
+    private File writeTextFile(File directory, String fileName, String value) throws IOException {
         if (directory == null) {
-            throw new IOException("External files directory is unavailable");
+            throw new IOException("Artifact directory is unavailable");
+        }
+        if (!directory.exists() && !directory.mkdirs()) {
+            throw new IOException("Failed to create artifact directory: " + directory.getAbsolutePath());
         }
         File file = new File(directory, fileName);
         try (FileOutputStream output = new FileOutputStream(file)) {
             output.write(value.getBytes("UTF-8"));
         }
-        System.out.println("Wrote artifact: " + file.getAbsolutePath());
+        return file;
     }
 
     private MajorTrafficCity randomMajorTrafficCity() {

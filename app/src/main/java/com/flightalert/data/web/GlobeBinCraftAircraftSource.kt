@@ -129,6 +129,7 @@ class GlobeBinCraftAircraftSource(private val user_agent: String) {
 
     fun pause_inventory_extraction(duration_ms: Long) {
         if (!source_enabled || destroyed) return
+        if (duration_ms <= 0L) return
         extraction_paused_until_elapsed_ms = max(
             extraction_paused_until_elapsed_ms,
             SystemClock.elapsedRealtime() + duration_ms.coerceAtLeast(0L)
@@ -183,6 +184,7 @@ class GlobeBinCraftAircraftSource(private val user_agent: String) {
         }
         if (fetch_in_progress) return
         fetch_in_progress = true
+        val fetch_started_elapsed_ms = SystemClock.elapsedRealtime()
         try {
             parser_executor.execute {
                 val snapshot = inventory_client.fetch(viewport.bounds)
@@ -197,7 +199,6 @@ class GlobeBinCraftAircraftSource(private val user_agent: String) {
                         schedule_fetch(STARTUP_RETRY_MS)
                         return@post
                     }
-                    val previous = latest
                     val next = GlobeSnapshot(
                         aircraft = snapshot.aircraft,
                         epoch_sec = snapshot.epoch_sec,
@@ -206,18 +207,19 @@ class GlobeBinCraftAircraftSource(private val user_agent: String) {
                         viewport_generation = viewport.generation
                     )
                     latest = next
-                    val should_notify = previous == null ||
-                        previous.viewport_generation != next.viewport_generation ||
-                        (previous.aircraft.isEmpty() && next.aircraft.isNotEmpty()) ||
-                        (previous.partial_coverage && !next.partial_coverage)
                     Log.d(TAG, "Globe binCraft source: ${next.aircraft.size} aircraft, partial=${next.partial_coverage}")
-                    if (should_notify) on_snapshot_updated?.invoke()
-                    schedule_fetch(EXTRACT_INTERVAL_MS)
+                    on_snapshot_updated?.invoke()
+                    schedule_fetch(next_cadence_delay_ms(fetch_started_elapsed_ms))
                 }
             }
         } catch (_: RejectedExecutionException) {
             fetch_in_progress = false
         }
+    }
+
+    private fun next_cadence_delay_ms(fetch_started_elapsed_ms: Long): Long {
+        val elapsed_ms = SystemClock.elapsedRealtime() - fetch_started_elapsed_ms
+        return (EXTRACT_INTERVAL_MS - elapsed_ms).coerceAtLeast(0L)
     }
 
     private fun globe_inventory_viewport(): GlobeViewport {
@@ -268,7 +270,7 @@ class GlobeBinCraftAircraftSource(private val user_agent: String) {
 
     private companion object {
         private const val TAG = "FlightAlert"
-        private const val EXTRACT_INTERVAL_MS = 2500L
+        private const val EXTRACT_INTERVAL_MS = 1000L
         private const val STARTUP_RETRY_MS = 450L
         private const val MAX_SNAPSHOT_AGE_MS = 9000L
         private const val GLOBE_INVENTORY_ZOOM = 0.0

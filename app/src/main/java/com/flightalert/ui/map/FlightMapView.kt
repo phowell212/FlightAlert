@@ -26,6 +26,7 @@ import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
@@ -113,6 +114,8 @@ import com.flightalert.ui.map.panels.FlightMapPanelStyle
 import com.flightalert.ui.map.panels.ImpactMethodologyPanelState
 import com.flightalert.ui.map.panels.MapLabelsPanelState
 import com.flightalert.ui.map.panels.PriorityAircraftPanelRow
+import com.flightalert.ui.map.panels.PriorityRangeAdjustButton
+import com.flightalert.ui.map.panels.PriorityRangeButtonFillState
 import com.flightalert.ui.map.panels.PriorityTrackerPanelState
 import com.flightalert.ui.map.panels.SettingsPanelState
 import com.flightalert.ui.map.panels.TrafficPanelRenderer
@@ -426,6 +429,8 @@ class FlightMapView(
         in_flight_retry_ms = AIRCRAFT_IN_FLIGHT_RETRY_MS,
         map_interaction_refresh_delay_ms = MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS,
         hybrid_supplement_retry_ms = HYBRID_BINCRAFT_SUPPLEMENT_RETRY_MS,
+        globe_snapshot_refresh_ms = BINCRAFT_SNAPSHOT_REFRESH_MS,
+        api_grace_ms = BINCRAFT_API_GRACE_MS,
         ready_aircraft_min = BINCRAFT_FEED_READY_AIRCRAFT_MIN
     )
     private val traffic_screen_projector = TrafficScreenProjector(
@@ -479,6 +484,7 @@ class FlightMapView(
     private var filters_open = false
     private var filter_search_focused = false
     private var impact_methodology_open = false
+    private var priority_adjust_hold: PriorityAdjustHold? = null
 
     private val aircraft_details_warm_requester = AircraftDetailsWarmRequester(
         coordinator = aircraft_details_coordinator,
@@ -530,6 +536,10 @@ class FlightMapView(
     private var debug_perf_skip_map = false
     private var debug_perf_skip_traffic = false
     private var debug_perf_skip_chrome = false
+    private var debug_perf_focus_open_map = false
+    private var debug_perf_focus_applied = false
+    private var debug_perf_target_lat: Double? = null
+    private var debug_perf_target_lon: Double? = null
     private var debug_draw_perf_frames = 0
     private var debug_draw_perf_total_ns = 0L
     private var debug_draw_perf_map_ns = 0L
@@ -598,8 +608,7 @@ class FlightMapView(
         setup_system_insets()
         globe_bin_craft_aircraft_source?.set_enabled(globe_bin_craft_source_enabled)
         globe_bin_craft_aircraft_source?.on_snapshot_updated = {
-            publish_startup_globe_snapshot_if_needed()
-            request_visible_aircraft_after_map_interaction()
+            publish_globe_snapshot_update_if_useful()
         }
     }
 
@@ -757,8 +766,10 @@ class FlightMapView(
         target_zoom: Double,
         run_id: String? = null,
         perf_map_source: TileSource? = null,
+        perf_map_labels_enabled: Boolean? = null,
         perf_restricted_airspaces_enabled: Boolean? = null,
         perf_clear_selection: Boolean = false,
+        perf_focus_open_map: Boolean = false,
         perf_skip_map: Boolean = false,
         perf_skip_traffic: Boolean = false,
         perf_skip_chrome: Boolean = false
@@ -768,6 +779,12 @@ class FlightMapView(
         perf_map_source?.let { source ->
             if (map_source != source) {
                 map_source = source
+                map_tile_renderer.reset_transitions()
+            }
+        }
+        perf_map_labels_enabled?.let { enabled ->
+            if (map_labels_enabled != enabled) {
+                map_labels_enabled = enabled
                 map_tile_renderer.reset_transitions()
             }
         }
@@ -788,13 +805,19 @@ class FlightMapView(
         debug_perf_skip_map = perf_skip_map
         debug_perf_skip_traffic = perf_skip_traffic
         debug_perf_skip_chrome = perf_skip_chrome
+        debug_perf_focus_open_map = perf_focus_open_map
+        debug_perf_focus_applied = false
+        debug_perf_target_lat = lat.coerceIn(-85.0, 85.0)
+        debug_perf_target_lon = normalize_longitude(lon)
         reset_debug_draw_perf()
-        manual_center_lat = lat.coerceIn(-85.0, 85.0)
-        manual_center_lon = normalize_longitude(lon)
+        manual_center_lat = debug_perf_target_lat
+        manual_center_lon = debug_perf_target_lon
+        apply_debug_perf_target_focus_if_needed()
         Log.i(
             TAG,
             "Debug perf viewport runId=${run_id ?: "none"} lat=$manual_center_lat lon=$manual_center_lon " +
-                "zoom=$zoom mapSource=$map_source restrictedAirspaces=$restricted_airspaces_layer_enabled " +
+                "zoom=$zoom mapSource=$map_source mapLabels=$map_labels_enabled restrictedAirspaces=$restricted_airspaces_layer_enabled " +
+                "targetLat=$debug_perf_target_lat targetLon=$debug_perf_target_lon focusOpenMap=$debug_perf_focus_open_map " +
                 "clearSelection=$perf_clear_selection skipMap=$debug_perf_skip_map " +
                 "skipTraffic=$debug_perf_skip_traffic skipChrome=$debug_perf_skip_chrome"
         )
@@ -884,6 +907,7 @@ class FlightMapView(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         apply_initial_mavic_range_zoom_if_needed()
+        apply_debug_perf_target_focus_if_needed()
         request_deferred_aircraft_refresh()
     }
 
@@ -1038,6 +1062,9 @@ class FlightMapView(
             end_pinch()
             return true
         }
+        if (priority_adjust_hold != null && event.pointerCount > 1) {
+            cancel_priority_adjust_hold()
+        }
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -1065,9 +1092,11 @@ class FlightMapView(
                 drag_start_center = if (map_touch_active) current_interaction_viewport()?.let {
                     WorldPoint(it.center_x, it.center_y)
                 } else null
+                begin_priority_adjust_hold_if_needed(x, y)
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                if (update_priority_adjust_hold(x, y)) return true
                 if (details_session.details_open && !debug_perf_hides_chrome() && !settings_open && !priority_tracker_open && !filters_open && details_max_scroll_y > 0f) {
                     val dy = y - details_scroll_start_y
                     if (!drag_started && abs(dy) > dp(6)) drag_started = true
@@ -1099,6 +1128,7 @@ class FlightMapView(
                 val was_dragging_map = drag_started && !drag_blocked
                 drag_started = false
                 drag_start_center = null
+                if (finish_priority_adjust_hold(x, y)) return true
                 if (was_dragging) {
                     if (was_dragging_map) {
                         mark_map_interaction()
@@ -1115,6 +1145,7 @@ class FlightMapView(
             MotionEvent.ACTION_CANCEL -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
                 map_touch_active = false
+                cancel_priority_adjust_hold()
                 drag_started = false
                 drag_start_center = null
                 return true
@@ -1214,6 +1245,7 @@ class FlightMapView(
             }
             if (zoom_step != null) {
                 // Keyboard zoom is centered in the open map area so panels do not steal the focal point.
+                mark_map_interaction()
                 val focus = default_map_focus(content_width(), content_height())
                 val scale_factor = 2.0.pow(zoom_step)
                 zoom_and_pan_during_pinch(scale_factor, focus.x, focus.y, focus.x, focus.y)
@@ -1485,8 +1517,16 @@ class FlightMapView(
         return MapTileRenderState(
             map_source = map_source,
             map_labels_enabled = map_labels_enabled,
-            user_agent = USER_AGENT
+            user_agent = USER_AGENT,
+            interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime())
         )
+    }
+
+    private fun map_tile_interaction_active(now: Long): Boolean {
+        return pinch_in_progress ||
+            drag_started ||
+            map_touch_active ||
+            now - last_map_interaction_ms <= MAP_TILE_INTERACTION_SETTLE_MS
     }
 
     private fun map_tile_style(): MapTileRenderStyle {
@@ -1533,7 +1573,7 @@ class FlightMapView(
         val visibility = aviation_layer_visibility()
         if (!aviation_layer_controller.has_enabled_layers(visibility) && selected_restricted_airspace == null) return
         val snapshot = aviation_layer_controller.snapshot ?: return
-        val visible_bounds = bounds_for_viewport(viewport)?.to_aviation_geo_bounds() ?: return
+        val visible_bounds = aviation_bounds_for_viewport(viewport).to_aviation_geo_bounds()
         aviation_layer_renderer.draw_layers(
             canvas = canvas,
             viewport = viewport,
@@ -1637,8 +1677,8 @@ class FlightMapView(
         return (MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS - elapsed).coerceAtLeast(AIRCRAFT_IN_FLIGHT_RETRY_MS)
     }
 
-    private fun publish_startup_globe_snapshot_if_needed() {
-        visible_aircraft_feed_controller.publish_startup_globe_snapshot_if_needed(aircraft_feed_mode)
+    private fun publish_globe_snapshot_update_if_useful() {
+        visible_aircraft_feed_controller.publish_globe_snapshot_update_if_useful(aircraft_feed_mode)
     }
 
     private fun visible_aircraft_request(): VisibleAircraftRequest {
@@ -1662,7 +1702,10 @@ class FlightMapView(
     private fun apply_aircraft_feed_result(result: FeedResult, fetch_token: Long, fetch_signature: String): Boolean {
         if (!is_current_aircraft_fetch(fetch_token, fetch_signature)) return false
         if (result.status == FeedStatus.OK) {
-            val parsed = aircraft_traffic_feed.map_aircraft(result)
+            val parsed = preserve_existing_aircraft_metadata(
+                result = result,
+                parsed = aircraft_traffic_feed.map_aircraft(result)
+            )
             val parsed_cache = traffic_cache_controller.build_cached_traffic(parsed)
             post {
                 publish_aircraft_feed_result(
@@ -1735,6 +1778,48 @@ class FlightMapView(
 
     private fun is_current_aircraft_fetch(fetch_token: Long, fetch_signature: String): Boolean {
         return visible_aircraft_feed_controller.is_current_fetch(fetch_token, fetch_signature)
+    }
+
+    private fun preserve_existing_aircraft_metadata(result: FeedResult, parsed: List<Aircraft>): List<Aircraft> {
+        if (result.source != FeedSource.AIRPLANES_LIVE_GLOBE) return parsed
+        val existing_by_key = all_aircraft_snapshot().associateBy { it.aircraft_metadata_merge_key() }
+        var changed = false
+        val merged = parsed.map { fresh_aircraft ->
+            val existing = existing_by_key[fresh_aircraft.aircraft_metadata_merge_key()]
+                ?: return@map fresh_aircraft
+            val merged_aircraft = fresh_aircraft.with_metadata_fallback(existing)
+            changed = changed || merged_aircraft !== fresh_aircraft
+            merged_aircraft
+        }
+        return if (changed) merged else parsed
+    }
+
+    private fun Aircraft.aircraft_metadata_merge_key(): String {
+        val hex = icao24.trim().lowercase(Locale.US)
+        if (hex.isNotBlank()) return "hex:$hex"
+        registration?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }?.let { return "reg:$it" }
+        callsign.trim().uppercase(Locale.US).takeIf { it.isNotBlank() }?.let { return "call:$it" }
+        return "pos:${"%.4f".format(Locale.US, lat)}:${"%.4f".format(Locale.US, lon)}"
+    }
+
+    private fun Aircraft.with_metadata_fallback(fallback: Aircraft): Aircraft {
+        val merged_callsign = callsign.takeUnless { it.isBlank() || it.equals("Unknown", ignoreCase = true) }
+            ?: fallback.callsign
+        val merged = copy(
+            callsign = merged_callsign,
+            registration = registration ?: fallback.registration,
+            type_code = type_code ?: fallback.type_code,
+            metadata_seed = metadata_seed ?: fallback.metadata_seed,
+            is_military = is_military || fallback.is_military,
+            on_ground = on_ground ?: fallback.on_ground,
+            altitude_m = altitude_m ?: fallback.altitude_m,
+            velocity_ms = velocity_ms ?: fallback.velocity_ms,
+            track_deg = track_deg ?: fallback.track_deg,
+            vertical_rate_ms = vertical_rate_ms ?: fallback.vertical_rate_ms,
+            category = category ?: fallback.category,
+            telemetry = telemetry?.with_fallback(fallback.telemetry) ?: fallback.telemetry
+        )
+        return if (merged == this) this else merged
     }
 
     private fun publish_aircraft_feed_failure(result: FeedResult, fetch_token: Long) {
@@ -1866,6 +1951,25 @@ class FlightMapView(
             min_lon = min(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0),
             max_lat = max(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
             max_lon = max(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0)
+        )
+    }
+
+    private fun aviation_bounds_for_viewport(viewport: Viewport, padding: Double = AIRCRAFT_BOUNDS_PADDING_PX): Bounds {
+        return bounds_for_viewport(viewport, padding) ?: world_longitude_bounds_for_viewport(viewport, padding)
+    }
+
+    private fun world_longitude_bounds_for_viewport(viewport: Viewport, padding: Double): Bounds {
+        val left = viewport.center_x - viewport.width / 2.0 - padding
+        val right = viewport.center_x + viewport.width / 2.0 + padding
+        val top = viewport.center_y - viewport.height / 2.0 - padding
+        val bottom = viewport.center_y + viewport.height / 2.0 + padding
+        val top_left = world_to_lat_lon(left, top, viewport.zoom)
+        val bottom_right = world_to_lat_lon(right, bottom, viewport.zoom)
+        return Bounds(
+            min_lat = min(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
+            min_lon = -180.0,
+            max_lat = max(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
+            max_lon = 180.0
         )
     }
 
@@ -2541,6 +2645,7 @@ class FlightMapView(
             priority_range_circle_visible = priority_range_circle_visible,
             alert_distance_label = telemetry_formatter.feet_setting(alert_distance_feet),
             alert_altitude_label = telemetry_formatter.feet_setting(alert_altitude_feet),
+            long_press_fill = priority_adjust_hold_fill_state(),
             aircraft_rows = priority_aircraft_snapshot().map { aircraft ->
                 PriorityAircraftPanelRow(
                     title = aircraft.registration ?: aircraft.callsign,
@@ -2585,7 +2690,7 @@ class FlightMapView(
         val snapshot = aviation_layer_controller.snapshot ?: return null
         val location = latest_location ?: return null
         val viewport = viewport_for(location, content_width(), content_height())
-        val visible_bounds = bounds_for_viewport(viewport)?.to_aviation_geo_bounds() ?: return null
+        val visible_bounds = aviation_bounds_for_viewport(viewport).to_aviation_geo_bounds()
         return restricted_airspace_inspector.airspace_at(
             x = x,
             y = y,
@@ -2673,13 +2778,124 @@ class FlightMapView(
             priority_close_button_bounds(panel).contains(x, y) -> priority_tracker_open = false
             priority_tracking_toggle_bounds(panel).contains(x, y) -> set_priority_tracking_enabled(!priority_tracking_enabled)
             priority_ring_toggle_bounds(panel).contains(x, y) -> set_priority_range_circle_visible(!priority_range_circle_visible)
-            alert_distance_minus_bounds(panel).contains(x, y) -> set_alert_distance_feet(alert_distance_feet - 1000f)
-            alert_distance_plus_bounds(panel).contains(x, y) -> set_alert_distance_feet(alert_distance_feet + 1000f)
-            alert_altitude_minus_bounds(panel).contains(x, y) -> set_alert_altitude_feet(alert_altitude_feet - 500f)
-            alert_altitude_plus_bounds(panel).contains(x, y) -> set_alert_altitude_feet(alert_altitude_feet + 500f)
+            alert_distance_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(PriorityRangeAdjustButton.DISTANCE_MINUS, long_press = false)
+            alert_distance_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(PriorityRangeAdjustButton.DISTANCE_PLUS, long_press = false)
+            alert_altitude_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(PriorityRangeAdjustButton.ALTITUDE_MINUS, long_press = false)
+            alert_altitude_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(PriorityRangeAdjustButton.ALTITUDE_PLUS, long_press = false)
         }
         invalidate()
         return true
+    }
+
+    private fun begin_priority_adjust_hold_if_needed(x: Float, y: Float) {
+        if (!priority_tracker_open) return
+        val button = priority_adjust_button_at(x, y) ?: return
+        val now = SystemClock.elapsedRealtime()
+        val timeout = ViewConfiguration.getLongPressTimeout().toLong()
+        priority_adjust_hold = PriorityAdjustHold(
+            button = button,
+            press_x = x,
+            press_y = y,
+            started_ms = now,
+            duration_ms = timeout
+        )
+        postDelayed({ fire_priority_adjust_hold(button, now) }, timeout)
+        postInvalidateOnAnimation()
+    }
+
+    private fun update_priority_adjust_hold(x: Float, y: Float): Boolean {
+        val hold = priority_adjust_hold ?: return false
+        if (!priority_tracker_open || !priority_adjust_button_bounds(hold.button).contains(x, y)) {
+            cancel_priority_adjust_hold()
+            return true
+        }
+        if (!hold.fired && SystemClock.elapsedRealtime() - hold.started_ms >= hold.duration_ms) {
+            fire_priority_adjust_hold(hold.button, hold.started_ms)
+        }
+        return true
+    }
+
+    private fun finish_priority_adjust_hold(x: Float, y: Float): Boolean {
+        val hold = priority_adjust_hold ?: return false
+        val still_inside = priority_tracker_open && priority_adjust_button_bounds(hold.button).contains(x, y)
+        if (still_inside && !hold.fired && SystemClock.elapsedRealtime() - hold.started_ms >= hold.duration_ms) {
+            fire_priority_adjust_hold(hold.button, hold.started_ms)
+        }
+        val consumed = priority_adjust_hold?.fired == true
+        priority_adjust_hold = null
+        postInvalidateOnAnimation()
+        return consumed
+    }
+
+    private fun fire_priority_adjust_hold(button: PriorityRangeAdjustButton, started_ms: Long) {
+        val hold = priority_adjust_hold ?: return
+        if (hold.button != button || hold.started_ms != started_ms || hold.fired) return
+        hold.fired = true
+        apply_priority_range_adjustment(button, long_press = true)
+        postInvalidateOnAnimation()
+    }
+
+    private fun cancel_priority_adjust_hold() {
+        if (priority_adjust_hold == null) return
+        priority_adjust_hold = null
+        postInvalidateOnAnimation()
+    }
+
+    private fun priority_adjust_hold_fill_state(): PriorityRangeButtonFillState? {
+        val hold = priority_adjust_hold ?: return null
+        return PriorityRangeButtonFillState(
+            button = hold.button,
+            press_x = hold.press_x,
+            press_y = hold.press_y,
+            started_ms = hold.started_ms,
+            duration_ms = hold.duration_ms
+        )
+    }
+
+    private fun priority_adjust_button_at(x: Float, y: Float): PriorityRangeAdjustButton? {
+        if (!priority_tracker_open) return null
+        return PriorityRangeAdjustButton.values().firstOrNull { priority_adjust_button_bounds(it).contains(x, y) }
+    }
+
+    private fun priority_adjust_button_bounds(button: PriorityRangeAdjustButton): RectF {
+        val panel = priority_tracker_panel_bounds(content_width(), content_height())
+        return when (button) {
+            PriorityRangeAdjustButton.DISTANCE_MINUS -> alert_distance_minus_bounds(panel)
+            PriorityRangeAdjustButton.DISTANCE_PLUS -> alert_distance_plus_bounds(panel)
+            PriorityRangeAdjustButton.ALTITUDE_MINUS -> alert_altitude_minus_bounds(panel)
+            PriorityRangeAdjustButton.ALTITUDE_PLUS -> alert_altitude_plus_bounds(panel)
+        }
+    }
+
+    private fun apply_priority_range_adjustment(button: PriorityRangeAdjustButton, long_press: Boolean) {
+        val direction = when (button) {
+            PriorityRangeAdjustButton.DISTANCE_MINUS,
+            PriorityRangeAdjustButton.ALTITUDE_MINUS -> -1f
+            PriorityRangeAdjustButton.DISTANCE_PLUS,
+            PriorityRangeAdjustButton.ALTITUDE_PLUS -> 1f
+        }
+        when (button) {
+            PriorityRangeAdjustButton.DISTANCE_MINUS,
+            PriorityRangeAdjustButton.DISTANCE_PLUS -> set_alert_distance_feet(
+                PriorityRangeAdjuster.adjusted_feet(
+                    current_feet = alert_distance_feet,
+                    value = PriorityRangeValue.HORIZONTAL,
+                    direction = direction,
+                    long_press = long_press,
+                    units = units
+                )
+            )
+            PriorityRangeAdjustButton.ALTITUDE_MINUS,
+            PriorityRangeAdjustButton.ALTITUDE_PLUS -> set_alert_altitude_feet(
+                PriorityRangeAdjuster.adjusted_feet(
+                    current_feet = alert_altitude_feet,
+                    value = PriorityRangeValue.VERTICAL,
+                    direction = direction,
+                    long_press = long_press,
+                    units = units
+                )
+            )
+        }
     }
 
     private fun handle_details_panel_tap(x: Float, y: Float): Boolean {
@@ -2991,6 +3207,27 @@ class FlightMapView(
         manual_center_lat = center.lat
         manual_center_lon = center.lon
         following_location = false
+    }
+
+    private fun apply_debug_perf_target_focus_if_needed() {
+        if (!debug_perf_viewport_active || !debug_perf_focus_open_map || debug_perf_focus_applied) return
+        val target_lat = debug_perf_target_lat ?: return
+        val target_lon = debug_perf_target_lon ?: return
+        val w = content_width()
+        val h = content_height()
+        if (w <= 1f || h <= 1f) return
+        val target_world = lat_lon_to_world(target_lat, target_lon, zoom)
+        val focus = default_map_focus(w, h)
+        set_manual_center_from_world(
+            target_world.x + w / 2.0 - focus.x,
+            target_world.y + h / 2.0 - focus.y
+        )
+        debug_perf_focus_applied = true
+        Log.i(
+            TAG,
+            "Debug perf focus anchored targetLat=$target_lat targetLon=$target_lon " +
+                "focusX=${focus.x} focusY=${focus.y} manualLat=$manual_center_lat manualLon=$manual_center_lon"
+        )
     }
 
     private fun is_overlay_or_control_hit(x: Float, y: Float): Boolean {
@@ -3550,6 +3787,8 @@ class FlightMapView(
 
     private fun feet_to_meters(feet: Double): Double = feet / 3.28084
 
+    private fun meters_to_feet(meters: Double): Double = meters * 3.28084
+
     private fun meters_per_pixel_at(latitude: Double, z: Double): Double {
         return MapProjection.meters_per_pixel_at(latitude, z)
     }
@@ -3650,5 +3889,14 @@ class FlightMapView(
     private fun with_alpha(color: Int, alpha: Int): Int {
         return Color.argb(alpha.coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
     }
+
+    private data class PriorityAdjustHold(
+        val button: PriorityRangeAdjustButton,
+        val press_x: Float,
+        val press_y: Float,
+        val started_ms: Long,
+        val duration_ms: Long,
+        var fired: Boolean = false
+    )
 
 }

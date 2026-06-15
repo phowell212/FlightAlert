@@ -13,7 +13,8 @@ object PriorityNotificationPresenter {
             .take(MAX_LISTED_AIRCRAFT)
             .joinToString("; ") { aircraft ->
                 val registration = aircraft.registration ?: "reg unavailable"
-                String.format(Locale.US, "%s %.0f ft", registration, aircraft.altitude_feet)
+                val estimate_note = if (aircraft.is_estimated_position) " est." else ""
+                String.format(Locale.US, "%s %.0f ft%s", registration, aircraft.altitude_feet, estimate_note)
             }
         val suffix = if (extreme_priority_aircraft.size > MAX_LISTED_AIRCRAFT) {
             " +${extreme_priority_aircraft.size - MAX_LISTED_AIRCRAFT} more"

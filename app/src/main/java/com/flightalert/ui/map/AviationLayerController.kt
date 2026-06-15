@@ -14,6 +14,7 @@ import com.flightalert.ui.map.render.AviationLayerVisibility
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 
 class AviationLayerController(
     private val client: AviationLayerClient,
@@ -59,7 +60,7 @@ class AviationLayerController(
         latest_visibility = visibility
         if (!has_enabled_layers(visibility)) {
             status_text = "Layers off"
-            request_warm_restricted_airspaces_if_needed(viewport)
+            request_warm_aviation_layers_if_needed(viewport)
             return
         }
         val query_bounds = layer_bounds_for_viewport(viewport) ?: return
@@ -68,7 +69,7 @@ class AviationLayerController(
         val now = now_ms()
         val needs_fetch = force ||
             snapshot == null ||
-            selection_key != last_selection_key ||
+            !snapshot_covers_visibility(snapshot, visibility) ||
             last_bounds?.contains(visible_viewport_bounds) != true ||
             now - last_fetch_ms >= refresh_ms
         if (!needs_fetch || fetch_in_flight) {
@@ -86,14 +87,14 @@ class AviationLayerController(
         )
     }
 
-    private fun request_warm_restricted_airspaces_if_needed(viewport: Viewport) {
+    private fun request_warm_aviation_layers_if_needed(viewport: Viewport) {
         val query_bounds = layer_bounds_for_viewport(viewport) ?: return
         val visible_viewport_bounds = visible_bounds(viewport) ?: query_bounds
-        val visibility = WARM_RESTRICTED_AIRSPACES_VISIBILITY
+        val visibility = WARM_AVIATION_LAYERS_VISIBILITY
         val selection_key = selection_key(visibility)
         val now = now_ms()
         val needs_fetch = snapshot == null ||
-            selection_key != last_selection_key ||
+            !snapshot_covers_visibility(snapshot, visibility) ||
             last_bounds?.contains(visible_viewport_bounds) != true ||
             now - last_fetch_ms >= refresh_ms
         if (!needs_fetch || fetch_in_flight) return
@@ -144,7 +145,7 @@ class AviationLayerController(
         latest_visibility = visibility
         if (!has_enabled_layers(visibility)) {
             status_text = "Layers off"
-            current_viewport()?.let { request_warm_restricted_airspaces_if_needed(it) }
+            current_viewport()?.let { request_warm_aviation_layers_if_needed(it) }
             request_redraw()
             return
         }
@@ -176,7 +177,11 @@ class AviationLayerController(
     ) {
         fetch_in_flight = false
         val latest_key = selection_key(latest_visibility)
-        if (selection_key != latest_key && !(prefetch && !has_enabled_layers(latest_visibility))) {
+        if (
+            selection_key != latest_key &&
+            snapshot_covers_visibility(snapshot, latest_visibility) != true &&
+            !(prefetch && !has_enabled_layers(latest_visibility))
+        ) {
             last_fetch_ms = 0L
             status_text = if (has_enabled_layers(latest_visibility)) "Refreshing aviation layers" else "Layers off"
             current_viewport()?.let { request_if_needed(it, latest_visibility, force = true) }
@@ -220,12 +225,15 @@ class AviationLayerController(
         val bottom = viewport.center_y + viewport.height / 2.0 + padding
         val top_left = MapProjection.world_to_lat_lon(left, top, viewport.zoom)
         val bottom_right = MapProjection.world_to_lat_lon(right, bottom, viewport.zoom)
-        if (abs(top_left.lon - bottom_right.lon) > 180.0) return null
+        val world_width = TILE_SIZE * 2.0.pow(viewport.zoom)
+        val longitude_span_degrees = ((right - left) / world_width) * 360.0
+        val use_world_longitude_bounds = abs(top_left.lon - bottom_right.lon) > 180.0 ||
+            longitude_span_degrees >= 180.0
         return Bounds(
             min_lat = min(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
-            min_lon = min(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0),
+            min_lon = if (use_world_longitude_bounds) -180.0 else min(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0),
             max_lat = max(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
-            max_lon = max(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0)
+            max_lon = if (use_world_longitude_bounds) 180.0 else max(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0)
         )
     }
 
@@ -259,6 +267,13 @@ class AviationLayerController(
             kept_last_good -> "Network unavailable; showing last aviation layers"
             loaded > 0 -> "$loaded aviation layer${if (loaded == 1) "" else "s"} loaded"
             else -> "No aviation layer data in view"
+        }
+    }
+
+    private fun snapshot_covers_visibility(snapshot: AviationLayerSnapshot?, visibility: AviationLayerVisibility): Boolean {
+        snapshot ?: return false
+        return active_kinds(visibility).all { kind ->
+            snapshot.statuses[kind] != null
         }
     }
 
@@ -325,11 +340,12 @@ class AviationLayerController(
     }
 
     private companion object {
-        val WARM_RESTRICTED_AIRSPACES_VISIBILITY = AviationLayerVisibility(
+        const val TILE_SIZE = 256
+        val WARM_AVIATION_LAYERS_VISIBILITY = AviationLayerVisibility(
             restricted_airspaces_enabled = true,
-            atc_boundaries_enabled = false,
-            oceanic_tracks_enabled = false,
-            airport_labels_enabled = false
+            atc_boundaries_enabled = true,
+            oceanic_tracks_enabled = true,
+            airport_labels_enabled = true
         )
     }
 }

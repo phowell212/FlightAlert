@@ -2,9 +2,9 @@ package com.flightalert.ui.map.render
 
 import android.graphics.Canvas
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.Matrix
 import android.graphics.PorterDuff
 import android.graphics.RectF
 import com.flightalert.data.AviationAirspaceFeature
@@ -255,6 +255,11 @@ class AviationLayerRenderer(
                 }
         }
         if (visibility.atc_boundaries_enabled) {
+            val focused_atc_feature = focused_airspace_feature(
+                viewport = viewport,
+                features = prepared_atc_boundaries,
+                visible_bounds = visible_bounds
+            )
             draw_airspace_layer(
                 canvas = canvas,
                 viewport = viewport,
@@ -267,6 +272,7 @@ class AviationLayerRenderer(
                 label_rects = layer_label_rects,
                 style = style,
                 restricted = false,
+                focused_feature = focused_atc_feature,
                 interaction_active = interaction_active
             )
         }
@@ -376,56 +382,69 @@ class AviationLayerRenderer(
         label_rects: MutableList<RectF>,
         style: AviationLayerStyle,
         restricted: Boolean,
+        focused_feature: PreparedAirspaceFeature? = null,
         interaction_active: Boolean
     ) {
         stroke_paint.style = Paint.Style.STROKE
         stroke_paint.strokeCap = Paint.Cap.ROUND
         stroke_paint.strokeJoin = Paint.Join.ROUND
-        stroke_paint.strokeWidth = dp(
-            when {
-                interaction_active && restricted -> 1.25f
-                interaction_active -> 1.0f
-                restricted && viewport.zoom >= 8.0 -> 2.0f
-                viewport.zoom >= 8.0 -> 1.6f
-                restricted -> 1.35f
-                else -> 1.1f
-            }
-        )
-        stroke_paint.color = with_alpha(
-            stroke,
-            when {
-                interaction_active && viewport.zoom >= 8.0 -> 190
-                interaction_active -> 150
-                viewport.zoom >= 8.0 -> 220
-                else -> 170
-            }
-        )
-        paint.style = Paint.Style.FILL
-        paint.color = with_alpha(fill, if (restricted && viewport.zoom >= 8.5) 28 else if (viewport.zoom >= 8.5) 18 else 10)
-
-        if (interaction_active) {
-            draw_interaction_airspace_layer(
-                canvas = canvas,
-                viewport = viewport,
-                features = features,
-                visible_bounds = visible_bounds,
-                excluded_feature = excluded_feature,
-                outline_paint = stroke_paint
-            )
-            stroke_paint.strokeCap = Paint.Cap.BUTT
-            stroke_paint.strokeJoin = Paint.Join.MITER
-            return
+        val low_zoom_emphasis = layer_low_zoom_emphasis(viewport.zoom, restricted)
+        val base_stroke_width_dp = when {
+            interaction_active && restricted -> 1.25f
+            interaction_active -> 1.0f
+            restricted && viewport.zoom >= 8.0 -> 2.0f
+            viewport.zoom >= 8.0 -> 1.6f
+            restricted -> 1.35f
+            else -> 1.1f
         }
+        val min_stroke_width_dp = if (restricted) 0.55f else 0.42f
+        stroke_paint.strokeWidth = dp(lerp(min_stroke_width_dp, base_stroke_width_dp, low_zoom_emphasis))
+        val raw_stroke_alpha = when {
+            interaction_active && viewport.zoom >= 8.0 -> 190
+            interaction_active -> 150
+            viewport.zoom >= 8.0 -> 220
+            else -> 170
+        }
+        val min_stroke_alpha_scale = if (restricted) 0.40f else 0.26f
+        val stroke_alpha_scale = lerp(min_stroke_alpha_scale, 1f, low_zoom_emphasis)
+        val base_stroke_alpha = (raw_stroke_alpha * stroke_alpha_scale).toInt().coerceIn(24, 235)
+        paint.style = Paint.Style.FILL
+        val fill_zoom_emphasis = smooth_step(5.3f, 8.5f, viewport.zoom.toFloat())
+        val raw_fill_alpha = if (restricted && viewport.zoom >= 8.5) 28 else if (viewport.zoom >= 8.5) 18 else 10
+        val base_fill_alpha = (raw_fill_alpha * fill_zoom_emphasis).toInt()
 
         var labels_drawn = 0
         var drawn_features = 0
         for (feature in features) {
             if (feature.source == excluded_feature || !feature.source.bounds.intersects(visible_bounds)) continue
             if (drawn_features >= MAX_DRAWN_AIRSPACE_FEATURES) break
-            feature.rings.forEach { ring ->
-                draw_prepared_airspace_ring(canvas, viewport, ring, paint, stroke_paint)
+            val is_focused = focused_feature == null || focused_feature === feature
+            val fill_alpha = when {
+                interaction_active -> 0
+                restricted -> base_fill_alpha
+                focused_feature == null -> 0
+                is_focused -> base_fill_alpha
+                else -> 0
             }
-            if (labels_drawn < label_limit && viewport.zoom >= AIRSPACE_LABEL_MIN_ZOOM) {
+            val stroke_alpha = when {
+                restricted -> base_stroke_alpha
+                focused_feature == null -> (base_stroke_alpha * 0.72f).toInt()
+                is_focused -> base_stroke_alpha
+                else -> (base_stroke_alpha * 0.58f).toInt()
+            }
+            paint.color = with_alpha(fill, fill_alpha)
+            stroke_paint.color = with_alpha(stroke, stroke_alpha)
+            val rings = if (interaction_active) feature.interaction_rings else feature.rings
+            rings.forEach { ring ->
+                draw_prepared_airspace_ring(
+                    canvas = canvas,
+                    viewport = viewport,
+                    ring = ring,
+                    fill_paint = paint.takeIf { fill_alpha > 0 },
+                    outline_paint = stroke_paint
+                )
+            }
+            if (!interaction_active && labels_drawn < label_limit && viewport.zoom >= AIRSPACE_LABEL_MIN_ZOOM) {
                 if (draw_airspace_label(canvas, viewport, feature, label_rects, style)) {
                     labels_drawn++
                 }
@@ -436,37 +455,60 @@ class AviationLayerRenderer(
         stroke_paint.strokeJoin = Paint.Join.MITER
     }
 
-    private fun draw_interaction_airspace_layer(
-        canvas: Canvas,
+    private fun layer_low_zoom_emphasis(zoom: Double, restricted: Boolean): Float {
+        val start = if (restricted) 3.2f else 3.7f
+        val end = if (restricted) 7.0f else 7.4f
+        return smooth_step(start, end, zoom.toFloat())
+    }
+
+    private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float {
+        val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
+    private fun lerp(start: Float, end: Float, amount: Float): Float {
+        return start + (end - start) * amount.coerceIn(0f, 1f)
+    }
+
+    private fun focused_airspace_feature(
         viewport: Viewport,
         features: List<PreparedAirspaceFeature>,
-        visible_bounds: AviationGeoBounds,
-        excluded_feature: AviationAirspaceFeature?,
-        outline_paint: Paint
-    ) {
-        val scale = 2.0.pow(viewport.zoom).toFloat()
-        val world_span = TILE_SIZE * scale
-        val screen_offset_x = (-viewport.center_x + viewport.width / 2.0).toFloat()
-        val screen_offset_y = (-viewport.center_y + viewport.height / 2.0).toFloat()
-        var drawn_features = 0
-        for (feature in features) {
-            if (feature.source == excluded_feature || !feature.source.bounds.intersects(visible_bounds)) continue
-            if (drawn_features >= MAX_DRAWN_AIRSPACE_FEATURES) break
-            feature.interaction_rings.forEach { ring ->
-                draw_prepared_airspace_ring_path(
-                    canvas = canvas,
-                    viewport = viewport,
-                    ring = ring,
-                    scale = scale,
-                    world_span = world_span,
-                    screen_offset_x = screen_offset_x,
-                    screen_offset_y = screen_offset_y,
-                    fill_paint = null,
-                    outline_paint = outline_paint
-                )
-            }
-            drawn_features++
+        visible_bounds: AviationGeoBounds
+    ): PreparedAirspaceFeature? {
+        val center = MapProjection.world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
+        val point = AviationLayerPoint(center.lat, center.lon)
+        return features.firstOrNull { feature ->
+            feature.source.bounds.intersects(visible_bounds) &&
+                feature.source.bounds.contains(point) &&
+                point_inside_airspace(point, feature.source)
         }
+    }
+
+    private fun AviationGeoBounds.contains(point: AviationLayerPoint): Boolean {
+        return point.lat in min_lat..max_lat && point.lon in min_lon..max_lon
+    }
+
+    private fun point_inside_airspace(point: AviationLayerPoint, feature: AviationAirspaceFeature): Boolean {
+        var crossings = 0
+        feature.rings.forEach { ring ->
+            if (point_inside_ring(point, ring)) crossings++
+        }
+        return crossings % 2 == 1
+    }
+
+    private fun point_inside_ring(point: AviationLayerPoint, ring: List<AviationLayerPoint>): Boolean {
+        if (ring.size < 3) return false
+        var inside = false
+        var j = ring.lastIndex
+        for (i in ring.indices) {
+            val pi = ring[i]
+            val pj = ring[j]
+            val intersects = (pi.lat > point.lat) != (pj.lat > point.lat) &&
+                point.lon < (pj.lon - pi.lon) * (point.lat - pi.lat) / ((pj.lat - pi.lat).takeIf { abs(it) > 1e-9 } ?: 1e-9) + pi.lon
+            if (intersects) inside = !inside
+            j = i
+        }
+        return inside
     }
 
     private fun draw_selected_airspace(

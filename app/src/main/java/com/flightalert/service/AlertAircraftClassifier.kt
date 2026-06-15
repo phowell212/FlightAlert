@@ -13,7 +13,8 @@ data class AlertAircraft(
     val contact_age_seconds: Double,
     val is_hazard: Boolean,
     val is_priority_range_aircraft: Boolean,
-    val is_extreme_priority: Boolean
+    val is_extreme_priority: Boolean,
+    val is_estimated_position: Boolean = false
 )
 
 object AlertAircraftClassifier {
@@ -32,7 +33,8 @@ object AlertAircraftClassifier {
         alert_altitude_feet: Float,
         priority_enabled: Boolean,
         priority_range_feet: Float,
-        now_epoch_sec: Double
+        now_epoch_sec: Double,
+        is_estimated_position: Boolean = false
     ): AlertAircraft? {
         val altitude_meters = altitude_meters ?: return null
         val contact_time = last_contact_sec ?: position_time_sec ?: return null
@@ -55,7 +57,8 @@ object AlertAircraftClassifier {
             contact_age_seconds = contact_age_seconds,
             is_hazard = is_alert_aircraft,
             is_priority_range_aircraft = priority_enabled && distance_feet <= priority_range_feet,
-            is_extreme_priority = is_alert_aircraft
+            is_extreme_priority = is_alert_aircraft,
+            is_estimated_position = is_estimated_position
         )
     }
 

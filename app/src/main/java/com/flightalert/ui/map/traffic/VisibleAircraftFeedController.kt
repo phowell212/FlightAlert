@@ -42,12 +42,15 @@ class VisibleAircraftFeedController(
     private val in_flight_retry_ms: Long,
     private val map_interaction_refresh_delay_ms: Long,
     private val hybrid_supplement_retry_ms: Long,
+    private val globe_snapshot_refresh_ms: Long,
+    private val api_grace_ms: Long,
     private val ready_aircraft_min: Int
 ) {
     private var fetch_in_flight = false
     private var refresh_scheduled = false
     private var scheduled_refresh_force = false
     private var last_fetch_elapsed_ms = 0L
+    private var last_globe_snapshot_publish_elapsed_ms = 0L
     private var fetch_token = 0L
     private var fetch_signature: String? = null
     private var waiting_for_viewport = false
@@ -134,14 +137,30 @@ class VisibleAircraftFeedController(
     }
 
     fun publish_startup_globe_snapshot_if_needed(feed_mode: FlightAlertSettings.AircraftFeedMode) {
-        if (current_total_aircraft() >= ready_aircraft_min) return
+        publish_globe_snapshot_update_if_useful(feed_mode)
+    }
+
+    fun publish_globe_snapshot_update_if_useful(feed_mode: FlightAlertSettings.AircraftFeedMode) {
         val source = globe_source ?: return
         if (!feed_mode.uses_globe) return
         if (!has_location() || !has_usable_viewport()) return
+        val now = SystemClock.elapsedRealtime()
+        val startup_publish = current_total_aircraft() < ready_aircraft_min
+        if (!startup_publish && fetch_in_flight && now - last_fetch_elapsed_ms < api_grace_ms) return
+        if (!startup_publish &&
+            now - last_globe_snapshot_publish_elapsed_ms < globe_publish_interval_floor_ms()
+        ) {
+            return
+        }
         val request = build_request()
         val signature = request_signature(request)
-        val token = if (fetch_token > 0L) fetch_token else ++fetch_token
-        fetch_signature = signature
+        val publish_while_fetching = fetch_in_flight
+        val token = if (publish_while_fetching && fetch_token > 0L) fetch_token else ++fetch_token
+        val result_signature = if (publish_while_fetching) fetch_signature ?: signature else signature
+        if (!publish_while_fetching) {
+            fetch_signature = signature
+        }
+        last_globe_snapshot_publish_elapsed_ms = now
         executor.execute {
             val result = source.latest_snapshot(
                 request.feed_bounds,
@@ -150,7 +169,15 @@ class VisibleAircraftFeedController(
                 request.exact_search
             ) ?: return@execute
             if (result.status == FeedStatus.OK) {
-                apply_result(result, token, signature)
+                if (publish_while_fetching) {
+                    post_to_main {
+                        if (fetch_in_flight && is_current_token(token)) {
+                            apply_result(result, token, result_signature)
+                        }
+                    }
+                } else {
+                    apply_result(result, token, result_signature)
+                }
             }
         }
     }
@@ -196,7 +223,12 @@ class VisibleAircraftFeedController(
         ).joinToString("|")
     }
 
+    private fun globe_publish_interval_floor_ms(): Long {
+        return (globe_snapshot_refresh_ms - GLOBE_SNAPSHOT_CADENCE_JITTER_MS).coerceAtLeast(0L)
+    }
+
     private companion object {
         const val TAG = "FlightAlert"
+        const val GLOBE_SNAPSHOT_CADENCE_JITTER_MS = 150L
     }
 }
