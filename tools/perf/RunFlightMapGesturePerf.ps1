@@ -5,7 +5,12 @@ param(
     [string]$ArtifactName = "",
     [double]$TargetHz = 120.0,
     [string]$OutputName = "",
-    [switch]$KeepDeviceArtifacts
+    [switch]$KeepDeviceArtifacts,
+    [switch]$RecordVideo,
+    [int]$VideoTimeLimitSeconds = 90,
+    [string]$VideoDisplayId = "",
+    [switch]$SkipChrome,
+    [switch]$SkipTraffic
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,6 +88,54 @@ function Pull-RemoteFile {
     return $destination
 }
 
+function Get-ActivePhysicalDisplayId {
+    $displayDump = Invoke-Adb shell dumpsys display
+    foreach ($line in $displayDump) {
+        if ($line -match "DisplayViewport\{type=INTERNAL, valid=true, isActive=true, displayId=0, uniqueId='local:(\d+)'") {
+            return $Matches[1]
+        }
+    }
+    return ""
+}
+
+function Start-ScreenRecord {
+    param(
+        [string]$RemotePath,
+        [int]$TimeLimitSeconds,
+        [string]$DisplayId
+    )
+    Invoke-Adb shell "pkill -2 screenrecord >/dev/null 2>&1 || true" | Out-Null
+    Invoke-Adb shell "rm -f $RemotePath" | Out-Null
+    $displayArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($DisplayId)) {
+        $displayArgs += "--display-id"
+        $displayArgs += $DisplayId
+    }
+    return Start-Job -ScriptBlock {
+        param($AdbPath, $DeviceId, $Path, $LimitSeconds, $DisplayArgs)
+        & $AdbPath -s $DeviceId shell screenrecord @DisplayArgs --bit-rate 12000000 --time-limit $LimitSeconds $Path 2>$null | Out-Null
+    } -ArgumentList $adb, $Device, $RemotePath, $TimeLimitSeconds, $displayArgs
+}
+
+function Stop-ScreenRecord {
+    param(
+        [System.Management.Automation.Job]$Job,
+        [string]$RemotePath
+    )
+    Invoke-Adb shell "pkill -2 screenrecord >/dev/null 2>&1 || true" | Out-Null
+    if ($Job) {
+        Wait-Job -Job $Job -Timeout 8 | Out-Null
+        if ($Job.State -eq "Running") {
+            Invoke-Adb shell "pkill screenrecord >/dev/null 2>&1 || true" | Out-Null
+            Wait-Job -Job $Job -Timeout 4 | Out-Null
+        }
+        Receive-Job -Job $Job -ErrorAction SilentlyContinue | Out-Null
+        Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+    }
+    $probe = Invoke-Adb shell "sh -c 'test -s $RemotePath && echo yes || true'"
+    return ($probe | Select-Object -First 1) -eq "yes"
+}
+
 if ([string]::IsNullOrWhiteSpace($ArtifactName)) {
     $ArtifactName = Get-DefaultArtifactName -Name $TestName
 }
@@ -103,14 +156,46 @@ Write-Host "Running $testClass#$TestName on $Device. Artifact prefix=$artifactPr
 Invoke-Adb logcat -c | Out-Null
 Remove-RemoteMatches -Patterns @($remoteAppPattern, $remoteRootPattern, $remoteDownloadPattern)
 
+$videoJob = $null
+$remoteVideoPath = "/sdcard/$OutputName-screenrecord.mp4"
+if ($RecordVideo) {
+    if ([string]::IsNullOrWhiteSpace($VideoDisplayId)) {
+        $VideoDisplayId = Get-ActivePhysicalDisplayId
+    }
+    if ([string]::IsNullOrWhiteSpace($VideoDisplayId)) {
+        Write-Host "Recording screen video to $remoteVideoPath for up to $VideoTimeLimitSeconds seconds."
+    } else {
+        Write-Host "Recording screen video to $remoteVideoPath for up to $VideoTimeLimitSeconds seconds on display $VideoDisplayId."
+    }
+    $videoJob = Start-ScreenRecord -RemotePath $remoteVideoPath -TimeLimitSeconds $VideoTimeLimitSeconds -DisplayId $VideoDisplayId
+    Start-Sleep -Milliseconds 600
+}
+
 Push-Location $repoRoot
 try {
     $gradleLog = Join-Path $outDir "$OutputName-gradle.txt"
-    $runnerArg = "-Pandroid.testInstrumentationRunnerArguments.class=$testClass#$TestName"
-    & $gradlew connectedDebugAndroidTest $runnerArg --no-daemon 2>&1 | Tee-Object -FilePath $gradleLog
+    $runnerArgs = @("-Pandroid.testInstrumentationRunnerArguments.class=$testClass#$TestName")
+    if ($SkipChrome) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipChrome=true"
+    }
+    if ($SkipTraffic) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipTraffic=true"
+    }
+    & $gradlew connectedDebugAndroidTest @runnerArgs --no-daemon 2>&1 | Tee-Object -FilePath $gradleLog
     $gradleExit = $LASTEXITCODE
 } finally {
     Pop-Location
+    if ($RecordVideo) {
+        $videoReady = Stop-ScreenRecord -Job $videoJob -RemotePath $remoteVideoPath
+        if ($videoReady) {
+            Pull-RemoteFile -RemotePath $remoteVideoPath -DestinationDirectory $outDir | Out-Null
+            if (-not $KeepDeviceArtifacts) {
+                Invoke-Adb shell "rm -f $remoteVideoPath" | Out-Null
+            }
+        } else {
+            Write-Host "Screen recording did not produce a non-empty video."
+        }
+    }
 }
 
 $logcatPath = Join-Path $outDir "$OutputName-logcat.txt"
@@ -145,6 +230,7 @@ Write-Host "Summary CSV:"
 $summaryLines | ForEach-Object { Write-Host $_ }
 
 $screenshots = @($pulledPaths | Where-Object { $_ -like "*.png" })
+$videos = @(Get-ChildItem -Path $outDir -Filter "*.mp4" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 Write-Host "Saved artifacts: $outDir"
 Write-Host "Saved summary CSV: $summaryCsv"
 if ($screenshots.Count -gt 0) {
@@ -152,6 +238,10 @@ if ($screenshots.Count -gt 0) {
     $screenshots | ForEach-Object { Write-Host "  $_" }
 } else {
     Write-Host "No screenshots were pulled for $artifactPrefix."
+}
+if ($videos.Count -gt 0) {
+    Write-Host "Saved videos:"
+    $videos | ForEach-Object { Write-Host "  $_" }
 }
 
 if ($gradleExit -ne 0) {

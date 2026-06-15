@@ -23,6 +23,7 @@ param(
     [switch]$SkipChrome,
     [switch]$NoScreenshots,
     [int]$PanDurationMs = 4200,
+    [double]$TargetHz = 120.0,
     [string]$OutputName = ""
 )
 
@@ -32,6 +33,11 @@ $PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $adb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
 $outDir = Join-Path $PSScriptRoot "out"
+$summarizer = Join-Path $PSScriptRoot "SummarizeFrameStats.ps1"
+
+if (-not (Test-Path $summarizer)) {
+    throw "SummarizeFrameStats.ps1 was not found next to this script."
+}
 
 $cities = @(
     @{ Name = "New York City"; Lat = 40.73; Lon = -73.93 },
@@ -376,8 +382,34 @@ try {
         $OutputName = "flightalert-$safeCity-$Mode-$stamp"
     }
     $runId = "perf-$safeCity-$Mode-$stamp-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $scenarioPath = Join-Path $outDir "$OutputName-scenario.json"
 
     Write-Host "Testing $($city.Name) at lat=$($city.Lat), lon=$($city.Lon), zoom=$Zoom with $Mode gestures, direction=$PanDirection, profile=$PanProfile, length=$PanLength, durationMs=$PanDurationMs, map=$MapSource, labels=$MapLabels, restricted=$RestrictedAirspaces. runId=$runId"
+    [ordered]@{
+        OutputName = $OutputName
+        RunId = $runId
+        Device = $Device
+        Mode = $Mode
+        Gesture = if ($Mode -eq "soak") { "Soak" } elseif ($Mode -eq "keyboardzoom") { "KeyboardZoom" } else { "Pan" }
+        City = $city.Name
+        Lat = $city.Lat
+        Lon = $city.Lon
+        Zoom = $Zoom
+        MapSource = $MapSource
+        MapLabels = $MapLabels
+        RestrictedAirspaces = $RestrictedAirspaces
+        PanDirection = $PanDirection
+        PanProfile = $PanProfile
+        PanLength = $PanLength
+        PanDurationMs = $PanDurationMs
+        SoakSeconds = $SoakSeconds
+        ClearSelection = [bool]$ClearSelection
+        SkipMap = [bool]$SkipMap
+        SkipTraffic = [bool]$SkipTraffic
+        SkipChrome = [bool]$SkipChrome
+        Screenshots = -not [bool]$NoScreenshots
+        TargetHz = $TargetHz
+    } | ConvertTo-Json | Set-Content -Path $scenarioPath
     Invoke-Adb logcat -c | Out-Null
     $startArgs = @(
         "shell", "am", "start", "--display", "0", "--activity-single-top",
@@ -385,7 +417,8 @@ try {
         "--es", "com.flightalert.PERF_LAT", "$($city.Lat)",
         "--es", "com.flightalert.PERF_LON", "$($city.Lon)",
         "--es", "com.flightalert.PERF_ZOOM", "$Zoom",
-        "--es", "com.flightalert.PERF_RUN_ID", "$runId"
+        "--es", "com.flightalert.PERF_RUN_ID", "$runId",
+        "--es", "com.flightalert.PERF_FOCUS_OPEN_MAP", "true"
     )
     if ($MapSource -ne "Current") {
         $startArgs += @("--es", "com.flightalert.PERF_MAP_SOURCE", $MapSource.ToUpperInvariant())
@@ -464,6 +497,9 @@ try {
     $statsPath = Join-Path $outDir "$OutputName-framestats.txt"
     Invoke-Adb shell dumpsys gfxinfo com.flightalert framestats | Set-Content -Path $statsPath
     $statsSummary = Read-FrameStatsSummary -Path $statsPath
+    $summaryCsv = Join-Path $outDir "$OutputName-summary-120hz.csv"
+    $summaryLines = & $summarizer -Path $statsPath -TargetHz $TargetHz -Csv
+    $summaryLines | Set-Content -Path $summaryCsv
 
     if (-not $NoScreenshots) {
         $screenshotPaths += Save-Screenshot -Label "end"
@@ -475,6 +511,10 @@ try {
 
     Write-Host "Saved framestats: $statsPath"
     Write-Host "Frame summary: $statsSummary"
+    Write-Host "Frame metrics:"
+    & $summarizer -Path $statsPath -TargetHz $TargetHz
+    Write-Host "Saved scenario: $scenarioPath"
+    Write-Host "Saved summary CSV: $summaryCsv"
     if ($NoScreenshots) {
         Write-Host "Screenshots disabled for this isolation run."
     } else {

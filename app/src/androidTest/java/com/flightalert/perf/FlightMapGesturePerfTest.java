@@ -59,6 +59,8 @@ public class FlightMapGesturePerfTest {
     private MajorTrafficCity currentPerfCity = null;
     private double currentPerfZoom = Double.NaN;
     private String currentPerfMapSource = "";
+    private boolean currentPerfSkipChrome = false;
+    private boolean currentPerfSkipTraffic = false;
 
     @Test
     public void launchOnly() throws Exception {
@@ -311,7 +313,9 @@ public class FlightMapGesturePerfTest {
 
     private void runCountryScaleZoomContinuity(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
         MajorTrafficCity city = randomMajorTrafficCity();
-        UiObject2 app = startAppAtMajorTraffic(city, 4.25, mapSource);
+        boolean skipChrome = instrumentationBooleanArgument("skipChrome");
+        boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
+        UiObject2 app = startAppAtMajorTraffic(city, 4.25, mapSource, skipChrome, skipTraffic);
         sleep(TRAFFIC_LOAD_WAIT_MS);
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + "-continent-rest.png");
@@ -325,7 +329,7 @@ public class FlightMapGesturePerfTest {
         requireFlightAlertForeground();
         capturePerfArtifacts(artifactName + "-continent");
 
-        app = startAppAtMajorTraffic(city, 5.4, mapSource);
+        app = startAppAtMajorTraffic(city, 5.4, mapSource, skipChrome, skipTraffic);
         sleep(1400);
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + "-country-rest.png");
@@ -454,10 +458,16 @@ public class FlightMapGesturePerfTest {
     }
 
     private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome) throws Exception {
+        return startAppAtMajorTraffic(city, zoom, mapSource, skipChrome, false);
+    }
+
+    private UiObject2 startAppAtMajorTraffic(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic) throws Exception {
         System.out.println("Testing major traffic city: " + city.name);
         currentPerfCity = city;
         currentPerfZoom = zoom;
         currentPerfMapSource = mapSource == null ? "default" : mapSource;
+        currentPerfSkipChrome = skipChrome;
+        currentPerfSkipTraffic = skipTraffic;
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context context = instrumentation.getTargetContext();
         grantFlightAlertPermissions();
@@ -472,6 +482,9 @@ public class FlightMapGesturePerfTest {
         if (skipChrome) {
             intent.putExtra("com.flightalert.PERF_SKIP_CHROME", "true");
         }
+        if (skipTraffic) {
+            intent.putExtra("com.flightalert.PERF_SKIP_TRAFFIC", "true");
+        }
         if (mapSource != null) {
             intent.putExtra("com.flightalert.PERF_MAP_SOURCE", mapSource);
         }
@@ -479,7 +492,7 @@ public class FlightMapGesturePerfTest {
         instrumentation.waitForIdleSync();
         acceptFlightAlertPermissionsIfPresent();
         if (!waitForFlightAlertForeground(8000L)) {
-            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome);
+            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic);
             instrumentation.waitForIdleSync();
             acceptFlightAlertPermissionsIfPresent();
             assertTrue("Refusing to run gestures outside Flight Alert. Foreground was:\n" + foregroundDiagnostic(), waitForFlightAlertForeground(8000L));
@@ -496,6 +509,10 @@ public class FlightMapGesturePerfTest {
     }
 
     private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome) throws Exception {
+        launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, false);
+    }
+
+    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic) throws Exception {
         StringBuilder command = new StringBuilder("am start -n ")
                 .append(PACKAGE_NAME).append("/.MainActivity")
                 .append(" --es com.flightalert.PERF_LAT ").append(city.lat)
@@ -506,6 +523,9 @@ public class FlightMapGesturePerfTest {
                 .append(" --ez com.flightalert.PERF_FOCUS_OPEN_MAP true");
         if (skipChrome) {
             command.append(" --es com.flightalert.PERF_SKIP_CHROME true");
+        }
+        if (skipTraffic) {
+            command.append(" --es com.flightalert.PERF_SKIP_TRAFFIC true");
         }
         if (mapSource != null) {
             command.append(" --es com.flightalert.PERF_MAP_SOURCE ").append(mapSource);
@@ -838,9 +858,16 @@ public class FlightMapGesturePerfTest {
         builder.append("lon=").append(city == null ? "unknown" : city.lon).append('\n');
         builder.append("last_launch_zoom=").append(currentPerfZoom).append('\n');
         builder.append("map_source=").append(currentPerfMapSource).append('\n');
+        builder.append("skip_chrome=").append(currentPerfSkipChrome).append('\n');
+        builder.append("skip_traffic=").append(currentPerfSkipTraffic).append('\n');
         builder.append("focus=open-map\n");
         builder.append("scale_bands=continent,country\n");
         return builder.toString();
+    }
+
+    private boolean instrumentationBooleanArgument(String name) {
+        String value = InstrumentationRegistry.getArguments().getString(name);
+        return "true".equalsIgnoreCase(value) || "1".equals(value) || "yes".equalsIgnoreCase(value);
     }
 
     private void writeShellArtifact(String fileName, String command) throws IOException {
