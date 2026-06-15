@@ -428,30 +428,30 @@ class MapTileRenderer(
         var interim_top_active = false
         var interim_top_alpha = 0f
         var interim_top_use_tile_grid = false
-        var satellite_zoom_transition_active = false
+        var zoom_transition_active = false
+        val previous_zoom = raster_transition_previous_zoom(tile_zoom)
+        val retained_transition_zoom = previous_zoom?.takeIf { zoom ->
+            retained_zoom_grid_covers_viewport(viewport, state, zoom)
+        }
+        val previous_zoom_alpha = retained_transition_zoom?.let { zoom ->
+            raster_zoom_handoff_alpha(viewport, tile_zoom, zoom)
+        } ?: 0f
+        zoom_transition_active = previous_zoom_alpha > RASTER_TILE_ZOOM_BLEND_MIN_ALPHA
         if (state.map_source == TileSource.SATELLITE) {
-            val previous_zoom = satellite_transition_previous_zoom(tile_zoom)
-            val retained_transition_zoom = previous_zoom?.takeIf { zoom ->
-                retained_zoom_grid_covers_viewport(viewport, state, zoom)
-            }
-            val previous_zoom_alpha = retained_transition_zoom?.let { zoom ->
-                satellite_zoom_handoff_alpha(viewport, tile_zoom, zoom)
-            } ?: 0f
-            satellite_zoom_transition_active = previous_zoom_alpha > SATELLITE_TILE_ZOOM_BLEND_MIN_ALPHA
-            if (interim_available && (requested > 0 || satellite_zoom_transition_active)) {
-                interim_top_zoom = if (satellite_zoom_transition_active) {
+            if (interim_available && (requested > 0 || zoom_transition_active)) {
+                interim_top_zoom = if (zoom_transition_active) {
                     retained_transition_zoom
                 } else {
                     coherent_interim_zoom_for_viewport(viewport, excluded_zoom = tile_zoom)
                 }
-                interim_top_use_tile_grid = satellite_zoom_transition_active && interim_top_zoom != null
+                interim_top_use_tile_grid = zoom_transition_active && interim_top_zoom != null
                 interim_top_active = interim_top_use_tile_grid || interim_top_zoom != null
                 if (interim_top_active) {
                     satellite_interim_overlay_active = true
                     satellite_interim_overlay_cache_key = state.cache_key
                     satellite_interim_overlay_zoom = interim_top_zoom
                     satellite_interim_overlay_fade_started_ms = 0L
-                    interim_top_alpha = if (satellite_zoom_transition_active && requested == 0) {
+                    interim_top_alpha = if (zoom_transition_active && requested == 0) {
                         previous_zoom_alpha
                     } else {
                         1f
@@ -459,13 +459,20 @@ class MapTileRenderer(
                 }
             }
         } else {
-            interim_top_zoom = if (interim_available && requested > 0) {
-                coherent_interim_zoom_for_viewport(viewport, excluded_zoom = tile_zoom)
-            } else {
-                null
+            interim_top_zoom = when {
+                zoom_transition_active -> retained_transition_zoom
+                interim_available && requested > 0 -> coherent_interim_zoom_for_viewport(viewport, excluded_zoom = tile_zoom)
+                else -> null
             }
+            interim_top_use_tile_grid = zoom_transition_active && interim_top_zoom != null
             interim_top_active = interim_top_zoom != null
-            interim_top_alpha = if (interim_top_zoom != null) 1f else 0f
+            interim_top_alpha = if (zoom_transition_active && requested == 0) {
+                previous_zoom_alpha
+            } else if (interim_top_zoom != null) {
+                1f
+            } else {
+                0f
+            }
         }
         val keep_interim_on_top = interim_top_active && interim_top_alpha > 0f
         if (!keep_interim_on_top) clear_satellite_interim_overlay()
@@ -474,7 +481,7 @@ class MapTileRenderer(
         }
         val satellite_transition_underlay_active =
             state.map_source == TileSource.SATELLITE &&
-                satellite_zoom_transition_active &&
+                zoom_transition_active &&
                 keep_interim_on_top &&
                 interim_top_zoom != null &&
                 interim_top_alpha < 0.999f
@@ -518,7 +525,7 @@ class MapTileRenderer(
                             now_ms = now_ms,
                             allow_alpha_without_tile_fallback = interim_available && !keep_interim_on_top,
                             interaction_active = state.interaction_active,
-                            force_opaque_satellite_tile = satellite_zoom_transition_active,
+                            force_opaque_satellite_tile = zoom_transition_active && state.map_source == TileSource.SATELLITE,
                             allow_child_fallback = !suppress_satellite_zoom_out_children
                         )
                     ) {
@@ -569,7 +576,7 @@ class MapTileRenderer(
         val composite_cache_size = synchronized(satellite_label_composite_lock) { satellite_label_composite_cache.size }
         debug_last_tile_summary = " mapTiles=$visible_tile_count loaded=$loaded requested=$requested " +
             "interim=${visible_interim_tile_buffer.size} keepInterim=$keep_interim_on_top " +
-            "hiddenBaseSkip=$retained_layer_fully_hides_base transitionUnderlay=$satellite_transition_underlay_active " +
+            "hiddenBaseSkip=$retained_layer_fully_hides_base zoomHandoff=$zoom_transition_active transitionUnderlay=$satellite_transition_underlay_active " +
             "labelComposite=$composited_reference_tiles refDraws=$reference_overlay_draws satLabelCache=$composite_cache_size"
         request_satellite_label_pan_cache_if_needed(
             viewport = viewport,
@@ -1498,7 +1505,7 @@ class MapTileRenderer(
         return false
     }
 
-    private fun satellite_transition_previous_zoom(tile_zoom: Int): Int? {
+    private fun raster_transition_previous_zoom(tile_zoom: Int): Int? {
         if (
             transition_from_tile_zoom == Int.MIN_VALUE ||
             transition_from_tile_zoom == tile_zoom ||
@@ -1509,11 +1516,11 @@ class MapTileRenderer(
         return transition_from_tile_zoom.coerceAtLeast(MIN_ZOOM)
     }
 
-    private fun satellite_zoom_handoff_alpha(viewport: Viewport, tile_zoom: Int, overlay_zoom: Int): Float {
+    private fun raster_zoom_handoff_alpha(viewport: Viewport, tile_zoom: Int, overlay_zoom: Int): Float {
         val zoom_fraction = (viewport.zoom - tile_zoom).toFloat().coerceIn(0f, 1f)
         val zoom_blend = smooth_step(
-            -SATELLITE_TILE_ZOOM_BLEND_MARGIN,
-            1f + SATELLITE_TILE_ZOOM_BLEND_MARGIN,
+            -RASTER_TILE_ZOOM_BLEND_MARGIN,
+            1f + RASTER_TILE_ZOOM_BLEND_MARGIN,
             zoom_fraction
         )
         return when {
@@ -2211,10 +2218,10 @@ class MapTileRenderer(
 
     private fun suppress_satellite_child_fallback(viewport: Viewport, tile_zoom: Int, state: MapTileRenderState): Boolean {
         if (state.map_source != TileSource.SATELLITE) return false
-        val previous_zoom = satellite_transition_previous_zoom(tile_zoom) ?: return false
+        val previous_zoom = raster_transition_previous_zoom(tile_zoom) ?: return false
         if (previous_zoom <= tile_zoom) return false
-        return satellite_zoom_handoff_alpha(viewport, tile_zoom, previous_zoom) >
-            SATELLITE_TILE_ZOOM_BLEND_MIN_ALPHA
+        return raster_zoom_handoff_alpha(viewport, tile_zoom, previous_zoom) >
+            RASTER_TILE_ZOOM_BLEND_MIN_ALPHA
     }
 
     private fun satellite_tile_alpha(key: String, now_ms: Long, interaction_active: Boolean): Float {
@@ -2284,8 +2291,8 @@ class MapTileRenderer(
         const val CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
         const val SATELLITE_TILE_ZOOM_FADE_MS = 420f
-        const val SATELLITE_TILE_ZOOM_BLEND_MARGIN = 0.38f
-        const val SATELLITE_TILE_ZOOM_BLEND_MIN_ALPHA = 0.01f
+        const val RASTER_TILE_ZOOM_BLEND_MARGIN = 0.52f
+        const val RASTER_TILE_ZOOM_BLEND_MIN_ALPHA = 0.01f
         const val SATELLITE_INTERIM_OVERLAY_FADE_MS = 460f
         const val SATELLITE_NO_DATA_SAMPLE_COLUMNS = 16
         const val SATELLITE_NO_DATA_SAMPLE_ROWS = 16
