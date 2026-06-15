@@ -73,6 +73,6 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 
 - `assembleDebug`, `assembleDebugAndroidTest`, `testDebugUnitTest`, and `lintDebug` pass on the release-prep tree.
 - Emulator visual/layout check covered the main street-map surface with real tiles, aircraft overlays, readable aircraft dots/outlines, and the current panel/theme treatment.
-- Physical phone `RFCX40KPN3B` passed `PriorityNotificationContractInstrumentedTest`, covering non-extreme contacts, extreme contacts, altitude text updates, and automatic notification clearing when the extreme-priority queue is empty.
-- Physical phone `RFCX40KPN3B` v1.5 low-zoom street/off shell-pan over New York City rendered 487 frames with 11 janky frames (2.26%), p50 7 ms, p95 10 ms, and p99 14 ms; same-run motion capture preserved real map imagery and aircraft dot outlines.
+- Physical test phone passed `PriorityNotificationContractInstrumentedTest`, covering non-extreme contacts, extreme contacts, altitude text updates, and automatic notification clearing when the extreme-priority queue is empty.
+- Physical test phone v1.5 low-zoom street/off shell-pan over New York City rendered 487 frames with 11 janky frames (2.26%), p50 7 ms, p95 10 ms, and p99 14 ms; same-run motion capture preserved real map imagery and aircraft dot outlines.
 - This pass kept the post-Optimizer/Artist map behavior intact while adding only light service/readability humanization and deterministic notification coverage.
