@@ -2,11 +2,12 @@
 
 Flight Alert is a Kotlin Android app for drone pilots who want live, map-first awareness of nearby aircraft. It is supplemental situational awareness only, not a certified detect-and-avoid system.
 
-Current version: **1.5**
+Current version: **1.6**
 
 ## Highlights
 
 - Live aircraft map with real street, no-label, or satellite tiles.
+- Smooth retained tile handoff for satellite imagery and street-map zoom transitions.
 - ADS-B/MLAT traffic from live public feeds, with source status shown when data is missing.
 - Traffic/details source modes for API-only, Airplanes.Live web-only, or hybrid enrichment.
 - Smooth aircraft motion, zoom/density marker morphing, and type-aware symbols.
@@ -15,6 +16,7 @@ Current version: **1.5**
 - Long-press an aircraft photo to open a source-labeled gallery; source-marked photos include proof and browser buttons.
 - Registry country flag in aircraft details and the traffic card.
 - Settings skins/themes, with Cockpit retained as an option.
+- Priority alert settings with unit-aware range controls.
 - Nested Settings panels for street-map labels and aviation layers.
 - Optional aviation layers from real public sources:
   - FAA ATC/FIR/OCA boundary airspace.
@@ -69,10 +71,9 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 - Filters only change visible map traffic; alert monitoring continues against the full live feed.
 - CO2/impact values are estimates, not measured fuel burn.
 
-## 1.5 Verification
+## 1.6 Verification
 
-- `assembleDebug`, `assembleDebugAndroidTest`, `testDebugUnitTest`, and `lintDebug` pass on the release-prep tree.
-- Reserved emulator `emulator-5608` passed `PriorityNotificationContractInstrumentedTest`, covering non-extreme contacts, extreme contacts, altitude text updates, service snapshot updates, and automatic notification clearing when the extreme-priority queue is empty.
-- Reserved emulator `emulator-5608` passed the `FlightMapGesturePerfTest#launchOnly` smoke and a manual foreground screenshot check with real street tiles, dense aircraft overlays, readable aircraft dots/outlines, aviation-layer geometry, and the current panel/theme treatment.
-- Optimizer baseline preserved: physical test phone v1.5 low-zoom street/off shell-pan over New York City rendered 487 frames with 11 janky frames (2.26%), p50 7 ms, p95 10 ms, and p99 14 ms; same-run motion capture preserved real map imagery and aircraft dot outlines.
-- This pass fixed the data-panel nearest-aircraft identity/selection issues, kept the post-Optimizer/Artist map behavior intact, and hardened deterministic notification coverage.
+- `assembleDebug` passes on the v1.6 tree.
+- v1.6 promotes the optimizer branch into `master`, preserving the feature-complete map, traffic, details, alert, aviation-layer, and settings behavior.
+- The release keeps the no-pretending data policy: unavailable live data remains labeled rather than invented.
+- The release notes and agent rules were cleaned to remove stale optimizer chatter, private test artifacts, and obsolete branch guidance.
