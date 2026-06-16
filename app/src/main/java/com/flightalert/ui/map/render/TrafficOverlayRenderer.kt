@@ -2883,7 +2883,7 @@ class TrafficOverlayRenderer(
         const val SYMBOL_OVERLAY_EXTERNAL_CENTER_JUMP_VIEWPORTS = 1.5f
         const val SYMBOL_OVERLAY_EXTERNAL_ZOOM_JUMP = 0.35
         const val DOT_OVERLAY_CACHE_MIN_DOTS = 3200
-        const val DOT_OVERLAY_CACHE_MAX_ZOOM = 4.8
+        const val DOT_OVERLAY_CACHE_MAX_ZOOM = 6.2
         const val DOT_OVERLAY_CACHE_MIN_ALPHA = 0.999f
         const val DOT_OVERLAY_CACHE_PADDING_DP = 320f
         const val DOT_OVERLAY_MAX_DIMENSION = 4096

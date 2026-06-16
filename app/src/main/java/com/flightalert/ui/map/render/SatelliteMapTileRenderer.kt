@@ -16,6 +16,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -70,6 +71,11 @@ internal class SatelliteMapTileRenderer(
     private val reference_tile_cache = linkedMapOf<String, Bitmap>()
     private val reference_tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
     private val requested_reference_tiles = mutableSetOf<String>()
+    // Label/reference overlays deliberately run on their own single worker so they cannot
+    // starve the base satellite imagery queue during zoom-out tile-grid changes.
+    private val reference_tile_executor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "flightalert-satellite-labels").apply { isDaemon = true }
+    }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private var transition_cache_key: String? = null
     private var transition_map_source: TileSource? = null
@@ -108,7 +114,7 @@ internal class SatelliteMapTileRenderer(
 
         update_tile_zoom_transition(lower_tile_zoom, state)
 
-        val interim_drawn = draw_interim_tiles(canvas, viewport, state, now_ms)
+        draw_interim_tiles(canvas, viewport, state, now_ms)
         val loaded_interim_tiles = ArrayList<InterimRasterTile>()
 
         val lower_stats = draw_tile_grid_layer(
@@ -119,7 +125,7 @@ internal class SatelliteMapTileRenderer(
             tile_zoom = lower_tile_zoom,
             now_ms = now_ms,
             layer_alpha = 1f,
-            draw_unavailable_if_missing = !interim_drawn,
+            draw_unavailable_if_missing = true,
             allow_parent_fallback = true,
             allow_child_fallback = true,
             loaded_interim_tiles = loaded_interim_tiles
@@ -157,6 +163,8 @@ internal class SatelliteMapTileRenderer(
             }
         }
 
+        val base_imagery_ready_for_labels = lower_stats.requested == 0 &&
+                (!has_upper_lod || upper_lod_alpha <= MIN_LAYER_ALPHA || upper_stats.requested == 0)
         val label_stats = draw_reference_overlay_layers(
             canvas = canvas,
             viewport = viewport,
@@ -166,7 +174,8 @@ internal class SatelliteMapTileRenderer(
             upper_tile_zoom = upper_tile_zoom,
             has_upper_lod = has_upper_lod,
             upper_lod_alpha = upper_lod_alpha,
-            prefetch_upper_lod = prefetch_upper_lod
+            prefetch_upper_lod = prefetch_upper_lod,
+            allow_requests = base_imagery_ready_for_labels
         )
 
         if (lower_stats.fading || upper_stats.fading || label_stats.fading) {
@@ -221,6 +230,7 @@ internal class SatelliteMapTileRenderer(
     }
 
     fun shutdown() {
+        reference_tile_executor.shutdownNow()
         clear()
     }
 
@@ -329,7 +339,9 @@ internal class SatelliteMapTileRenderer(
                             )
                         ) {
                             fallback_drawn++
-                        } else if (draw_unavailable_if_missing) {
+                        } else if (draw_unavailable_if_missing &&
+                            !retained_interim_intersects_destination(viewport, state.cache_key, destination)
+                        ) {
                             draw_unavailable_tile(canvas, screen_x, screen_y, tile_size_on_screen, style)
                         }
                     }
@@ -355,7 +367,8 @@ internal class SatelliteMapTileRenderer(
         upper_tile_zoom: Int,
         has_upper_lod: Boolean,
         upper_lod_alpha: Float,
-        prefetch_upper_lod: Boolean
+        prefetch_upper_lod: Boolean,
+        allow_requests: Boolean
     ): TileLayerDrawStats {
         val overlays = state.reference_overlay_layers
         if (overlays.isEmpty()) {
@@ -376,7 +389,8 @@ internal class SatelliteMapTileRenderer(
                 overlay = overlay,
                 tile_zoom = lower_tile_zoom,
                 now_ms = now_ms,
-                layer_alpha = lower_alpha
+                layer_alpha = lower_alpha,
+                allow_requests = allow_requests
             )
             visible += lower_stats.visible
             loaded += lower_stats.loaded
@@ -391,7 +405,8 @@ internal class SatelliteMapTileRenderer(
                     overlay = overlay,
                     tile_zoom = upper_tile_zoom,
                     now_ms = now_ms,
-                    layer_alpha = upper_lod_alpha
+                    layer_alpha = upper_lod_alpha,
+                    allow_requests = allow_requests
                 )
                 visible += upper_stats.visible
                 loaded += upper_stats.loaded
@@ -416,7 +431,8 @@ internal class SatelliteMapTileRenderer(
         overlay: ReferenceTileOverlay,
         tile_zoom: Int,
         now_ms: Long,
-        layer_alpha: Float
+        layer_alpha: Float,
+        allow_requests: Boolean
     ): TileLayerDrawStats {
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
@@ -458,15 +474,17 @@ internal class SatelliteMapTileRenderer(
                     }
                 } else {
                     requested++
-                    request_reference_tile(
-                        z = tile_zoom,
-                        x = tx,
-                        y = ty,
-                        key = key,
-                        cache_key = overlay.cache_key,
-                        url = overlay.tile_url(tile_zoom, tx, ty),
-                        user_agent = state.user_agent
-                    )
+                    if (allow_requests) {
+                        request_reference_tile(
+                            z = tile_zoom,
+                            x = tx,
+                            y = ty,
+                            key = key,
+                            cache_key = overlay.cache_key,
+                            url = overlay.tile_url(tile_zoom, tx, ty),
+                            user_agent = state.user_agent
+                        )
+                    }
                 }
             }
         }
@@ -507,7 +525,7 @@ internal class SatelliteMapTileRenderer(
             if (requested_reference_tiles.contains(key)) return
             requested_reference_tiles += key
         }
-        executor.execute {
+        reference_tile_executor.execute {
             var connection: HttpURLConnection? = null
             try {
                 val file = reference_tile_file(z, x, y, cache_key)
@@ -663,6 +681,45 @@ internal class SatelliteMapTileRenderer(
                 rect.left <= viewport.width &&
                 rect.bottom >= 0f &&
                 rect.top <= viewport.height
+    }
+
+
+    private fun retained_interim_intersects_destination(
+        viewport: Viewport,
+        cache_key: String,
+        destination: RectF
+    ): Boolean {
+        for (tile in interim_tiles.values) {
+            if (tile.cache_key != cache_key) continue
+            if (interim_tile_intersects_destination(tile, viewport, destination)) return true
+        }
+        return false
+    }
+
+    private fun interim_tile_intersects_destination(
+        tile: InterimRasterTile,
+        viewport: Viewport,
+        destination: RectF
+    ): Boolean {
+        val scale = 2.0.pow(viewport.zoom - tile.z)
+        val tile_size_on_screen = (TILE_SIZE * scale).toFloat()
+        val tile_world_width_at_zoom = TILE_SIZE * 2.0.pow(viewport.zoom)
+        val base_screen_x = (tile.x * TILE_SIZE * scale - viewport.center_x + viewport.width / 2.0).toFloat()
+        val screen_y = (tile.y * TILE_SIZE * scale - viewport.center_y + viewport.height / 2.0).toFloat()
+        if (screen_y > destination.bottom || screen_y + tile_size_on_screen < destination.top) return false
+        val repeat_start = floor((destination.left - tile_size_on_screen - base_screen_x) / tile_world_width_at_zoom).toInt()
+        val repeat_end = floor((destination.right - base_screen_x) / tile_world_width_at_zoom).toInt()
+        for (repeat in repeat_start..repeat_end) {
+            val screen_x = (base_screen_x + repeat * tile_world_width_at_zoom).toFloat()
+            val tile_rect = RectF(
+                screen_x,
+                screen_y,
+                screen_x + tile_size_on_screen,
+                screen_y + tile_size_on_screen
+            )
+            if (RectF.intersects(tile_rect, destination)) return true
+        }
+        return false
     }
 
     private fun replace_interim_tiles(tiles: List<InterimRasterTile>) {

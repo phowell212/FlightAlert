@@ -1211,7 +1211,7 @@ internal class TrafficOverlayStateBuilder(
         const val TILE_SIZE = 256
         const val VISIBLE_AIRCRAFT_INITIAL_CAPACITY = 2048
         const val DENSE_DOT_BATCH_MAX_ZOOM = 8.8
-        const val DENSE_DOT_WORLD_BATCH_MAX_ZOOM = 4.6
+        const val DENSE_DOT_WORLD_BATCH_MAX_ZOOM = 6.2
         const val DENSE_DOT_BATCH_DENSITY_FULL = 2.4f
         const val DENSE_DOT_SYMBOL_SETTLE_MS = 360L
         const val DENSE_DOT_CACHE_ZOOM_EPSILON = 0.0001
