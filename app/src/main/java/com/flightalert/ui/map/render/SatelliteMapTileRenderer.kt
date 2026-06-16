@@ -40,8 +40,17 @@ private data class InterimRasterTile(
     var last_used_ms: Long
 )
 
-// 363ef40 satellite renderer restored behind the Satellite toggle.
-// This intentionally ignores satellite reference/label overlays; aviation, traffic, route, and other layers are still drawn above this by FlightMapView.
+private data class TileLayerDrawStats(
+    val visible: Int,
+    val loaded: Int,
+    val requested: Int,
+    val fallback_drawn: Int,
+    val fading: Boolean
+)
+
+// Satellite renderer restored behind the Satellite toggle, with continuous LOD blending.
+// This intentionally ignores satellite reference/label overlays; aviation, traffic, route,
+// and other layers are still drawn above this by FlightMapView.
 internal class SatelliteMapTileRenderer(
     private val context: Context,
     private val executor: Executor,
@@ -62,7 +71,6 @@ internal class SatelliteMapTileRenderer(
     private var transition_map_source: TileSource? = null
     private var current_tile_zoom = Int.MIN_VALUE
     private var tile_zoom_direction = 0
-    private var tile_zoom_transition_started_ms = 0L
     private var last_satellite_buffer_request_key: String? = null
     private var last_satellite_buffer_request_ms = 0L
 
@@ -80,72 +88,85 @@ internal class SatelliteMapTileRenderer(
         paint.color = style.map_empty
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
 
-        val left_world = viewport.center_x - viewport.width / 2.0
-        val top_world = viewport.center_y - viewport.height / 2.0
-        val tile_zoom = viewport.zoom.toInt().coerceIn(MIN_ZOOM, TileSource.SATELLITE.max_native_zoom)
-        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
-        val tile_world_scale = 1.0 / tile_to_viewport_scale
-        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
-        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt()
-        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt()
-        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
-        val max_tile = 1 shl tile_zoom
+        val lower_tile_zoom = floor(viewport.zoom)
+            .toInt()
+            .coerceIn(MIN_ZOOM, TileSource.SATELLITE.max_native_zoom)
+        val upper_tile_zoom = (lower_tile_zoom + 1)
+            .coerceAtMost(TileSource.SATELLITE.max_native_zoom)
+        val zoom_fraction = (viewport.zoom - lower_tile_zoom).toFloat().coerceIn(0f, 1f)
+        val has_upper_lod = upper_tile_zoom > lower_tile_zoom
+        val upper_lod_alpha = if (has_upper_lod) {
+            smooth_step(LOD_BLEND_START_FRACTION, LOD_BLEND_END_FRACTION, zoom_fraction)
+        } else {
+            0f
+        }
+        val prefetch_upper_lod = has_upper_lod && zoom_fraction >= LOD_PREFETCH_START_FRACTION
 
-        update_tile_zoom_transition(tile_zoom, state, now_ms)
-        request_satellite_buffer_tiles(tile_zoom, first_tile_x, last_tile_x, first_tile_y, last_tile_y, max_tile, state, now_ms)
+        update_tile_zoom_transition(lower_tile_zoom, state)
 
         val interim_drawn = draw_interim_tiles(canvas, viewport, state, now_ms)
         val loaded_interim_tiles = ArrayList<InterimRasterTile>()
-        var loaded = 0
-        var requested = 0
-        var visible = 0
-        var needs_transition_redraw = false
 
-        for (ty in first_tile_y..last_tile_y) {
-            if (ty !in 0 until max_tile) continue
-            for (tx_raw in first_tile_x..last_tile_x) {
-                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
-                val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
-                val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
-                val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
-                val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
-                val destination = RectF(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
-                visible++
+        val lower_stats = draw_tile_grid_layer(
+            canvas = canvas,
+            viewport = viewport,
+            state = state,
+            style = style,
+            tile_zoom = lower_tile_zoom,
+            now_ms = now_ms,
+            layer_alpha = 1f,
+            draw_unavailable_if_missing = !interim_drawn,
+            allow_parent_fallback = true,
+            allow_child_fallback = true,
+            loaded_interim_tiles = loaded_interim_tiles
+        )
 
-                val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
-                if (bitmap != null) {
-                    if (draw_loaded_tile(canvas, bitmap, destination, tile_zoom, tx, ty, key, state, now_ms)) {
-                        needs_transition_redraw = true
-                    }
-                    loaded_interim_tiles += InterimRasterTile(
-                        cache_key = state.cache_key,
-                        z = tile_zoom,
-                        x = tx,
-                        y = ty,
-                        bitmap = bitmap,
-                        last_used_ms = now_ms
-                    )
-                    loaded++
-                } else {
-                    requested++
-                    if (!draw_satellite_fallback_tile(canvas, tile_zoom, tx, ty, state, destination)) {
-                        request_satellite_parent_tiles(tile_zoom, tx, ty, state)
-                        if (!interim_drawn) {
-                            draw_unavailable_tile(canvas, screen_x, screen_y, tile_size_on_screen, style)
-                        }
-                    }
-                    request_tile(tile_zoom, tx, ty, key, state)
-                }
+        val upper_stats = if (has_upper_lod && (upper_lod_alpha > MIN_LAYER_ALPHA || prefetch_upper_lod)) {
+            draw_tile_grid_layer(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                style = style,
+                tile_zoom = upper_tile_zoom,
+                now_ms = now_ms,
+                layer_alpha = upper_lod_alpha,
+                draw_unavailable_if_missing = false,
+                allow_parent_fallback = false,
+                allow_child_fallback = true,
+                loaded_interim_tiles = loaded_interim_tiles
+            )
+        } else {
+            TileLayerDrawStats(visible = 0, loaded = 0, requested = 0, fallback_drawn = 0, fading = false)
+        }
+
+        val blend_active = has_upper_lod &&
+                upper_lod_alpha > MIN_LAYER_ALPHA &&
+                upper_lod_alpha < 1f - MIN_LAYER_ALPHA
+        val required_tiles_ready = lower_stats.requested == 0 &&
+                (!has_upper_lod || upper_lod_alpha <= MIN_LAYER_ALPHA || upper_stats.requested == 0)
+
+        if (loaded_interim_tiles.isNotEmpty()) {
+            if (blend_active || !required_tiles_ready) {
+                merge_interim_tiles(loaded_interim_tiles)
+            } else {
+                replace_interim_tiles(loaded_interim_tiles)
             }
         }
 
-        if (requested == 0 && loaded_interim_tiles.isNotEmpty()) {
-            replace_interim_tiles(loaded_interim_tiles)
+        if (lower_stats.fading || upper_stats.fading) {
+            request_redraw()
         }
-        if (needs_transition_redraw) request_redraw()
 
-        debug_last_tile_summary = " mapTiles=$visible loaded=$loaded requested=$requested sat363=1 interim=${interim_tiles.size}"
-        return if (requested == 0 && loaded > 0) {
+        val visible = lower_stats.visible + upper_stats.visible
+        val loaded = lower_stats.loaded + upper_stats.loaded
+        val requested = lower_stats.requested + upper_stats.requested
+        val fallback_drawn = lower_stats.fallback_drawn + upper_stats.fallback_drawn
+        debug_last_tile_summary =
+            " mapTiles=$visible loaded=$loaded requested=$requested fallback=$fallback_drawn " +
+                    "satLod=${lower_tile_zoom}->${upper_tile_zoom} lodAlpha=${"%.2f".format(Locale.US, upper_lod_alpha)} " +
+                    "blend=$blend_active interim=${interim_tiles.size}"
+
+        return if (lower_stats.requested == 0 && lower_stats.loaded > 0) {
             "${TileSource.SATELLITE.display_name} loaded"
         } else {
             "Loading ${TileSource.SATELLITE.display_name.lowercase(Locale.US)} tiles"
@@ -163,7 +184,6 @@ internal class SatelliteMapTileRenderer(
         transition_map_source = null
         current_tile_zoom = Int.MIN_VALUE
         tile_zoom_direction = 0
-        tile_zoom_transition_started_ms = 0L
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
         debug_last_tile_summary = ""
@@ -174,7 +194,6 @@ internal class SatelliteMapTileRenderer(
         transition_map_source = null
         current_tile_zoom = Int.MIN_VALUE
         tile_zoom_direction = 0
-        tile_zoom_transition_started_ms = 0L
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
         debug_last_tile_summary = ""
@@ -184,35 +203,136 @@ internal class SatelliteMapTileRenderer(
         clear()
     }
 
-    // Memory cache is first; disk and network loading happen through request_tile like the 363 renderer.
-    private fun tile_bitmap(z: Int, x: Int, y: Int, key: String, state: MapTileRenderState): Bitmap? {
+    private fun draw_tile_grid_layer(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: MapTileRenderState,
+        style: MapTileRenderStyle,
+        tile_zoom: Int,
+        now_ms: Long,
+        layer_alpha: Float,
+        draw_unavailable_if_missing: Boolean,
+        allow_parent_fallback: Boolean,
+        allow_child_fallback: Boolean,
+        loaded_interim_tiles: MutableList<InterimRasterTile>
+    ): TileLayerDrawStats {
+        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val tile_world_scale = 1.0 / tile_to_viewport_scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
+        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
+        val max_tile = 1 shl tile_zoom
+
+        request_satellite_buffer_tiles(
+            tile_zoom = tile_zoom,
+            first_tile_x = first_tile_x,
+            last_tile_x = last_tile_x,
+            first_tile_y = first_tile_y,
+            last_tile_y = last_tile_y,
+            max_tile = max_tile,
+            state = state,
+            now_ms = now_ms
+        )
+
+        var visible = 0
+        var loaded = 0
+        var requested = 0
+        var fallback_drawn = 0
+        var fading = false
+        val layer_visible = layer_alpha > MIN_LAYER_ALPHA
+
+        for (ty in first_tile_y..last_tile_y) {
+            if (ty !in 0 until max_tile) continue
+            for (tx_raw in first_tile_x..last_tile_x) {
+                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
+                val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
+                val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
+                val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
+                val destination = RectF(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
+                visible++
+
+                val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
+                if (bitmap != null) {
+                    loaded_interim_tiles += InterimRasterTile(
+                        cache_key = state.cache_key,
+                        z = tile_zoom,
+                        x = tx,
+                        y = ty,
+                        bitmap = bitmap,
+                        last_used_ms = now_ms
+                    )
+                    loaded++
+
+                    if (layer_visible) {
+                        val load_alpha = satellite_tile_load_alpha(key, now_ms)
+                        val draw_alpha = (layer_alpha * load_alpha).coerceIn(0f, 1f)
+                        if (draw_alpha > MIN_LAYER_ALPHA) {
+                            if (load_alpha < 0.999f && layer_alpha >= 0.999f) {
+                                draw_satellite_fallback_tile(
+                                    canvas = canvas,
+                                    z = tile_zoom,
+                                    x = tx,
+                                    y = ty,
+                                    state = state,
+                                    destination = destination,
+                                    alpha = layer_alpha,
+                                    allow_parent_fallback = allow_parent_fallback,
+                                    allow_child_fallback = allow_child_fallback
+                                )
+                            }
+                            draw_tile_bitmap(canvas, bitmap, null, destination, draw_alpha)
+                        }
+                        if (load_alpha < 0.999f) fading = true
+                    }
+                } else {
+                    requested++
+                    request_satellite_parent_tiles(tile_zoom, tx, ty, state)
+                    request_tile(tile_zoom, tx, ty, key, state)
+
+                    if (layer_visible) {
+                        if (
+                            draw_satellite_fallback_tile(
+                                canvas = canvas,
+                                z = tile_zoom,
+                                x = tx,
+                                y = ty,
+                                state = state,
+                                destination = destination,
+                                alpha = layer_alpha,
+                                allow_parent_fallback = allow_parent_fallback,
+                                allow_child_fallback = allow_child_fallback
+                            )
+                        ) {
+                            fallback_drawn++
+                        } else if (draw_unavailable_if_missing) {
+                            draw_unavailable_tile(canvas, screen_x, screen_y, tile_size_on_screen, style)
+                        }
+                    }
+                }
+            }
+        }
+
+        return TileLayerDrawStats(
+            visible = visible,
+            loaded = loaded,
+            requested = requested,
+            fallback_drawn = fallback_drawn,
+            fading = fading
+        )
+    }
+
+    // Memory cache is first. Interim tiles are treated as a retained raster source so a zoom-level
+    // crossfade can keep using the previous complete imagery even after the active tile grid changes.
+    private fun tile_bitmap(@Suppress("UNUSED_PARAMETER") z: Int, @Suppress("UNUSED_PARAMETER") x: Int, @Suppress("UNUSED_PARAMETER") y: Int, key: String, @Suppress("UNUSED_PARAMETER") state: MapTileRenderState): Bitmap? {
         synchronized(tile_cache) {
             tile_cache[key]?.let { return it }
         }
+        interim_tiles[key]?.let { return it.bitmap }
         return null
-    }
-
-    private fun draw_loaded_tile(
-        canvas: Canvas,
-        bitmap: Bitmap,
-        destination: RectF,
-        z: Int,
-        x: Int,
-        y: Int,
-        key: String,
-        state: MapTileRenderState,
-        now_ms: Long
-    ): Boolean {
-        val alpha = satellite_tile_alpha(key, now_ms)
-        if (alpha < 0.999f) {
-            if (draw_satellite_fallback_tile(canvas, z, x, y, state, destination)) {
-                draw_tile_bitmap(canvas, bitmap, null, destination, alpha)
-                return true
-            }
-            request_satellite_parent_tiles(z, x, y, state)
-        }
-        draw_tile_bitmap(canvas, bitmap, null, destination, 1f)
-        return false
     }
 
     private fun draw_tile_bitmap(canvas: Canvas, bitmap: Bitmap, source: Rect?, destination: RectF, alpha: Float) {
@@ -278,9 +398,9 @@ internal class SatelliteMapTileRenderer(
 
     private fun rect_intersects_viewport(rect: RectF, viewport: Viewport): Boolean {
         return rect.right >= 0f &&
-            rect.left <= viewport.width &&
-            rect.bottom >= 0f &&
-            rect.top <= viewport.height
+                rect.left <= viewport.width &&
+                rect.bottom >= 0f &&
+                rect.top <= viewport.height
     }
 
     private fun replace_interim_tiles(tiles: List<InterimRasterTile>) {
@@ -288,6 +408,17 @@ internal class SatelliteMapTileRenderer(
         for (tile in tiles.takeLast(MAX_INTERIM_TILES)) {
             val key = "${tile.cache_key}/${tile.z}/${tile.x}/${tile.y}"
             interim_tiles[key] = tile
+        }
+    }
+
+    private fun merge_interim_tiles(tiles: List<InterimRasterTile>) {
+        for (tile in tiles) {
+            val key = "${tile.cache_key}/${tile.z}/${tile.x}/${tile.y}"
+            interim_tiles[key] = tile
+        }
+        while (interim_tiles.size > MAX_INTERIM_TILES) {
+            val first_key = interim_tiles.keys.firstOrNull() ?: break
+            interim_tiles.remove(first_key)
         }
     }
 
@@ -307,14 +438,23 @@ internal class SatelliteMapTileRenderer(
         x: Int,
         y: Int,
         state: MapTileRenderState,
-        destination: RectF
+        destination: RectF,
+        alpha: Float,
+        allow_parent_fallback: Boolean,
+        allow_child_fallback: Boolean
     ): Boolean {
-        val parent = satellite_parent_tile_fallback(z, x, y, state)
-        if (parent != null) {
-            draw_tile_bitmap(canvas, parent.bitmap, parent.source_rect, destination, 1f)
-            return true
+        if (alpha <= MIN_LAYER_ALPHA) return false
+        if (allow_parent_fallback) {
+            val parent = satellite_parent_tile_fallback(z, x, y, state)
+            if (parent != null) {
+                draw_tile_bitmap(canvas, parent.bitmap, parent.source_rect, destination, alpha)
+                return true
+            }
         }
-        return draw_satellite_child_tile_fallback(canvas, z, x, y, state, destination)
+        if (allow_child_fallback) {
+            return draw_satellite_child_tile_fallback(canvas, z, x, y, state, destination, alpha)
+        }
+        return false
     }
 
     // Satellite zooms look better when a real lower-zoom tile remains visible until the exact tile arrives.
@@ -327,7 +467,7 @@ internal class SatelliteMapTileRenderer(
             val parent_x = x / scale
             val parent_y = y / scale
             val parent_key = "${state.cache_key}/$fallback_z/$parent_x/$parent_y"
-            val bitmap = synchronized(tile_cache) { tile_cache[parent_key] }
+            val bitmap = synchronized(tile_cache) { tile_cache[parent_key] } ?: interim_tiles[parent_key]?.bitmap
             if (bitmap != null) {
                 val src_width = (bitmap.width / scale).coerceAtLeast(1)
                 val src_height = (bitmap.height / scale).coerceAtLeast(1)
@@ -356,7 +496,8 @@ internal class SatelliteMapTileRenderer(
         x: Int,
         y: Int,
         state: MapTileRenderState,
-        destination: RectF
+        destination: RectF,
+        alpha: Float
     ): Boolean {
         if (z >= TileSource.SATELLITE.max_native_zoom) return false
         val max_delta = (TileSource.SATELLITE.max_native_zoom - z).coerceAtMost(SATELLITE_CHILD_FALLBACK_MAX_DELTA)
@@ -376,7 +517,7 @@ internal class SatelliteMapTileRenderer(
                     val child_x_raw = x * scale + child_x_offset
                     val child_x = ((child_x_raw % max_child_tile) + max_child_tile) % max_child_tile
                     val child_key = "${state.cache_key}/$child_z/$child_x/$child_y"
-                    val bitmap = synchronized(tile_cache) { tile_cache[child_key] }
+                    val bitmap = synchronized(tile_cache) { tile_cache[child_key] } ?: interim_tiles[child_key]?.bitmap
                     if (bitmap == null) {
                         missing_child = true
                         break
@@ -391,7 +532,7 @@ internal class SatelliteMapTileRenderer(
                 if (missing_child) break
             }
             if (!missing_child && children.size == scale * scale) {
-                draw_satellite_child_tiles(canvas, destination, children)
+                draw_satellite_child_tiles(canvas, destination, children, alpha)
                 return true
             }
         }
@@ -401,7 +542,8 @@ internal class SatelliteMapTileRenderer(
     private fun draw_satellite_child_tiles(
         canvas: Canvas,
         destination: RectF,
-        children: List<ChildTileFallback>
+        children: List<ChildTileFallback>,
+        alpha: Float
     ) {
         val width = destination.width()
         val height = destination.height()
@@ -410,7 +552,7 @@ internal class SatelliteMapTileRenderer(
             val top = destination.top + child.child_y * height / child.child_scale
             val right = destination.left + (child.child_x + 1) * width / child.child_scale
             val bottom = destination.top + (child.child_y + 1) * height / child.child_scale
-            draw_tile_bitmap(canvas, child.bitmap, null, RectF(left, top, right, bottom), 1f)
+            draw_tile_bitmap(canvas, child.bitmap, null, RectF(left, top, right, bottom), alpha)
         }
     }
 
@@ -523,36 +665,28 @@ internal class SatelliteMapTileRenderer(
         }
     }
 
-    private fun update_tile_zoom_transition(tile_zoom: Int, state: MapTileRenderState, now_ms: Long) {
+    private fun update_tile_zoom_transition(tile_zoom: Int, state: MapTileRenderState) {
         val changed_source = transition_cache_key != state.cache_key || transition_map_source != state.map_source
         if (changed_source) {
             transition_cache_key = state.cache_key
             transition_map_source = state.map_source
             current_tile_zoom = tile_zoom
             tile_zoom_direction = 0
-            tile_zoom_transition_started_ms = 0L
             return
         }
         if (tile_zoom != current_tile_zoom) {
             tile_zoom_direction = tile_zoom.compareTo(current_tile_zoom)
             current_tile_zoom = tile_zoom
-            tile_zoom_transition_started_ms = now_ms
         }
     }
 
-    private fun satellite_tile_alpha(key: String, now_ms: Long): Float {
+    private fun satellite_tile_load_alpha(key: String, now_ms: Long): Float {
         val loaded_at = tile_loaded_elapsed_ms[key] ?: 0L
-        val load_alpha = if (loaded_at > 0L) {
+        return if (loaded_at > 0L) {
             smooth_step(0f, 1f, ((now_ms - loaded_at).coerceAtLeast(0L).toFloat() / SATELLITE_TILE_FADE_MS))
         } else {
             1f
         }
-        val zoom_alpha = if (tile_zoom_transition_started_ms > 0L) {
-            smooth_step(0f, 1f, ((now_ms - tile_zoom_transition_started_ms).coerceAtLeast(0L).toFloat() / SATELLITE_TILE_ZOOM_FADE_MS))
-        } else {
-            1f
-        }
-        return load_alpha.coerceAtMost(zoom_alpha)
     }
 
     private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float {
@@ -587,12 +721,15 @@ internal class SatelliteMapTileRenderer(
         const val MAX_MEMORY_TILES = 260
         const val MAX_INTERIM_TILES = 360
         const val TILE_CACHE_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
-        const val RASTER_INTERIM_MAX_AGE_MS = 12_000L
+        const val RASTER_INTERIM_MAX_AGE_MS = 45_000L
         const val SATELLITE_REQUEST_TILE_BUFFER = 1
         const val SATELLITE_BUFFER_REQUEST_THROTTLE_MS = 180L
         const val SATELLITE_PARENT_REQUEST_DEPTH = 4
         const val SATELLITE_CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
-        const val SATELLITE_TILE_ZOOM_FADE_MS = 420f
+        const val LOD_PREFETCH_START_FRACTION = 0.08f
+        const val LOD_BLEND_START_FRACTION = 0.18f
+        const val LOD_BLEND_END_FRACTION = 0.82f
+        const val MIN_LAYER_ALPHA = 0.01f
     }
 }
