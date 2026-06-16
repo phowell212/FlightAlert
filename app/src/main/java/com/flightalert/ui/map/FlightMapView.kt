@@ -1332,24 +1332,42 @@ class FlightMapView(
     private fun update_pinch(event: MotionEvent) {
         mark_map_interaction()
         if (!pinch_in_progress) begin_pinch(event)
+
         val span = pointer_span(event)
         val focus_x = pointer_focus_x(event)
         val focus_y = pointer_focus_y(event)
+
         if (span <= dp(20) || last_pinch_span <= dp(20)) {
             last_pinch_span = span
             last_pinch_focus_x = focus_x
             last_pinch_focus_y = focus_y
             return
         }
-        val scale_factor = (span / last_pinch_span).toDouble()
 
-        val moved = abs(focus_x - last_pinch_focus_x) > dp(0.5f) || abs(focus_y - last_pinch_focus_y) > dp(0.5f)
-        if (abs(scale_factor - 1.0) >= 0.01 || moved) {
-            zoom_and_pan_during_pinch(scale_factor, last_pinch_focus_x, last_pinch_focus_y, focus_x, focus_y, persist_zoom = false)
+        val scale_factor = (span / last_pinch_span).toDouble()
+        if (!scale_factor.isFinite() || scale_factor <= 0.0) return
+
+        val zoom_delta = ln(scale_factor) / ln(2.0)
+        val moved =
+            abs(focus_x - last_pinch_focus_x) > dp(0.25f) ||
+                    abs(focus_y - last_pinch_focus_y) > dp(0.25f)
+
+        // 0.001 zoom levels is roughly 0.07% scale change.
+        // Or remove this threshold entirely and apply every valid MOVE.
+        if (abs(zoom_delta) >= 0.001 || moved) {
+            zoom_and_pan_during_pinch(
+                scale_factor,
+                last_pinch_focus_x,
+                last_pinch_focus_y,
+                focus_x,
+                focus_y,
+                persist_zoom = false
+            )
+
+            last_pinch_span = span
+            last_pinch_focus_x = focus_x
+            last_pinch_focus_y = focus_y
         }
-        last_pinch_span = span
-        last_pinch_focus_x = focus_x
-        last_pinch_focus_y = focus_y
     }
 
     private fun end_pinch() {
