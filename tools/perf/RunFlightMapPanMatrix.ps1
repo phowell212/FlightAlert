@@ -1,5 +1,5 @@
 param(
-    [string]$Device = "RFCX40KPN3B",
+    [string]$Device = "",
     [ValidateSet("Short", "Full")]
     [string]$Matrix = "Short",
     [string]$IterationLabel = "",

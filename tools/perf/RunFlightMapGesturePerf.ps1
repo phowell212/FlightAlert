@@ -1,5 +1,5 @@
 param(
-    [string]$Device = "RFCX40KPN3B",
+    [string]$Device = "",
     [Parameter(Mandatory = $true)]
     [string]$TestName,
     [string]$ArtifactName = "",
@@ -34,7 +34,11 @@ if (-not (Test-Path $gradlew)) { throw "gradlew.bat was not found at $gradlew" }
 if (-not (Test-Path $summarizer)) { throw "SummarizeFrameStats.ps1 was not found next to this script." }
 
 function Invoke-Adb {
-    & $adb -s $Device @args
+    if ([string]::IsNullOrWhiteSpace($Device)) {
+        & $adb @args
+    } else {
+        & $adb -s $Device @args
+    }
 }
 
 function Get-DefaultArtifactName {
@@ -88,7 +92,11 @@ function Pull-RemoteFile {
     )
     $fileName = Split-Path -Path $RemotePath -Leaf
     $destination = Join-Path $DestinationDirectory $fileName
-    & $adb -s $Device pull $RemotePath $destination | Out-Null
+    if ([string]::IsNullOrWhiteSpace($Device)) {
+        & $adb pull $RemotePath $destination | Out-Null
+    } else {
+        & $adb -s $Device pull $RemotePath $destination | Out-Null
+    }
     if ($LASTEXITCODE -ne 0) { throw "Failed to pull $RemotePath" }
     return $destination
 }

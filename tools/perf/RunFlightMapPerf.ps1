@@ -1,5 +1,5 @@
 param(
-    [string]$Device = "RFCX40KPN3B",
+    [string]$Device = "",
     [ValidateSet("soak", "shellpan", "longpan", "keyboardzoom")]
     [string]$Mode = "longpan",
     [ValidateSet("Horizontal", "Vertical", "DiagonalDown", "DiagonalUp")]
@@ -57,7 +57,11 @@ $cities = @(
 )
 
 function Invoke-Adb {
-    & $adb -s $Device @args
+    if ([string]::IsNullOrWhiteSpace($Device)) {
+        & $adb @args
+    } else {
+        & $adb -s $Device @args
+    }
 }
 
 function Assert-FlightAlertForeground {
@@ -159,7 +163,11 @@ function Pull-Screenshot {
     $localPng = Join-Path $outDir "$OutputName-$Label.png"
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $adb -s $Device pull $RemotePng $localPng 2>$null | Out-Null
+    if ([string]::IsNullOrWhiteSpace($Device)) {
+        & $adb pull $RemotePng $localPng 2>$null | Out-Null
+    } else {
+        & $adb -s $Device pull $RemotePng $localPng 2>$null | Out-Null
+    }
     $pullExitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousErrorActionPreference
     if ($pullExitCode -ne 0) { throw "Failed to pull $Label screenshot from $Device." }
