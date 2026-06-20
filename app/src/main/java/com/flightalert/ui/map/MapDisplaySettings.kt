@@ -42,6 +42,7 @@ enum class TileSource(
         return when (this) {
             STREET -> emptyList()
             SATELLITE -> buildList {
+                if (borders_enabled) add(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
                 if (street_labels_enabled) add(ReferenceTileOverlay.WORLD_TRANSPORTATION)
             }
         }
@@ -55,7 +56,6 @@ enum class TileSource(
                 buildList {
                     add(base_attribution)
                     overlays.forEach { add(it.attribution) }
-                    if (borders_enabled) add("Natural Earth public domain reference data")
                 }.joinToString("; ")
             }
         }
