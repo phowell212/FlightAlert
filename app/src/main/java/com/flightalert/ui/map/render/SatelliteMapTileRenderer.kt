@@ -25,6 +25,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -241,6 +242,15 @@ internal class SatelliteMapTileRenderer(
             }
         }
 
+        val satellite_filter_alpha = draw_satellite_anti_flicker_filter(
+            canvas = canvas,
+            viewport = viewport,
+            state = state,
+            zoom_fraction = zoom_fraction,
+            lower_stats = lower_stats,
+            upper_stats = upper_stats
+        )
+
         val reference_request_generation = begin_reference_tile_request_generation()
         val label_stats = draw_reference_overlay_layers(
             canvas = canvas,
@@ -273,7 +283,7 @@ internal class SatelliteMapTileRenderer(
         debug_last_tile_summary =
             " mapTiles=$visible loaded=$loaded requested=$requested fallback=$fallback_drawn " +
                     "satLod=${lower_tile_zoom}->${upper_tile_zoom} lodAlpha=${"%.2f".format(Locale.US, upper_lod_alpha)} " +
-                    "blend=$blend_active interim=${interim_tiles.size} labels=${label_stats.loaded}/${label_stats.visible} " +
+                    "blend=$blend_active antiFlicker=$satellite_filter_alpha interim=${interim_tiles.size} labels=${label_stats.loaded}/${label_stats.visible} " +
                     "labelReq=${label_stats.requested} labelFallback=${label_stats.fallback_drawn}" +
                     label_stats.debug_summary + local_reference_stats.summary() + " "
 
@@ -546,6 +556,28 @@ internal class SatelliteMapTileRenderer(
             fading = fading,
             debug_summary = debug_parts.joinToString(separator = "")
         )
+    }
+
+    private fun draw_satellite_anti_flicker_filter(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: MapTileRenderState,
+        zoom_fraction: Float,
+        lower_stats: TileLayerDrawStats,
+        upper_stats: TileLayerDrawStats
+    ): Int {
+        val visible = lower_stats.visible + upper_stats.visible
+        if (visible <= 0) return 0
+        if (!state.interaction_active) return 0
+
+        val zoom_midpoint_weight = (1f - abs(zoom_fraction - 0.5f) * 2f).coerceIn(0f, 1f)
+        val raw_alpha = SATELLITE_ANTI_FLICKER_ZOOM_ALPHA * zoom_midpoint_weight
+        val alpha = raw_alpha.roundToInt().coerceIn(0, SATELLITE_ANTI_FLICKER_MAX_ALPHA)
+        if (alpha <= 0) return 0
+        paint.style = Paint.Style.FILL
+        paint.color = with_alpha(SATELLITE_ANTI_FLICKER_COLOR, alpha)
+        canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
+        return alpha
     }
 
     private fun draw_reference_overlay_grid(
@@ -1584,6 +1616,9 @@ internal class SatelliteMapTileRenderer(
         const val LOD_BLEND_START_FRACTION = 0.18f
         const val LOD_BLEND_END_FRACTION = 0.82f
         const val MIN_LAYER_ALPHA = 0.01f
+        const val SATELLITE_ANTI_FLICKER_COLOR = 0xFF0A1110.toInt()
+        const val SATELLITE_ANTI_FLICKER_ZOOM_ALPHA = 3.0f
+        const val SATELLITE_ANTI_FLICKER_MAX_ALPHA = 4
         const val SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS = 15_000L
         const val SATELLITE_TILE_NETWORK_THREADS = 4
         const val SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE = 2
