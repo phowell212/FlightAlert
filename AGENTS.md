@@ -136,7 +136,7 @@ When an optimization attempt works, fails, is reverted, or remains pending, reco
 
 Record only meaningful optimization evidence here. Do not keep rejected experiments in source just because they were tried.
 
-Current target: build `optimizer/best-of-both-clean` from clean `master`, layering only proven feature-complete code and measured keeper optimizations from `test/local-perf`. Performance acceptance is based on frame-time and FPS data by scale band; visual completeness is a separate video/screenshot/manual review gate. Do not accept a change just because jank counters improve, and do not accept a performance win if the separate visual check shows fewer aircraft, missing layers, tile flicker, morph jumps, altered styling, or any protected feature loss.
+Current target: none.
 
 Branch comparison evidence:
 
