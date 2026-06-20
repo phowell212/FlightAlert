@@ -547,6 +547,8 @@ class FlightMapView(
     private var debug_perf_traffic_detail_timing = false
     private var debug_perf_focus_open_map = false
     private var debug_perf_focus_applied = false
+    private var debug_perf_focus_x_fraction: Double? = null
+    private var debug_perf_focus_y_fraction: Double? = null
     private var debug_perf_target_lat: Double? = null
     private var debug_perf_target_lon: Double? = null
     private var debug_draw_perf_frames = 0
@@ -786,6 +788,8 @@ class FlightMapView(
         perf_restricted_airspaces_enabled: Boolean? = null,
         perf_clear_selection: Boolean = false,
         perf_focus_open_map: Boolean = false,
+        perf_focus_x_fraction: Double? = null,
+        perf_focus_y_fraction: Double? = null,
         perf_skip_map: Boolean = false,
         perf_skip_traffic: Boolean = false,
         perf_skip_chrome: Boolean = false,
@@ -831,6 +835,8 @@ class FlightMapView(
         debug_perf_traffic_detail_timing = perf_traffic_detail_timing
         debug_perf_focus_open_map = perf_focus_open_map
         debug_perf_focus_applied = false
+        debug_perf_focus_x_fraction = perf_focus_x_fraction?.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0)
+        debug_perf_focus_y_fraction = perf_focus_y_fraction?.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0)
         debug_perf_target_lat = lat.coerceIn(-85.0, 85.0)
         debug_perf_target_lon = normalize_longitude(lon)
         reset_debug_draw_perf()
@@ -842,6 +848,7 @@ class FlightMapView(
             "Debug perf viewport runId=${run_id ?: "none"} lat=$manual_center_lat lon=$manual_center_lon " +
                 "zoom=$zoom mapSource=$map_source mapLabels=$map_labels_enabled restrictedAirspaces=$restricted_airspaces_layer_enabled " +
                 "targetLat=$debug_perf_target_lat targetLon=$debug_perf_target_lon focusOpenMap=$debug_perf_focus_open_map " +
+                "focusXFraction=${debug_perf_focus_x_fraction ?: "layout"} focusYFraction=${debug_perf_focus_y_fraction ?: "layout"} " +
                 "clearSelection=$perf_clear_selection skipMap=$debug_perf_skip_map " +
                 "skipTraffic=$debug_perf_skip_traffic skipChrome=$debug_perf_skip_chrome " +
                 "skipTopStatus=$debug_perf_skip_top_status skipControls=$debug_perf_skip_controls " +
@@ -861,7 +868,8 @@ class FlightMapView(
         layer_draw_ns: Long,
         path_ns: Long,
         traffic_ns: Long,
-        chrome_ns: Long
+        chrome_ns: Long,
+        location: Location?
     ) {
         debug_draw_perf_frames++
         debug_draw_perf_total_ns += total_ns
@@ -876,7 +884,7 @@ class FlightMapView(
             debug_draw_perf_max_detail_summary = debug_current_draw_detail_summary()
         }
         if (debug_draw_perf_frames >= DEBUG_DRAW_PERF_LOG_INTERVAL || total_ns >= DEBUG_DRAW_PERF_SLOW_NS) {
-            debug_log_draw_perf(total_ns, map_ns, layer_request_ns, layer_draw_ns, path_ns, traffic_ns, chrome_ns)
+            debug_log_draw_perf(total_ns, map_ns, layer_request_ns, layer_draw_ns, path_ns, traffic_ns, chrome_ns, location)
             reset_debug_draw_perf()
         }
     }
@@ -888,7 +896,8 @@ class FlightMapView(
         layer_draw_ns: Long,
         path_ns: Long,
         traffic_ns: Long,
-        chrome_ns: Long
+        chrome_ns: Long,
+        location: Location?
     ) {
         val frames = debug_draw_perf_frames.coerceAtLeast(1)
         Log.d(
@@ -905,6 +914,7 @@ class FlightMapView(
                 map_tile_renderer.debug_last_tile_summary +
                 traffic_overlay_renderer.debug_last_symbol_cache_summary +
                 traffic_overlay_renderer.debug_last_detail_timing_summary +
+                debug_perf_camera_summary(location) +
                 " maxFrameDetail=${debug_draw_perf_max_detail_summary}"
         )
     }
@@ -916,6 +926,31 @@ class FlightMapView(
             traffic_overlay_renderer.debug_last_symbol_cache_summary +
             traffic_overlay_renderer.debug_last_detail_timing_summary
     }
+
+    private fun debug_perf_camera_summary(location: Location?): String {
+        val center_lat = location?.let { viewport_center_lat(it) } ?: manual_center_lat
+        val center_lon = location?.let { viewport_center_lon(it) } ?: manual_center_lon
+        val focus_geo = debug_perf_focus_geo(location)
+        return " camera centerLat=${center_lat?.format_lat_lon() ?: "none"}" +
+            " centerLon=${center_lon?.format_lat_lon() ?: "none"}" +
+            " focusLat=${focus_geo?.lat?.format_lat_lon() ?: "none"}" +
+            " focusLon=${focus_geo?.lon?.format_lat_lon() ?: "none"}" +
+            " targetLat=${debug_perf_target_lat?.format_lat_lon() ?: "none"}" +
+            " targetLon=${debug_perf_target_lon?.format_lat_lon() ?: "none"}" +
+            " follow=$following_location manual=${manual_center_lat != null && manual_center_lon != null} zoom=${"%.3f".format(Locale.US, zoom)}"
+    }
+
+    private fun debug_perf_focus_geo(location: Location?): GeoPoint? {
+        val focus = debug_perf_focus_point(content_width(), content_height()) ?: return null
+        val viewport = location?.let { viewport_for(it, content_width(), content_height()) } ?: current_interaction_viewport() ?: return null
+        return world_to_lat_lon(
+            viewport.center_x - viewport.width / 2.0 + focus.x,
+            viewport.center_y - viewport.height / 2.0 + focus.y,
+            viewport.zoom
+        )
+    }
+
+    private fun Double.format_lat_lon(): String = "%.5f".format(Locale.US, this)
 
     private fun reset_debug_draw_perf() {
         debug_draw_perf_frames = 0
@@ -1071,7 +1106,8 @@ class FlightMapView(
                     layer_draw_ns = debug_layer_draw_ns,
                     path_ns = debug_path_ns,
                     traffic_ns = debug_traffic_ns,
-                    chrome_ns = chrome_ns
+                    chrome_ns = chrome_ns,
+                    location = location
                 )
             }
         }
@@ -3409,7 +3445,7 @@ class FlightMapView(
         val h = content_height()
         if (w <= 1f || h <= 1f) return
         val target_world = lat_lon_to_world(target_lat, target_lon, zoom)
-        val focus = default_map_focus(w, h)
+        val focus = debug_perf_focus_point(w, h) ?: default_map_focus(w, h)
         set_manual_center_from_world(
             target_world.x + w / 2.0 - focus.x,
             target_world.y + h / 2.0 - focus.y
@@ -3420,6 +3456,19 @@ class FlightMapView(
             "Debug perf focus anchored targetLat=$target_lat targetLon=$target_lon " +
                 "focusX=${focus.x} focusY=${focus.y} manualLat=$manual_center_lat manualLon=$manual_center_lon"
         )
+    }
+
+    private fun debug_perf_focus_point(w: Float, h: Float): ScreenPoint? {
+        if (!debug_perf_viewport_active) return null
+        val focus_x_fraction = debug_perf_focus_x_fraction
+        val focus_y_fraction = debug_perf_focus_y_fraction
+        if (focus_x_fraction != null && focus_y_fraction != null) {
+            return ScreenPoint(
+                (w * focus_x_fraction).toFloat().coerceIn(0f, w),
+                (h * focus_y_fraction).toFloat().coerceIn(0f, h)
+            )
+        }
+        return if (debug_perf_focus_open_map) default_map_focus(w, h) else null
     }
 
     private fun is_overlay_or_control_hit(x: Float, y: Float): Boolean {

@@ -28,7 +28,7 @@ enum class TileSource(
     val max_native_zoom: Int
 ) {
     // Providers stay explicit so the map background remains auditable and never becomes fake imagery.
-    STREET("osm", "Street map", "OpenStreetMap / CARTO tiles", 19),
+    STREET("carto_voyager", "Street map", "CARTO Voyager tiles, OpenStreetMap data", 19),
     SATELLITE("esri_world_imagery", "Satellite", "Esri World Imagery", 19);
 
     fun cache_key(labels_enabled: Boolean): String {
@@ -66,7 +66,7 @@ enum class TileSource(
     fun tile_url(z: Int, x: Int, y: Int, labels_enabled: Boolean): String {
         return when (this) {
             STREET -> if (labels_enabled) {
-                "https://tile.openstreetmap.org/$z/$x/$y.png"
+                "https://basemaps.cartocdn.com/rastertiles/voyager/$z/$x/$y.png"
             } else {
                 "https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/$z/$x/$y.png"
             }

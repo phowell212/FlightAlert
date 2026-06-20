@@ -3,6 +3,7 @@ package com.flightalert.ui.map.render
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
@@ -115,6 +116,7 @@ class TrafficOverlayRenderer(
     private val path: Path,
     private val chrome: TrafficOverlayChrome
 ) {
+    private val symbol_draw_matrix = Matrix()
     private var dot_outline_points = FloatArray(0)
     private var dot_outline_count = 0
     private val dot_fill_points = Array(DOT_BATCH_GROUP_COUNT) { FloatArray(0) }
@@ -1777,19 +1779,18 @@ class TrafficOverlayRenderer(
         stroke: Int
     ) {
         val draw_scale = icon_scale / mask_resolution_scale.coerceAtLeast(0.001f)
-        val save_count = canvas.save()
-        try {
-            canvas.translate(x, y)
-            canvas.scale(draw_scale, draw_scale)
-            if (track_deg != null && symbol != AircraftSymbol.SURFACE) canvas.rotate(track_deg.toFloat())
-            symbol_mask_paint.color = fill
-            canvas.drawBitmap(mask.fill, -mask.fill.width / 2f, -mask.fill.height / 2f, symbol_mask_paint)
-            symbol_mask_paint.color = stroke
-            canvas.drawBitmap(mask.stroke, -mask.stroke.width / 2f, -mask.stroke.height / 2f, symbol_mask_paint)
-            symbol_mask_paint.alpha = 255
-        } finally {
-            canvas.restoreToCount(save_count)
+        symbol_draw_matrix.reset()
+        symbol_draw_matrix.postTranslate(-mask.fill.width / 2f, -mask.fill.height / 2f)
+        symbol_draw_matrix.postScale(draw_scale, draw_scale)
+        if (track_deg != null && symbol != AircraftSymbol.SURFACE) {
+            symbol_draw_matrix.postRotate(track_deg.toFloat())
         }
+        symbol_draw_matrix.postTranslate(x, y)
+        symbol_mask_paint.color = fill
+        canvas.drawBitmap(mask.fill, symbol_draw_matrix, symbol_mask_paint)
+        symbol_mask_paint.color = stroke
+        canvas.drawBitmap(mask.stroke, symbol_draw_matrix, symbol_mask_paint)
+        symbol_mask_paint.alpha = 255
     }
 
     private fun aircraft_symbol_mask(symbol: AircraftSymbol, shape_progress: Float): AircraftSymbolMask {

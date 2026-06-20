@@ -100,6 +100,26 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
         return result
     }
 
+    fun query_count(viewport: Viewport, padding_px: Float): Int {
+        val scale = 2.0.pow(viewport.zoom)
+        val min_y = ((viewport.center_y - viewport.height / 2.0 - padding_px) / scale).coerceIn(0.0, WORLD_SIZE)
+        val max_y = ((viewport.center_y + viewport.height / 2.0 + padding_px) / scale).coerceIn(0.0, WORLD_SIZE)
+        val raw_min_x = (viewport.center_x - viewport.width / 2.0 - padding_px) / scale
+        val raw_max_x = (viewport.center_x + viewport.width / 2.0 + padding_px) / scale
+        return if (raw_max_x - raw_min_x >= WORLD_SIZE) {
+            count_range(0.0, WORLD_SIZE, min_y, max_y)
+        } else {
+            val min_x = normalize_world_x(raw_min_x)
+            val max_x = normalize_world_x(raw_max_x)
+            if (min_x <= max_x) {
+                count_range(min_x, max_x, min_y, max_y)
+            } else {
+                count_range(min_x, WORLD_SIZE, min_y, max_y) +
+                    count_range(0.0, max_x, min_y, max_y)
+            }
+        }
+    }
+
     private fun collect_range(
         min_x: Double,
         max_x: Double,
@@ -117,6 +137,26 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
                 cells[row_offset + column]?.let(result::addAll)
             }
         }
+    }
+
+    private fun count_range(
+        min_x: Double,
+        max_x: Double,
+        min_y: Double,
+        max_y: Double
+    ): Int {
+        val min_column = (min_x / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
+        val max_column = (max_x / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
+        val min_row = (min_y / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
+        val max_row = (max_y / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
+        var count = 0
+        for (row in min_row..max_row) {
+            val row_offset = row * CELL_COUNT
+            for (column in min_column..max_column) {
+                count += cells[row_offset + column]?.size ?: 0
+            }
+        }
+        return count
     }
 
     private fun normalize_world_x(value: Double): Double {

@@ -396,7 +396,7 @@ object AircraftSymbolRenderer {
 
     private const val AIRCRAFT_MORPH_SEED_RADIUS_DP = 4f
     private const val SYMBOL_VECTOR_PROGRESS_STEPS = 96
-    private const val SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES = 512
+    private const val SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES = 768
 
     private val GENERAL_AVIATION_POINTS = floatArrayOf(
         0f, -17f,

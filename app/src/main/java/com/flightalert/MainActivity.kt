@@ -199,6 +199,8 @@ class MainActivity : ComponentActivity() {
         val restricted = intent.optional_boolean_extra(EXTRA_PERF_RESTRICTED_AIRSPACES_ENABLED)
         val clear_selection = intent.optional_boolean_extra(EXTRA_PERF_CLEAR_SELECTION) == true
         val focus_open_map = intent.optional_boolean_extra(EXTRA_PERF_FOCUS_OPEN_MAP) == true
+        val focus_x_fraction = intent.optional_double_extra(EXTRA_PERF_FOCUS_X_FRACTION)
+        val focus_y_fraction = intent.optional_double_extra(EXTRA_PERF_FOCUS_Y_FRACTION)
         val skip_map = intent.optional_boolean_extra(EXTRA_PERF_SKIP_MAP) == true
         val skip_traffic = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TRAFFIC) == true
         val skip_chrome = intent.optional_boolean_extra(EXTRA_PERF_SKIP_CHROME) == true
@@ -216,6 +218,8 @@ class MainActivity : ComponentActivity() {
             perf_restricted_airspaces_enabled = restricted,
             perf_clear_selection = clear_selection,
             perf_focus_open_map = focus_open_map,
+            perf_focus_x_fraction = focus_x_fraction,
+            perf_focus_y_fraction = focus_y_fraction,
             perf_skip_map = skip_map,
             perf_skip_traffic = skip_traffic,
             perf_skip_chrome = skip_chrome,
@@ -247,6 +251,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun Intent.optional_double_extra(name: String): Double? {
+        if (!hasExtra(name)) return null
+        return double_extra(name, Double.NaN).takeIf { it.isFinite() }
+    }
+
     private fun is_debuggable_build(): Boolean {
         return (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
     }
@@ -263,6 +272,8 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PERF_RESTRICTED_AIRSPACES_ENABLED = "com.flightalert.PERF_RESTRICTED_AIRSPACES_ENABLED"
         const val EXTRA_PERF_CLEAR_SELECTION = "com.flightalert.PERF_CLEAR_SELECTION"
         const val EXTRA_PERF_FOCUS_OPEN_MAP = "com.flightalert.PERF_FOCUS_OPEN_MAP"
+        const val EXTRA_PERF_FOCUS_X_FRACTION = "com.flightalert.PERF_FOCUS_X_FRACTION"
+        const val EXTRA_PERF_FOCUS_Y_FRACTION = "com.flightalert.PERF_FOCUS_Y_FRACTION"
         const val EXTRA_PERF_SKIP_MAP = "com.flightalert.PERF_SKIP_MAP"
         const val EXTRA_PERF_SKIP_TRAFFIC = "com.flightalert.PERF_SKIP_TRAFFIC"
         const val EXTRA_PERF_SKIP_CHROME = "com.flightalert.PERF_SKIP_CHROME"

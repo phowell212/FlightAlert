@@ -207,18 +207,14 @@ internal class TrafficOverlayStateBuilder(
         world_aircraft_dot_batch(frame, selected_key, path_focus)?.let { return it }
         shifted_dense_dot_batch(frame, selected_key, path_focus)?.let { return it }
         val base_padding_px = traffic_query_padding_px(frame.viewport)
-        val initial_query = frame.cache.spatial_index.query(frame.viewport, base_padding_px)
-        if (!should_prepare_dense_dot_batch(frame.viewport, initial_query.size)) {
+        val initial_count = frame.cache.spatial_index.query_count(frame.viewport, base_padding_px)
+        if (!should_prepare_dense_dot_batch(frame.viewport, initial_count)) {
             clear_dense_dot_cache()
             return null
         }
         val cache_reuse_padding_px = dp(DENSE_DOT_CACHE_MAX_REUSE_DP)
         val dense_padding_px = base_padding_px + cache_reuse_padding_px
-        val query = if (dense_padding_px > base_padding_px + 0.5f) {
-            frame.cache.spatial_index.query(frame.viewport, dense_padding_px)
-        } else {
-            initial_query
-        }
+        val query = frame.cache.spatial_index.query(frame.viewport, dense_padding_px)
         reset_dense_dot_batch_buffers()
         val scale = 2.0.pow(frame.viewport.zoom)
         val seen_keys = if (frame.cache.extreme_priority_aircraft.isNotEmpty() || selection.selected_aircraft_snapshot != null) {

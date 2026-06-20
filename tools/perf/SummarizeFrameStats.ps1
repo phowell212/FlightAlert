@@ -145,6 +145,7 @@ function New-FrameStatsSummary {
         $sampleSeconds = $data.IntendedSeconds[$data.IntendedSeconds.Count - 1] - $data.IntendedSeconds[0]
     }
     $producedFps = if ($sampleSeconds -gt 0.0) { $count / $sampleSeconds } else { [double]::NaN }
+    $mean = if ($count -gt 0) { ($durations | Measure-Object -Average).Average } else { [double]::NaN }
     $p50 = Get-PercentileValue -Values $durations -Percentile 50
     $p90 = Get-PercentileValue -Values $durations -Percentile 90
     $p95 = Get-PercentileValue -Values $durations -Percentile 95
@@ -156,6 +157,7 @@ function New-FrameStatsSummary {
     $presentP50 = Get-PercentileValue -Values $presentIntervals -Percentile 50
     $presentP95 = Get-PercentileValue -Values $presentIntervals -Percentile 95
     $presentP99 = Get-PercentileValue -Values $presentIntervals -Percentile 99
+    $presentMean = if ($presentCount -gt 0) { ($presentIntervals | Measure-Object -Average).Average } else { [double]::NaN }
 
     return [pscustomobject]@{
         File = Split-Path -Path $StatsPath -Leaf
@@ -164,6 +166,10 @@ function New-FrameStatsSummary {
         PresentIntervals = $presentCount
         TargetHz = [Math]::Round($TargetHz, 1)
         TargetBudgetMs = [Math]::Round($budgetMs, 2)
+        SampleSeconds = [Math]::Round($sampleSeconds, 3)
+        ProducedFps = [Math]::Round($producedFps, 1)
+        MeanMs = [Math]::Round($mean, 2)
+        MeanEquivalentFps = if ($mean -gt 0.0) { [Math]::Round(1000.0 / $mean, 1) } else { [double]::NaN }
         OverTarget = $overTarget
         LatencyMiss120Pct = if ($count -gt 0) { [Math]::Round(($overTarget * 100.0) / $count, 2) } else { [double]::NaN }
         Over90Pct = if ($count -gt 0) { [Math]::Round(($over90 * 100.0) / $count, 2) } else { [double]::NaN }
@@ -175,6 +181,8 @@ function New-FrameStatsSummary {
         P95Ms = [Math]::Round($p95, 2)
         P99Ms = [Math]::Round($p99, 2)
         PresentP50Ms = [Math]::Round($presentP50, 2)
+        PresentMeanMs = [Math]::Round($presentMean, 2)
+        PresentMeanFps = if ($presentMean -gt 0.0) { [Math]::Round(1000.0 / $presentMean, 1) } else { [double]::NaN }
         PresentP95Ms = [Math]::Round($presentP95, 2)
         PresentP99Ms = [Math]::Round($presentP99, 2)
         MaxMs = if ($count -gt 0) { [Math]::Round(($durations | Measure-Object -Maximum).Maximum, 2) } else { [double]::NaN }
@@ -196,5 +204,5 @@ if ($Csv) {
     $summaries | ConvertTo-Csv -NoTypeInformation
 } else {
     $summaries |
-        Format-Table File, Frames, PresentDrop120Pct, PresentP50Ms, PresentP95Ms, PresentP99Ms, LatencyMiss120Pct, P50Ms, P95Ms, P95EquivalentFps, AndroidJank -AutoSize
+        Format-Table File, Frames, ProducedFps, PresentMeanFps, PresentP50Ms, PresentP95Ms, PresentP99Ms, MeanMs, P50Ms, P95Ms, P95EquivalentFps -AutoSize
 }
