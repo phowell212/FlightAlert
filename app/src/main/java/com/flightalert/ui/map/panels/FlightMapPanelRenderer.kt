@@ -27,6 +27,7 @@ data class SettingsPanelState(
     val units: UnitSystem,
     val map_source: TileSource,
     val map_labels_enabled: Boolean,
+    val map_borders_enabled: Boolean,
     val aircraft_feed_mode: AircraftFeedMode,
     val aviation_layers_enabled: Boolean,
     val alerts_enabled: Boolean,
@@ -36,7 +37,8 @@ data class SettingsPanelState(
 )
 
 data class MapLabelsPanelState(
-    val map_labels_enabled: Boolean
+    val street_labels_enabled: Boolean,
+    val borders_enabled: Boolean
 )
 
 data class AviationLayersPanelState(
@@ -141,7 +143,7 @@ class FlightMapPanelRenderer(
 
         draw_settings_section_label(canvas, rect.left + dp(18), rect.top + dp(230), "Map", style)
         chrome.draw_choice_button(canvas, chrome.layout.map_source_button_bounds(rect), if (state.map_source == TileSource.SATELLITE) "Satellite map" else "Street map", state.map_source == TileSource.SATELLITE)
-        chrome.draw_choice_button(canvas, chrome.layout.map_labels_button_bounds(rect), if (state.map_labels_enabled) "Map labels on" else "Map labels off", state.map_labels_enabled)
+        chrome.draw_choice_button(canvas, chrome.layout.map_labels_button_bounds(rect), map_labels_button_label(state, compact = false), state.map_labels_enabled || state.map_borders_enabled)
         chrome.draw_choice_button(canvas, chrome.layout.globe_bin_craft_source_button_bounds(rect), state.aircraft_feed_mode.display_name, true)
         chrome.draw_choice_button(canvas, chrome.layout.aviation_layers_button_bounds(rect), "Aviation layers", state.aviation_layers_enabled)
 
@@ -178,20 +180,21 @@ class FlightMapPanelRenderer(
         text_paint.textSize = if (compact) sp(11) else sp(12)
         text_paint.color = style.visual_theme.colors.muted
         val label_y = if (compact) rect.top + dp(74) else rect.top + dp(82)
-        canvas.drawText("Map labels", rect.left + dp(18), label_y, text_paint)
+        canvas.drawText("Label layers", rect.left + dp(18), label_y, text_paint)
 
-        chrome.draw_choice_button(canvas, chrome.layout.map_labels_on_button_bounds(rect), "Labels on", state.map_labels_enabled)
-        chrome.draw_choice_button(canvas, chrome.layout.map_labels_off_button_bounds(rect), "Labels off", !state.map_labels_enabled)
+        chrome.draw_choice_button(canvas, chrome.layout.map_street_labels_button_bounds(rect), "Street labels", state.street_labels_enabled)
+        chrome.draw_choice_button(canvas, chrome.layout.map_borders_button_bounds(rect), if (compact) "Borders" else "Countries + borders", state.borders_enabled)
 
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = false
         text_paint.textSize = if (compact) sp(10) else sp(11)
         text_paint.color = style.visual_theme.colors.muted
         val source_y = if (compact) rect.top + dp(154) else rect.top + dp(216)
-        val source_text = if (state.map_labels_enabled) {
-            "Current: labeled or reference tiles"
-        } else {
-            "Current: no-label base where available"
+        val source_text = when {
+            state.street_labels_enabled && state.borders_enabled -> "Current: street labels plus countries and borders"
+            state.street_labels_enabled -> "Current: street labels only"
+            state.borders_enabled -> "Current: countries and borders only"
+            else -> "Current: no-label base where available"
         }
         draw_fitted_left_text(canvas, source_text, rect.left + dp(18), source_y, rect.width() - dp(36), text_paint.textSize, sp(8))
     }
@@ -370,7 +373,7 @@ class FlightMapPanelRenderer(
 
         draw_settings_section_label(canvas, map.left, rect.top + dp(if (wide) 58 else 184), "Map", style)
         chrome.draw_choice_button(canvas, chrome.layout.map_source_button_bounds(rect), if (state.map_source == TileSource.SATELLITE) "Satellite" else "Street", state.map_source == TileSource.SATELLITE)
-        chrome.draw_choice_button(canvas, chrome.layout.map_labels_button_bounds(rect), if (state.map_labels_enabled) "Labels on" else "Labels off", state.map_labels_enabled)
+        chrome.draw_choice_button(canvas, chrome.layout.map_labels_button_bounds(rect), map_labels_button_label(state, compact = true), state.map_labels_enabled || state.map_borders_enabled)
         chrome.draw_choice_button(canvas, chrome.layout.globe_bin_craft_source_button_bounds(rect), state.aircraft_feed_mode.compact_name, true)
         chrome.draw_choice_button(canvas, chrome.layout.aviation_layers_button_bounds(rect), "Layers", state.aviation_layers_enabled)
 
@@ -380,6 +383,15 @@ class FlightMapPanelRenderer(
 
         draw_settings_section_label(canvas, safety.left, rect.top + dp(158), "Reference", style)
         chrome.draw_choice_button(canvas, chrome.layout.impact_methodology_button_bounds(rect), "Impact method", false)
+    }
+
+    private fun map_labels_button_label(state: SettingsPanelState, compact: Boolean): String {
+        val prefix = if (compact) "Labels" else "Map labels"
+        return when {
+            state.map_labels_enabled && state.map_borders_enabled -> "$prefix on"
+            state.map_labels_enabled || state.map_borders_enabled -> "$prefix mixed"
+            else -> "$prefix off"
+        }
     }
 
     private fun draw_settings_section_label(canvas: Canvas, x: Float, y: Float, label: String, style: FlightMapPanelStyle) {

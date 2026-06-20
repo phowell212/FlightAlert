@@ -467,6 +467,7 @@ class FlightMapView(
     private var units = UnitSystem.valueOf(prefs.getString(FlightAlertSettings.KEY_UNITS, UnitSystem.IMPERIAL.name) ?: UnitSystem.IMPERIAL.name)
     private var map_source = read_map_source()
     private var map_labels_enabled = prefs.getBoolean(FlightAlertSettings.KEY_MAP_LABELS_ENABLED, FlightAlertSettings.DEFAULT_MAP_LABELS_ENABLED)
+    private var map_borders_enabled = prefs.getBoolean(FlightAlertSettings.KEY_MAP_BORDERS_ENABLED, FlightAlertSettings.DEFAULT_MAP_BORDERS_ENABLED)
     private var aircraft_feed_mode = FlightAlertSettings.read_aircraft_feed_mode(prefs)
     private var globe_bin_craft_source_enabled = aircraft_feed_mode.uses_globe
     private var atc_boundaries_layer_enabled = prefs.getBoolean(FlightAlertSettings.KEY_LAYER_ATC_BOUNDARIES_ENABLED, FlightAlertSettings.DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED)
@@ -785,6 +786,8 @@ class FlightMapView(
         run_id: String? = null,
         perf_map_source: TileSource? = null,
         perf_map_labels_enabled: Boolean? = null,
+        perf_map_roads_enabled: Boolean? = null,
+        perf_map_borders_enabled: Boolean? = null,
         perf_restricted_airspaces_enabled: Boolean? = null,
         perf_clear_selection: Boolean = false,
         perf_focus_open_map: Boolean = false,
@@ -809,6 +812,18 @@ class FlightMapView(
         perf_map_labels_enabled?.let { enabled ->
             if (map_labels_enabled != enabled) {
                 map_labels_enabled = enabled
+                map_tile_renderer.reset_transitions()
+            }
+        }
+        perf_map_roads_enabled?.let { enabled ->
+            if (map_labels_enabled != enabled) {
+                map_labels_enabled = enabled
+                map_tile_renderer.reset_transitions()
+            }
+        }
+        perf_map_borders_enabled?.let { enabled ->
+            if (map_borders_enabled != enabled) {
+                map_borders_enabled = enabled
                 map_tile_renderer.reset_transitions()
             }
         }
@@ -846,7 +861,7 @@ class FlightMapView(
         Log.i(
             TAG,
             "Debug perf viewport runId=${run_id ?: "none"} lat=$manual_center_lat lon=$manual_center_lon " +
-                "zoom=$zoom mapSource=$map_source mapLabels=$map_labels_enabled restrictedAirspaces=$restricted_airspaces_layer_enabled " +
+                "zoom=$zoom mapSource=$map_source mapLabels=$map_labels_enabled mapBorders=$map_borders_enabled restrictedAirspaces=$restricted_airspaces_layer_enabled " +
                 "targetLat=$debug_perf_target_lat targetLon=$debug_perf_target_lon focusOpenMap=$debug_perf_focus_open_map " +
                 "focusXFraction=${debug_perf_focus_x_fraction ?: "layout"} focusYFraction=${debug_perf_focus_y_fraction ?: "layout"} " +
                 "clearSelection=$perf_clear_selection skipMap=$debug_perf_skip_map " +
@@ -1632,6 +1647,7 @@ class FlightMapView(
         return MapTileRenderState(
             map_source = map_source,
             map_labels_enabled = map_labels_enabled,
+            map_borders_enabled = map_borders_enabled,
             user_agent = USER_AGENT,
             interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime())
         )
@@ -2798,17 +2814,21 @@ class FlightMapView(
             units = units,
             map_source = map_source,
             map_labels_enabled = map_labels_enabled,
+            map_borders_enabled = map_borders_enabled,
             aircraft_feed_mode = aircraft_feed_mode,
             aviation_layers_enabled = has_aviation_layers_enabled(),
             alerts_enabled = alerts_enabled,
             priority_tracking_enabled = priority_tracking_enabled,
-            map_attribution = map_source.attribution_text(map_labels_enabled),
+            map_attribution = map_source.attribution_text(map_labels_enabled, map_borders_enabled),
             aircraft_source_label = aircraft_source_preference_label()
         )
     }
 
     private fun map_labels_panel_state(): MapLabelsPanelState {
-        return MapLabelsPanelState(map_labels_enabled = map_labels_enabled)
+        return MapLabelsPanelState(
+            street_labels_enabled = map_labels_enabled,
+            borders_enabled = map_borders_enabled
+        )
     }
 
     private fun aviation_layers_panel_state(): AviationLayersPanelState {
@@ -3194,8 +3214,8 @@ class FlightMapView(
         if (map_labels_open) {
             when {
                 close_button_bounds(panel).contains(x, y) -> map_labels_open = false
-                map_labels_on_button_bounds(panel).contains(x, y) -> set_map_labels_enabled(true)
-                map_labels_off_button_bounds(panel).contains(x, y) -> set_map_labels_enabled(false)
+                map_street_labels_button_bounds(panel).contains(x, y) -> set_map_labels_enabled(!map_labels_enabled)
+                map_borders_button_bounds(panel).contains(x, y) -> set_map_borders_enabled(!map_borders_enabled)
             }
             invalidate()
             return true
@@ -3527,6 +3547,15 @@ class FlightMapView(
         map_labels_enabled = enabled
         map_tile_renderer.reset_transitions()
         prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_LABELS_ENABLED, map_labels_enabled) }
+        map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
+        invalidate()
+    }
+
+    private fun set_map_borders_enabled(enabled: Boolean) {
+        if (map_borders_enabled == enabled) return
+        map_borders_enabled = enabled
+        map_tile_renderer.reset_transitions()
+        prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_BORDERS_ENABLED, map_borders_enabled) }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
         invalidate()
     }
@@ -3941,8 +3970,8 @@ class FlightMapView(
     private fun priority_tracker_button_bounds(panel: RectF): RectF = layout.priority_tracker_button_bounds(panel)
     private fun impact_methodology_button_bounds(panel: RectF): RectF = layout.impact_methodology_button_bounds(panel)
     private fun impact_source_button_bounds(panel: RectF, index: Int): RectF = layout.impact_source_button_bounds(panel, index, AircraftImpactEstimator.source_labels.size)
-    private fun map_labels_on_button_bounds(panel: RectF): RectF = layout.map_labels_on_button_bounds(panel)
-    private fun map_labels_off_button_bounds(panel: RectF): RectF = layout.map_labels_off_button_bounds(panel)
+    private fun map_street_labels_button_bounds(panel: RectF): RectF = layout.map_street_labels_button_bounds(panel)
+    private fun map_borders_button_bounds(panel: RectF): RectF = layout.map_borders_button_bounds(panel)
     private fun aviation_layer_status_bounds(panel: RectF): RectF = layout.aviation_layer_status_bounds(panel)
     private fun layer_atc_button_bounds(panel: RectF): RectF = layout.layer_atc_button_bounds(panel)
     private fun layer_restricted_button_bounds(panel: RectF): RectF = layout.layer_restricted_button_bounds(panel)

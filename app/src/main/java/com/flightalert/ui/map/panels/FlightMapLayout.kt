@@ -236,7 +236,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         }
     }
 
-    fun map_labels_on_button_bounds(panel: RectF): RectF {
+    fun map_street_labels_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
             val left = panel.left + dp(18)
             val right = panel.centerX() - dp(5)
@@ -245,7 +245,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         return RectF(panel.left + dp(18), panel.top + dp(102), panel.right - dp(18), panel.top + dp(138))
     }
 
-    fun map_labels_off_button_bounds(panel: RectF): RectF {
+    fun map_borders_button_bounds(panel: RectF): RectF {
         if (is_compact_settings_panel(panel)) {
             val left = panel.centerX() + dp(5)
             val right = panel.right - dp(18)

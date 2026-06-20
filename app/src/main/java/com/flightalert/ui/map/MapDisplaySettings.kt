@@ -38,27 +38,26 @@ enum class TileSource(
         }
     }
 
-    fun reference_overlay_layers(labels_enabled: Boolean): List<ReferenceTileOverlay> {
+    fun reference_overlay_layers(street_labels_enabled: Boolean, borders_enabled: Boolean): List<ReferenceTileOverlay> {
         return when (this) {
             STREET -> emptyList()
-            SATELLITE -> if (labels_enabled) {
-                listOf(
-                    ReferenceTileOverlay.WORLD_TRANSPORTATION,
-                    ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES
-                )
-            } else {
-                emptyList()
+            SATELLITE -> buildList {
+                if (street_labels_enabled) add(ReferenceTileOverlay.WORLD_TRANSPORTATION)
+                if (borders_enabled) add(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
             }
         }
     }
 
-    fun attribution_text(labels_enabled: Boolean): String {
+    fun attribution_text(labels_enabled: Boolean, borders_enabled: Boolean = labels_enabled): String {
         return when (this) {
             STREET -> if (labels_enabled) base_attribution else "CARTO no-label tiles, OpenStreetMap data"
-            SATELLITE -> if (labels_enabled) {
-                "$base_attribution; ${reference_overlay_layers(labels_enabled).joinToString("; ") { it.attribution }}"
-            } else {
-                base_attribution
+            SATELLITE -> {
+                val overlays = reference_overlay_layers(labels_enabled, borders_enabled)
+                if (overlays.isNotEmpty()) {
+                    "$base_attribution; ${overlays.joinToString("; ") { it.attribution }}"
+                } else {
+                    base_attribution
+                }
             }
         }
     }

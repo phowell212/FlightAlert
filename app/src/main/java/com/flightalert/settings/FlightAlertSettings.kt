@@ -16,6 +16,7 @@ object FlightAlertSettings {
     const val KEY_PRIORITY_RANGE_CIRCLE_VISIBLE = "priority_range_circle_visible"
     const val KEY_MAP_SOURCE = "map_source"
     const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
+    const val KEY_MAP_BORDERS_ENABLED = "map_borders_enabled"
     const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
     const val KEY_GLOBE_BINCRAFT_SOURCE_ENABLED = "globe_bin_craft_source_enabled"
     const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
@@ -36,6 +37,7 @@ object FlightAlertSettings {
     const val DEFAULT_PRIORITY_RANGE_FEET = 52800f
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
     const val DEFAULT_MAP_LABELS_ENABLED = true
+    const val DEFAULT_MAP_BORDERS_ENABLED = true
     const val DEFAULT_GLOBE_BINCRAFT_SOURCE_ENABLED = true
     const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
     const val DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED = false
