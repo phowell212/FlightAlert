@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
@@ -63,10 +64,10 @@ private data class TileLayerDrawStats(
 // Labels/reference tiles are drawn afterward in their own cache so they cannot disturb base imagery.
 internal class SatelliteMapTileRenderer(
     private val context: Context,
-    private val executor: Executor,
+    @Suppress("UNUSED_PARAMETER") executor: Executor,
     private val paint: Paint,
     private val text_paint: Paint,
-    @Suppress("UNUSED_PARAMETER") dp: (Float) -> Float,
+    private val dp: (Float) -> Float,
     private val sp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int,
     private val report_status: (String) -> Unit,
@@ -78,6 +79,22 @@ internal class SatelliteMapTileRenderer(
     private val requested_tiles = mutableSetOf<String>()
     private val current_tile_request_generations = mutableMapOf<String, Long>()
     private var current_tile_request_generation = 0L
+    private val satellite_tile_worker_id = AtomicInteger()
+    private val satellite_tile_task_sequence = AtomicLong()
+    private val satellite_tile_executor = ThreadPoolExecutor(
+        SATELLITE_TILE_NETWORK_THREADS,
+        SATELLITE_TILE_NETWORK_THREADS,
+        SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
+        TimeUnit.MILLISECONDS,
+        PriorityBlockingQueue<Runnable>(),
+        ThreadFactory { runnable ->
+            Thread(runnable, "flightalert-satellite-tiles-${satellite_tile_worker_id.incrementAndGet()}").apply {
+                isDaemon = true
+            }
+        }
+    ).apply {
+        allowCoreThreadTimeOut(true)
+    }
     private val tile_disk_worker_id = AtomicInteger()
     private val tile_disk_executor = ThreadPoolExecutor(
         1,
@@ -131,6 +148,16 @@ internal class SatelliteMapTileRenderer(
     private var tile_zoom_direction = 0
     private var last_satellite_buffer_request_key: String? = null
     private var last_satellite_buffer_request_ms = 0L
+    private val local_reference_renderer = LocalReferenceOverlayRenderer(
+        context = context,
+        paint = paint,
+        text_paint = text_paint,
+        path = Path(),
+        dp = dp,
+        sp = sp,
+        with_alpha = with_alpha,
+        request_redraw = request_redraw
+    )
 
     var debug_last_tile_summary: String = ""
         private set
@@ -228,6 +255,12 @@ internal class SatelliteMapTileRenderer(
             allow_exact_requests = true,
             request_generation = reference_request_generation
         )
+        val local_reference_stats = local_reference_renderer.draw(
+            canvas = canvas,
+            viewport = viewport,
+            enabled = state.map_borders_enabled,
+            interaction_active = state.interaction_active
+        )
 
         if (lower_stats.fading || upper_stats.fading || label_stats.fading) {
             request_redraw()
@@ -242,7 +275,7 @@ internal class SatelliteMapTileRenderer(
                     "satLod=${lower_tile_zoom}->${upper_tile_zoom} lodAlpha=${"%.2f".format(Locale.US, upper_lod_alpha)} " +
                     "blend=$blend_active interim=${interim_tiles.size} labels=${label_stats.loaded}/${label_stats.visible} " +
                     "labelReq=${label_stats.requested} labelFallback=${label_stats.fallback_drawn}" +
-                    label_stats.debug_summary + " "
+                    label_stats.debug_summary + local_reference_stats.summary() + " "
 
         return if (lower_stats.requested == 0 && lower_stats.loaded > 0) {
             "${TileSource.SATELLITE.display_name} loaded"
@@ -267,6 +300,7 @@ internal class SatelliteMapTileRenderer(
             current_reference_tile_request_generations.clear()
             current_reference_tile_request_generation = 0L
         }
+        local_reference_renderer.clear()
         transition_cache_key = null
         transition_map_source = null
         current_tile_zoom = Int.MIN_VALUE
@@ -287,6 +321,7 @@ internal class SatelliteMapTileRenderer(
     }
 
     fun shutdown() {
+        satellite_tile_executor.shutdownNow()
         tile_disk_executor.shutdownNow()
         reference_tile_executor.shutdownNow()
         clear()
@@ -385,7 +420,15 @@ internal class SatelliteMapTileRenderer(
                 } else {
                     requested++
                     request_satellite_parent_tiles(tile_zoom, tx, ty, state, request_generation)
-                    request_tile(tile_zoom, tx, ty, key, state)
+                    request_tile(
+                        z = tile_zoom,
+                        x = tx,
+                        y = ty,
+                        key = key,
+                        state = state,
+                        request_generation = request_generation,
+                        request_priority = SATELLITE_TILE_REQUEST_PRIORITY_EXACT
+                    )
 
                     if (layer_visible) {
                         if (
@@ -1239,7 +1282,15 @@ internal class SatelliteMapTileRenderer(
                 val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
                 mark_current_tile_request(key, request_generation)
                 request_satellite_parent_tiles(tile_zoom, tx, ty, state, request_generation)
-                request_tile(tile_zoom, tx, ty, key, state)
+                request_tile(
+                    z = tile_zoom,
+                    x = tx,
+                    y = ty,
+                    key = key,
+                    state = state,
+                    request_generation = request_generation,
+                    request_priority = SATELLITE_TILE_REQUEST_PRIORITY_BUFFER
+                )
             }
         }
     }
@@ -1261,42 +1312,62 @@ internal class SatelliteMapTileRenderer(
             val parent_key = "${state.cache_key}/$parent_z/$parent_x/$parent_y"
             mark_current_tile_request(parent_key, request_generation)
             if (tile_bitmap(parent_z, parent_x, parent_y, parent_key, state) == null) {
-                request_tile(parent_z, parent_x, parent_y, parent_key, state)
+                request_tile(
+                    z = parent_z,
+                    x = parent_x,
+                    y = parent_y,
+                    key = parent_key,
+                    state = state,
+                    request_generation = request_generation,
+                    request_priority = SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE - depth
+                )
             }
         }
     }
 
     // Download one HTTPS tile off the UI thread, then redraw when real bitmap data is available.
-    private fun request_tile(z: Int, x: Int, y: Int, key: String, state: MapTileRenderState) {
+    private fun request_tile(
+        z: Int,
+        x: Int,
+        y: Int,
+        key: String,
+        state: MapTileRenderState,
+        request_generation: Long,
+        request_priority: Int
+    ) {
         if (tile_bitmap(z, x, y, key, state) != null) return
         synchronized(requested_tiles) {
             if (requested_tiles.contains(key)) return
             requested_tiles += key
         }
-        executor.execute {
+        satellite_tile_executor.execute(SatelliteTileRequestTask(
+            generation = request_generation,
+            priority = request_priority,
+            sequence = satellite_tile_task_sequence.incrementAndGet(),
+            action = tileTask@{
             var connection: HttpURLConnection? = null
             var redrew_when_loaded = false
             var skipped_stale_request = false
             try {
                 if (should_skip_stale_tile_request(key)) {
                     skipped_stale_request = true
-                    return@execute
+                    return@tileTask
                 }
                 if (tile_bitmap(z, x, y, key, state) != null) {
                     skipped_stale_request = true
-                    return@execute
+                    return@tileTask
                 }
                 val file = tile_file(z, x, y, state)
                 if (is_fresh_tile_file(file)) {
                     val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options())
                     if (bitmap != null) {
                         synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
-                        return@execute
+                        return@tileTask
                     }
                 }
                 val url = https_url(TileSource.SATELLITE.tile_url(z, x, y, state.map_labels_enabled)) ?: run {
                     report_status("Map tiles unavailable")
-                    return@execute
+                    return@tileTask
                 }
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 8000
@@ -1324,7 +1395,7 @@ internal class SatelliteMapTileRenderer(
                 synchronized(requested_tiles) { requested_tiles -= key }
                 if (!redrew_when_loaded && !skipped_stale_request) request_redraw()
             }
-        }
+        }))
     }
 
     private fun begin_tile_request_generation(): Long {
@@ -1462,6 +1533,22 @@ internal class SatelliteMapTileRenderer(
         }
     }
 
+    private class SatelliteTileRequestTask(
+        private val generation: Long,
+        private val priority: Int,
+        private val sequence: Long,
+        private val action: () -> Unit
+    ) : Runnable, Comparable<Runnable> {
+        override fun run() = action()
+
+        override fun compareTo(other: Runnable): Int {
+            val task = other as? SatelliteTileRequestTask ?: return -1
+            if (generation != task.generation) return task.generation.compareTo(generation)
+            if (priority != task.priority) return priority.compareTo(task.priority)
+            return sequence.compareTo(task.sequence)
+        }
+    }
+
     private companion object {
         const val TILE_SIZE = 256
         const val MIN_ZOOM = 3
@@ -1498,6 +1585,10 @@ internal class SatelliteMapTileRenderer(
         const val LOD_BLEND_END_FRACTION = 0.82f
         const val MIN_LAYER_ALPHA = 0.01f
         const val SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS = 15_000L
+        const val SATELLITE_TILE_NETWORK_THREADS = 4
+        const val SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE = 2
+        const val SATELLITE_TILE_REQUEST_PRIORITY_EXACT = 6
+        const val SATELLITE_TILE_REQUEST_PRIORITY_BUFFER = 10
         const val CURRENT_TILE_REQUEST_HISTORY_MAX = 900
         const val CURRENT_TILE_REQUEST_HISTORY_AGE = 6L
         const val CURRENT_TILE_REQUEST_STALE_GENERATIONS = 2L

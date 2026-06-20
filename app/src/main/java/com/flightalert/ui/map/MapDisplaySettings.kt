@@ -43,7 +43,6 @@ enum class TileSource(
             STREET -> emptyList()
             SATELLITE -> buildList {
                 if (street_labels_enabled) add(ReferenceTileOverlay.WORLD_TRANSPORTATION)
-                if (borders_enabled) add(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
             }
         }
     }
@@ -53,11 +52,11 @@ enum class TileSource(
             STREET -> if (labels_enabled) base_attribution else "CARTO no-label tiles, OpenStreetMap data"
             SATELLITE -> {
                 val overlays = reference_overlay_layers(labels_enabled, borders_enabled)
-                if (overlays.isNotEmpty()) {
-                    "$base_attribution; ${overlays.joinToString("; ") { it.attribution }}"
-                } else {
-                    base_attribution
-                }
+                buildList {
+                    add(base_attribution)
+                    overlays.forEach { add(it.attribution) }
+                    if (borders_enabled) add("Natural Earth public domain reference data")
+                }.joinToString("; ")
             }
         }
     }
