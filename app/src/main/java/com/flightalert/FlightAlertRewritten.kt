@@ -23224,6 +23224,19 @@ class TrafficOverlayRenderer(
     private var symbol_overlay_last_seen_center_x = Double.NaN
     private var symbol_overlay_last_seen_center_y = Double.NaN
     private var symbol_overlay_last_seen_zoom = Double.NaN
+    private var symbol_overlay_recorded_aircraft_count = 0
+    private var symbol_overlay_motion_excluded_count = 0
+    private var symbol_overlay_motion_excluded_short_horizon_count = 0
+    private var symbol_overlay_motion_excluded_tiny_horizon_count = 0
+    private var symbol_overlay_rotorcraft_excluded_count = 0
+    private var symbol_overlay_offscreen_count = 0
+    private var symbol_overlay_max_motion_error_px = 0f
+    private var symbol_overlay_recorded_padding_px = 0f
+    private var symbol_overlay_recording_source_aircraft_count = 0
+    private var symbol_overlay_recording_install_aircraft_count = 0
+    private var symbol_overlay_recording_install_mode = "none"
+    private var symbol_overlay_recording_request_reason = "none"
+    private var symbol_overlay_recording_elapsed_ms = 0L
     private val symbol_overlay_async_lock = Any()
     private val symbol_overlay_main_handler = Handler(Looper.getMainLooper())
     private var symbol_overlay_async_generation = 0
@@ -23262,6 +23275,9 @@ class TrafficOverlayRenderer(
     private var debug_detail_symbol_style_ns = 0L
     private var debug_detail_symbol_shadow_ns = 0L
     private var debug_detail_symbol_mask_ns = 0L
+    private var debug_detail_symbol_mask_setup_ns = 0L
+    private var debug_detail_symbol_mask_fill_ns = 0L
+    private var debug_detail_symbol_mask_stroke_ns = 0L
     private var debug_detail_label_ns = 0L
     private var debug_detail_labels_drawn = 0
     private var rotorcraft_animation_frame_requested = false
@@ -23446,17 +23462,21 @@ class TrafficOverlayRenderer(
             )
             debug_detail_direct_symbol_ns += debug_detail_elapsed_ns(direct_start_ns)
             val miss_detail = debug_symbol_cache_miss_detail
+            val record_detail = symbol_overlay_debug_recording_summary(aircraft.size)
+            val miss_suffix = if (miss_detail.isNotEmpty()) " $miss_detail" else ""
+            val record_suffix = if (record_detail.isNotEmpty()) " $record_detail" else ""
             debug_last_symbol_cache_summary =
-                "symbolCache=miss reason=$debug_symbol_cache_miss_reason" +
-                    if (miss_detail.isNotEmpty()) " $miss_detail direct=$direct_count" else " direct=$direct_count"
+                "symbolCache=miss reason=$debug_symbol_cache_miss_reason$miss_suffix$record_suffix direct=$direct_count"
         } else {
             if (!symbol_overlay_has_motion_exclusions &&
                 cached_symbol_overlay_covers_direct_fallback(cached_coverage, viewport)
             ) {
+                val record_detail = symbol_overlay_debug_recording_summary(aircraft.size)
+                val record_suffix = if (record_detail.isNotEmpty()) " $record_detail" else ""
                 debug_last_symbol_cache_summary =
                     "symbolCache=hit slices=${symbol_overlay_occupied_tiles.size} " +
                         "cached=${symbol_overlay_cached_aircraft_keys.size} " +
-                        "motionEx=$symbol_overlay_has_motion_exclusions direct=0"
+                        "motionEx=$symbol_overlay_has_motion_exclusions$record_suffix direct=0"
                 return
             }
             val direct_start_ns = debug_detail_start_ns()
@@ -23477,10 +23497,12 @@ class TrafficOverlayRenderer(
                 exclude_aircraft_keys = symbol_overlay_cached_aircraft_keys
             )
             debug_detail_direct_symbol_ns += debug_detail_elapsed_ns(direct_start_ns)
+            val record_detail = symbol_overlay_debug_recording_summary(aircraft.size)
+            val record_suffix = if (record_detail.isNotEmpty()) " $record_detail" else ""
             debug_last_symbol_cache_summary =
                 "symbolCache=hit slices=${symbol_overlay_occupied_tiles.size} " +
                     "cached=${symbol_overlay_cached_aircraft_keys.size} " +
-                    "motionEx=$symbol_overlay_has_motion_exclusions direct=$direct_count"
+                    "motionEx=$symbol_overlay_has_motion_exclusions$record_suffix direct=$direct_count"
         }
     }
 
@@ -23490,6 +23512,46 @@ class TrafficOverlayRenderer(
             cached_coverage.top <= -edge_padding &&
             cached_coverage.right >= viewport.width + edge_padding &&
             cached_coverage.bottom >= viewport.height + edge_padding
+    }
+
+    private fun drop_sparse_symbol_overlay_recording_if_needed(current_aircraft_count: Int): Boolean {
+        if (symbol_overlay_key == null ||
+            current_aircraft_count < SYMBOL_OVERLAY_SPARSE_RECORDING_MIN_CURRENT_AIRCRAFT
+        ) {
+            return false
+        }
+        val cached_count = symbol_overlay_cached_aircraft_keys.size
+        if (cached_count * SYMBOL_OVERLAY_SPARSE_RECORDING_MAX_CURRENT_RATIO >= current_aircraft_count) {
+            return false
+        }
+        symbol_overlay_bitmap?.let { bitmap ->
+            if (!bitmap.isRecycled) bitmap.recycle()
+        }
+        symbol_overlay_bitmap = null
+        symbol_overlay_key = null
+        symbol_overlay_width = 0
+        symbol_overlay_height = 0
+        symbol_overlay_center_x = Double.NaN
+        symbol_overlay_center_y = Double.NaN
+        symbol_overlay_occupied_tiles = emptyList()
+        symbol_overlay_cached_aircraft_keys = emptySet()
+        symbol_overlay_has_motion_exclusions = false
+        symbol_overlay_recorded_aircraft_count = 0
+        symbol_overlay_motion_excluded_count = 0
+        symbol_overlay_motion_excluded_short_horizon_count = 0
+        symbol_overlay_motion_excluded_tiny_horizon_count = 0
+        symbol_overlay_rotorcraft_excluded_count = 0
+        symbol_overlay_offscreen_count = 0
+        symbol_overlay_max_motion_error_px = 0f
+        symbol_overlay_recorded_padding_px = 0f
+        symbol_overlay_recording_source_aircraft_count = 0
+        symbol_overlay_recording_install_aircraft_count = 0
+        symbol_overlay_recording_install_mode = "dropped_sparse"
+        symbol_overlay_recording_request_reason = "none"
+        symbol_overlay_recording_elapsed_ms = 0L
+        symbol_overlay_saw_interaction = false
+        symbol_overlay_last_interaction_visual_key = null
+        return true
     }
 
     private fun symbol_overlay_cache_padding_px(viewport: Viewport): Float {
@@ -23514,6 +23576,9 @@ class TrafficOverlayRenderer(
         debug_detail_symbol_style_ns = 0L
         debug_detail_symbol_shadow_ns = 0L
         debug_detail_symbol_mask_ns = 0L
+        debug_detail_symbol_mask_setup_ns = 0L
+        debug_detail_symbol_mask_fill_ns = 0L
+        debug_detail_symbol_mask_stroke_ns = 0L
         debug_detail_label_ns = 0L
         debug_detail_labels_drawn = 0
     }
@@ -23529,6 +23594,9 @@ class TrafficOverlayRenderer(
                 "symbolStyle=${debug_detail_symbol_style_ns.ms_debug()} " +
                 "symbolShadow=${debug_detail_symbol_shadow_ns.ms_debug()} " +
                 "symbolMask=${debug_detail_symbol_mask_ns.ms_debug()} " +
+                "symbolMaskSetup=${debug_detail_symbol_mask_setup_ns.ms_debug()} " +
+                "symbolMaskFill=${debug_detail_symbol_mask_fill_ns.ms_debug()} " +
+                "symbolMaskStroke=${debug_detail_symbol_mask_stroke_ns.ms_debug()} " +
                 "labels=${debug_detail_label_ns.ms_debug()} labelsDrawn=$debug_detail_labels_drawn"
     }
 
@@ -23576,13 +23644,23 @@ class TrafficOverlayRenderer(
             debug_symbol_cache_miss_reason = "invalid_transform"
             return null
         }
+        val dropped_sparse_recording = drop_sparse_symbol_overlay_recording_if_needed(aircraft.size)
         val can_bridge_scaled_overlay = interaction_active &&
             symbol_overlay_key != null &&
             scale in SYMBOL_OVERLAY_INTERACTION_SCALE_MIN..SYMBOL_OVERLAY_INTERACTION_SCALE_MAX
         if (abs(scale - 1f) > SYMBOL_OVERLAY_PAN_SCALE_EPSILON && !can_bridge_scaled_overlay) {
             debug_symbol_cache_miss_reason = "scale"
             if (debug_collect_detail_timing) {
-                debug_symbol_cache_miss_detail = "scale=${scale.debug_decimal()} tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()}"
+                debug_symbol_cache_miss_detail = symbol_overlay_scale_miss_detail(
+                    aircraft = aircraft,
+                    viewport = viewport,
+                    style = style,
+                    marker_blend = marker_blend,
+                    interaction_active = interaction_active,
+                    scale = scale,
+                    translation_x = translation_x,
+                    translation_y = translation_y
+                )
             }
             return null
         }
@@ -23596,9 +23674,13 @@ class TrafficOverlayRenderer(
         val source_center_x = viewport.center_x + translation_x / scale
         val source_center_y = viewport.center_y + translation_y / scale
         if (interaction_active && symbol_overlay_key == null) {
-            install_any_completed_symbol_overlay_recording()
+            install_any_completed_symbol_overlay_recording(aircraft.size)
             if (symbol_overlay_key == null) {
-                debug_symbol_cache_miss_reason = if (symbol_overlay_recording_pending()) "recording" else "active_coverage"
+                debug_symbol_cache_miss_reason = when {
+                    dropped_sparse_recording -> "sparse_recording"
+                    symbol_overlay_recording_pending() -> "recording"
+                    else -> "active_coverage"
+                }
                 return null
             }
         }
@@ -23629,13 +23711,22 @@ class TrafficOverlayRenderer(
         if (interaction_active && symbol_overlay_key != null && !cache_intersects_viewport) {
             debug_symbol_cache_miss_reason = "active_coverage"
             if (debug_collect_detail_timing) {
-                debug_symbol_cache_miss_detail =
-                    "coverage l=${cache_left.debug_decimal()} t=${cache_top.debug_decimal()} " +
-                        "r=${cache_right.debug_decimal()} b=${cache_bottom.debug_decimal()} " +
-                        "scale=${scale.debug_decimal()} tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()} " +
-                        "centerDx=${(source_center_x - symbol_overlay_center_x).debug_decimal()} " +
-                        "centerDy=${(source_center_y - symbol_overlay_center_y).debug_decimal()} " +
-                        "size=${symbol_overlay_width}x$symbol_overlay_height"
+                debug_symbol_cache_miss_detail = symbol_overlay_active_coverage_miss_detail(
+                    cache_left = cache_left,
+                    cache_top = cache_top,
+                    cache_right = cache_right,
+                    cache_bottom = cache_bottom,
+                    scale = scale,
+                    translation_x = translation_x,
+                    translation_y = translation_y,
+                    source_center_x = source_center_x,
+                    source_center_y = source_center_y,
+                    dimensions_match = dimensions_match,
+                    current_width_px = width_px,
+                    current_height_px = height_px,
+                    current_padding_px = padding,
+                    zoom = viewport.zoom
+                )
             }
             return null
         }
@@ -23652,7 +23743,7 @@ class TrafficOverlayRenderer(
             appearance_bucket = appearance_bucket,
             theme_key = style.visual_theme.hashCode()
         )
-        install_completed_symbol_overlay_recording(key)
+        install_completed_symbol_overlay_recording(key, aircraft.size)
         val visual_key = key.visual_key()
         if (interaction_active) {
             symbol_overlay_last_interaction_visual_key = visual_key
@@ -23690,7 +23781,12 @@ class TrafficOverlayRenderer(
                         translation_x = translation_x,
                         translation_y = translation_y,
                         source_center_x = source_center_x,
-                        source_center_y = source_center_y
+                        source_center_y = source_center_y,
+                        dimensions_match = dimensions_match,
+                        current_width_px = width_px,
+                        current_height_px = height_px,
+                        current_padding_px = padding,
+                        zoom = viewport.zoom
                     )
                 } else {
                     symbol_overlay_active_visual_miss_detail(
@@ -23717,7 +23813,8 @@ class TrafficOverlayRenderer(
                 height_px = height_px,
                 center_x = source_center_x,
                 center_y = source_center_y,
-                key = key
+                key = key,
+                reason = if (cold_idle_prewarm) "cold" else "visual"
             )
         }
         val can_draw_cached_overlay = if (interaction_active) {
@@ -23727,6 +23824,7 @@ class TrafficOverlayRenderer(
         }
         if (!can_draw_cached_overlay) {
             debug_symbol_cache_miss_reason = when {
+                dropped_sparse_recording -> "sparse_recording"
                 interaction_active -> debug_symbol_cache_miss_reason
                 symbol_overlay_saw_interaction -> "inactive_after_interaction"
                 else -> "inactive"
@@ -23793,14 +23891,124 @@ class TrafficOverlayRenderer(
         translation_x: Float,
         translation_y: Float,
         source_center_x: Double,
-        source_center_y: Double
+        source_center_y: Double,
+        dimensions_match: Boolean,
+        current_width_px: Int,
+        current_height_px: Int,
+        current_padding_px: Float,
+        zoom: Double
     ): String {
         return "coverage l=${cache_left.debug_decimal()} t=${cache_top.debug_decimal()} " +
             "r=${cache_right.debug_decimal()} b=${cache_bottom.debug_decimal()} " +
-            "scale=${scale.debug_decimal()} tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()} " +
+            "zoom=${String.format(Locale.US, "%.2f", zoom)} scale=${scale.debug_decimal()} " +
+            "tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()} " +
             "centerDx=${(source_center_x - symbol_overlay_center_x).debug_decimal()} " +
             "centerDy=${(source_center_y - symbol_overlay_center_y).debug_decimal()} " +
-            "size=${symbol_overlay_width}x$symbol_overlay_height"
+            "dims=$dimensions_match expected=${current_width_px}x$current_height_px " +
+            "cached=${symbol_overlay_width}x$symbol_overlay_height " +
+            "pad=${current_padding_px.debug_decimal()} recPad=${symbol_overlay_recorded_padding_px.debug_decimal()}"
+    }
+
+    private fun symbol_overlay_scale_miss_detail(
+        aircraft: List<TrafficAircraftOverlayState>,
+        viewport: Viewport,
+        style: TrafficOverlayStyle,
+        marker_blend: Float,
+        interaction_active: Boolean,
+        scale: Float,
+        translation_x: Float,
+        translation_y: Float
+    ): String {
+        val padding = symbol_overlay_cache_padding_px(viewport)
+        val width_px = ceil(viewport.width + padding * 2f).toInt().coerceAtLeast(1)
+        val height_px = ceil(viewport.height + padding * 2f).toInt().coerceAtLeast(1)
+        val has_key = symbol_overlay_key != null
+        if (!has_key) {
+            return "scale=${scale.debug_decimal()} gate=${SYMBOL_OVERLAY_INTERACTION_SCALE_MAX.debug_decimal()} " +
+                "active=$interaction_active key=false zoom=${String.format(Locale.US, "%.2f", viewport.zoom)} " +
+                "tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()} " +
+                "expected=${width_px}x$height_px pad=${padding.debug_decimal()}"
+        }
+        val source_center_x = viewport.center_x + translation_x / scale
+        val source_center_y = viewport.center_y + translation_y / scale
+        val center_matches =
+            abs(symbol_overlay_center_x - source_center_x) <= SYMBOL_OVERLAY_CENTER_EPSILON &&
+                abs(symbol_overlay_center_y - source_center_y) <= SYMBOL_OVERLAY_CENTER_EPSILON
+        val dimensions_match = symbol_overlay_width == width_px &&
+            symbol_overlay_height == height_px
+        val cache_translation_x = if (interaction_active) {
+            translation_x
+        } else {
+            (symbol_overlay_center_x - viewport.center_x).toFloat()
+        }
+        val cache_translation_y = if (interaction_active) {
+            translation_y
+        } else {
+            (symbol_overlay_center_y - viewport.center_y).toFloat()
+        }
+        val cache_left = cache_translation_x - padding * scale
+        val cache_top = cache_translation_y - padding * scale
+        val cache_right = cache_left + symbol_overlay_width * scale
+        val cache_bottom = cache_top + symbol_overlay_height * scale
+        val cache_intersects_viewport = dimensions_match &&
+            cache_right >= 0f &&
+            cache_bottom >= 0f &&
+            cache_left <= viewport.width &&
+            cache_top <= viewport.height
+        val bridge_detail = symbol_overlay_scale_miss_bridge_detail(
+            aircraft = aircraft,
+            viewport = viewport,
+            style = style,
+            marker_blend = marker_blend,
+            interaction_active = interaction_active,
+            scale = scale,
+            center_matches = center_matches,
+            dimensions_match = dimensions_match
+        )
+        return "scale=${scale.debug_decimal()} gate=${SYMBOL_OVERLAY_INTERACTION_SCALE_MAX.debug_decimal()} " +
+            "active=$interaction_active key=true intersects=$cache_intersects_viewport " +
+            "coverage l=${cache_left.debug_decimal()} t=${cache_top.debug_decimal()} " +
+            "r=${cache_right.debug_decimal()} b=${cache_bottom.debug_decimal()} " +
+            "zoom=${String.format(Locale.US, "%.2f", viewport.zoom)} " +
+            "tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()} " +
+            "centerDx=${(source_center_x - symbol_overlay_center_x).debug_decimal()} " +
+            "centerDy=${(source_center_y - symbol_overlay_center_y).debug_decimal()} " +
+            "dims=$dimensions_match expected=${width_px}x$height_px " +
+            "cached=${symbol_overlay_width}x$symbol_overlay_height " +
+            "pad=${padding.debug_decimal()} recPad=${symbol_overlay_recorded_padding_px.debug_decimal()}$bridge_detail"
+    }
+
+    private fun symbol_overlay_scale_miss_bridge_detail(
+        aircraft: List<TrafficAircraftOverlayState>,
+        viewport: Viewport,
+        style: TrafficOverlayStyle,
+        marker_blend: Float,
+        interaction_active: Boolean,
+        scale: Float,
+        center_matches: Boolean,
+        dimensions_match: Boolean
+    ): String {
+        val cached_key = symbol_overlay_key ?: return ""
+        val appearance_bucket = aircraft_symbol_overlay_appearance_bucket(aircraft)
+        if (appearance_bucket < SYMBOL_OVERLAY_APPEARANCE_READY_BUCKET) {
+            return " bridge appearance=$appearance_bucket"
+        }
+        val current_key = AircraftSymbolOverlayCacheKey(
+            marker_bucket = aircraft_symbol_progress_bucket(AircraftMarkerMorph.shape_progress(marker_blend)),
+            icon_scale_bucket = (aircraft_icon_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
+            dot_scale_bucket = (aircraft_dot_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
+            aircraft_signature = aircraft_symbol_overlay_signature(aircraft, interaction_active, viewport.zoom),
+            appearance_bucket = appearance_bucket,
+            theme_key = style.visual_theme.hashCode()
+        )
+        return " " + symbol_overlay_active_visual_miss_detail(
+            cached_key = cached_key,
+            current_key = current_key,
+            scale = scale,
+            visual_key_matches = cached_key.visual_key_matches(current_key),
+            center_matches = center_matches,
+            dimensions_match = dimensions_match
+        )
     }
 
     private fun symbol_overlay_active_visual_miss_detail(
@@ -23907,7 +24115,10 @@ class TrafficOverlayRenderer(
         return aircraft_overlay_signature(aircraft, zoom)
     }
 
-    private fun install_completed_symbol_overlay_recording(expected_key: AircraftSymbolOverlayCacheKey) {
+    private fun install_completed_symbol_overlay_recording(
+        expected_key: AircraftSymbolOverlayCacheKey,
+        install_aircraft_count: Int
+    ) {
         val result = synchronized(symbol_overlay_async_lock) {
             val pending = symbol_overlay_async_result
             if (pending?.key == expected_key) {
@@ -23917,19 +24128,23 @@ class TrafficOverlayRenderer(
                 null
             }
         } ?: return
-        install_symbol_overlay_recording_result(result)
+        install_symbol_overlay_recording_result(result, "exact", install_aircraft_count)
     }
 
-    private fun install_any_completed_symbol_overlay_recording() {
+    private fun install_any_completed_symbol_overlay_recording(install_aircraft_count: Int) {
         val result = synchronized(symbol_overlay_async_lock) {
             val pending = symbol_overlay_async_result ?: return
             symbol_overlay_async_result = null
             pending
         }
-        install_symbol_overlay_recording_result(result)
+        install_symbol_overlay_recording_result(result, "any", install_aircraft_count)
     }
 
-    private fun install_symbol_overlay_recording_result(result: AircraftSymbolOverlayAsyncResult) {
+    private fun install_symbol_overlay_recording_result(
+        result: AircraftSymbolOverlayAsyncResult,
+        install_mode: String,
+        install_aircraft_count: Int
+    ) {
         val current = symbol_overlay_bitmap
         if (current != null && current !== result.bitmap && !current.isRecycled) {
             current.recycle()
@@ -23943,6 +24158,48 @@ class TrafficOverlayRenderer(
         symbol_overlay_occupied_tiles = result.occupied_tiles
         symbol_overlay_cached_aircraft_keys = result.cached_aircraft_keys
         symbol_overlay_has_motion_exclusions = result.has_motion_exclusions
+        symbol_overlay_recorded_aircraft_count = result.recorded_aircraft_count
+        symbol_overlay_motion_excluded_count = result.motion_excluded_count
+        symbol_overlay_motion_excluded_short_horizon_count = result.motion_excluded_short_horizon_count
+        symbol_overlay_motion_excluded_tiny_horizon_count = result.motion_excluded_tiny_horizon_count
+        symbol_overlay_rotorcraft_excluded_count = result.rotorcraft_excluded_count
+        symbol_overlay_offscreen_count = result.offscreen_count
+        symbol_overlay_max_motion_error_px = result.max_motion_error_px
+        symbol_overlay_recorded_padding_px = result.padding_px
+        symbol_overlay_recording_source_aircraft_count = result.source_aircraft_count
+        symbol_overlay_recording_install_aircraft_count = install_aircraft_count
+        symbol_overlay_recording_install_mode = install_mode
+        symbol_overlay_recording_request_reason = result.request_reason
+        symbol_overlay_recording_elapsed_ms = result.recorded_elapsed_ms
+    }
+
+    private fun symbol_overlay_debug_recording_summary(current_aircraft_count: Int): String {
+        val sparse_recording = current_aircraft_count >= 256 &&
+            symbol_overlay_recorded_aircraft_count * 4 < current_aircraft_count
+        if (!debug_collect_detail_timing && !sparse_recording) return ""
+        val recording_age_ms = if (symbol_overlay_recording_elapsed_ms > 0L) {
+            (SystemClock.elapsedRealtime() - symbol_overlay_recording_elapsed_ms).coerceAtLeast(0L)
+        } else {
+            -1L
+        }
+        val horizon_detail = if (debug_collect_detail_timing) {
+            "recMotion085=$symbol_overlay_motion_excluded_short_horizon_count " +
+                "recMotion065=$symbol_overlay_motion_excluded_tiny_horizon_count "
+        } else {
+            ""
+        }
+        return "recCached=$symbol_overlay_recorded_aircraft_count " +
+            "recMotion=$symbol_overlay_motion_excluded_count " +
+            horizon_detail +
+            "recRotor=$symbol_overlay_rotorcraft_excluded_count " +
+            "recOff=$symbol_overlay_offscreen_count " +
+            "recMotionMax=${symbol_overlay_max_motion_error_px.debug_decimal()} " +
+            "recInput=$symbol_overlay_recording_source_aircraft_count " +
+            "recAt=$symbol_overlay_recording_install_aircraft_count " +
+            "recCur=$current_aircraft_count " +
+            "recInstall=$symbol_overlay_recording_install_mode " +
+            "recAgeMs=$recording_age_ms " +
+            "recReq=$symbol_overlay_recording_request_reason"
     }
 
     private fun symbol_overlay_recording_pending(): Boolean {
@@ -23960,7 +24217,8 @@ class TrafficOverlayRenderer(
         height_px: Int,
         center_x: Double,
         center_y: Double,
-        key: AircraftSymbolOverlayCacheKey
+        key: AircraftSymbolOverlayCacheKey,
+        reason: String
     ) {
         val generation = synchronized(symbol_overlay_async_lock) {
             if (symbol_overlay_async_key == key || symbol_overlay_async_result?.key == key) return
@@ -23990,6 +24248,8 @@ class TrafficOverlayRenderer(
                 center_x = center_x,
                 center_y = center_y,
                 key = key,
+                request_reason = reason,
+                collect_motion_horizon_debug = debug_collect_detail_timing,
                 dp_scale = dp_scale
             )
             symbol_overlay_main_handler.post {
@@ -24925,18 +25185,41 @@ class TrafficOverlayRenderer(
         fill: Int,
         stroke: Int
     ) {
-        val draw_scale = icon_scale / mask_resolution_scale.coerceAtLeast(0.001f)
-        symbol_draw_matrix.reset()
-        symbol_draw_matrix.postTranslate(-mask.fill.width / 2f, -mask.fill.height / 2f)
-        symbol_draw_matrix.postScale(draw_scale, draw_scale)
-        if (track_deg != null && symbol != AircraftSymbol.SURFACE) {
-            symbol_draw_matrix.postRotate(track_deg.toFloat())
+        if (debug_collect_detail_timing) {
+            val setup_start_ns = SystemClock.elapsedRealtimeNanos()
+            val draw_scale = icon_scale / mask_resolution_scale.coerceAtLeast(0.001f)
+            symbol_draw_matrix.reset()
+            symbol_draw_matrix.postTranslate(-mask.fill.width / 2f, -mask.fill.height / 2f)
+            symbol_draw_matrix.postScale(draw_scale, draw_scale)
+            if (track_deg != null && symbol != AircraftSymbol.SURFACE) {
+                symbol_draw_matrix.postRotate(track_deg.toFloat())
+            }
+            symbol_draw_matrix.postTranslate(x, y)
+            debug_detail_symbol_mask_setup_ns += SystemClock.elapsedRealtimeNanos() - setup_start_ns
+
+            symbol_mask_paint.color = fill
+            val fill_start_ns = SystemClock.elapsedRealtimeNanos()
+            canvas.drawBitmap(mask.fill, symbol_draw_matrix, symbol_mask_paint)
+            debug_detail_symbol_mask_fill_ns += SystemClock.elapsedRealtimeNanos() - fill_start_ns
+
+            symbol_mask_paint.color = stroke
+            val stroke_start_ns = SystemClock.elapsedRealtimeNanos()
+            canvas.drawBitmap(mask.stroke, symbol_draw_matrix, symbol_mask_paint)
+            debug_detail_symbol_mask_stroke_ns += SystemClock.elapsedRealtimeNanos() - stroke_start_ns
+        } else {
+            val draw_scale = icon_scale / mask_resolution_scale.coerceAtLeast(0.001f)
+            symbol_draw_matrix.reset()
+            symbol_draw_matrix.postTranslate(-mask.fill.width / 2f, -mask.fill.height / 2f)
+            symbol_draw_matrix.postScale(draw_scale, draw_scale)
+            if (track_deg != null && symbol != AircraftSymbol.SURFACE) {
+                symbol_draw_matrix.postRotate(track_deg.toFloat())
+            }
+            symbol_draw_matrix.postTranslate(x, y)
+            symbol_mask_paint.color = fill
+            canvas.drawBitmap(mask.fill, symbol_draw_matrix, symbol_mask_paint)
+            symbol_mask_paint.color = stroke
+            canvas.drawBitmap(mask.stroke, symbol_draw_matrix, symbol_mask_paint)
         }
-        symbol_draw_matrix.postTranslate(x, y)
-        symbol_mask_paint.color = fill
-        canvas.drawBitmap(mask.fill, symbol_draw_matrix, symbol_mask_paint)
-        symbol_mask_paint.color = stroke
-        canvas.drawBitmap(mask.stroke, symbol_draw_matrix, symbol_mask_paint)
         symbol_mask_paint.alpha = 255
     }
 
@@ -25666,7 +25949,18 @@ class TrafficOverlayRenderer(
         val center_y: Double,
         val occupied_tiles: List<AircraftSymbolOverlayTile>,
         val cached_aircraft_keys: Set<String>,
-        val has_motion_exclusions: Boolean
+        val has_motion_exclusions: Boolean,
+        val padding_px: Float,
+        val source_aircraft_count: Int,
+        val recorded_aircraft_count: Int,
+        val motion_excluded_count: Int,
+        val motion_excluded_short_horizon_count: Int,
+        val motion_excluded_tiny_horizon_count: Int,
+        val rotorcraft_excluded_count: Int,
+        val offscreen_count: Int,
+        val max_motion_error_px: Float,
+        val recorded_elapsed_ms: Long,
+        val request_reason: String
     )
 
     private data class AircraftSymbolOverlayTile(
@@ -25741,6 +26035,8 @@ class TrafficOverlayRenderer(
             center_x: Double,
             center_y: Double,
             key: AircraftSymbolOverlayCacheKey,
+            request_reason: String,
+            collect_motion_horizon_debug: Boolean,
             dp_scale: Float
         ): AircraftSymbolOverlayAsyncResult {
             val bitmap = createBitmap(width_px, height_px, Bitmap.Config.ARGB_8888)
@@ -25753,6 +26049,16 @@ class TrafficOverlayRenderer(
             val occupied_tiles = BooleanArray(tile_cols * tile_rows)
             val cached_aircraft_keys = HashSet<String>()
             var has_motion_exclusions = false
+            var recorded_aircraft_count = 0
+            var motion_excluded_count = 0
+            var motion_excluded_short_horizon_count = 0
+            var motion_excluded_tiny_horizon_count = 0
+            var rotorcraft_excluded_count = 0
+            var offscreen_count = 0
+            var max_motion_error_squared = 0f
+            val max_motion_error_squared_allowed =
+                SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_MAX_ERROR_PX * SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_MAX_ERROR_PX
+            val now_ms = SystemClock.elapsedRealtime()
             try {
                 val colors = visual_theme.colors
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -25762,19 +26068,41 @@ class TrafficOverlayRenderer(
                     isDither = true
                 }
                 val dp: (Float) -> Float = { value -> value * dp_scale }
-                val now_ms = SystemClock.elapsedRealtime()
                 for (item in aircraft) {
                     val selected = item.appearance_key == selected_aircraft_key
                     val elapsed_sec = traffic_motion_elapsed_seconds(item, now_ms)
                     val x = item.screen_point.x + item.screen_velocity_x_px_per_sec * elapsed_sec + padding
                     val y = item.screen_point.y + item.screen_velocity_y_px_per_sec * elapsed_sec + padding
                     val cull_padding = aircraft_cull_padding(item, viewport.zoom, selected, dp)
-                    if (!is_on_screen(x, y, viewport, cull_padding)) continue
+                    if (!is_on_screen(x, y, viewport, cull_padding)) {
+                        offscreen_count++
+                        continue
+                    }
                     if (item.symbol == AircraftSymbol.ROTORCRAFT) {
+                        rotorcraft_excluded_count++
                         has_motion_exclusions = true
                         continue
                     }
-                    if (!is_motion_stable_for_cache(item)) {
+                    val motion_error_squared = motion_cache_error_squared(item)
+                    if (motion_error_squared > max_motion_error_squared_allowed) {
+                        motion_excluded_count++
+                        if (motion_error_squared > max_motion_error_squared) max_motion_error_squared = motion_error_squared
+                        if (collect_motion_horizon_debug) {
+                            if (motion_cache_error_squared(
+                                    item,
+                                    SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_DEBUG_SHORT_HORIZON_SEC
+                                ) <= max_motion_error_squared_allowed
+                            ) {
+                                motion_excluded_short_horizon_count++
+                            }
+                            if (motion_cache_error_squared(
+                                    item,
+                                    SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_DEBUG_TINY_HORIZON_SEC
+                                ) <= max_motion_error_squared_allowed
+                            ) {
+                                motion_excluded_tiny_horizon_count++
+                            }
+                        }
                         has_motion_exclusions = true
                         continue
                     }
@@ -25795,6 +26123,7 @@ class TrafficOverlayRenderer(
                         dp = dp,
                         now_ms = now_ms
                     )
+                    recorded_aircraft_count++
                     mark_occupied_tiles(
                         occupied_tiles = occupied_tiles,
                         tile_cols = tile_cols,
@@ -25819,21 +26148,35 @@ class TrafficOverlayRenderer(
                 center_y = center_y,
                 occupied_tiles = build_occupied_tile_rects(occupied_tiles, tile_cols, tile_rows, width_px, height_px, tile_size),
                 cached_aircraft_keys = cached_aircraft_keys,
-                has_motion_exclusions = has_motion_exclusions
+                has_motion_exclusions = has_motion_exclusions,
+                padding_px = padding,
+                source_aircraft_count = aircraft.size,
+                recorded_aircraft_count = recorded_aircraft_count,
+                motion_excluded_count = motion_excluded_count,
+                motion_excluded_short_horizon_count = motion_excluded_short_horizon_count,
+                motion_excluded_tiny_horizon_count = motion_excluded_tiny_horizon_count,
+                rotorcraft_excluded_count = rotorcraft_excluded_count,
+                offscreen_count = offscreen_count,
+                max_motion_error_px = sqrt(max_motion_error_squared.toDouble()).toFloat(),
+                recorded_elapsed_ms = now_ms,
+                request_reason = request_reason
             )
         }
 
-        private fun is_motion_stable_for_cache(item: TrafficAircraftOverlayState): Boolean {
+        private fun motion_cache_error_squared(item: TrafficAircraftOverlayState): Float {
+            return motion_cache_error_squared(item, SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_HORIZON_SEC)
+        }
+
+        private fun motion_cache_error_squared(item: TrafficAircraftOverlayState, horizon_sec: Float): Float {
             if (item.motion_limit_sec <= 0f ||
                 (item.screen_velocity_x_px_per_sec == 0f && item.screen_velocity_y_px_per_sec == 0f)
             ) {
-                return true
+                return 0f
             }
-            val projection_sec = min(item.motion_limit_sec, SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_HORIZON_SEC)
+            val projection_sec = min(item.motion_limit_sec, horizon_sec.coerceAtLeast(0f))
             val dx = item.screen_velocity_x_px_per_sec * projection_sec
             val dy = item.screen_velocity_y_px_per_sec * projection_sec
-            val max_error = SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_MAX_ERROR_PX
-            return dx * dx + dy * dy <= max_error * max_error
+            return dx * dx + dy * dy
         }
 
         private fun mark_occupied_tiles(
@@ -26147,11 +26490,13 @@ class TrafficOverlayRenderer(
         const val SYMBOL_OVERLAY_WIDE_COVERAGE_MAX_ZOOM = 6.0
         const val SYMBOL_OVERLAY_WIDE_COVERAGE_PADDING_DP = 420f
         const val SYMBOL_OVERLAY_DIRECT_FALLBACK_PADDING_DP = 96f
+        const val SYMBOL_OVERLAY_SPARSE_RECORDING_MIN_CURRENT_AIRCRAFT = 256
+        const val SYMBOL_OVERLAY_SPARSE_RECORDING_MAX_CURRENT_RATIO = 8
         const val SYMBOL_OVERLAY_SCALE_BUCKET = 1000f
         const val SYMBOL_OVERLAY_PAN_SCALE_EPSILON = 0.0025f
         const val SYMBOL_OVERLAY_INTERACTION_SCALE_MIN = 0.62f
         const val SYMBOL_OVERLAY_INTERACTION_SCALE_MAX = 1.62f
-        const val SYMBOL_OVERLAY_INTERACTION_MARKER_BUCKET_TOLERANCE = 6
+        const val SYMBOL_OVERLAY_INTERACTION_MARKER_BUCKET_TOLERANCE = 18
         const val SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE = 120
         const val SYMBOL_OVERLAY_CENTER_EPSILON = 0.5
         const val SYMBOL_OVERLAY_APPEARANCE_READY_BUCKET = 1
@@ -26160,6 +26505,8 @@ class TrafficOverlayRenderer(
         const val SYMBOL_OVERLAY_READY_AIRCRAFT_FRACTION = 0.72f
         const val SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_MAX_ERROR_PX = 0.42f
         const val SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_HORIZON_SEC = 1.25f
+        const val SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_DEBUG_SHORT_HORIZON_SEC = 0.85f
+        const val SYMBOL_OVERLAY_DYNAMIC_EXCLUSION_DEBUG_TINY_HORIZON_SEC = 0.65f
         const val SYMBOL_OVERLAY_EXTERNAL_CENTER_JUMP_VIEWPORTS = 1.5f
         const val SYMBOL_OVERLAY_EXTERNAL_ZOOM_JUMP = 0.35
         const val DOT_OVERLAY_CACHE_MIN_DOTS = 3200
@@ -28699,6 +29046,7 @@ internal class TrafficOverlayStateBuilder(
     private var debug_state_symbol_cache_ns = 0L
     private var debug_state_aircraft_pick_ns = 0L
     private var debug_state_symbol_mode = "none"
+    private var debug_state_symbol_build_reason = "none"
 
     // Build the renderer snapshot from cached traffic so pan frames only cull and interpolate.
     fun traffic_overlay_state(frame: TrafficOverlayFrame): TrafficOverlayState {
@@ -29078,14 +29426,47 @@ internal class TrafficOverlayStateBuilder(
         val interaction_zoom_reuse = interaction_reuse &&
             abs(zoom_delta) <= DENSE_SYMBOL_CACHE_INTERACTION_ZOOM_STEPS
         val idle_reuse = can_reuse_dense_symbol_cache_while_idle(source_changed, zoom_changed)
-        if (!interaction_reuse && !idle_reuse) return null
-        if (dense_symbol_cache_width != frame.viewport.width || dense_symbol_cache_height != frame.viewport.height) return null
-        if (dense_symbol_cache_selected_key != selected_key || dense_symbol_cache_path_focus != path_focus) return null
-        if (zoom_changed && !interaction_zoom_reuse) return null
-        if (source_changed && !interaction_reuse) return null
+        if (!interaction_reuse && !idle_reuse) {
+            if (debug_collect_detail_timing) {
+                debug_dense_symbol_build_reason(
+                    debug_dense_symbol_reuse_reason(
+                        prefix = "reuse_off",
+                        frame = frame,
+                        source_changed = source_changed,
+                        zoom_changed = zoom_changed,
+                        interaction_reuse = interaction_reuse,
+                        idle_reuse = idle_reuse
+                    )
+                )
+            }
+            return null
+        }
+        if (dense_symbol_cache_width != frame.viewport.width || dense_symbol_cache_height != frame.viewport.height) {
+            debug_dense_symbol_build_reason("viewport_size")
+            return null
+        }
+        if (dense_symbol_cache_selected_key != selected_key || dense_symbol_cache_path_focus != path_focus) {
+            debug_dense_symbol_build_reason("selection_or_path")
+            return null
+        }
+        if (zoom_changed && !interaction_zoom_reuse) {
+            if (debug_collect_detail_timing) {
+                debug_dense_symbol_build_reason(
+                    "zoom_gate dz=${String.format(Locale.US, "%.2f", zoom_delta)}"
+                )
+            }
+            return null
+        }
+        if (source_changed && !interaction_reuse) {
+            debug_dense_symbol_build_reason("source_idle")
+            return null
+        }
         val transform_scale_double = 2.0.pow(zoom_delta)
         val transform_scale = transform_scale_double.toFloat()
-        if (transform_scale <= 0f || transform_scale.isNaN() || transform_scale.isInfinite()) return null
+        if (transform_scale <= 0f || transform_scale.isNaN() || transform_scale.isInfinite()) {
+            debug_dense_symbol_build_reason("invalid_scale")
+            return null
+        }
         val translation_x = (
             dense_symbol_cache_center_x * transform_scale_double -
                 frame.viewport.center_x +
@@ -29098,7 +29479,16 @@ internal class TrafficOverlayStateBuilder(
                 frame.viewport.height / 2.0 -
                 dense_symbol_cache_height * transform_scale_double / 2.0
             ).toFloat()
-        if (!dense_symbol_cache_covers_viewport(frame.viewport, transform_scale, translation_x, translation_y)) return null
+        if (!dense_symbol_cache_covers_viewport(frame.viewport, transform_scale, translation_x, translation_y)) {
+            if (debug_collect_detail_timing) {
+                debug_dense_symbol_build_reason(
+                    "coverage scale=${String.format(Locale.US, "%.2f", transform_scale)} " +
+                        "tx=${String.format(Locale.US, "%.2f", translation_x)} " +
+                        "ty=${String.format(Locale.US, "%.2f", translation_y)}"
+                )
+            }
+            return null
+        }
         val states = if (interaction_reuse && abs(transform_scale - 1f) > DENSE_SYMBOL_VISIBLE_FILTER_SCALE_EPSILON) {
             visible_scaled_dense_symbol_states(
                 states = dense_symbol_cache_states,
@@ -29116,6 +29506,105 @@ internal class TrafficOverlayStateBuilder(
             translation_x = translation_x,
             translation_y = translation_y
         )
+    }
+
+    private fun debug_dense_symbol_build_reason(reason: String) {
+        if (debug_collect_detail_timing) {
+            debug_state_symbol_build_reason = reason
+        }
+    }
+
+    private fun debug_dense_symbol_reuse_reason(
+        prefix: String,
+        frame: TrafficOverlayFrame,
+        source_changed: Boolean,
+        zoom_changed: Boolean,
+        interaction_reuse: Boolean,
+        idle_reuse: Boolean
+    ): String {
+        val now = now_elapsed_ms()
+        val cache_age_ms = now - dense_symbol_cache_built_ms
+        val interaction_age_ms = now - frame.interaction.last_map_interaction_ms
+        val source_detail = if (source_changed) {
+            dense_symbol_source_change_detail(frame.cache.aircraft)
+        } else {
+            ""
+        }
+        return "$prefix source=$source_changed zoom=$zoom_changed " +
+            "iReuse=$interaction_reuse idle=$idle_reuse " +
+            "cacheAge=$cache_age_ms intAge=$interaction_age_ms " +
+            source_detail +
+            "pinch=${frame.interaction.pinch_in_progress} " +
+            "touch=${frame.interaction.map_touch_active} drag=${frame.interaction.drag_started}"
+    }
+
+    private fun dense_symbol_source_change_detail(current_aircraft: List<Aircraft>): String {
+        val cached_aircraft = dense_symbol_cache_aircraft
+        if (cached_aircraft == null || cached_aircraft.isEmpty()) {
+            return "srcCur=${current_aircraft.size}/0 srcCached=0/0 srcSame=0 srcAdd=0 srcDrop=0 "
+        }
+        val cached_by_key = HashMap<String, Aircraft>(cached_aircraft.size * 2)
+        for (item in cached_aircraft) {
+            val key = item.appearance_key()
+            if (!cached_by_key.containsKey(key)) {
+                cached_by_key[key] = item
+            }
+        }
+        val current_keys = HashSet<String>(current_aircraft.size * 2)
+        var same_count = 0
+        var changed_position_count = 0
+        var changed_motion_count = 0
+        var changed_freshness_count = 0
+        var same_reference_count = 0
+        var same_index_reference_count = 0
+        var max_abs_lat_delta_e6 = 0.0
+        var max_abs_lon_delta_e6 = 0.0
+        for ((index, item) in current_aircraft.withIndex()) {
+            val key = item.appearance_key()
+            val cached_item = cached_by_key[key]
+            if (current_keys.add(key) && cached_item != null) {
+                same_count++
+                if (cached_item === item) {
+                    same_reference_count++
+                }
+                if (index < cached_aircraft.size && cached_aircraft[index] === item) {
+                    same_index_reference_count++
+                }
+                val lat_delta_e6 = abs(item.lat - cached_item.lat) * 1_000_000.0
+                val lon_delta_e6 = abs(item.lon - cached_item.lon) * 1_000_000.0
+                if (lat_delta_e6 > max_abs_lat_delta_e6) max_abs_lat_delta_e6 = lat_delta_e6
+                if (lon_delta_e6 > max_abs_lon_delta_e6) max_abs_lon_delta_e6 = lon_delta_e6
+                if (lat_delta_e6 > 1.0 || lon_delta_e6 > 1.0) {
+                    changed_position_count++
+                }
+                if (nullable_double_changed(item.velocity_ms, cached_item.velocity_ms, 0.2) ||
+                    nullable_double_changed(item.track_deg, cached_item.track_deg, 0.1) ||
+                    nullable_double_changed(item.altitude_m, cached_item.altitude_m, 1.0) ||
+                    item.on_ground != cached_item.on_ground
+                ) {
+                    changed_motion_count++
+                }
+                if (nullable_double_changed(item.position_time_sec, cached_item.position_time_sec, 0.1) ||
+                    nullable_double_changed(item.last_contact_sec, cached_item.last_contact_sec, 0.1)
+                ) {
+                    changed_freshness_count++
+                }
+            }
+        }
+        val added_count = (current_keys.size - same_count).coerceAtLeast(0)
+        val dropped_count = (cached_by_key.size - same_count).coerceAtLeast(0)
+        return "srcCur=${current_aircraft.size}/${current_keys.size} " +
+            "srcCached=${cached_aircraft.size}/${cached_by_key.size} " +
+            "srcSame=$same_count srcAdd=$added_count srcDrop=$dropped_count " +
+            "srcPos=$changed_position_count srcMove=$changed_motion_count srcFresh=$changed_freshness_count " +
+            "srcRef=$same_reference_count srcIdxRef=$same_index_reference_count " +
+            "srcMaxLatE6=${String.format(Locale.US, "%.1f", max_abs_lat_delta_e6)} " +
+            "srcMaxLonE6=${String.format(Locale.US, "%.1f", max_abs_lon_delta_e6)} "
+    }
+
+    private fun nullable_double_changed(current: Double?, cached: Double?, tolerance: Double): Boolean {
+        if (current == null || cached == null) return current != cached
+        return abs(current - cached) > tolerance
     }
 
     private fun visible_scaled_dense_symbol_states(
@@ -29407,6 +29896,7 @@ internal class TrafficOverlayStateBuilder(
         debug_state_symbol_cache_ns = 0L
         debug_state_aircraft_pick_ns = 0L
         debug_state_symbol_mode = "none"
+        debug_state_symbol_build_reason = "none"
     }
 
     private fun finish_debug_detail_timing() {
@@ -29415,6 +29905,7 @@ internal class TrafficOverlayStateBuilder(
             "stateDetail dotState=${debug_state_dot_batch_ns.ms_debug()} " +
                 "symOverlay=${debug_state_symbol_overlay_ns.ms_debug()} " +
                 "symMode=$debug_state_symbol_mode " +
+                "symBuild=$debug_state_symbol_build_reason " +
                 "symShift=${debug_state_symbol_shift_ns.ms_debug()} " +
                 "symQuery=${debug_state_symbol_query_ns.ms_debug()} " +
                 "symFilter=${debug_state_symbol_filter_ns.ms_debug()} " +
