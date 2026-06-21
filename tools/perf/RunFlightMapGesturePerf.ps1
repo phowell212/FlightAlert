@@ -248,6 +248,7 @@ function Get-DefaultArtifactName {
         "satelliteTileTransitionBandContinuityPerf" { return "satelliteTileTransitionBandContinuityPerf" }
         "satelliteFastZoomOutTileLoad" { return "satelliteFastZoomOutTileLoad" }
         "satelliteFastZoomOutTileLoadPerf" { return "satelliteFastZoomOutTileLoadPerf" }
+        "closeSatellitePanLabels" { return "closeSatellitePanLabels" }
         "streetFastZoomOutTileLoad" { return "streetFastZoomOutTileLoad" }
         "streetFastZoomOutTileLoadPerf" { return "streetFastZoomOutTileLoadPerf" }
         "panAcrossZoomLevels" { return "panAcrossZoomLevels" }

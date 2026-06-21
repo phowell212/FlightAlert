@@ -25,6 +25,8 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -57,6 +59,40 @@ private data class TileLayerDrawStats(
     val fallback_drawn: Int,
     val fading: Boolean,
     val debug_summary: String = ""
+)
+
+private data class ReferenceTileCoverage(
+    val visible: Int,
+    val loaded: Int,
+    val ready: Int,
+    val fallback_ready: Int,
+    val center_visible: Int = 0,
+    val center_loaded: Int = 0,
+    val center_ready: Int = 0,
+    val center_fallback_ready: Int = 0
+) {
+    val loaded_ratio: Float
+        get() = if (visible <= 0) 1f else loaded.toFloat() / visible.toFloat()
+    val ready_ratio: Float
+        get() = if (visible <= 0) 1f else ready.toFloat() / visible.toFloat()
+    val visual_ready: Int
+        get() = (ready + fallback_ready).coerceAtMost(visible)
+    val visual_ratio: Float
+        get() = if (visible <= 0) 1f else visual_ready.toFloat() / visible.toFloat()
+    val center_loaded_ratio: Float
+        get() = if (center_visible <= 0) 1f else center_loaded.toFloat() / center_visible.toFloat()
+    val center_ready_ratio: Float
+        get() = if (center_visible <= 0) 1f else center_ready.toFloat() / center_visible.toFloat()
+    val center_visual_ready: Int
+        get() = (center_ready + center_fallback_ready).coerceAtMost(center_visible)
+    val center_visual_ratio: Float
+        get() = if (center_visible <= 0) 1f else center_visual_ready.toFloat() / center_visible.toFloat()
+}
+
+private data class ReferenceOverlayDrawPlan(
+    val draw_tile_zoom: Int,
+    val prefetch_tile_zooms: List<Int>,
+    val coverage: ReferenceTileCoverage
 )
 
 // Satellite renderer restored behind the Satellite toggle, with continuous LOD blending.
@@ -116,8 +152,10 @@ internal class SatelliteMapTileRenderer(
     private val reference_tile_cache = LinkedHashMap<String, Bitmap>(MAX_REFERENCE_MEMORY_TILES, 0.75f, true)
     private val reference_tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
     private val requested_reference_tiles = mutableMapOf<String, Long>()
+    private val requested_reference_tile_redraws = mutableSetOf<String>()
     private val current_reference_tile_request_generations = mutableMapOf<String, Long>()
     private var current_reference_tile_request_generation = 0L
+    private val reference_selected_tile_zooms = mutableMapOf<ReferenceTileOverlay, Int>()
     private val reference_tile_worker_id = AtomicInteger()
     private val reference_tile_task_sequence = AtomicLong()
     // Label/reference overlays deliberately run on their own small, prioritized worker pool so
@@ -190,7 +228,12 @@ internal class SatelliteMapTileRenderer(
         update_tile_zoom_transition(lower_tile_zoom, state)
         val request_generation = begin_tile_request_generation()
 
-        val retained_interim_drawn = draw_interim_tiles(canvas, viewport, state, now_ms)
+        val retained_interim_drawn = draw_interim_tiles(
+            canvas = canvas,
+            viewport = viewport,
+            state = state,
+            now_ms = now_ms
+        )
         val loaded_interim_tiles = ArrayList<InterimRasterTile>()
 
         val lower_stats = draw_tile_grid_layer(
@@ -201,7 +244,7 @@ internal class SatelliteMapTileRenderer(
             tile_zoom = lower_tile_zoom,
             now_ms = now_ms,
             layer_alpha = 1f,
-            draw_unavailable_if_missing = false,
+            draw_unavailable_if_missing = true,
             allow_parent_fallback = true,
             allow_child_fallback = true,
             loaded_interim_tiles = loaded_interim_tiles,
@@ -299,9 +342,11 @@ internal class SatelliteMapTileRenderer(
         synchronized(requested_tiles) { requested_tiles.clear() }
         synchronized(requested_reference_tiles) {
             requested_reference_tiles.clear()
+            requested_reference_tile_redraws.clear()
             current_reference_tile_request_generations.clear()
             current_reference_tile_request_generation = 0L
         }
+        reference_selected_tile_zooms.clear()
         local_reference_renderer.clear()
         transition_cache_key = null
         transition_map_source = null
@@ -383,9 +428,6 @@ internal class SatelliteMapTileRenderer(
                 val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
                 val destination = RectF(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
                 visible++
-                if (state.interaction_active && layer_alpha >= SATELLITE_PARENT_PREFETCH_MIN_ALPHA) {
-                    request_satellite_parent_tiles(tile_zoom, tx, ty, state, request_generation)
-                }
 
                 val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
                 if (bitmap != null) {
@@ -493,33 +535,35 @@ internal class SatelliteMapTileRenderer(
         var fallback_drawn = 0
         var fading = false
         val debug_parts = ArrayList<String>(overlays.size)
-        val draw_tile_zoom = if (has_upper_lod && upper_lod_alpha >= REFERENCE_LOD_SWITCH_ALPHA) {
-            upper_tile_zoom
-        } else {
-            lower_tile_zoom
-        }
-        val prefetch_tile_zoom = when {
-            !has_upper_lod -> null
-            draw_tile_zoom == lower_tile_zoom && prefetch_upper_lod -> upper_tile_zoom
-            draw_tile_zoom == upper_tile_zoom -> lower_tile_zoom
-            else -> null
-        }
 
         for (overlay in overlays) {
-            if (overlay == ReferenceTileOverlay.WORLD_TRANSPORTATION &&
-                draw_tile_zoom < REFERENCE_TRANSPORTATION_MIN_ZOOM
-            ) {
-                continue
-            }
-            val overlay_alpha = reference_overlay_zoom_alpha(
+            val plan = reference_overlay_draw_plan(
                 overlay = overlay,
-                viewport_zoom = viewport.zoom,
-                draw_tile_zoom = draw_tile_zoom,
+                viewport = viewport,
+                now_ms = now_ms,
                 lower_tile_zoom = lower_tile_zoom,
                 upper_tile_zoom = upper_tile_zoom,
                 has_upper_lod = has_upper_lod,
-                upper_lod_alpha = upper_lod_alpha
+                upper_lod_alpha = upper_lod_alpha,
+                prefetch_upper_lod = prefetch_upper_lod
+            ) ?: continue
+            val overlay_alpha = reference_overlay_zoom_alpha(
+                overlay = overlay,
+                viewport_zoom = viewport.zoom
             )
+            val draw_alpha = overlay_alpha * reference_overlay_coverage_alpha(
+                overlay = overlay,
+                viewport_zoom = viewport.zoom,
+                coverage = plan.coverage
+            )
+            val requests_allowed_for_zoom = reference_overlay_requests_allowed(
+                overlay = overlay,
+                viewport_zoom = viewport.zoom,
+                overlay_alpha = overlay_alpha
+            )
+            if (!requests_allowed_for_zoom && overlay_alpha <= MIN_LAYER_ALPHA) {
+                continue
+            }
             var overlay_visible = 0
             var overlay_loaded = 0
             var overlay_requested = 0
@@ -529,10 +573,13 @@ internal class SatelliteMapTileRenderer(
                 viewport = viewport,
                 state = state,
                 overlay = overlay,
-                tile_zoom = draw_tile_zoom,
+                tile_zoom = plan.draw_tile_zoom,
                 now_ms = now_ms,
-                layer_alpha = overlay_alpha,
-                allow_exact_requests = allow_exact_requests,
+                layer_alpha = draw_alpha,
+                allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                allow_parent_requests = requests_allowed_for_zoom,
+                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
+                request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
                 request_generation = request_generation
             )
             overlay_visible += draw_stats.visible
@@ -541,16 +588,41 @@ internal class SatelliteMapTileRenderer(
             overlay_fallback_drawn += draw_stats.fallback_drawn
             fading = fading || draw_stats.fading
 
-            if (prefetch_tile_zoom != null) {
-                draw_reference_overlay_grid(
-                    canvas = canvas,
+            for (prefetch_tile_zoom in plan.prefetch_tile_zooms) {
+                request_reference_overlay_prefetch_grid(
                     viewport = viewport,
                     state = state,
                     overlay = overlay,
                     tile_zoom = prefetch_tile_zoom,
-                    now_ms = now_ms,
-                    layer_alpha = 0f,
-                    allow_exact_requests = allow_exact_requests,
+                    allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                    tile_buffer = reference_overlay_prefetch_tile_buffer(
+                        draw_tile_zoom = plan.draw_tile_zoom,
+                        prefetch_tile_zoom = prefetch_tile_zoom,
+                        viewport_zoom = viewport.zoom
+                    ),
+                    request_priority_base = reference_prefetch_request_priority_base(
+                        draw_tile_zoom = plan.draw_tile_zoom,
+                        prefetch_tile_zoom = prefetch_tile_zoom,
+                        viewport_zoom = viewport.zoom
+                    ),
+                    request_stale_generation_tolerance = REFERENCE_TILE_PREFETCH_STALE_GENERATIONS,
+                    request_generation = request_generation
+                )
+            }
+            val pan_prefetch_buffer = reference_overlay_pan_prefetch_tile_buffer(
+                overlay = overlay,
+                viewport_zoom = viewport.zoom
+            )
+            if (pan_prefetch_buffer > 0) {
+                request_reference_overlay_prefetch_grid(
+                    viewport = viewport,
+                    state = state,
+                    overlay = overlay,
+                    tile_zoom = plan.draw_tile_zoom,
+                    allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                    tile_buffer = pan_prefetch_buffer,
+                    request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_PAN_PREFETCH,
+                    request_stale_generation_tolerance = REFERENCE_TILE_PAN_PREFETCH_STALE_GENERATIONS,
                     request_generation = request_generation
                 )
             }
@@ -559,7 +631,9 @@ internal class SatelliteMapTileRenderer(
             requested += overlay_requested
             fallback_drawn += overlay_fallback_drawn
             debug_parts += " ${reference_overlay_debug_name(overlay)}=$overlay_loaded/$overlay_visible" +
-                " req=$overlay_requested fallback=$overlay_fallback_drawn"
+                " req=$overlay_requested fallback=$overlay_fallback_drawn lod=${plan.draw_tile_zoom}" +
+                " ready=${plan.coverage.ready}/${plan.coverage.visible}" +
+                " center=${plan.coverage.center_ready}/${plan.coverage.center_visible}"
         }
 
         return TileLayerDrawStats(
@@ -572,6 +646,499 @@ internal class SatelliteMapTileRenderer(
         )
     }
 
+    private fun reference_overlay_draw_plan(
+        overlay: ReferenceTileOverlay,
+        viewport: Viewport,
+        now_ms: Long,
+        lower_tile_zoom: Int,
+        upper_tile_zoom: Int,
+        has_upper_lod: Boolean,
+        upper_lod_alpha: Float,
+        prefetch_upper_lod: Boolean
+    ): ReferenceOverlayDrawPlan? {
+        val candidates = reference_overlay_candidate_zooms(
+            overlay = overlay,
+            lower_tile_zoom = lower_tile_zoom,
+            upper_tile_zoom = upper_tile_zoom,
+            has_upper_lod = has_upper_lod,
+            upper_lod_alpha = upper_lod_alpha,
+            prefetch_upper_lod = prefetch_upper_lod,
+            viewport_zoom = viewport.zoom
+        )
+        val previous = reference_selected_tile_zooms[overlay]
+        if (previous != null &&
+            previous in MIN_ZOOM..TileSource.SATELLITE.max_native_zoom &&
+            reference_retained_lod_drawable(
+                overlay = overlay,
+                tile_zoom = previous,
+                viewport_zoom = viewport.zoom
+            )
+        ) {
+            candidates += previous
+        }
+
+        val drawable_candidates = candidates
+            .filter { reference_overlay_lod_drawable(overlay, it) }
+            .distinct()
+        if (drawable_candidates.isEmpty()) return null
+
+        val target_tile_zoom = if (has_upper_lod && upper_lod_alpha >= REFERENCE_LOD_SWITCH_ALPHA) {
+            upper_tile_zoom
+        } else {
+            lower_tile_zoom
+        }.let { target ->
+            if (target in drawable_candidates) {
+                target
+            } else {
+                drawable_candidates.minByOrNull { abs(it - target) } ?: drawable_candidates.first()
+            }
+        }
+
+        val coverages = drawable_candidates.associateWith { tile_zoom ->
+            reference_tile_coverage(
+                overlay = overlay,
+                viewport = viewport,
+                tile_zoom = tile_zoom,
+                now_ms = now_ms
+            )
+        }
+        val previous_coverage = previous?.takeIf { it in drawable_candidates }?.let { zoom ->
+            coverages[zoom]?.let { coverage -> zoom to coverage }
+        }
+        val target_coverage = coverages[target_tile_zoom]
+        val retained_previous = previous_coverage
+            ?.takeIf { (_, coverage) ->
+                target_tile_zoom != previous &&
+                    reference_retained_lod_ratio(overlay, coverage) >= REFERENCE_RETAINED_LOD_MIN_RATIO &&
+                    (target_coverage == null ||
+                        !reference_lod_switch_ready(overlay, target_coverage))
+            }
+        val best_ready = coverages.entries.maxWithOrNull(reference_lod_coverage_comparator(overlay, previous))
+        val draw_tile_zoom = when {
+            retained_previous != null -> retained_previous.first
+            target_coverage != null &&
+                reference_lod_switch_ready(overlay, target_coverage) -> target_tile_zoom
+            best_ready != null -> best_ready.key
+            else -> target_tile_zoom
+        }
+        reference_selected_tile_zooms[overlay] = draw_tile_zoom
+
+        val draw_coverage = coverages[draw_tile_zoom] ?: ReferenceTileCoverage(0, 0, 0, 0)
+        val prefetch_tile_zooms = reference_overlay_prefetch_tile_zooms(
+            overlay = overlay,
+            drawable_candidates = drawable_candidates,
+            draw_tile_zoom = draw_tile_zoom,
+            target_tile_zoom = target_tile_zoom,
+            viewport_zoom = viewport.zoom,
+            coverage = draw_coverage
+        )
+        return ReferenceOverlayDrawPlan(
+            draw_tile_zoom = draw_tile_zoom,
+            prefetch_tile_zooms = prefetch_tile_zooms,
+            coverage = draw_coverage
+        )
+    }
+
+    private fun reference_overlay_candidate_zooms(
+        overlay: ReferenceTileOverlay,
+        lower_tile_zoom: Int,
+        upper_tile_zoom: Int,
+        has_upper_lod: Boolean,
+        upper_lod_alpha: Float,
+        prefetch_upper_lod: Boolean,
+        viewport_zoom: Double
+    ): LinkedHashSet<Int> {
+        val max_candidate = if (has_upper_lod && (upper_lod_alpha > MIN_LAYER_ALPHA || prefetch_upper_lod)) {
+            upper_tile_zoom
+        } else {
+            lower_tile_zoom
+        }.let { candidate ->
+            when (overlay) {
+                ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> candidate
+                ReferenceTileOverlay.WORLD_TRANSPORTATION -> minOf(
+                    candidate,
+                    reference_transportation_detail_tile_zoom(viewport_zoom)
+                )
+            }
+        }.coerceIn(MIN_ZOOM, TileSource.SATELLITE.max_native_zoom)
+        val min_draw_zoom = when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> MIN_ZOOM
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_MIN_ZOOM
+        }
+        val coarser_depth = when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARY_COARSE_LOD_DEPTH
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_COARSE_LOD_DEPTH
+        }
+        val min_candidate = maxOf(
+            lower_tile_zoom - coarser_depth,
+            min_draw_zoom,
+            reference_min_visual_tile_zoom(overlay, viewport_zoom)
+        )
+            .coerceAtMost(max_candidate)
+        val candidates = linkedSetOf<Int>()
+        for (zoom in min_candidate..max_candidate) {
+            candidates += zoom
+        }
+        return candidates
+    }
+
+    private fun reference_min_visual_tile_zoom(overlay: ReferenceTileOverlay, viewport_zoom: Double): Int {
+        val max_upscale_delta = when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARY_MAX_TILE_UPSCALE_DELTA
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_MAX_TILE_UPSCALE_DELTA
+        }
+        return ceil(viewport_zoom - max_upscale_delta)
+            .toInt()
+            .coerceAtLeast(MIN_ZOOM)
+            .coerceAtMost(TileSource.SATELLITE.max_native_zoom)
+    }
+
+    private fun reference_transportation_detail_tile_zoom(viewport_zoom: Double): Int {
+        return floor(viewport_zoom + REFERENCE_TRANSPORTATION_DETAIL_ADVANCE)
+            .toInt()
+            .coerceIn(REFERENCE_TRANSPORTATION_MIN_ZOOM, TileSource.SATELLITE.max_native_zoom)
+    }
+
+    private fun reference_overlay_lod_drawable(overlay: ReferenceTileOverlay, tile_zoom: Int): Boolean {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> true
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> tile_zoom >= REFERENCE_TRANSPORTATION_MIN_ZOOM
+        }
+    }
+
+    private fun reference_retained_lod_drawable(
+        overlay: ReferenceTileOverlay,
+        tile_zoom: Int,
+        viewport_zoom: Double
+    ): Boolean {
+        if (!reference_overlay_lod_drawable(overlay, tile_zoom)) return false
+        val max_upscale_delta = when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARY_MAX_TILE_UPSCALE_DELTA
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_MAX_TILE_UPSCALE_DELTA
+        }
+        val max_detail_delta = when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARY_RETAINED_MAX_DETAIL_DELTA
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_RETAINED_MAX_DETAIL_DELTA
+        }
+        val delta = tile_zoom.toDouble() - viewport_zoom
+        return delta >= -max_upscale_delta && delta <= max_detail_delta
+    }
+
+    private fun reference_retained_lod_ratio(
+        overlay: ReferenceTileOverlay,
+        coverage: ReferenceTileCoverage
+    ): Float {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES ->
+                minOf(coverage.loaded_ratio, coverage.center_loaded_ratio)
+            ReferenceTileOverlay.WORLD_TRANSPORTATION ->
+                minOf(coverage.loaded_ratio, coverage.center_loaded_ratio)
+        }
+    }
+
+    private fun reference_lod_ready_ratio(
+        overlay: ReferenceTileOverlay,
+        coverage: ReferenceTileCoverage
+    ): Float {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES ->
+                minOf(coverage.ready_ratio, coverage.center_ready_ratio)
+            ReferenceTileOverlay.WORLD_TRANSPORTATION ->
+                minOf(coverage.ready_ratio, coverage.center_ready_ratio)
+        }
+    }
+
+    private fun reference_lod_switch_ready(
+        overlay: ReferenceTileOverlay,
+        coverage: ReferenceTileCoverage
+    ): Boolean {
+        return reference_lod_ready_ratio(overlay, coverage) >= REFERENCE_LOD_SWITCH_READY_RATIO
+    }
+
+    private fun reference_lod_coverage_comparator(
+        overlay: ReferenceTileOverlay,
+        previous: Int?
+    ): Comparator<Map.Entry<Int, ReferenceTileCoverage>> {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES ->
+                compareBy<Map.Entry<Int, ReferenceTileCoverage>> { reference_lod_ready_ratio(overlay, it.value) }
+                    .thenBy { it.value.ready_ratio }
+                    .thenBy { it.value.loaded_ratio }
+                    .thenBy { it.value.center_loaded_ratio }
+                    .thenBy { it.value.visual_ratio }
+                    .thenBy { it.value.center_visual_ratio }
+                    .thenBy { if (it.key == previous) 1 else 0 }
+                    .thenBy { -it.key }
+
+            ReferenceTileOverlay.WORLD_TRANSPORTATION ->
+                compareBy<Map.Entry<Int, ReferenceTileCoverage>> { reference_lod_ready_ratio(overlay, it.value) }
+                    .thenBy { it.value.ready_ratio }
+                    .thenBy { it.value.loaded_ratio }
+                    .thenBy { it.value.center_loaded_ratio }
+                    .thenBy { it.value.visual_ratio }
+                    .thenBy { it.value.center_visual_ratio }
+                    .thenBy { if (it.key == previous) 1 else 0 }
+                    .thenBy { -it.key }
+        }
+    }
+
+    private fun reference_overlay_requests_allowed(
+        overlay: ReferenceTileOverlay,
+        viewport_zoom: Double,
+        overlay_alpha: Float
+    ): Boolean {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> true
+            ReferenceTileOverlay.WORLD_TRANSPORTATION ->
+                overlay_alpha > MIN_LAYER_ALPHA ||
+                    viewport_zoom.toFloat() >= REFERENCE_TRANSPORTATION_PREFETCH_START_ZOOM
+        }
+    }
+
+    private fun reference_prefetch_lod_limit(overlay: ReferenceTileOverlay): Int {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARY_PREFETCH_LOD_LIMIT
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_PREFETCH_LOD_LIMIT
+        }
+    }
+
+    private fun reference_overlay_prefetch_tile_zooms(
+        overlay: ReferenceTileOverlay,
+        drawable_candidates: List<Int>,
+        draw_tile_zoom: Int,
+        target_tile_zoom: Int,
+        viewport_zoom: Double,
+        coverage: ReferenceTileCoverage
+    ): List<Int> {
+        val prefetch_zooms = linkedSetOf<Int>()
+        if (reference_overlay_prefetch_allowed(overlay, coverage)) {
+            drawable_candidates
+                .asSequence()
+                .filter { it != draw_tile_zoom && it > draw_tile_zoom }
+                .sortedBy { abs(it - target_tile_zoom) }
+                .take(reference_prefetch_lod_limit(overlay))
+                .forEach { prefetch_zooms += it }
+        }
+        if (overlay == ReferenceTileOverlay.WORLD_TRANSPORTATION) {
+            val zoom_out_prefetch = ArrayList<Int>(REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT)
+            var zoom = reference_transportation_detail_tile_zoom(viewport_zoom) -
+                REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_OFFSET
+            var count = 0
+            while (zoom >= REFERENCE_TRANSPORTATION_MIN_ZOOM &&
+                count < REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT
+            ) {
+                if (zoom != draw_tile_zoom) zoom_out_prefetch += zoom
+                zoom -= REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_STEP
+                count++
+            }
+            zoom_out_prefetch.asReversed().forEach { prefetch_zooms += it }
+        } else {
+            val zoom_out_prefetch = ArrayList<Int>(REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_COUNT)
+            var zoom = floor(viewport_zoom).toInt() - REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_OFFSET
+            var count = 0
+            while (zoom >= MIN_ZOOM && count < REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_COUNT) {
+                if (zoom != draw_tile_zoom) zoom_out_prefetch += zoom
+                zoom -= REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_STEP
+                count++
+            }
+            zoom_out_prefetch.asReversed().forEach { prefetch_zooms += it }
+        }
+        return prefetch_zooms.toList()
+    }
+
+    private fun reference_overlay_coverage_alpha(
+        overlay: ReferenceTileOverlay,
+        viewport_zoom: Double,
+        coverage: ReferenceTileCoverage
+    ): Float {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> smooth_step(
+                REFERENCE_BOUNDARY_DRAW_MIN_LOADED_RATIO,
+                REFERENCE_BOUNDARY_DRAW_FULL_LOADED_RATIO,
+                coverage.loaded_ratio
+            )
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> {
+                if (viewport_zoom.toFloat() >= REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM) {
+                    smooth_step(
+                        REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO,
+                        REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO,
+                        coverage.loaded_ratio
+                    )
+                } else {
+                    smooth_step(
+                        REFERENCE_TRANSPORTATION_DRAW_MIN_LOADED_RATIO,
+                        REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO,
+                        coverage.loaded_ratio
+                    )
+                }
+            }
+        }
+    }
+
+    private fun reference_overlay_prefetch_tile_buffer(
+        draw_tile_zoom: Int,
+        prefetch_tile_zoom: Int,
+        viewport_zoom: Double
+    ): Int {
+        if (prefetch_tile_zoom >= draw_tile_zoom) return 0
+        val zoom_gap = (viewport_zoom - prefetch_tile_zoom.toDouble()).coerceAtLeast(0.0)
+        return when {
+            zoom_gap >= 3.0 -> 2
+            zoom_gap >= 1.5 -> 1
+            else -> 0
+        }
+    }
+
+    private fun reference_overlay_pan_prefetch_tile_buffer(
+        overlay: ReferenceTileOverlay,
+        viewport_zoom: Double
+    ): Int {
+        val zoom = viewport_zoom.toFloat()
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES ->
+                if (zoom >= REFERENCE_BOUNDARY_PAN_PREFETCH_START_ZOOM) REFERENCE_OVERLAY_PAN_PREFETCH_TILE_BUFFER else 0
+            ReferenceTileOverlay.WORLD_TRANSPORTATION ->
+                if (zoom >= REFERENCE_TRANSPORTATION_PAN_PREFETCH_START_ZOOM) REFERENCE_OVERLAY_PAN_PREFETCH_TILE_BUFFER else 0
+        }
+    }
+
+    private fun reference_overlay_prefetch_allowed(
+        overlay: ReferenceTileOverlay,
+        coverage: ReferenceTileCoverage
+    ): Boolean {
+        return coverage.visible <= 0 ||
+            reference_lod_ready_ratio(overlay, coverage) >= REFERENCE_LOD_SWITCH_READY_RATIO ||
+            minOf(coverage.loaded_ratio, coverage.center_loaded_ratio) >= REFERENCE_PREFETCH_LOADED_RATIO
+    }
+
+    private fun reference_tile_coverage(
+        overlay: ReferenceTileOverlay,
+        viewport: Viewport,
+        tile_zoom: Int,
+        now_ms: Long
+    ): ReferenceTileCoverage {
+        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val tile_world_scale = 1.0 / tile_to_viewport_scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
+        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
+        val max_tile = 1 shl tile_zoom
+
+        var visible = 0
+        var loaded = 0
+        var ready = 0
+        var fallback_ready = 0
+        var center_visible = 0
+        var center_loaded = 0
+        var center_ready = 0
+        var center_fallback_ready = 0
+        val center_left = viewport.width * REFERENCE_CENTER_COVERAGE_LEFT_FRACTION
+        val center_right = viewport.width * REFERENCE_CENTER_COVERAGE_RIGHT_FRACTION
+        val center_top = viewport.height * REFERENCE_CENTER_COVERAGE_TOP_FRACTION
+        val center_bottom = viewport.height * REFERENCE_CENTER_COVERAGE_BOTTOM_FRACTION
+        val parent_fallback_allowed = reference_parent_fallback_allowed(overlay, viewport.zoom)
+        for (ty in first_tile_y..last_tile_y) {
+            if (ty !in 0 until max_tile) continue
+            for (tx_raw in first_tile_x..last_tile_x) {
+                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
+                val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
+                val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
+                val covers_center = screen_x < center_right &&
+                    screen_x + tile_size_on_screen > center_left &&
+                    screen_y < center_bottom &&
+                    screen_y + tile_size_on_screen > center_top
+                visible++
+                if (covers_center) center_visible++
+                val key = "${overlay.cache_key}/$tile_zoom/$tx/$ty"
+                val has_parent_fallback = parent_fallback_allowed &&
+                    reference_parent_fallback_available(
+                        z = tile_zoom,
+                        x = tx,
+                        y = ty,
+                        overlay = overlay
+                    )
+                val bitmap = reference_tile_bitmap(key)
+                if (bitmap != null) {
+                    loaded++
+                    if (covers_center) center_loaded++
+                    if (reference_tile_load_alpha(key, now_ms) >= 0.999f) {
+                        ready++
+                        if (covers_center) center_ready++
+                    } else if (has_parent_fallback) {
+                        fallback_ready++
+                        if (covers_center) center_fallback_ready++
+                    }
+                } else if (has_parent_fallback) {
+                    fallback_ready++
+                    if (covers_center) center_fallback_ready++
+                }
+            }
+        }
+        return ReferenceTileCoverage(
+            visible = visible,
+            loaded = loaded,
+            ready = ready,
+            fallback_ready = fallback_ready,
+            center_visible = center_visible,
+            center_loaded = center_loaded,
+            center_ready = center_ready,
+            center_fallback_ready = center_fallback_ready
+        )
+    }
+
+    private fun request_reference_overlay_prefetch_grid(
+        viewport: Viewport,
+        state: MapTileRenderState,
+        overlay: ReferenceTileOverlay,
+        tile_zoom: Int,
+        allow_exact_requests: Boolean,
+        tile_buffer: Int,
+        request_priority_base: Int,
+        request_stale_generation_tolerance: Long,
+        request_generation: Long
+    ) {
+        if (!allow_exact_requests) return
+        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val tile_world_scale = 1.0 / tile_to_viewport_scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt() - tile_buffer
+        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt() - tile_buffer
+        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt() + tile_buffer
+        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt() + tile_buffer
+        val max_tile = 1 shl tile_zoom
+        val request_priority = reference_tile_request_priority(
+            overlay = overlay,
+            base_priority = request_priority_base
+        )
+
+        for (ty in first_tile_y..last_tile_y) {
+            if (ty !in 0 until max_tile) continue
+            for (tx_raw in first_tile_x..last_tile_x) {
+                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                val key = "${overlay.cache_key}/$tile_zoom/$tx/$ty"
+                if (reference_tile_bitmap(key) != null) continue
+                request_reference_tile(
+                    z = tile_zoom,
+                    x = tx,
+                    y = ty,
+                    key = key,
+                    cache_key = overlay.cache_key,
+                    url = overlay.tile_url(tile_zoom, tx, ty),
+                    user_agent = state.user_agent,
+                    request_generation = request_generation,
+                    request_priority = request_priority,
+                    request_stale_generation_tolerance = request_stale_generation_tolerance,
+                    redraw_when_loaded = false
+                )
+            }
+        }
+    }
+
     private fun draw_reference_overlay_grid(
         canvas: Canvas,
         viewport: Viewport,
@@ -581,6 +1148,9 @@ internal class SatelliteMapTileRenderer(
         now_ms: Long,
         layer_alpha: Float,
         allow_exact_requests: Boolean,
+        allow_parent_requests: Boolean,
+        request_priority_base: Int,
+        request_stale_generation_tolerance: Long,
         request_generation: Long
     ): TileLayerDrawStats {
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
@@ -599,6 +1169,7 @@ internal class SatelliteMapTileRenderer(
         var fallback_drawn = 0
         var fading = false
         val layer_visible = layer_alpha > MIN_LAYER_ALPHA
+        val parent_request_allowed = reference_parent_request_allowed(overlay, viewport.zoom)
         val parent_fallback_allowed = reference_parent_fallback_allowed(overlay, viewport.zoom)
 
         for (ty in first_tile_y..last_tile_y) {
@@ -623,7 +1194,7 @@ internal class SatelliteMapTileRenderer(
                                 z = tile_zoom,
                                 x = tx,
                                 y = ty,
-                                cache_key = overlay.cache_key,
+                                overlay = overlay,
                                 destination = destination,
                                 alpha = layer_alpha * (1f - load_alpha)
                             )
@@ -638,17 +1209,7 @@ internal class SatelliteMapTileRenderer(
                     }
                 } else {
                     requested++
-                    if (parent_fallback_allowed) {
-                        request_reference_parent_tile(
-                            z = tile_zoom,
-                            x = tx,
-                            y = ty,
-                            overlay = overlay,
-                            user_agent = state.user_agent,
-                            request_generation = request_generation
-                        )
-                    }
-                    if (allow_exact_requests || overlay == ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES) {
+                    if (allow_exact_requests) {
                         request_reference_tile(
                             z = tile_zoom,
                             x = tx,
@@ -660,8 +1221,21 @@ internal class SatelliteMapTileRenderer(
                             request_generation = request_generation,
                             request_priority = reference_tile_request_priority(
                                 overlay = overlay,
-                                base_priority = REFERENCE_TILE_REQUEST_PRIORITY_EXACT
-                            )
+                                base_priority = request_priority_base
+                            ),
+                            request_stale_generation_tolerance = request_stale_generation_tolerance,
+                            redraw_when_loaded = true
+                        )
+                    }
+                    if (allow_parent_requests && parent_request_allowed) {
+                        request_reference_parent_tiles(
+                            z = tile_zoom,
+                            x = tx,
+                            y = ty,
+                            overlay = overlay,
+                            user_agent = state.user_agent,
+                            request_generation = request_generation,
+                            request_stale_generation_tolerance = REFERENCE_TILE_PARENT_STALE_GENERATIONS
                         )
                     }
                     if (parent_fallback_allowed &&
@@ -671,7 +1245,7 @@ internal class SatelliteMapTileRenderer(
                             z = tile_zoom,
                             x = tx,
                             y = ty,
-                            cache_key = overlay.cache_key,
+                            overlay = overlay,
                             destination = destination,
                             alpha = layer_alpha
                         )
@@ -693,23 +1267,8 @@ internal class SatelliteMapTileRenderer(
 
     private fun reference_overlay_zoom_alpha(
         overlay: ReferenceTileOverlay,
-        viewport_zoom: Double,
-        draw_tile_zoom: Int,
-        lower_tile_zoom: Int,
-        upper_tile_zoom: Int,
-        has_upper_lod: Boolean,
-        upper_lod_alpha: Float
+        viewport_zoom: Double
     ): Float {
-        val selected_lod_alpha = when {
-            !has_upper_lod -> 1f
-            draw_tile_zoom == upper_tile_zoom -> upper_lod_alpha
-            draw_tile_zoom == lower_tile_zoom -> 1f - upper_lod_alpha
-            else -> 1f
-        }.coerceIn(0f, 1f)
-        val lod_alpha = REFERENCE_SELECTED_LOD_MIN_ALPHA +
-            (1f - REFERENCE_SELECTED_LOD_MIN_ALPHA) *
-            smooth_step(REFERENCE_SELECTED_LOD_FADE_START, 1f, selected_lod_alpha)
-
         return when (overlay) {
             ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> {
                 val zoom_alpha = REFERENCE_BOUNDARY_MIN_ALPHA +
@@ -719,8 +1278,7 @@ internal class SatelliteMapTileRenderer(
                         REFERENCE_BOUNDARY_ZOOM_FADE_END,
                         viewport_zoom.toFloat()
                     )
-                val alpha = (zoom_alpha * lod_alpha).coerceIn(0f, 1f)
-                if (alpha >= REFERENCE_FULL_ALPHA_SNAP) 1f else alpha
+                if (zoom_alpha >= REFERENCE_FULL_ALPHA_SNAP) 1f else zoom_alpha.coerceIn(0f, 1f)
             }
 
             ReferenceTileOverlay.WORLD_TRANSPORTATION -> {
@@ -758,48 +1316,85 @@ internal class SatelliteMapTileRenderer(
         val zoom = viewport_zoom.toFloat()
         return when (overlay) {
             ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES ->
-                zoom <= REFERENCE_BOUNDARY_PARENT_FALLBACK_MAX_ZOOM
+                reference_parent_fallback_depth(overlay) > 0 &&
+                    zoom <= REFERENCE_BOUNDARY_PARENT_FALLBACK_MAX_ZOOM
 
             ReferenceTileOverlay.WORLD_TRANSPORTATION ->
-                zoom >= REFERENCE_TRANSPORTATION_FADE_START_ZOOM &&
+                reference_parent_fallback_depth(overlay) > 0 &&
+                    zoom >= REFERENCE_TRANSPORTATION_FADE_START_ZOOM &&
                     zoom <= REFERENCE_TRANSPORTATION_PARENT_FALLBACK_MAX_ZOOM
         }
     }
 
-    private fun request_reference_parent_tile(
+    private fun reference_parent_request_allowed(overlay: ReferenceTileOverlay, viewport_zoom: Double): Boolean {
+        val zoom = viewport_zoom.toFloat()
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES ->
+                zoom <= REFERENCE_BOUNDARY_PARENT_FALLBACK_MAX_ZOOM
+
+            ReferenceTileOverlay.WORLD_TRANSPORTATION ->
+                zoom >= REFERENCE_TRANSPORTATION_PREFETCH_START_ZOOM &&
+                    zoom <= REFERENCE_TRANSPORTATION_PARENT_FALLBACK_MAX_ZOOM
+        }
+    }
+
+    private fun request_reference_parent_tiles(
         z: Int,
         x: Int,
         y: Int,
         overlay: ReferenceTileOverlay,
         user_agent: String,
-        request_generation: Long
+        request_generation: Long,
+        request_stale_generation_tolerance: Long
     ) {
-        if (z <= MIN_ZOOM) return
-        val parent_z = z - 1
-        val parent_x = x / 2
-        val parent_y = y / 2
-        val parent_key = "${overlay.cache_key}/$parent_z/$parent_x/$parent_y"
-        if (reference_tile_bitmap(parent_key) != null) return
-        request_reference_tile(
-            z = parent_z,
-            x = parent_x,
-            y = parent_y,
-            key = parent_key,
-            cache_key = overlay.cache_key,
-            url = overlay.tile_url(parent_z, parent_x, parent_y),
-            user_agent = user_agent,
-            request_generation = request_generation,
-            request_priority = reference_tile_request_priority(
-                overlay = overlay,
-                base_priority = REFERENCE_TILE_REQUEST_PRIORITY_PARENT
+        val min_parent_zoom = reference_parent_min_zoom(overlay)
+        if (z <= min_parent_zoom) return
+        val max_depth = (z - min_parent_zoom).coerceAtMost(reference_parent_request_depth(overlay))
+        for (depth in 1..max_depth) {
+            val parent_z = z - depth
+            val scale = 1 shl depth
+            val parent_x = x / scale
+            val parent_y = y / scale
+            val parent_key = "${overlay.cache_key}/$parent_z/$parent_x/$parent_y"
+            if (reference_tile_bitmap(parent_key) != null) continue
+            request_reference_tile(
+                z = parent_z,
+                x = parent_x,
+                y = parent_y,
+                key = parent_key,
+                cache_key = overlay.cache_key,
+                url = overlay.tile_url(parent_z, parent_x, parent_y),
+                user_agent = user_agent,
+                request_generation = request_generation,
+                request_priority = reference_tile_request_priority(
+                    overlay = overlay,
+                    base_priority = REFERENCE_TILE_REQUEST_PRIORITY_PARENT - depth
+                ),
+                request_stale_generation_tolerance = request_stale_generation_tolerance,
+                redraw_when_loaded = reference_parent_fallback_depth(overlay) > 0
             )
-        )
+        }
     }
 
     private fun reference_tile_request_priority(overlay: ReferenceTileOverlay, base_priority: Int): Int {
         return base_priority + when (overlay) {
             ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARIES_REQUEST_PRIORITY_OFFSET
-            ReferenceTileOverlay.WORLD_TRANSPORTATION -> 0
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_REQUEST_PRIORITY_OFFSET
+        }
+    }
+
+    private fun reference_prefetch_request_priority_base(
+        draw_tile_zoom: Int,
+        prefetch_tile_zoom: Int,
+        viewport_zoom: Double
+    ): Int {
+        val current_floor_zoom = floor(viewport_zoom).toInt()
+        val is_zoom_out_prefetch = prefetch_tile_zoom < draw_tile_zoom ||
+            prefetch_tile_zoom <= current_floor_zoom
+        return if (is_zoom_out_prefetch) {
+            REFERENCE_TILE_REQUEST_PRIORITY_ZOOM_OUT_PREFETCH
+        } else {
+            REFERENCE_TILE_REQUEST_PRIORITY_PREFETCH
         }
     }
 
@@ -812,12 +1407,15 @@ internal class SatelliteMapTileRenderer(
         url: String,
         user_agent: String,
         request_generation: Long,
-        request_priority: Int
+        request_priority: Int,
+        request_stale_generation_tolerance: Long,
+        redraw_when_loaded: Boolean
     ) {
         mark_current_reference_tile_request(key, request_generation)
         if (reference_tile_bitmap(key) != null) return
         var task_generation = request_generation
         synchronized(requested_reference_tiles) {
+            if (redraw_when_loaded) requested_reference_tile_redraws += key
             val queued_generation = requested_reference_tiles[key]
             if (
                 queued_generation != null &&
@@ -837,7 +1435,7 @@ internal class SatelliteMapTileRenderer(
             var redrew_when_loaded = false
             var skipped_request = false
             try {
-                if (should_skip_stale_reference_tile_request(key)) {
+                if (should_skip_stale_reference_tile_request(key, request_stale_generation_tolerance)) {
                     skipped_request = true
                     return@tileTask
                 }
@@ -855,8 +1453,10 @@ internal class SatelliteMapTileRenderer(
                     val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options())
                     if (bitmap != null && reference_overlay_tile_is_safe(bitmap)) {
                         synchronized(reference_tile_cache) { put_reference_tile_in_memory(key, bitmap, fade = false) }
-                        redrew_when_loaded = true
-                        request_redraw()
+                        if (should_redraw_reference_tile_request(key, redraw_when_loaded)) {
+                            redrew_when_loaded = true
+                            request_redraw()
+                        }
                         if (fresh) return@tileTask
                     } else {
                         if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
@@ -878,8 +1478,10 @@ internal class SatelliteMapTileRenderer(
                     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decode_options())
                     if (bitmap != null && reference_overlay_tile_is_safe(bitmap)) {
                         synchronized(reference_tile_cache) { put_reference_tile_in_memory(key, bitmap, fade = true) }
-                        redrew_when_loaded = true
-                        request_redraw()
+                        if (should_redraw_reference_tile_request(key, redraw_when_loaded)) {
+                            redrew_when_loaded = true
+                            request_redraw()
+                        }
                         write_tile_file_async(file, bytes)
                     } else {
                         bitmap?.takeIf { !it.isRecycled }?.recycle()
@@ -892,12 +1494,19 @@ internal class SatelliteMapTileRenderer(
                 report_status("Map labels unavailable")
             } finally {
                 connection?.disconnect()
+                val should_redraw_after_task = should_redraw_reference_tile_request(key, redraw_when_loaded)
                 synchronized(requested_reference_tiles) {
                     if ((requested_reference_tiles[key] ?: Long.MIN_VALUE) <= task_generation) {
                         requested_reference_tiles.remove(key)
+                        requested_reference_tile_redraws.remove(key)
                     }
                 }
-                if (!redrew_when_loaded && !skipped_request) request_redraw()
+                if (!redrew_when_loaded &&
+                    !skipped_request &&
+                    should_redraw_after_task
+                ) {
+                    request_redraw()
+                }
             }
         }))
     }
@@ -926,10 +1535,16 @@ internal class SatelliteMapTileRenderer(
         }
     }
 
-    private fun should_skip_stale_reference_tile_request(key: String): Boolean {
+    private fun should_skip_stale_reference_tile_request(key: String, max_generation_age: Long): Boolean {
         synchronized(requested_reference_tiles) {
             val generation = current_reference_tile_request_generations[key] ?: return true
-            return current_reference_tile_request_generation - generation > REFERENCE_TILE_REQUEST_STALE_GENERATIONS
+            return current_reference_tile_request_generation - generation > max_generation_age
+        }
+    }
+
+    private fun should_redraw_reference_tile_request(key: String, fallback: Boolean): Boolean {
+        synchronized(requested_reference_tiles) {
+            return fallback || requested_reference_tile_redraws.contains(key)
         }
     }
 
@@ -986,38 +1601,80 @@ internal class SatelliteMapTileRenderer(
         z: Int,
         x: Int,
         y: Int,
-        cache_key: String,
+        overlay: ReferenceTileOverlay,
         destination: RectF,
         alpha: Float
     ): Boolean {
         if (alpha < REFERENCE_PARENT_FALLBACK_MIN_ALPHA) return false
-        val parent = reference_parent_tile_fallback(z, x, y, cache_key) ?: return false
+        val parent = reference_parent_tile_fallback(z, x, y, overlay) ?: return false
         draw_tile_bitmap(canvas, parent.bitmap, parent.source_rect, destination, alpha)
         return true
     }
 
-    private fun reference_parent_tile_fallback(z: Int, x: Int, y: Int, cache_key: String): TileFallback? {
-        if (z <= MIN_ZOOM) return null
-        val fallback_z = z - 1
-        val parent_x = x / 2
-        val parent_y = y / 2
-        val parent_key = "$cache_key/$fallback_z/$parent_x/$parent_y"
-        val bitmap = reference_tile_bitmap(parent_key) ?: return null
-        val src_width = (bitmap.width / 2).coerceAtLeast(1)
-        val src_height = (bitmap.height / 2).coerceAtLeast(1)
-        val child_x = x % 2
-        val child_y = y % 2
-        val left = (child_x * src_width).coerceIn(0, bitmap.width - 1)
-        val top = (child_y * src_height).coerceIn(0, bitmap.height - 1)
-        return TileFallback(
-            bitmap = bitmap,
-            source_rect = Rect(
-                left,
-                top,
-                (left + src_width).coerceAtMost(bitmap.width),
-                (top + src_height).coerceAtMost(bitmap.height)
+    private fun reference_parent_fallback_available(
+        z: Int,
+        x: Int,
+        y: Int,
+        overlay: ReferenceTileOverlay
+    ): Boolean {
+        return reference_parent_tile_fallback(z, x, y, overlay) != null
+    }
+
+    private fun reference_parent_tile_fallback(
+        z: Int,
+        x: Int,
+        y: Int,
+        overlay: ReferenceTileOverlay
+    ): TileFallback? {
+        val min_parent_zoom = reference_parent_min_zoom(overlay)
+        if (z <= min_parent_zoom) return null
+        val max_depth = (z - min_parent_zoom).coerceAtMost(reference_parent_fallback_depth(overlay))
+        if (max_depth <= 0) return null
+        for (depth in 1..max_depth) {
+            val fallback_z = z - depth
+            val scale = 1 shl depth
+            val parent_x = x / scale
+            val parent_y = y / scale
+            val parent_key = "${overlay.cache_key}/$fallback_z/$parent_x/$parent_y"
+            val bitmap = reference_tile_bitmap(parent_key) ?: continue
+            val src_width = (bitmap.width / scale).coerceAtLeast(1)
+            val src_height = (bitmap.height / scale).coerceAtLeast(1)
+            val child_x = x % scale
+            val child_y = y % scale
+            val left = (child_x * src_width).coerceIn(0, bitmap.width - 1)
+            val top = (child_y * src_height).coerceIn(0, bitmap.height - 1)
+            return TileFallback(
+                bitmap = bitmap,
+                source_rect = Rect(
+                    left,
+                    top,
+                    (left + src_width).coerceAtMost(bitmap.width),
+                    (top + src_height).coerceAtMost(bitmap.height)
+                )
             )
-        )
+        }
+        return null
+    }
+
+    private fun reference_parent_min_zoom(overlay: ReferenceTileOverlay): Int {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> MIN_ZOOM
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_MIN_ZOOM
+        }
+    }
+
+    private fun reference_parent_request_depth(overlay: ReferenceTileOverlay): Int {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARY_PARENT_REQUEST_DEPTH
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_PARENT_REQUEST_DEPTH
+        }
+    }
+
+    private fun reference_parent_fallback_depth(overlay: ReferenceTileOverlay): Int {
+        return when (overlay) {
+            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> REFERENCE_BOUNDARY_PARENT_FALLBACK_DEPTH
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> REFERENCE_TRANSPORTATION_PARENT_FALLBACK_DEPTH
+        }
     }
 
     // Memory cache is first. Interim tiles are treated as a retained raster source so a zoom-level
@@ -1194,9 +1851,9 @@ internal class SatelliteMapTileRenderer(
     // Satellite zooms look better when a real lower-zoom tile remains visible until the exact tile arrives.
     private fun satellite_parent_tile_fallback(z: Int, x: Int, y: Int, state: MapTileRenderState): TileFallback? {
         if (z <= MIN_ZOOM) return null
-        var fallback_z = z - 1
-        while (fallback_z >= MIN_ZOOM) {
-            val delta = z - fallback_z
+        val max_depth = (z - MIN_ZOOM).coerceAtMost(SATELLITE_PARENT_REQUEST_DEPTH)
+        for (delta in 1..max_depth) {
+            val fallback_z = z - delta
             val scale = 1 shl delta
             val parent_x = x / scale
             val parent_y = y / scale
@@ -1219,7 +1876,6 @@ internal class SatelliteMapTileRenderer(
                     )
                 )
             }
-            fallback_z -= 1
         }
         return null
     }
@@ -1559,8 +2215,8 @@ internal class SatelliteMapTileRenderer(
 
         override fun compareTo(other: Runnable): Int {
             val task = other as? ReferenceTileRequestTask ?: return -1
-            if (generation != task.generation) return task.generation.compareTo(generation)
             if (priority != task.priority) return priority.compareTo(task.priority)
+            if (generation != task.generation) return task.generation.compareTo(generation)
             return sequence.compareTo(task.sequence)
         }
     }
@@ -1591,34 +2247,75 @@ internal class SatelliteMapTileRenderer(
         const val SATELLITE_REQUEST_TILE_BUFFER = 1
         const val SATELLITE_BUFFER_REQUEST_THROTTLE_MS = 180L
         const val SATELLITE_PARENT_REQUEST_DEPTH = 10
-        const val SATELLITE_PARENT_PREFETCH_MIN_ALPHA = 0.45f
         const val SATELLITE_CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
-        const val MAX_REFERENCE_MEMORY_TILES = 640
+        const val MAX_REFERENCE_MEMORY_TILES = 768
         const val REFERENCE_TILE_CACHE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
         const val REFERENCE_TILE_FADE_MS = 280f
-        const val REFERENCE_TILE_NETWORK_THREADS = 2
+        const val REFERENCE_TILE_NETWORK_THREADS = 4
         const val REFERENCE_LOD_SWITCH_ALPHA = 0.5f
         const val REFERENCE_PARENT_FALLBACK_MIN_ALPHA = 0.03f
         const val REFERENCE_TRANSPORTATION_MIN_ZOOM = 6
-        const val REFERENCE_SELECTED_LOD_MIN_ALPHA = 0.82f
-        const val REFERENCE_SELECTED_LOD_FADE_START = 0.5f
+        const val REFERENCE_TRANSPORTATION_PREFETCH_START_ZOOM = 5.85f
         const val REFERENCE_FULL_ALPHA_SNAP = 0.985f
         const val REFERENCE_BOUNDARY_MIN_ALPHA = 0.62f
         const val REFERENCE_BOUNDARY_MAX_ALPHA = 1f
         const val REFERENCE_BOUNDARY_ZOOM_FADE_START = 3.2f
         const val REFERENCE_BOUNDARY_ZOOM_FADE_END = 6.8f
-        const val REFERENCE_BOUNDARY_PARENT_FALLBACK_MAX_ZOOM = 7.8f
+        const val REFERENCE_BOUNDARY_PARENT_FALLBACK_MAX_ZOOM = 16.2f
         const val REFERENCE_TRANSPORTATION_FADE_START_ZOOM = 6.0f
         const val REFERENCE_TRANSPORTATION_FADE_END_ZOOM = 7.2f
-        const val REFERENCE_TRANSPORTATION_PARENT_FALLBACK_MAX_ZOOM = 7.8f
+        const val REFERENCE_TRANSPORTATION_PARENT_FALLBACK_MAX_ZOOM = 16.2f
+        const val REFERENCE_TILE_REQUEST_PRIORITY_EXACT = 0
+        const val REFERENCE_TILE_REQUEST_PRIORITY_ZOOM_OUT_PREFETCH = 1
+        const val REFERENCE_TILE_REQUEST_PRIORITY_PAN_PREFETCH = 1
         const val REFERENCE_TILE_REQUEST_PRIORITY_PARENT = 2
-        const val REFERENCE_TILE_REQUEST_PRIORITY_EXACT = 4
-        const val REFERENCE_BOUNDARIES_REQUEST_PRIORITY_OFFSET = -2
-        const val REFERENCE_TILE_REQUEST_HISTORY_MAX = 1_600
-        const val REFERENCE_TILE_REQUEST_HISTORY_AGE = 6L
+        const val REFERENCE_TILE_REQUEST_PRIORITY_PREFETCH = 3
+        const val REFERENCE_BOUNDARIES_REQUEST_PRIORITY_OFFSET = 0
+        const val REFERENCE_TRANSPORTATION_REQUEST_PRIORITY_OFFSET = 0
+        const val REFERENCE_BOUNDARY_PARENT_REQUEST_DEPTH = 4
+        const val REFERENCE_TRANSPORTATION_PARENT_REQUEST_DEPTH = 7
+        const val REFERENCE_BOUNDARY_PARENT_FALLBACK_DEPTH = 0
+        const val REFERENCE_TRANSPORTATION_PARENT_FALLBACK_DEPTH = 0
+        const val REFERENCE_BOUNDARY_COARSE_LOD_DEPTH = 2
+        const val REFERENCE_TRANSPORTATION_COARSE_LOD_DEPTH = 2
+        const val REFERENCE_BOUNDARY_MAX_TILE_UPSCALE_DELTA = 1.65
+        const val REFERENCE_TRANSPORTATION_MAX_TILE_UPSCALE_DELTA = 1.55
+        const val REFERENCE_BOUNDARY_RETAINED_MAX_DETAIL_DELTA = 1.45
+        const val REFERENCE_TRANSPORTATION_RETAINED_MAX_DETAIL_DELTA = 1.35
+        const val REFERENCE_BOUNDARY_DRAW_MIN_LOADED_RATIO = 0.84f
+        const val REFERENCE_BOUNDARY_DRAW_FULL_LOADED_RATIO = 0.98f
+        const val REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_OFFSET = 3
+        const val REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_STEP = 2
+        const val REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_COUNT = 4
+        const val REFERENCE_TRANSPORTATION_DETAIL_ADVANCE = 0.28
+        const val REFERENCE_TRANSPORTATION_DRAW_MIN_LOADED_RATIO = 0.9f
+        const val REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO = 0.99f
+        const val REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM = 12.0f
+        const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO = 0.2f
+        const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO = 0.55f
+        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_OFFSET = 3
+        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_STEP = 2
+        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT = 4
+        const val REFERENCE_BOUNDARY_PAN_PREFETCH_START_ZOOM = 4.0f
+        const val REFERENCE_TRANSPORTATION_PAN_PREFETCH_START_ZOOM = 7.2f
+        const val REFERENCE_OVERLAY_PAN_PREFETCH_TILE_BUFFER = 1
+        const val REFERENCE_RETAINED_LOD_MIN_RATIO = 0.8f
+        const val REFERENCE_LOD_SWITCH_READY_RATIO = 0.92f
+        const val REFERENCE_BOUNDARY_PREFETCH_LOD_LIMIT = 1
+        const val REFERENCE_TRANSPORTATION_PREFETCH_LOD_LIMIT = 1
+        const val REFERENCE_PREFETCH_LOADED_RATIO = 0.86f
+        const val REFERENCE_TILE_REQUEST_HISTORY_MAX = 2_400
+        const val REFERENCE_TILE_REQUEST_HISTORY_AGE = 48L
         const val REFERENCE_TILE_REQUEST_STALE_GENERATIONS = 2L
+        const val REFERENCE_TILE_PREFETCH_STALE_GENERATIONS = 36L
+        const val REFERENCE_TILE_PAN_PREFETCH_STALE_GENERATIONS = 24L
+        const val REFERENCE_TILE_PARENT_STALE_GENERATIONS = 36L
         const val REFERENCE_TILE_REQUEUE_GENERATIONS = 3L
+        const val REFERENCE_CENTER_COVERAGE_LEFT_FRACTION = 0.18f
+        const val REFERENCE_CENTER_COVERAGE_RIGHT_FRACTION = 0.82f
+        const val REFERENCE_CENTER_COVERAGE_TOP_FRACTION = 0.2f
+        const val REFERENCE_CENTER_COVERAGE_BOTTOM_FRACTION = 0.84f
         const val REFERENCE_ALPHA_SAMPLE_COLUMNS = 8
         const val REFERENCE_ALPHA_SAMPLE_ROWS = 8
         const val REFERENCE_VISIBLE_ALPHA_THRESHOLD = 12

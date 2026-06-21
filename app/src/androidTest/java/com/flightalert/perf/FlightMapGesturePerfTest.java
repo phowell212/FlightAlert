@@ -266,6 +266,28 @@ public class FlightMapGesturePerfTest {
     }
 
     @Test
+    public void closeSatellitePanLabels() throws Exception {
+        MajorTrafficCity city = randomInlandTrafficCity();
+        boolean skipChrome = instrumentationBooleanArgument("skipChrome");
+        boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
+        UiObject2 app = startAppAtMajorTraffic(city, 12.2, "SATELLITE", skipChrome, skipTraffic);
+        sleep(TRAFFIC_LOAD_WAIT_MS);
+        captureActiveDisplay("flightalert-perf-closeSatellitePanLabels-rest.png");
+        clearPerfCounters();
+
+        scheduleActiveDisplayCapture("flightalert-perf-closeSatellitePanLabels-pan-start.png", 120);
+        panMajorCityCorridor(app, PAN_STEPS);
+        scheduleActiveDisplayCapture("flightalert-perf-closeSatellitePanLabels-pan-active.png", 120);
+        sleep(450);
+        panMajorCityCorridor(app, PAN_STEPS);
+        sleep(900);
+        waitForScheduledCaptures();
+        requireFlightAlertForeground();
+        captureActiveDisplay("flightalert-perf-closeSatellitePanLabels.png");
+        capturePerfArtifacts("closeSatellitePanLabels");
+    }
+
+    @Test
     public void streetFastZoomOutTileLoad() throws Exception {
         runStreetFastZoomOutTileLoad("streetFastZoomOutTileLoad", true);
     }

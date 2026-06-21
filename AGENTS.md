@@ -124,6 +124,8 @@ For optimization work, use a connected physical phone when one is available. Pre
 
 Use subagents only for low-conflict work with a clearly bounded scope, especially read-only history/code research, test-harness additions, standalone verification helpers, and small files that can be owned independently. Put subagents in a separate workspace or explicitly assign a disjoint file set before allowing edits. Do not touch files owned by an active editing subagent until it reports back, unless the user explicitly redirects ownership.
 
+When Pro mode / Pro Agent Bridge is available, use it for parallelizable, high-value analysis such as independent diagnosis, visual/performance strategy, or test-result review. Keep Pro use scoped and advisory: do not paste secrets, do not hand it broad filesystem context, and do not use it excessively when local evidence is enough.
+
 After meaningful changes, run:
 
 ```powershell
@@ -136,7 +138,7 @@ When an optimization attempt works, fails, is reverted, or remains pending, reco
 
 Record only meaningful optimization evidence here. Do not keep rejected experiments in source just because they were tried.
 
-Current target: none.
+Current target: fix all flicker, sudden pop-in/pop-out, duplicate fade, and zoom-transition instability under the Settings map labels controls, including roads, labels, borders, and local/reference overlays. Acceptance requires physical-device human-like zoom in/out videos across multiple zoom levels showing smooth label behavior with no major performance regression.
 
 Branch comparison evidence:
 
@@ -144,6 +146,7 @@ Branch comparison evidence:
 
 Keeper candidates currently allowed on this clean branch:
 
+- Map-label reference overlay stability keeper, June 20/21: `SatelliteMapTileRenderer` now chooses reference road/border LODs using full-viewport plus center-viewport readiness, retains the last drawable LOD until the replacement is ready, runs quiet prefetches that upgrade to exact redraws when visible, and same-LOD overscans reference tiles ahead of panning without drawing parent fallbacks. This specifically preserves the accepted local/reference map-label visuals while preventing road/street-label dropout and tile-box road endings. Physical Fold `RFCX40KPN3B` clean close-pan video `map-labels-close-pan-r4-satellite-labels-overscan-clean` passed route proof over Denver, showed stable roads/street labels/borders in sampled MP4 frames, and logged 99 debug samples with `labelPartial=0`, `roadsPartial=0`, `roadsCenterPartial=0`, `roadsReqFrames=0`, `bordersPartial=0`, and `bordersCenterPartial=0`; frame evidence was produced FPS 619.4, present mean FPS 70.7, present p50 8.33 ms, present p95 49.99 ms, Android jank 19.54%. The same build's panel-on close-pan run `map-labels-close-pan-r3-satellite-labels-overscan` measured produced FPS 998.7, present mean FPS 89.2, present p95 16.67 ms, Android jank 15.94%. Fast zoom-out hotspot video `map-labels-fastzoomout-road-hotspot-r24-maponly-overscan` still had expected edge/fade partials during rapid zoom but retained complete center coverage and visually avoided the prior missing-label/box-edge road artifacts; keep investigating broad zoom-out frame time, but keep the reference overlay stability path unless a future video proves a regression.
 - Reusable `Matrix` drawing for cached aircraft symbol masks. It preserves the same fill/stroke masks and transform while reducing per-symbol canvas state churn. Bounded DFW z5.4 street diagonal run `opt-matrix-symboldraw-dfw-z54-street-diag-real` measured Android jank about 11.28%, present-drop120 about 8.55%, present p50 about 8.34 ms, present p95 about 41.62 ms. Same-target A/B with the old save/translate/scale/rotate path, `opt-ab-savecanvas-dfw-z54-street-diag-real`, worsened to about 22.22% Android jank and 20.43% present-drop120. Keep the Matrix path unless a separate visual/video check catches a transform mismatch.
 - Count-only spatial-index probing for dense traffic state. It preserves the same padded aircraft set and same rendered aircraft pixels, but replaces the first allocating `TrafficSpatialIndex.query()` used only for density/symbol decisions with `query_count()`, then performs the real padded query once. Real-phone Denver z6.2 satellite full-traffic run `traffic-countquery-denver-z62-satellite-real` improved the immediate comparison from about 55.56% Android jank / 58.33% present-drop120 / 91.72 ms present p95 to about 21.43% / 22.94% / 50.04 ms, with motion screenshot visually intact and labels at `288/288 labelReq=0`.
 - Aircraft symbol body path cache increased from 512 to 768 entries to reduce churn across symbols and morph buckets. Keep only if later visual and timing tests remain neutral or better.
