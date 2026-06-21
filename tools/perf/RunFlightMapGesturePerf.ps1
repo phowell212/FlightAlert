@@ -7,7 +7,8 @@ param(
     [string]$OutputName = "",
     [switch]$KeepDeviceArtifacts,
     [switch]$RecordVideo,
-    [int]$VideoTimeLimitSeconds = 90,
+    [int]$VideoTimeLimitSeconds = 60,
+    [int]$MaxRunSeconds = 150,
     [string]$VideoDisplayId = "",
     [string]$City = "",
     [ValidateSet("Current", "On", "Off")]
@@ -20,6 +21,7 @@ param(
     [switch]$SkipTrafficPanel,
     [switch]$SkipTraffic,
     [switch]$TrafficDetailTiming,
+    [switch]$MapDetailTiming,
     [ValidateSet("Unchecked", "Pass", "Fail")]
     [string]$VisibleEvidenceLandSafe = "Unchecked",
     [string]$VisibleEvidenceReviewer = ""
@@ -40,18 +42,44 @@ $landSafeTargets = @{
     "dfw" = [pscustomobject]@{ Name = "Dallas-Fort Worth"; Lat = 32.90; Lon = -97.04; MinLat = 29.7; MaxLat = 35.8; MinLon = -101.6; MaxLon = -92.8; MaxDistanceKm = 620.0 }
     "atlanta" = [pscustomobject]@{ Name = "Atlanta"; Lat = 33.64; Lon = -84.43; MinLat = 30.6; MaxLat = 36.5; MinLon = -88.8; MaxLon = -80.2; MaxDistanceKm = 620.0 }
     "atl" = [pscustomobject]@{ Name = "Atlanta"; Lat = 33.64; Lon = -84.43; MinLat = 30.6; MaxLat = 36.5; MinLon = -88.8; MaxLon = -80.2; MaxDistanceKm = 620.0 }
-    "denver" = [pscustomobject]@{ Name = "Denver"; Lat = 39.86; Lon = -104.67; MinLat = 37.1; MaxLat = 42.6; MinLon = -109.4; MaxLon = -100.0; MaxDistanceKm = 620.0 }
-    "den" = [pscustomobject]@{ Name = "Denver"; Lat = 39.86; Lon = -104.67; MinLat = 37.1; MaxLat = 42.6; MinLon = -109.4; MaxLon = -100.0; MaxDistanceKm = 620.0 }
     "phoenix" = [pscustomobject]@{ Name = "Phoenix"; Lat = 33.43; Lon = -112.01; MinLat = 31.7; MaxLat = 36.0; MinLon = -116.0; MaxLon = -108.4; MaxDistanceKm = 560.0 }
     "phx" = [pscustomobject]@{ Name = "Phoenix"; Lat = 33.43; Lon = -112.01; MinLat = 31.7; MaxLat = 36.0; MinLon = -116.0; MaxLon = -108.4; MaxDistanceKm = 560.0 }
     "lasvegas" = [pscustomobject]@{ Name = "Las Vegas"; Lat = 36.08; Lon = -115.15; MinLat = 34.2; MaxLat = 38.5; MinLon = -118.5; MaxLon = -111.9; MaxDistanceKm = 520.0 }
     "las" = [pscustomobject]@{ Name = "Las Vegas"; Lat = 36.08; Lon = -115.15; MinLat = 34.2; MaxLat = 38.5; MinLon = -118.5; MaxLon = -111.9; MaxDistanceKm = 520.0 }
     "vegas" = [pscustomobject]@{ Name = "Las Vegas"; Lat = 36.08; Lon = -115.15; MinLat = 34.2; MaxLat = 38.5; MinLon = -118.5; MaxLon = -111.9; MaxDistanceKm = 520.0 }
+    "chicago" = [pscustomobject]@{ Name = "Chicago"; Lat = 41.88; Lon = -87.63; MinLat = 39.4; MaxLat = 44.2; MinLon = -91.4; MaxLon = -83.8; MaxDistanceKm = 480.0 }
+    "chi" = [pscustomobject]@{ Name = "Chicago"; Lat = 41.88; Lon = -87.63; MinLat = 39.4; MaxLat = 44.2; MinLon = -91.4; MaxLon = -83.8; MaxDistanceKm = 480.0 }
+    "ord" = [pscustomobject]@{ Name = "Chicago"; Lat = 41.88; Lon = -87.63; MinLat = 39.4; MaxLat = 44.2; MinLon = -91.4; MaxLon = -83.8; MaxDistanceKm = 480.0 }
+    "newyorkcity" = [pscustomobject]@{ Name = "New York City"; Lat = 40.73; Lon = -73.93; MinLat = 38.7; MaxLat = 43.1; MinLon = -77.4; MaxLon = -70.1; MaxDistanceKm = 460.0 }
+    "newyork" = [pscustomobject]@{ Name = "New York City"; Lat = 40.73; Lon = -73.93; MinLat = 38.7; MaxLat = 43.1; MinLon = -77.4; MaxLon = -70.1; MaxDistanceKm = 460.0 }
+    "nyc" = [pscustomobject]@{ Name = "New York City"; Lat = 40.73; Lon = -73.93; MinLat = 38.7; MaxLat = 43.1; MinLon = -77.4; MaxLon = -70.1; MaxDistanceKm = 460.0 }
+    "jfk" = [pscustomobject]@{ Name = "New York City"; Lat = 40.73; Lon = -73.93; MinLat = 38.7; MaxLat = 43.1; MinLon = -77.4; MaxLon = -70.1; MaxDistanceKm = 460.0 }
+    "losangeles" = [pscustomobject]@{ Name = "Los Angeles"; Lat = 33.94; Lon = -118.40; MinLat = 32.0; MaxLat = 36.4; MinLon = -121.8; MaxLon = -115.2; MaxDistanceKm = 460.0 }
+    "la" = [pscustomobject]@{ Name = "Los Angeles"; Lat = 33.94; Lon = -118.40; MinLat = 32.0; MaxLat = 36.4; MinLon = -121.8; MaxLon = -115.2; MaxDistanceKm = 460.0 }
+    "lax" = [pscustomobject]@{ Name = "Los Angeles"; Lat = 33.94; Lon = -118.40; MinLat = 32.0; MaxLat = 36.4; MinLon = -121.8; MaxLon = -115.2; MaxDistanceKm = 460.0 }
+    "london" = [pscustomobject]@{ Name = "London"; Lat = 51.47; Lon = -0.45; MinLat = 48.6; MaxLat = 54.3; MinLon = -5.4; MaxLon = 4.6; MaxDistanceKm = 600.0 }
+    "lhr" = [pscustomobject]@{ Name = "London"; Lat = 51.47; Lon = -0.45; MinLat = 48.6; MaxLat = 54.3; MinLon = -5.4; MaxLon = 4.6; MaxDistanceKm = 600.0 }
+    "lon" = [pscustomobject]@{ Name = "London"; Lat = 51.47; Lon = -0.45; MinLat = 48.6; MaxLat = 54.3; MinLon = -5.4; MaxLon = 4.6; MaxDistanceKm = 600.0 }
+    "amsterdam" = [pscustomobject]@{ Name = "Amsterdam"; Lat = 52.31; Lon = 4.77; MinLat = 49.6; MaxLat = 54.9; MinLon = 0.2; MaxLon = 9.6; MaxDistanceKm = 560.0 }
+    "ams" = [pscustomobject]@{ Name = "Amsterdam"; Lat = 52.31; Lon = 4.77; MinLat = 49.6; MaxLat = 54.9; MinLon = 0.2; MaxLon = 9.6; MaxDistanceKm = 560.0 }
+    "frankfurt" = [pscustomobject]@{ Name = "Frankfurt"; Lat = 50.04; Lon = 8.56; MinLat = 47.1; MaxLat = 53.0; MinLon = 4.0; MaxLon = 13.2; MaxDistanceKm = 560.0 }
+    "fra" = [pscustomobject]@{ Name = "Frankfurt"; Lat = 50.04; Lon = 8.56; MinLat = 47.1; MaxLat = 53.0; MinLon = 4.0; MaxLon = 13.2; MaxDistanceKm = 560.0 }
+    "paris" = [pscustomobject]@{ Name = "Paris"; Lat = 49.01; Lon = 2.55; MinLat = 46.1; MaxLat = 51.8; MinLon = -2.4; MaxLon = 7.4; MaxDistanceKm = 560.0 }
+    "par" = [pscustomobject]@{ Name = "Paris"; Lat = 49.01; Lon = 2.55; MinLat = 46.1; MaxLat = 51.8; MinLon = -2.4; MaxLon = 7.4; MaxDistanceKm = 560.0 }
+    "cdg" = [pscustomobject]@{ Name = "Paris"; Lat = 49.01; Lon = 2.55; MinLat = 46.1; MaxLat = 51.8; MinLon = -2.4; MaxLon = 7.4; MaxDistanceKm = 560.0 }
+    "madrid" = [pscustomobject]@{ Name = "Madrid"; Lat = 40.49; Lon = -3.57; MinLat = 37.7; MaxLat = 43.3; MinLon = -8.4; MaxLon = 1.2; MaxDistanceKm = 560.0 }
+    "mad" = [pscustomobject]@{ Name = "Madrid"; Lat = 40.49; Lon = -3.57; MinLat = 37.7; MaxLat = 43.3; MinLon = -8.4; MaxLon = 1.2; MaxDistanceKm = 560.0 }
 }
 
 if (-not (Test-Path $adb)) { throw "adb.exe was not found at $adb" }
 if (-not (Test-Path $gradlew)) { throw "gradlew.bat was not found at $gradlew" }
 if (-not (Test-Path $summarizer)) { throw "SummarizeFrameStats.ps1 was not found next to this script." }
+if ($MaxRunSeconds -gt 180) { throw "MaxRunSeconds=$MaxRunSeconds is too long. Perf harness runs are capped at 180 seconds; use 60 seconds for short checks and 150 seconds or less for thorough checks." }
+if ($MaxRunSeconds -lt 30) { throw "MaxRunSeconds=$MaxRunSeconds is too short for reliable instrumentation startup; use at least 30 seconds." }
+if ($VideoTimeLimitSeconds -gt 180) { throw "VideoTimeLimitSeconds=$VideoTimeLimitSeconds is too long. Videos are capped at 180 seconds and should usually be 60 seconds for short checks or 150 seconds for thorough checks." }
+if ($VideoTimeLimitSeconds -lt 5) { throw "VideoTimeLimitSeconds=$VideoTimeLimitSeconds is too short to produce useful visual evidence." }
+if ($VideoTimeLimitSeconds -gt $MaxRunSeconds) { throw "VideoTimeLimitSeconds=$VideoTimeLimitSeconds cannot exceed MaxRunSeconds=$MaxRunSeconds." }
+if ($RecordVideo -and $MaxRunSeconds -lt 45) { throw "RecordVideo needs MaxRunSeconds of at least 45 seconds so the app can stay foreground while the video finishes." }
 if (($MapRoads -eq "Current") -xor ($MapBorders -eq "Current")) {
     throw "When testing split map labels, provide both -MapRoads and -MapBorders so the run does not inherit half of the state from device preferences."
 }
@@ -77,11 +105,25 @@ function Get-LandSafeTarget {
     return $null
 }
 
+function Get-TimetableDefaultCity {
+    $utcHour = [DateTime]::UtcNow.Hour
+    if (($utcHour -ge 5 -and $utcHour -lt 15) -or ($utcHour -ge 3 -and $utcHour -lt 5)) {
+        return "Frankfurt"
+    }
+    if ($utcHour -ge 15 -and $utcHour -lt 22) {
+        return "Atlanta"
+    }
+    if ($utcHour -ge 22 -or $utcHour -lt 3) {
+        return "Dallas-Fort Worth"
+    }
+    return "Frankfurt"
+}
+
 function Assert-InlandCityArgument {
     if ([string]::IsNullOrWhiteSpace($City)) { return }
     $target = Get-LandSafeTarget -Name $City
     if (-not $target) {
-        throw "City '$City' is not a land-safe harness target. Use Dallas-Fort Worth, Atlanta, Denver, Phoenix, or Las Vegas for route-proof performance tests."
+        throw "City '$City' is not a land-safe harness target. Choose a current timetable-backed US/EU target such as Frankfurt, London, Amsterdam, Paris, Madrid, Dallas-Fort Worth, Atlanta, Phoenix, Las Vegas, Chicago, New York, or Los Angeles."
     }
 }
 
@@ -137,7 +179,7 @@ function Test-RouteFocusEvidence {
         OutOfEnvelopeSamples = 0
     }
     if (-not $target) {
-        $result.RejectReason = "target city is missing or not in the inland route-proof allowlist"
+        $result.RejectReason = "target city is missing or not in the timetable-backed US/EU route-proof allowlist"
         return [pscustomobject]$result
     }
     if (-not (Test-Path $LogcatPath)) {
@@ -164,7 +206,7 @@ function Test-RouteFocusEvidence {
         return [pscustomobject]$result
     }
     if ($result.OutOfEnvelopeSamples -gt 0) {
-        $result.RejectReason = "$($result.OutOfEnvelopeSamples) focus samples left the inland route envelope for $($target.Name)"
+        $result.RejectReason = "$($result.OutOfEnvelopeSamples) focus samples left the timetable-backed US/EU route envelope for $($target.Name)"
         return [pscustomobject]$result
     }
     $result.Passed = $true
@@ -221,6 +263,48 @@ function New-PngContactSheet {
     }
 }
 
+function Get-FlightAlertFfmpegPath {
+    $candidates = @(
+        "C:\Tools\ffmpeg-btbn-latest\bin\ffmpeg.exe",
+        "ffmpeg.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+        $resolved = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($resolved) { return $resolved.Source }
+    }
+    return ""
+}
+
+function New-RoadMotionVideoStrip {
+    param(
+        [string]$VideoPath,
+        [string]$DestinationPath
+    )
+    if (-not (Test-Path $VideoPath)) { return "" }
+    $ffmpeg = Get-FlightAlertFfmpegPath
+    if ([string]::IsNullOrWhiteSpace($ffmpeg)) { return "" }
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $arguments = @(
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", $VideoPath,
+            "-vf", "fps=8,scale=480:-1,tile=4x8",
+            "-frames:v", "1",
+            "-update", "1",
+            $DestinationPath
+        )
+        $process = Start-Process -FilePath $ffmpeg -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        if ($process.ExitCode -ne 0 -or -not (Test-Path $DestinationPath)) { return "" }
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+    return $DestinationPath
+}
+
 function Get-DefaultArtifactName {
     param([string]$Name)
     switch ($Name) {
@@ -249,6 +333,8 @@ function Get-DefaultArtifactName {
         "satelliteFastZoomOutTileLoad" { return "satelliteFastZoomOutTileLoad" }
         "satelliteFastZoomOutTileLoadPerf" { return "satelliteFastZoomOutTileLoadPerf" }
         "closeSatellitePanLabels" { return "closeSatellitePanLabels" }
+        "closeSatellitePanLabelsPerf" { return "closeSatellitePanLabelsPerf" }
+        "satellitePanZoomSanityPerf" { return "satellitePanZoomSanityPerf" }
         "streetFastZoomOutTileLoad" { return "streetFastZoomOutTileLoad" }
         "streetFastZoomOutTileLoadPerf" { return "streetFastZoomOutTileLoadPerf" }
         "panAcrossZoomLevels" { return "panAcrossZoomLevels" }
@@ -371,6 +457,36 @@ function Wait-FlightAlertForeground {
     return $false
 }
 
+function Get-RemainingRunSeconds {
+    param([DateTime]$Deadline)
+    $remaining = [int][Math]::Ceiling(($Deadline - (Get-Date)).TotalSeconds)
+    return [Math]::Max(1, $remaining)
+}
+
+function Stop-FlightAlertPerfRun {
+    Invoke-Adb shell "pkill -2 screenrecord >/dev/null 2>&1 || true" | Out-Null
+    Invoke-Adb shell "am force-stop $packageName >/dev/null 2>&1 || true" | Out-Null
+}
+
+function Stop-GradleInstrumentationProcesses {
+    param([string]$RepoRootForMatch)
+    $normalizedRoot = $RepoRootForMatch.ToLowerInvariant()
+    $processes = @(Get-CimInstance Win32_Process | Where-Object {
+        $commandLine = $_.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) { return $false }
+        $lower = $commandLine.ToLowerInvariant()
+        return $lower.Contains("connecteddebugandroidtest") -and $lower.Contains($normalizedRoot)
+    })
+    foreach ($process in $processes) {
+        try {
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+            Write-Host "Stopped timed-out Gradle instrumentation process pid=$($process.ProcessId)."
+        } catch {
+            Write-Host "Could not stop timed-out Gradle instrumentation process pid=$($process.ProcessId): $($_.Exception.Message)"
+        }
+    }
+}
+
 function Start-GradleInstrumentationJob {
     param(
         [string]$RepoRoot,
@@ -388,6 +504,45 @@ function Start-GradleInstrumentationJob {
         & $JobGradlewPath connectedDebugAndroidTest @JobRunnerArgs --no-daemon 2>&1 | Tee-Object -FilePath $JobGradleLogPath
         "FLIGHTALERT_GRADLE_EXIT_CODE=$LASTEXITCODE"
     } -ArgumentList $RepoRoot, $GradlewPath, $RunnerArgs, $GradleLogPath, $DeviceSerial
+}
+
+function Wait-GradleInstrumentationJob {
+    param(
+        [System.Management.Automation.Job]$Job,
+        [int]$TimeoutSeconds
+    )
+    $exitCode = 1
+    $timedOut = $false
+    $completed = Wait-Job -Job $Job -Timeout $TimeoutSeconds
+    if (-not $completed) {
+        $timedOut = $true
+        Write-Host "Instrumentation exceeded MaxRunSeconds; stopping screen recording, force-stopping Flight Alert, and discarding this run as evidence."
+        Stop-FlightAlertPerfRun
+        Stop-GradleInstrumentationProcesses -RepoRootForMatch $repoRoot
+        Stop-Job -Job $Job -ErrorAction SilentlyContinue
+    }
+    $jobOutput = @(Receive-Job -Job $Job -ErrorAction SilentlyContinue)
+    Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+    foreach ($entry in $jobOutput) {
+        $line = "$entry"
+        if ($line -match "^FLIGHTALERT_GRADLE_EXIT_CODE=(\d+)$") {
+            $exitCode = [int]$Matches[1]
+        } else {
+            Write-Host $line
+        }
+    }
+    if ($timedOut) {
+        $exitCode = 124
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        TimedOut = $timedOut
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($City)) {
+    $City = Get-TimetableDefaultCity
+    Write-Host "No -City supplied; selected timetable-backed target '$City' from current UTC hour $([DateTime]::UtcNow.ToString('HH:mm'))."
 }
 
 Assert-InlandCityArgument
@@ -416,6 +571,9 @@ $videoJob = $null
 $remoteVideoPath = "/sdcard/$OutputName-screenrecord.mp4"
 $videoStartedAfterForeground = $false
 $videoSkippedReason = ""
+$videoEvidenceHoldSeconds = 0
+$gradleExit = 1
+$gradleTimedOut = $false
 
 Push-Location $repoRoot
 $previousAndroidSerial = $env:ANDROID_SERIAL
@@ -455,38 +613,47 @@ try {
     if ($TrafficDetailTiming) {
         $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.trafficDetailTiming=true"
     }
+    if ($MapDetailTiming) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.mapDetailTiming=true"
+    }
     if ($RecordVideo) {
-        $gradleExit = 1
+        $videoEvidenceHoldSeconds = [Math]::Min($VideoTimeLimitSeconds, [Math]::Max(6, $MaxRunSeconds - 45))
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.videoEvidenceHoldSeconds=$videoEvidenceHoldSeconds"
+    }
+    $runDeadline = (Get-Date).AddSeconds($MaxRunSeconds)
+    if ($RecordVideo) {
         $gradleJob = Start-GradleInstrumentationJob -RepoRoot $repoRoot -GradlewPath $gradlew -RunnerArgs $runnerArgs -GradleLogPath $gradleLog -DeviceSerial $Device
-        if (Wait-FlightAlertForeground -TimeoutSeconds 90) {
+        $foregroundTimeout = [Math]::Min(30, (Get-RemainingRunSeconds -Deadline $runDeadline))
+        if (Wait-FlightAlertForeground -TimeoutSeconds $foregroundTimeout) {
+            Start-Sleep -Milliseconds 1200
+            if (-not (Wait-FlightAlertForeground -TimeoutSeconds ([Math]::Min(2, (Get-RemainingRunSeconds -Deadline $runDeadline))))) {
+                $videoSkippedReason = "Flight Alert left foreground during the pre-video settle delay; video skipped to avoid launcher/home-screen evidence."
+                Write-Host $videoSkippedReason
+            } else {
             if ([string]::IsNullOrWhiteSpace($VideoDisplayId)) {
                 $VideoDisplayId = Get-ActivePhysicalDisplayId
             }
             if ([string]::IsNullOrWhiteSpace($VideoDisplayId)) {
-                Write-Host "Recording screen video to $remoteVideoPath for up to $VideoTimeLimitSeconds seconds after Flight Alert reached foreground."
+                Write-Host "Recording screen video to $remoteVideoPath for up to $VideoTimeLimitSeconds seconds after Flight Alert reached foreground. Max run seconds=$MaxRunSeconds."
             } else {
-                Write-Host "Recording screen video to $remoteVideoPath for up to $VideoTimeLimitSeconds seconds on display $VideoDisplayId after Flight Alert reached foreground."
+                Write-Host "Recording screen video to $remoteVideoPath for up to $VideoTimeLimitSeconds seconds on display $VideoDisplayId after Flight Alert reached foreground. Max run seconds=$MaxRunSeconds."
             }
             $videoJob = Start-ScreenRecord -RemotePath $remoteVideoPath -TimeLimitSeconds $VideoTimeLimitSeconds -DisplayId $VideoDisplayId
             $videoStartedAfterForeground = $true
             Start-Sleep -Milliseconds 300
+            }
         } else {
-            $videoSkippedReason = "Flight Alert did not reach foreground within 90 seconds; video skipped to avoid launcher/home-screen evidence."
+            $videoSkippedReason = "Flight Alert did not reach foreground within $foregroundTimeout seconds; video skipped to avoid launcher/home-screen evidence."
             Write-Host $videoSkippedReason
         }
-        $jobOutput = Receive-Job -Job $gradleJob -Wait
-        Remove-Job -Job $gradleJob -Force -ErrorAction SilentlyContinue
-        foreach ($entry in $jobOutput) {
-            $line = "$entry"
-            if ($line -match "^FLIGHTALERT_GRADLE_EXIT_CODE=(\d+)$") {
-                $gradleExit = [int]$Matches[1]
-            } else {
-                Write-Host $line
-            }
-        }
+        $jobResult = Wait-GradleInstrumentationJob -Job $gradleJob -TimeoutSeconds (Get-RemainingRunSeconds -Deadline $runDeadline)
+        $gradleExit = $jobResult.ExitCode
+        $gradleTimedOut = $jobResult.TimedOut
     } else {
-        & $gradlew connectedDebugAndroidTest @runnerArgs --no-daemon 2>&1 | Tee-Object -FilePath $gradleLog
-        $gradleExit = $LASTEXITCODE
+        $gradleJob = Start-GradleInstrumentationJob -RepoRoot $repoRoot -GradlewPath $gradlew -RunnerArgs $runnerArgs -GradleLogPath $gradleLog -DeviceSerial $Device
+        $jobResult = Wait-GradleInstrumentationJob -Job $gradleJob -TimeoutSeconds (Get-RemainingRunSeconds -Deadline $runDeadline)
+        $gradleExit = $jobResult.ExitCode
+        $gradleTimedOut = $jobResult.TimedOut
     }
 } finally {
     if ($null -eq $previousAndroidSerial) {
@@ -531,11 +698,20 @@ $videos = @(Get-ChildItem -Path $outDir -Filter "*.mp4" -ErrorAction SilentlyCon
 $targetArtifacts = @($pulledPaths | Where-Object { $_ -like "*-target.txt" })
 $routeFocusEvidence = Test-RouteFocusEvidence -LogcatPath $logcatPath -TargetArtifacts $targetArtifacts
 $contactSheetPath = ""
+$roadMotionStripPath = ""
+$roadMotionStripRequired = $RecordVideo -and $MapRoads -eq "On" -and $TestName.ToLowerInvariant().Contains("satellite")
 if ($screenshots.Count -gt 0) {
     try {
         $contactSheetPath = New-PngContactSheet -PngPaths $screenshots -DestinationPath (Join-Path $outDir "$OutputName-contact-sheet.png")
     } catch {
         Write-Host "Contact sheet generation skipped: $($_.Exception.Message)"
+    }
+}
+if ($roadMotionStripRequired -and $videos.Count -gt 0) {
+    try {
+        $roadMotionStripPath = New-RoadMotionVideoStrip -VideoPath $videos[0] -DestinationPath (Join-Path $outDir "$OutputName-road-motion-strip.jpg")
+    } catch {
+        Write-Host "Road motion strip generation skipped: $($_.Exception.Message)"
     }
 }
 $routeProofPath = Join-Path $outDir "$OutputName-route-proof.txt"
@@ -548,14 +724,21 @@ $routeProof += "city_argument=$City"
 $routeProof += "map_roads_argument=$MapRoads"
 $routeProof += "map_borders_argument=$MapBorders"
 $routeProof += "record_video=$RecordVideo"
+$routeProof += "max_run_seconds=$MaxRunSeconds"
+$routeProof += "video_time_limit_seconds=$VideoTimeLimitSeconds"
+$routeProof += "video_evidence_hold_seconds=$videoEvidenceHoldSeconds"
+$routeProof += "instrumentation_timed_out=$gradleTimedOut"
 $routeProof += "video_started_after_flightalert_foreground=$videoStartedAfterForeground"
 $routeProof += "video_skipped_reason=$videoSkippedReason"
 $routeProof += "visible_evidence_land_safe=$VisibleEvidenceLandSafe"
 $routeProof += "visible_evidence_reviewer=$VisibleEvidenceReviewer"
-$routeProof += "visible_evidence_rule=Pass only after screenshots/video and focusLat/focusLon logs show active gesture focus over inland land/traffic. Incidental coastline/water in a continent-scale viewport is acceptable only when the focus stays on the requested inland target."
+$routeProof += "visible_evidence_rule=Pass only after screenshots/video and focusLat/focusLon logs show active gesture focus over the timetable-backed US/EU land/traffic target. Incidental coastline/water in a continent-scale viewport is acceptable only when the focus stays on the requested target."
 $routeProof += "screenshots_count=$($screenshots.Count)"
 $routeProof += "videos_count=$($videos.Count)"
 $routeProof += "contact_sheet=$contactSheetPath"
+$routeProof += "road_motion_strip_required=$roadMotionStripRequired"
+$routeProof += "road_motion_strip=$roadMotionStripPath"
+$routeProof += "road_motion_temporal_rule=For satellite roads-on video evidence, inspect the MP4 and road-motion strip for frame-to-frame road opacity flicker, road LOD scale swaps, whole-road-layer blink, parent/exact overlay crossfades, and label/border/road mismatches. Still contact sheets alone are insufficient."
 $routeProof += "pulled_target_artifacts=$($targetArtifacts.Count)"
 $routeProof += "route_focus_passed=$($routeFocusEvidence.Passed)"
 $routeProof += "route_focus_city=$($routeFocusEvidence.City)"
@@ -581,17 +764,28 @@ if (Test-Path $logcatPath) {
         $routeProof += @($phaseLines | ForEach-Object { $_.Line })
     }
 }
-$acceptedEvidence = ($VisibleEvidenceLandSafe -eq "Pass" -and $routeFocusEvidence.Passed -and (-not $RecordVideo -or $videoStartedAfterForeground))
+$roadMotionEvidenceReady = (-not $roadMotionStripRequired) -or -not [string]::IsNullOrWhiteSpace($roadMotionStripPath)
+$acceptedEvidence = (
+    $VisibleEvidenceLandSafe -eq "Pass" -and
+    $routeFocusEvidence.Passed -and
+    (-not $RecordVideo -or $videoStartedAfterForeground) -and
+    $roadMotionEvidenceReady -and
+    -not $gradleTimedOut
+)
 if (-not $acceptedEvidence) {
     $routeProof += ""
     $routeProof += "accepted_optimizer_evidence=false"
-    $routeProof += "accepted_optimizer_evidence_reason=visible evidence is $VisibleEvidenceLandSafe; route_focus_passed=$($routeFocusEvidence.Passed); video_started_after_flightalert_foreground=$videoStartedAfterForeground."
+    $routeProof += "accepted_optimizer_evidence_reason=visible evidence is $VisibleEvidenceLandSafe; route_focus_passed=$($routeFocusEvidence.Passed); video_started_after_flightalert_foreground=$videoStartedAfterForeground; road_motion_evidence_ready=$roadMotionEvidenceReady; instrumentation_timed_out=$gradleTimedOut."
 } else {
     $routeProof += ""
     $routeProof += "accepted_optimizer_evidence=true"
 }
 $routeProof | Set-Content -Path $routeProofPath
 Write-Host "Saved route-proof manifest: $routeProofPath"
+
+if ($gradleTimedOut) {
+    throw "Instrumentation exceeded MaxRunSeconds=$MaxRunSeconds. Stopped screen recording/app and pulled available artifacts into $outDir; discard this run as evidence."
+}
 
 $framestats = @($pulledPaths | Where-Object { $_ -like "*-framestats.txt" })
 if ($framestats.Count -eq 0) {
@@ -612,6 +806,9 @@ Write-Host ("Route focus evidence: passed={0}; city={1}; samples={2}; maxDistanc
     $routeFocusEvidence.Passed, $routeFocusEvidence.ExpectedCity, $routeFocusEvidence.FocusSamples, [double]$routeFocusEvidence.MaxDistanceKm, $routeFocusEvidence.RejectReason)
 if (-not [string]::IsNullOrWhiteSpace($contactSheetPath)) {
     Write-Host "Saved contact sheet: $contactSheetPath"
+}
+if (-not [string]::IsNullOrWhiteSpace($roadMotionStripPath)) {
+    Write-Host "Saved road motion strip: $roadMotionStripPath"
 }
 if ($screenshots.Count -gt 0) {
     Write-Host "Saved screenshots:"

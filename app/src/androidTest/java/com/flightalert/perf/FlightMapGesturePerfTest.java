@@ -22,6 +22,7 @@ import androidx.test.uiautomator.Until;
 
 import com.flightalert.MainActivity;
 
+import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -36,44 +37,51 @@ public class FlightMapGesturePerfTest {
     private static final String PACKAGE_NAME = "com.flightalert";
     private static final String PERF_PHASE_LOG_TAG = "FlightAlertPerfPhase";
     private static final String PERF_BAND_NOT_APPLICABLE = "not_applicable";
-    private static final long TRAFFIC_LOAD_WAIT_MS = 9000L;
-    private static final int QUICK_PINCH_SPEED_PX_PER_SEC = 14000;
-    private static final int SMOOTH_PINCH_SPEED_PX_PER_SEC = 3200;
-    private static final int HUMAN_TRANSITION_PINCH_STEPS = 24;
-    private static final long HUMAN_TRANSITION_PINCH_STEP_DELAY_MS = 14L;
-    private static final int PAN_STEPS = 44;
+    private static final long TRAFFIC_LOAD_WAIT_MS = 6000L;
+    private static final long SANITY_TRAFFIC_LOAD_WAIT_MS = 3500L;
     private static final int SATELLITE_FAST_ZOOM_OUT_STEPS = 4;
-    private static final int SATELLITE_FAST_ZOOM_OUT_FULL_POWER_STEPS = 3;
-    private static final float SATELLITE_FAST_ZOOM_OUT_FINISH_PERCENT = 0.46f;
     private static final double COUNTRY_CONTINUITY_CONTINENT_ZOOM = 4.25;
     private static final double COUNTRY_CONTINUITY_COUNTRY_ZOOM = 5.4;
     private static final double COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM = 7.55;
     private static final String COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND = "regional100mi";
     private static final String COUNTRY_CONTINUITY_FULL_RANGE_BAND = "fullRange";
-    private static final int COUNTRY_CONTINUITY_FULL_RANGE_CYCLES = 1;
-    private static final int COUNTRY_CONTINUITY_FULL_RANGE_STEPS_PER_LEG = 7;
-    private static final int COUNTRY_CONTINUITY_FULL_RANGE_PREROLL_CLOSES = 0;
     private static final float MAP_FOCUS_SAFE_INSET_DP = 96f;
     private static final MajorTrafficCity[] MAJOR_TRAFFIC_CITIES = new MajorTrafficCity[] {
             new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04),
             new MajorTrafficCity("Atlanta", 33.64, -84.43),
-            new MajorTrafficCity("Denver", 39.86, -104.67),
             new MajorTrafficCity("Phoenix", 33.43, -112.01),
-            new MajorTrafficCity("Las Vegas", 36.08, -115.15)
+            new MajorTrafficCity("Las Vegas", 36.08, -115.15),
+            new MajorTrafficCity("Chicago", 41.88, -87.63),
+            new MajorTrafficCity("New York City", 40.73, -73.93),
+            new MajorTrafficCity("Los Angeles", 33.94, -118.40),
+            new MajorTrafficCity("London", 51.47, -0.45),
+            new MajorTrafficCity("Amsterdam", 52.31, 4.77),
+            new MajorTrafficCity("Frankfurt", 50.04, 8.56),
+            new MajorTrafficCity("Paris", 49.01, 2.55),
+            new MajorTrafficCity("Madrid", 40.49, -3.57)
     };
     private static final MajorTrafficCity[] INLAND_TRAFFIC_CITIES = new MajorTrafficCity[] {
             new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04),
             new MajorTrafficCity("Atlanta", 33.64, -84.43),
-            new MajorTrafficCity("Denver", 39.86, -104.67),
             new MajorTrafficCity("Phoenix", 33.43, -112.01),
-            new MajorTrafficCity("Las Vegas", 36.08, -115.15)
+            new MajorTrafficCity("Las Vegas", 36.08, -115.15),
+            new MajorTrafficCity("Chicago", 41.88, -87.63),
+            new MajorTrafficCity("New York City", 40.73, -73.93),
+            new MajorTrafficCity("Los Angeles", 33.94, -118.40),
+            new MajorTrafficCity("London", 51.47, -0.45),
+            new MajorTrafficCity("Amsterdam", 52.31, 4.77),
+            new MajorTrafficCity("Frankfurt", 50.04, 8.56),
+            new MajorTrafficCity("Paris", 49.01, 2.55),
+            new MajorTrafficCity("Madrid", 40.49, -3.57)
     };
     private static final MajorTrafficCity[] FULL_RANGE_LAND_SAFE_TRAFFIC_CITIES = new MajorTrafficCity[] {
             new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04),
             new MajorTrafficCity("Atlanta", 33.64, -84.43),
-            new MajorTrafficCity("Denver", 39.86, -104.67),
             new MajorTrafficCity("Phoenix", 33.43, -112.01),
-            new MajorTrafficCity("Las Vegas", 36.08, -115.15)
+            new MajorTrafficCity("Las Vegas", 36.08, -115.15),
+            new MajorTrafficCity("Frankfurt", 50.04, 8.56),
+            new MajorTrafficCity("Paris", 49.01, 2.55),
+            new MajorTrafficCity("Madrid", 40.49, -3.57)
     };
     private final java.util.ArrayList<Thread> scheduledCaptureThreads = new java.util.ArrayList<>();
     private MajorTrafficCity currentPerfCity = null;
@@ -86,6 +94,7 @@ public class FlightMapGesturePerfTest {
     private boolean currentPerfSkipTrafficPanel = false;
     private boolean currentPerfSkipTraffic = false;
     private boolean currentPerfTrafficDetailTiming = false;
+    private boolean currentPerfMapDetailTiming = false;
     private String currentPerfPhaseName = PERF_BAND_NOT_APPLICABLE;
     private String currentPerfPhaseZoomPlan = "";
     private String currentPerfPhaseGesturePlan = "";
@@ -97,6 +106,17 @@ public class FlightMapGesturePerfTest {
     private boolean centeredPerfGestureFocus = false;
     private boolean currentPerfFocusOpenMap = false;
     private boolean currentPerfTargetOptimizerSafe = true;
+
+    @After
+    public void holdForegroundForVideoEvidence() throws Exception {
+        int holdSeconds = instrumentationIntArgument("videoEvidenceHoldSeconds", 0);
+        if (holdSeconds <= 0) return;
+        long deadline = SystemClock.uptimeMillis() + holdSeconds * 1000L;
+        while (SystemClock.uptimeMillis() < deadline) {
+            requireFlightAlertForeground();
+            sleep(250);
+        }
+    }
 
     @Test
     public void launchOnly() throws Exception {
@@ -137,27 +157,19 @@ public class FlightMapGesturePerfTest {
         warmUpZoom(app);
         clearPerfCounters();
 
-        for (int cycle = 0; cycle < 6; cycle++) {
-            scaleAwareQuickPinchClose(app, "country");
-            sleep(90);
-            scaleAwareQuickPinchOpen(app, "country");
-            sleep(140);
-            scaleAwareQuickPinchClose(app, "country");
-            sleep(90);
-            scaleAwareQuickPinchOpen(app, "country");
-            sleep(160);
-            smallPanOverTraffic(app, "country");
+        int cycles = captureScreenshots ? 5 : 3;
+        for (int cycle = 0; cycle < cycles; cycle++) {
+            humanLikeQuickOverlappedPinch(app, "country", false);
+            sleep(80);
+            humanLikeQuickOverlappedPinch(app, "country", true);
+            sleep(110);
+            briefHumanPanOverTraffic(app, "country");
             requireFlightAlertForeground();
         }
-        for (int i = 0; i < 2; i++) {
-            quickPinchOpen(app);
-            sleep(110);
-        }
-        for (int i = 0; i < 2; i++) {
-            quickPinchClose(app);
-            sleep(110);
-        }
-        sleep(1200);
+        humanLikeOverlappedPinch(app, "country", true);
+        sleep(120);
+        humanLikeOverlappedPinch(app, "country", false);
+        sleep(500);
         requireFlightAlertForeground();
         capturePerfArtifacts(artifactName);
         if (captureScreenshots) {
@@ -267,24 +279,79 @@ public class FlightMapGesturePerfTest {
 
     @Test
     public void closeSatellitePanLabels() throws Exception {
+        runCloseSatellitePanLabels("closeSatellitePanLabels", true);
+    }
+
+    @Test
+    public void closeSatellitePanLabelsPerf() throws Exception {
+        runCloseSatellitePanLabels("closeSatellitePanLabelsPerf", false);
+    }
+
+    @Test
+    public void satellitePanZoomSanityPerf() throws Exception {
+        MajorTrafficCity city = randomInlandTrafficCity();
+        boolean skipChrome = instrumentationBooleanArgument("skipChrome");
+        boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
+        UiObject2 app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM, "SATELLITE", skipChrome, skipTraffic);
+        sleep(SANITY_TRAFFIC_LOAD_WAIT_MS);
+        setPerfPhaseMetadata(
+                "sanityPanZoom",
+                "launch_zoom=" + COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM + "; bounded_pan=true; human_like_overlapped_pan_pinch=true",
+                "short bounded pan plus overlapping pan/pinch zoom-out and zoom-in gestures over the timetable-selected US/EU traffic target"
+        );
+        clearPerfCounters();
+        markPerfPhase("satellitePanZoomSanityPerf", "sanityPanZoom", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "phase_start");
+        briefHumanPanOverTraffic(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND);
+        sleep(90);
+        markPerfPhase("satellitePanZoomSanityPerf", "sanityPanZoom", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_overlap_zoom_out");
+        humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, false);
+        sleep(120);
+        markPerfPhase("satellitePanZoomSanityPerf", "sanityPanZoom", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_overlap_zoom_in");
+        humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, true);
+        sleep(180);
+        requireFlightAlertForeground();
+        capturePerfArtifacts("satellitePanZoomSanityPerf");
+    }
+
+    private void runCloseSatellitePanLabels(String artifactName, boolean captureScreenshots) throws Exception {
         MajorTrafficCity city = randomInlandTrafficCity();
         boolean skipChrome = instrumentationBooleanArgument("skipChrome");
         boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
         UiObject2 app = startAppAtMajorTraffic(city, 12.2, "SATELLITE", skipChrome, skipTraffic);
         sleep(TRAFFIC_LOAD_WAIT_MS);
-        captureActiveDisplay("flightalert-perf-closeSatellitePanLabels-rest.png");
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
+        }
         clearPerfCounters();
 
-        scheduleActiveDisplayCapture("flightalert-perf-closeSatellitePanLabels-pan-start.png", 120);
-        panMajorCityCorridor(app, PAN_STEPS);
-        scheduleActiveDisplayCapture("flightalert-perf-closeSatellitePanLabels-pan-active.png", 120);
+        if (captureScreenshots) {
+            scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-pan-start.png", 120);
+        }
+        int panPasses = captureScreenshots ? 3 : 2;
+        for (int pass = 0; pass < panPasses; pass++) {
+            markPerfPhase(artifactName, "closeSatellitePanLabels", "close", "human_like_pan pass=" + (pass + 1) + "/" + panPasses);
+            briefHumanPanOverTraffic(app, "close");
+            sleep(80);
+        }
+        if (captureScreenshots) {
+            scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-pan-active.png", 120);
+        }
         sleep(450);
-        panMajorCityCorridor(app, PAN_STEPS);
-        sleep(900);
-        waitForScheduledCaptures();
+        if (captureScreenshots) {
+            markPerfPhase(artifactName, "closeSatellitePanLabels", "close", "human_like_pan evidence_finish");
+            briefHumanPanOverTraffic(app, "close");
+            sleep(900);
+        } else {
+            sleep(250);
+        }
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
         requireFlightAlertForeground();
-        captureActiveDisplay("flightalert-perf-closeSatellitePanLabels.png");
-        capturePerfArtifacts("closeSatellitePanLabels");
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
+        capturePerfArtifacts(artifactName);
     }
 
     @Test
@@ -307,17 +374,29 @@ public class FlightMapGesturePerfTest {
         for (int i = 0; i < 10; i++) {
             if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-start.png", 120);
             if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-out.png", 120);
-            smoothPinchOpen(app);
+            humanLikeOverlappedPinch(app, i < 4 ? "country" : COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, true);
             sleep(170);
         }
-        sleep(900);
+        sleep(250);
+        briefHumanPanOverTraffic(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND);
+        app = reanchorAtTrafficTarget(
+                city,
+                11.6,
+                mapSource,
+                false,
+                false,
+                true,
+                artifactName,
+                "close",
+                "reverse_leg_reanchor"
+        );
         for (int i = 0; i < 9; i++) {
             if (i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-reverse-start.png", 120);
             if (i == 4) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-in.png", 120);
-            smoothPinchClose(app);
+            humanLikeOverlappedPinch(app, i < 4 ? COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND : "country", false);
             sleep(170);
         }
-        sleep(1200);
+        sleep(600);
         waitForScheduledCaptures();
         requireFlightAlertForeground();
         captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
@@ -325,7 +404,7 @@ public class FlightMapGesturePerfTest {
     }
 
     private void runMorphTransitionSweep(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
-        MajorTrafficCity city = new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04);
+        MajorTrafficCity city = randomInlandTrafficCity();
         UiObject2 app = startAppAtMajorTraffic(city, 7.55, mapSource);
         sleep(TRAFFIC_LOAD_WAIT_MS);
         if (captureScreenshots) {
@@ -336,14 +415,26 @@ public class FlightMapGesturePerfTest {
         for (int i = 0; i < 7; i++) {
             if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-start.png", 120);
             if (captureScreenshots && i == 3) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-out.png", 120);
-            gentlePinchOpen(app);
+            humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, true);
             sleep(150);
         }
-        sleep(450);
+        sleep(220);
+        briefHumanPanOverTraffic(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND);
+        app = reanchorAtTrafficTarget(
+                city,
+                10.2,
+                mapSource,
+                false,
+                false,
+                true,
+                artifactName,
+                COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND,
+                "reverse_leg_reanchor"
+        );
         for (int i = 0; i < 7; i++) {
             if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-reverse-start.png", 120);
             if (captureScreenshots && i == 3) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-motion-active-in.png", 120);
-            gentlePinchClose(app);
+            humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, false);
             sleep(150);
         }
         sleep(900);
@@ -358,41 +449,26 @@ public class FlightMapGesturePerfTest {
     }
 
     private void runWideScaleZoomContinuity(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
-        MajorTrafficCity city = new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04);
-        UiObject2 app = startAppAtMajorTraffic(city, 3.25, mapSource, true);
+        MajorTrafficCity city = randomFullRangeLandSafeTrafficCity();
+        UiObject2 app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_CONTINENT_ZOOM, mapSource, true, false, true);
         sleep(TRAFFIC_LOAD_WAIT_MS);
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
         }
+        setPerfPhaseMetadata(
+                "continent",
+                "launch_zoom=" + COUNTRY_CONTINUITY_CONTINENT_ZOOM + "; app_focus_open_map=true; timetable_target=" + city.name,
+                "wide-scale continuity uses timetable-selected US/EU traffic and short human-like overlapped pan/pinch gestures, avoiding random far-field terrain"
+        );
         clearPerfCounters();
-
-        for (int i = 0; i < 4; i++) {
-            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-start.png", 120);
-            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-active.png", 120);
-            smoothPinchOpen(app);
-            sleep(170);
-        }
-        sleep(260);
-        for (int i = 0; i < 4; i++) {
-            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-start.png", 120);
-            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-active.png", 120);
-            smoothPinchClose(app);
-            sleep(170);
-        }
-        sleep(260);
-        for (int cycle = 0; cycle < 3; cycle++) {
-            if (captureScreenshots && cycle == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-start.png", 80);
-            if (captureScreenshots && cycle == 1) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-active.png", 80);
-            quickPinchOpen(app);
-            sleep(90);
-            quickPinchClose(app);
-            sleep(110);
-        }
-        sleep(900);
+        markPerfPhase(artifactName, "continent", "continent", "phase_start");
+        runHumanLikeBandMotion(app, artifactName, "continent", true, captureScreenshots);
+        sleep(700);
         if (captureScreenshots) {
             waitForScheduledCaptures();
         }
         requireFlightAlertForeground();
+        markPerfPhase(artifactName, "continent", "continent", "phase_capture_artifacts");
         capturePerfArtifacts(artifactName);
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
@@ -405,28 +481,7 @@ public class FlightMapGesturePerfTest {
         boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
         centeredPerfGestureFocus = false;
         try {
-            UiObject2 app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_CONTINENT_ZOOM, mapSource, skipChrome, skipTraffic, true);
-            sleep(TRAFFIC_LOAD_WAIT_MS);
-            if (captureScreenshots) {
-                captureActiveDisplay("flightalert-perf-" + artifactName + "-continent-rest.png");
-            }
-            setPerfPhaseMetadata(
-                    "continent",
-                    "launch_zoom=" + COUNTRY_CONTINUITY_CONTINENT_ZOOM + "; app_focus_open_map=true",
-                    "app camera and gestures share the unobstructed open-map focus; smooth_cycles=3; first_direction=zoom_in; quick_cycles=3; pan_after_quick=true"
-            );
-            clearPerfCounters();
-            markPerfPhase(artifactName, "continent", "continent", "phase_start");
-
-            runZoomContinuityPhase(app, artifactName, "continent", 3, true, captureScreenshots);
-            if (captureScreenshots) {
-                waitForScheduledCaptures();
-            }
-            requireFlightAlertForeground();
-            markPerfPhase(artifactName, "continent", "continent", "phase_capture_artifacts");
-            capturePerfArtifacts(artifactName + "-continent");
-
-            app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_COUNTRY_ZOOM, mapSource, skipChrome, skipTraffic, true);
+            UiObject2 app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_COUNTRY_ZOOM, mapSource, skipChrome, skipTraffic, true);
             sleep(TRAFFIC_LOAD_WAIT_MS);
             if (captureScreenshots) {
                 captureActiveDisplay("flightalert-perf-" + artifactName + "-country-rest.png");
@@ -434,68 +489,18 @@ public class FlightMapGesturePerfTest {
             setPerfPhaseMetadata(
                     "country",
                     "launch_zoom=" + COUNTRY_CONTINUITY_COUNTRY_ZOOM + "; app_focus_open_map=true",
-                    "app camera and gestures share the unobstructed open-map focus; smooth_cycles=5; first_direction=zoom_out; quick_cycles=3; pan_after_quick=true"
+                    "app camera and gestures share the unobstructed open-map focus; short human-like overlapped pan/pinch gestures; first_direction=zoom_out"
             );
             clearPerfCounters();
             markPerfPhase(artifactName, "country", "country", "phase_start");
-            runZoomContinuityPhase(app, artifactName, "country", 5, false, captureScreenshots);
-
-            sleep(900);
+            runHumanLikeBandMotion(app, artifactName, "country", false, captureScreenshots);
+            sleep(700);
             if (captureScreenshots) {
                 waitForScheduledCaptures();
             }
             requireFlightAlertForeground();
             markPerfPhase(artifactName, "country", "country", "phase_capture_artifacts");
-            capturePerfArtifacts(artifactName + "-country");
-
-            app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM, mapSource, skipChrome, skipTraffic, true);
-            sleep(TRAFFIC_LOAD_WAIT_MS);
-            if (captureScreenshots) {
-                captureActiveDisplay("flightalert-perf-" + artifactName + "-" + COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND + "-rest.png");
-            }
-            setPerfPhaseMetadata(
-                    COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND,
-                    "launch_zoom=" + COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM + "; app_focus_open_map=true",
-                    "app camera and gestures share the unobstructed open-map focus; smooth_cycles=3; first_direction=zoom_in; quick_cycles=3; pan_after_quick=true"
-            );
-            clearPerfCounters();
-            markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "phase_start");
-            runZoomContinuityPhase(app, artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, 3, true, captureScreenshots);
-
-            sleep(900);
-            if (captureScreenshots) {
-                waitForScheduledCaptures();
-            }
-            requireFlightAlertForeground();
-            markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "phase_capture_artifacts");
-            capturePerfArtifacts(artifactName + "-" + COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND);
-
-            app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_CONTINENT_ZOOM, mapSource, skipChrome, skipTraffic, true);
-            sleep(TRAFFIC_LOAD_WAIT_MS);
-            if (captureScreenshots) {
-                captureActiveDisplay("flightalert-perf-" + artifactName + "-" + COUNTRY_CONTINUITY_FULL_RANGE_BAND + "-rest.png");
-            }
-            setPerfPhaseMetadata(
-                    COUNTRY_CONTINUITY_FULL_RANGE_BAND,
-                    "start_from_launch_zoom=" + COUNTRY_CONTINUITY_CONTINENT_ZOOM +
-                            "; app_focus_open_map=true" +
-                            "; preroll_close_pinches=" + COUNTRY_CONTINUITY_FULL_RANGE_PREROLL_CLOSES +
-                            "; cycles=" + COUNTRY_CONTINUITY_FULL_RANGE_CYCLES +
-                            "; steps_per_in_out_leg=" + COUNTRY_CONTINUITY_FULL_RANGE_STEPS_PER_LEG +
-                            "; planned_band_order=continent>country>" + COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND + ">close",
-                    "app camera and gestures share the unobstructed open-map focus; anchored smooth pinches; bounded closed elliptical pan checkpoints; one bounded elliptical pinch while panning per leg"
-            );
-            clearPerfCounters();
-            markPerfPhase(artifactName, COUNTRY_CONTINUITY_FULL_RANGE_BAND, COUNTRY_CONTINUITY_FULL_RANGE_BAND, "phase_start");
-            runFullRangeZoomInvestigation(app, artifactName, captureScreenshots);
-
-            sleep(900);
-            if (captureScreenshots) {
-                waitForScheduledCaptures();
-            }
-            requireFlightAlertForeground();
-            markPerfPhase(artifactName, COUNTRY_CONTINUITY_FULL_RANGE_BAND, COUNTRY_CONTINUITY_FULL_RANGE_BAND, "phase_capture_artifacts");
-            capturePerfArtifacts(artifactName + "-" + COUNTRY_CONTINUITY_FULL_RANGE_BAND);
+            capturePerfArtifacts(artifactName);
             if (captureScreenshots) {
                 captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
             }
@@ -504,162 +509,56 @@ public class FlightMapGesturePerfTest {
         }
     }
 
-    private void runZoomContinuityPhase(UiObject2 app, String artifactName, String scaleName, int smoothCycles, boolean zoomInFirst, boolean captureScreenshots) throws Exception {
+    private void runHumanLikeBandMotion(UiObject2 app, String artifactName, String scaleName, boolean zoomInFirst, boolean captureScreenshots) throws Exception {
         String firstDirection = zoomInFirst ? "zoom_in" : "zoom_out";
         String reverseDirection = zoomInFirst ? "zoom_out" : "zoom_in";
-        markPerfPhase(artifactName, scaleName, scaleName, "smooth_a_start direction=" + firstDirection + " cycles=" + smoothCycles);
-        for (int i = 0; i < 5; i++) {
-            if (i >= smoothCycles) break;
-            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-motion-start-a.png", 120);
-            if (captureScreenshots && i == Math.max(1, smoothCycles / 2)) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-motion-active-a.png", 120);
-            markPerfPhase(artifactName, scaleName, scaleName, "smooth_a_step=" + (i + 1) + "/" + smoothCycles + " direction=" + firstDirection);
-            if (zoomInFirst) {
-                scaleAwareSmoothPinchOpen(app, scaleName);
-            } else {
-                scaleAwareSmoothPinchClose(app, scaleName);
-            }
-            sleep(150);
+        if (captureScreenshots) {
+            scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-human-motion-start.png", 120);
         }
-        sleep(300);
-        markPerfPhase(artifactName, scaleName, scaleName, "smooth_b_start direction=" + reverseDirection + " cycles=" + smoothCycles);
-        for (int i = 0; i < 5; i++) {
-            if (i >= smoothCycles) break;
-            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-reverse-start-b.png", 120);
-            if (captureScreenshots && i == Math.max(1, smoothCycles / 2)) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-motion-active-b.png", 120);
-            markPerfPhase(artifactName, scaleName, scaleName, "smooth_b_step=" + (i + 1) + "/" + smoothCycles + " direction=" + reverseDirection);
-            if (zoomInFirst) {
-                scaleAwareSmoothPinchClose(app, scaleName);
-            } else {
-                scaleAwareSmoothPinchOpen(app, scaleName);
-            }
-            sleep(150);
+        markPerfPhase(artifactName, scaleName, scaleName, "human_like_pan_start");
+        briefHumanPanOverTraffic(app, scaleName);
+        sleep(90);
+
+        if (captureScreenshots) {
+            scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-human-overlap-a.png", 120);
         }
-        sleep(250);
-        markPerfPhase(artifactName, scaleName, scaleName, "quick_cycles_start cycles=3 direction=zoom_out_then_in");
-        for (int cycle = 0; cycle < 3; cycle++) {
-            if (captureScreenshots && cycle == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-quick-start.png", 80);
-            if (captureScreenshots && cycle == 1) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-quick-active.png", 80);
-            markPerfPhase(artifactName, scaleName, scaleName, "quick_cycle=" + (cycle + 1) + "/3 direction=zoom_out_then_in");
-            scaleAwareQuickPinchClose(app, scaleName);
-            sleep(85);
-            scaleAwareQuickPinchOpen(app, scaleName);
-            sleep(95);
+        markPerfPhase(artifactName, scaleName, scaleName, "human_like_overlap direction=" + firstDirection);
+        humanLikeOverlappedPinch(app, scaleName, zoomInFirst);
+        sleep(130);
+
+        if (captureScreenshots) {
+            scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + scaleName + "-human-overlap-b.png", 120);
         }
-        markPerfPhase(artifactName, scaleName, scaleName, "pan_checkpoint after_quick_cycles");
-        smallPanOverTraffic(app, scaleName);
+        markPerfPhase(artifactName, scaleName, scaleName, "human_like_overlap direction=" + reverseDirection);
+        humanLikeOverlappedPinch(app, scaleName, !zoomInFirst);
+        sleep(130);
+
+        markPerfPhase(artifactName, scaleName, scaleName, "human_like_pan_finish");
+        briefHumanPanOverTraffic(app, scaleName);
         requireFlightAlertForeground();
-    }
-
-    private void runFullRangeZoomInvestigation(UiObject2 app, String artifactName, boolean captureScreenshots) throws Exception {
-        for (int i = 0; i < COUNTRY_CONTINUITY_FULL_RANGE_PREROLL_CLOSES; i++) {
-            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + COUNTRY_CONTINUITY_FULL_RANGE_BAND + "-preroll-start.png", 120);
-            markPerfPhase(artifactName, COUNTRY_CONTINUITY_FULL_RANGE_BAND, "country_to_continent", "preroll_close_step=" + (i + 1) + "/" + COUNTRY_CONTINUITY_FULL_RANGE_PREROLL_CLOSES);
-            smoothPinchClose(app);
-            sleep(145);
-            if (i == 2) {
-                markPerfPhase(artifactName, COUNTRY_CONTINUITY_FULL_RANGE_BAND, "country_to_continent", "pan_checkpoint preroll");
-                smallPanOverTraffic(app, "country_to_continent");
-            }
-        }
-        sleep(240);
-
-        for (int cycle = 0; cycle < COUNTRY_CONTINUITY_FULL_RANGE_CYCLES; cycle++) {
-            runFullRangeZoomLeg(app, artifactName, cycle, true, captureScreenshots);
-            sleep(220);
-            runFullRangeZoomLeg(app, artifactName, cycle, false, captureScreenshots);
-            sleep(220);
-        }
-        requireFlightAlertForeground();
-    }
-
-    private void runFullRangeZoomLeg(UiObject2 app, String artifactName, int cycle, boolean zoomIn, boolean captureScreenshots) throws Exception {
-        String directionName = zoomIn ? "zoom-in" : "zoom-out";
-        for (int step = 0; step < COUNTRY_CONTINUITY_FULL_RANGE_STEPS_PER_LEG; step++) {
-            String plannedBand = plannedFullRangeBand(zoomIn, step);
-            if (captureScreenshots && cycle == 0 && step == 0) {
-                scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + COUNTRY_CONTINUITY_FULL_RANGE_BAND + "-" + directionName + "-start.png", 120);
-            }
-            if (captureScreenshots && cycle == 0 && step == 4) {
-                scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-" + COUNTRY_CONTINUITY_FULL_RANGE_BAND + "-" + directionName + "-active.png", 120);
-            }
-            boolean driftWhilePanning = step == 3;
-            markPerfPhase(
-                    artifactName,
-                    COUNTRY_CONTINUITY_FULL_RANGE_BAND,
-                    plannedBand,
-                    "cycle=" + (cycle + 1) + "/" + COUNTRY_CONTINUITY_FULL_RANGE_CYCLES +
-                            " direction=" + directionName +
-                            " step=" + (step + 1) + "/" + COUNTRY_CONTINUITY_FULL_RANGE_STEPS_PER_LEG +
-                            " gesture=" + (driftWhilePanning ? "bounded_elliptical_pinch_pan" : "anchored_pinch")
-            );
-            if (driftWhilePanning) {
-                if (zoomIn) {
-                    driftingPinchOpen(app, plannedBand);
-                } else {
-                    driftingPinchClose(app, plannedBand);
-                }
-            } else if (zoomIn) {
-                scaleAwareSmoothPinchOpen(app, plannedBand);
-            } else {
-                scaleAwareSmoothPinchClose(app, plannedBand);
-            }
-            sleep(145);
-            if (cycle == 0 && (step == 1 || step == 5)) {
-                markPerfPhase(artifactName, COUNTRY_CONTINUITY_FULL_RANGE_BAND, plannedBand, "pan_checkpoint direction=" + directionName + " step=" + (step + 1));
-                smallPanOverTraffic(app, plannedBand);
-            }
-        }
-    }
-
-    private String plannedFullRangeBand(boolean zoomIn, int step) {
-        if (zoomIn) {
-            if (step < 2) return "continent";
-            if (step < 4) return "country";
-            if (step < 6) return COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND;
-            return "close";
-        }
-        if (step < 2) return "close";
-        if (step < 4) return COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND;
-        if (step < 6) return "country";
-        return "continent";
     }
 
     private void runCloseScaleZoomContinuity(String mapSource, String artifactName, boolean captureScreenshots) throws Exception {
         MajorTrafficCity city = randomFullRangeLandSafeTrafficCity();
-        UiObject2 app = startAppAtMajorTraffic(city, 11.6, mapSource);
+        UiObject2 app = startAppAtMajorTraffic(city, 11.6, mapSource, false, false, true);
         sleep(TRAFFIC_LOAD_WAIT_MS);
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
         }
+        setPerfPhaseMetadata(
+                "close",
+                "launch_zoom=11.6; app_focus_open_map=true; timetable_target=" + city.name,
+                "close-scale continuity uses brief human-like pan plus overlapping zoom-out/zoom-in gestures over the selected traffic target"
+        );
         clearPerfCounters();
-
-        for (int i = 0; i < 4; i++) {
-            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-start.png", 120);
-            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-active.png", 120);
-            smoothPinchOpen(app);
-            sleep(170);
-        }
-        sleep(300);
-        for (int i = 0; i < 5; i++) {
-            if (captureScreenshots && i == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-start.png", 120);
-            if (captureScreenshots && i == 2) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-active.png", 120);
-            smoothPinchClose(app);
-            sleep(150);
-        }
-        sleep(240);
-        for (int cycle = 0; cycle < 3; cycle++) {
-            if (captureScreenshots && cycle == 0) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-start.png", 80);
-            if (captureScreenshots && cycle == 1) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-quick-active.png", 80);
-            quickPinchClose(app);
-            sleep(90);
-            quickPinchOpen(app);
-            sleep(110);
-        }
-        sleep(900);
+        markPerfPhase(artifactName, "close", "close", "phase_start");
+        runHumanLikeBandMotion(app, artifactName, "close", false, captureScreenshots);
+        sleep(700);
         if (captureScreenshots) {
             waitForScheduledCaptures();
         }
         requireFlightAlertForeground();
+        markPerfPhase(artifactName, "close", "close", "phase_capture_artifacts");
         capturePerfArtifacts(artifactName);
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
@@ -675,26 +574,37 @@ public class FlightMapGesturePerfTest {
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
         }
+        setPerfPhaseMetadata(
+                COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND,
+                "launch_zoom=5.88; map_source=SATELLITE; timetable_target=" + city.name,
+                "satellite transition band uses human-like pan and overlapping pinch gestures rather than isolated pan/pause/zoom steps"
+        );
         clearPerfCounters();
 
         if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-pan-start.png", 120);
-        panSatelliteTransitionBand(app);
+        markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "country", "human_like_pan_start");
+        briefHumanPanOverTraffic(app, "country");
         sleep(180);
 
         if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-start.png", 120);
-        humanTransitionPinchOpen(app);
+        markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "country", "human_like_overlap direction=zoom_in step=1/2");
+        humanLikeOverlappedPinch(app, "country", true);
         if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-in-active.png", 170);
-        humanTransitionPinchOpen(app);
+        markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_overlap direction=zoom_in step=2/2");
+        humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, true);
         sleep(220);
 
         if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-start.png", 120);
-        humanTransitionPinchClose(app);
+        markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_overlap direction=zoom_out step=1/2");
+        humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, false);
         if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-active.png", 170);
-        humanTransitionPinchClose(app);
+        markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "country", "human_like_overlap direction=zoom_out step=2/2");
+        humanLikeOverlappedPinch(app, "country", false);
         sleep(220);
 
         if (captureScreenshots) scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-pan-after-zoom.png", 120);
-        panSatelliteTransitionBand(app);
+        markPerfPhase(artifactName, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "country", "human_like_pan_finish");
+        briefHumanPanOverTraffic(app, "country");
         sleep(900);
         if (captureScreenshots) {
             waitForScheduledCaptures();
@@ -725,8 +635,8 @@ public class FlightMapGesturePerfTest {
         }
         setPerfPhaseMetadata(
                 "fastZoomOutTileLoad",
-                "map_source=" + mapSource + "; launch_zoom=13.2; app_focus_open_map=true; " + SATELLITE_FAST_ZOOM_OUT_STEPS + " fast zoom-out pinches from close detail toward country/wide scale; first " + SATELLITE_FAST_ZOOM_OUT_FULL_POWER_STEPS + " are full-power and the remaining steps use a controlled finish to keep route proof valid; post-zoom recovery window captures tile load catch-up",
-                "anchored human-style quick pinch-close gestures over inland airport traffic; no keyboard zoom; recovery screenshots at 250/650/1200 ms after final zoom-out"
+                "map_source=" + mapSource + "; launch_zoom=13.2; app_focus_open_map=true; timetable_target=" + city.name + "; " + SATELLITE_FAST_ZOOM_OUT_STEPS + " human-like quick overlapping zoom-out gestures from close detail toward country/wide scale; post-zoom recovery window captures tile load catch-up",
+                "anchored quick overlap pinch-close gestures over selected US/EU airport traffic; no keyboard zoom; recovery screenshots at 250/650/1200 ms after final zoom-out"
         );
         clearPerfCounters();
         markPerfPhase(artifactName, "fastZoomOutTileLoad", "close", "phase_start " + mapLabel + "_close_tiles_loaded");
@@ -737,7 +647,7 @@ public class FlightMapGesturePerfTest {
                     artifactName,
                     "fastZoomOutTileLoad",
                     plannedBand,
-                    "fast_zoom_out_step=" + (step + 1) + "/" + SATELLITE_FAST_ZOOM_OUT_STEPS + " gesture=" + fastZoomOutGestureName(step)
+                    "fast_zoom_out_step=" + (step + 1) + "/" + SATELLITE_FAST_ZOOM_OUT_STEPS + " gesture=" + fastZoomOutGestureName(plannedBand)
             );
             if (captureScreenshots && step == 0) {
                 scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-start.png", 90);
@@ -748,7 +658,7 @@ public class FlightMapGesturePerfTest {
             if (captureScreenshots && step == SATELLITE_FAST_ZOOM_OUT_STEPS - 1) {
                 scheduleActiveDisplayCapture("flightalert-perf-" + artifactName + "-zoom-out-wide.png", 90);
             }
-            fastSatelliteZoomOutStep(app, step);
+            fastSatelliteZoomOutStep(app, plannedBand);
             sleep(65);
         }
 
@@ -777,37 +687,40 @@ public class FlightMapGesturePerfTest {
         return "continent";
     }
 
-    private void fastSatelliteZoomOutStep(UiObject2 app, int step) {
-        if (step < SATELLITE_FAST_ZOOM_OUT_FULL_POWER_STEPS) {
-            quickPinchClose(app);
-        } else {
-            anchoredPinch(app, SATELLITE_FAST_ZOOM_OUT_FINISH_PERCENT, QUICK_PINCH_SPEED_PX_PER_SEC, false);
-        }
+    private void fastSatelliteZoomOutStep(UiObject2 app, String plannedBand) {
+        humanLikeQuickOverlappedPinch(app, plannedBand, false);
     }
 
-    private String fastZoomOutGestureName(int step) {
-        if (step < SATELLITE_FAST_ZOOM_OUT_FULL_POWER_STEPS) return "anchored_full_power_quick_pinch_close";
-        return "anchored_controlled_quick_pinch_close_percent_" + SATELLITE_FAST_ZOOM_OUT_FINISH_PERCENT;
+    private String fastZoomOutGestureName(String plannedBand) {
+        return "human_like_quick_overlap_pinch_close_" + plannedBand;
     }
 
     @Test
     public void panAcrossZoomLevels() throws Exception {
         MajorTrafficCity city = randomInlandTrafficCity();
-        UiObject2 app = startAppAtMajorTraffic(city, 5.5);
+        UiObject2 app = startAppAtMajorTraffic(city, COUNTRY_CONTINUITY_COUNTRY_ZOOM, null, false, false, true);
         sleep(TRAFFIC_LOAD_WAIT_MS);
-        smoothPinchOpen(app);
-        sleep(500);
+        setPerfPhaseMetadata(
+                "multiZoomPan",
+                "launch_zoom=" + COUNTRY_CONTINUITY_COUNTRY_ZOOM + "; app_focus_open_map=true; timetable_target=" + city.name,
+                "pan checks include overlapping human-like zoom transitions across country, regional, and close bands"
+        );
         clearPerfCounters();
 
-        for (int level = 0; level < 4; level++) {
-            panMajorCityCorridor(app, PAN_STEPS);
+        String[] bands = new String[] {"country", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "close"};
+        for (int level = 0; level < bands.length; level++) {
+            String band = bands[level];
+            markPerfPhase("panAcrossZoomLevels", "multiZoomPan", band, "human_like_pan level=" + (level + 1));
+            briefHumanPanOverTraffic(app, band);
+            sleep(120);
+            markPerfPhase("panAcrossZoomLevels", "multiZoomPan", band, "human_like_overlap direction=zoom_in level=" + (level + 1));
+            humanLikeOverlappedPinch(app, band, true);
             sleep(180);
-            smoothPinchOpen(app);
-            sleep(260);
             requireFlightAlertForeground();
         }
-        panMajorCityCorridor(app, PAN_STEPS);
-        sleep(1200);
+        markPerfPhase("panAcrossZoomLevels", "multiZoomPan", "close", "human_like_pan_finish");
+        briefHumanPanOverTraffic(app, "close");
+        sleep(900);
         requireFlightAlertForeground();
         captureActiveDisplay("flightalert-perf-panAcrossZoomLevels.png");
         capturePerfArtifacts("panAcrossZoomLevels");
@@ -847,10 +760,12 @@ public class FlightMapGesturePerfTest {
         currentPerfSkipControls = instrumentationBooleanArgument("skipControls");
         currentPerfSkipTrafficPanel = instrumentationBooleanArgument("skipTrafficPanel");
         boolean trafficDetailTiming = instrumentationBooleanArgument("trafficDetailTiming");
+        boolean mapDetailTiming = instrumentationBooleanArgument("mapDetailTiming");
         Boolean mapRoads = instrumentationOptionalBooleanArgument("mapRoads");
         Boolean mapBorders = instrumentationOptionalBooleanArgument("mapBorders");
         requireCompleteMapReferenceArguments(mapRoads, mapBorders);
         currentPerfTrafficDetailTiming = trafficDetailTiming;
+        currentPerfMapDetailTiming = mapDetailTiming;
         currentPerfTargetOptimizerSafe = isOptimizerSafeTrafficCity(city);
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context context = instrumentation.getTargetContext();
@@ -877,36 +792,58 @@ public class FlightMapGesturePerfTest {
             intent.putExtra("com.flightalert.PERF_MAP_BORDERS_ENABLED", mapBorders.booleanValue());
         }
         if (skipChrome) {
-            intent.putExtra("com.flightalert.PERF_SKIP_CHROME", "true");
+            intent.putExtra("com.flightalert.PERF_SKIP_CHROME", true);
         }
         if (currentPerfSkipTopStatus) {
-            intent.putExtra("com.flightalert.PERF_SKIP_TOP_STATUS", "true");
+            intent.putExtra("com.flightalert.PERF_SKIP_TOP_STATUS", true);
         }
         if (currentPerfSkipControls) {
-            intent.putExtra("com.flightalert.PERF_SKIP_CONTROLS", "true");
+            intent.putExtra("com.flightalert.PERF_SKIP_CONTROLS", true);
         }
         if (currentPerfSkipTrafficPanel) {
-            intent.putExtra("com.flightalert.PERF_SKIP_TRAFFIC_PANEL", "true");
+            intent.putExtra("com.flightalert.PERF_SKIP_TRAFFIC_PANEL", true);
         }
         if (skipTraffic) {
-            intent.putExtra("com.flightalert.PERF_SKIP_TRAFFIC", "true");
+            intent.putExtra("com.flightalert.PERF_SKIP_TRAFFIC", true);
         }
         if (trafficDetailTiming) {
-            intent.putExtra("com.flightalert.PERF_TRAFFIC_DETAIL_TIMING", "true");
+            intent.putExtra("com.flightalert.PERF_TRAFFIC_DETAIL_TIMING", true);
+        }
+        if (mapDetailTiming) {
+            intent.putExtra("com.flightalert.PERF_MAP_DETAIL_TIMING", true);
         }
         if (mapSource != null) {
             intent.putExtra("com.flightalert.PERF_MAP_SOURCE", mapSource);
         }
         context.startActivity(intent);
-        instrumentation.waitForIdleSync();
+        sleep(250);
         acceptFlightAlertPermissionsIfPresent();
         if (!waitForFlightAlertForeground(8000L)) {
-            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, trafficDetailTiming, focusOpenMap);
-            instrumentation.waitForIdleSync();
+            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, trafficDetailTiming, mapDetailTiming, focusOpenMap);
+            sleep(250);
             acceptFlightAlertPermissionsIfPresent();
             assertTrue("Refusing to run gestures outside Flight Alert. Foreground was:\n" + foregroundDiagnostic(), waitForFlightAlertForeground(8000L));
         }
         return flightAlertRoot();
+    }
+
+    private UiObject2 reanchorAtTrafficTarget(
+            MajorTrafficCity city,
+            double zoom,
+            String mapSource,
+            boolean skipChrome,
+            boolean skipTraffic,
+            boolean focusOpenMap,
+            String artifactName,
+            String scaleBand,
+            String detail
+    ) throws Exception {
+        markPerfPhase(artifactName, scaleBand, scaleBand, detail + "_start city=" + city.name + " zoom=" + zoom);
+        UiObject2 app = startAppAtMajorTraffic(city, zoom, mapSource, skipChrome, skipTraffic, focusOpenMap);
+        sleep(SANITY_TRAFFIC_LOAD_WAIT_MS);
+        requireFlightAlertForeground();
+        markPerfPhase(artifactName, scaleBand, scaleBand, detail + "_complete city=" + city.name + " zoom=" + zoom);
+        return app;
     }
 
     private void requireCompleteMapReferenceArguments(Boolean mapRoads, Boolean mapBorders) {
@@ -923,19 +860,7 @@ public class FlightMapGesturePerfTest {
         runShell("appops set " + PACKAGE_NAME + " ACCESS_COARSE_LOCATION allow >/dev/null 2>&1 || true");
     }
 
-    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome) throws Exception {
-        launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, false);
-    }
-
-    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic) throws Exception {
-        launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, false);
-    }
-
-    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean trafficDetailTiming) throws Exception {
-        launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, trafficDetailTiming, true);
-    }
-
-    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean trafficDetailTiming, boolean focusOpenMap) throws Exception {
+    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean trafficDetailTiming, boolean mapDetailTiming, boolean focusOpenMap) throws Exception {
         StringBuilder command = new StringBuilder("am start -n ")
                 .append(PACKAGE_NAME).append("/.MainActivity")
                 .append(" --es com.flightalert.PERF_LAT ").append(city.lat)
@@ -956,22 +881,25 @@ public class FlightMapGesturePerfTest {
             command.append(" --ez com.flightalert.PERF_MAP_BORDERS_ENABLED ").append(mapBorders.booleanValue() ? "true" : "false");
         }
         if (skipChrome) {
-            command.append(" --es com.flightalert.PERF_SKIP_CHROME true");
+            command.append(" --ez com.flightalert.PERF_SKIP_CHROME true");
         }
         if (currentPerfSkipTopStatus) {
-            command.append(" --es com.flightalert.PERF_SKIP_TOP_STATUS true");
+            command.append(" --ez com.flightalert.PERF_SKIP_TOP_STATUS true");
         }
         if (currentPerfSkipControls) {
-            command.append(" --es com.flightalert.PERF_SKIP_CONTROLS true");
+            command.append(" --ez com.flightalert.PERF_SKIP_CONTROLS true");
         }
         if (currentPerfSkipTrafficPanel) {
-            command.append(" --es com.flightalert.PERF_SKIP_TRAFFIC_PANEL true");
+            command.append(" --ez com.flightalert.PERF_SKIP_TRAFFIC_PANEL true");
         }
         if (skipTraffic) {
-            command.append(" --es com.flightalert.PERF_SKIP_TRAFFIC true");
+            command.append(" --ez com.flightalert.PERF_SKIP_TRAFFIC true");
         }
         if (trafficDetailTiming) {
-            command.append(" --es com.flightalert.PERF_TRAFFIC_DETAIL_TIMING true");
+            command.append(" --ez com.flightalert.PERF_TRAFFIC_DETAIL_TIMING true");
+        }
+        if (mapDetailTiming) {
+            command.append(" --ez com.flightalert.PERF_MAP_DETAIL_TIMING true");
         }
         if (mapSource != null) {
             command.append(" --es com.flightalert.PERF_MAP_SOURCE ").append(mapSource);
@@ -1013,134 +941,34 @@ public class FlightMapGesturePerfTest {
     }
 
     private void warmUpZoom(UiObject2 app) throws Exception {
-        for (int i = 0; i < 3; i++) {
-            smoothPinchOpen(app);
-            sleep(180);
-        }
-        for (int i = 0; i < 2; i++) {
-            smoothPinchClose(app);
-            sleep(180);
-        }
+        humanLikeOverlappedPinch(app, "country", true);
+        sleep(140);
+        humanLikeOverlappedPinch(app, "country", false);
+        sleep(140);
         requireFlightAlertForeground();
     }
 
-    private void quickPinchOpen(UiObject2 app) {
-        anchoredPinch(app, 0.72f, QUICK_PINCH_SPEED_PX_PER_SEC, true);
+    private void humanLikeOverlappedPinch(UiObject2 app, String scaleBand, boolean open) {
+        humanLikeOverlappedPinchWithCadence(app, scaleBand, open, false, 18, 10L, 0.62f);
     }
 
-    private void quickPinchClose(UiObject2 app) {
-        anchoredPinch(app, 0.72f, QUICK_PINCH_SPEED_PX_PER_SEC, false);
+    private void humanLikeQuickOverlappedPinch(UiObject2 app, String scaleBand, boolean open) {
+        humanLikeOverlappedPinchWithCadence(app, scaleBand, open, true, 10, 8L, 0.95f);
     }
 
-    private void scaleAwareQuickPinchOpen(UiObject2 app, String scaleBand) {
-        anchoredPinch(app, pinchPercentForScaleBand(scaleBand, true, true), QUICK_PINCH_SPEED_PX_PER_SEC, true);
-    }
-
-    private void scaleAwareQuickPinchClose(UiObject2 app, String scaleBand) {
-        anchoredPinch(app, pinchPercentForScaleBand(scaleBand, true, false), QUICK_PINCH_SPEED_PX_PER_SEC, false);
-    }
-
-    private void smoothPinchOpen(UiObject2 app) {
-        anchoredPinch(app, 0.64f, SMOOTH_PINCH_SPEED_PX_PER_SEC, true);
-    }
-
-    private void smoothPinchClose(UiObject2 app) {
-        anchoredPinch(app, 0.64f, SMOOTH_PINCH_SPEED_PX_PER_SEC, false);
-    }
-
-    private void scaleAwareSmoothPinchOpen(UiObject2 app, String scaleBand) {
-        anchoredPinch(app, pinchPercentForScaleBand(scaleBand, false, true), SMOOTH_PINCH_SPEED_PX_PER_SEC, true);
-    }
-
-    private void scaleAwareSmoothPinchClose(UiObject2 app, String scaleBand) {
-        anchoredPinch(app, pinchPercentForScaleBand(scaleBand, false, false), SMOOTH_PINCH_SPEED_PX_PER_SEC, false);
-    }
-
-    private void gentlePinchOpen(UiObject2 app) {
-        anchoredPinch(app, 0.28f, SMOOTH_PINCH_SPEED_PX_PER_SEC, true);
-    }
-
-    private void gentlePinchClose(UiObject2 app) {
-        anchoredPinch(app, 0.28f, SMOOTH_PINCH_SPEED_PX_PER_SEC, false);
-    }
-
-    private void humanTransitionPinchOpen(UiObject2 app) {
-        anchoredPinchWithCadence(app, 0.42f, true, HUMAN_TRANSITION_PINCH_STEPS, HUMAN_TRANSITION_PINCH_STEP_DELAY_MS);
-    }
-
-    private void humanTransitionPinchClose(UiObject2 app) {
-        anchoredPinchWithCadence(app, 0.42f, false, HUMAN_TRANSITION_PINCH_STEPS, HUMAN_TRANSITION_PINCH_STEP_DELAY_MS);
-    }
-
-    private void driftingPinchOpen(UiObject2 app, String scaleBand) {
-        driftingPinchWithCadence(app, scaleBand, true, HUMAN_TRANSITION_PINCH_STEPS, HUMAN_TRANSITION_PINCH_STEP_DELAY_MS);
-    }
-
-    private void driftingPinchClose(UiObject2 app, String scaleBand) {
-        driftingPinchWithCadence(app, scaleBand, false, HUMAN_TRANSITION_PINCH_STEPS, HUMAN_TRANSITION_PINCH_STEP_DELAY_MS);
-    }
-
-    private void anchoredPinch(UiObject2 app, float percent, int speedPxPerSecond, boolean open) {
-        android.graphics.Rect bounds = app.getVisibleBounds();
-        float shortSide = Math.max(1f, Math.min(bounds.width(), bounds.height()));
-        float innerRadius = Math.max(42f, shortSide * 0.055f);
-        float outerRadius = Math.max(innerRadius + 48f, shortSide * percent * 0.42f);
-        int steps = anchoredPinchSteps(innerRadius, outerRadius, speedPxPerSecond);
-        anchoredPinchWithCadence(app, percent, open, steps, 8L);
-    }
-
-    private void anchoredPinchWithCadence(UiObject2 app, float percent, boolean open, int steps, long stepDelayMs) {
+    private void humanLikeOverlappedPinchWithCadence(UiObject2 app, String scaleBand, boolean open, boolean quick, int steps, long stepDelayMs, float percentScale) {
         android.graphics.Rect bounds = app.getVisibleBounds();
         android.graphics.Rect mapBounds = safeMapGestureBounds(bounds);
-        android.graphics.Point focus = anchoredMapFocus(app, bounds);
-        float centerX = focus.x;
-        float centerY = focus.y;
+        android.graphics.Point focus = mapFocusForBounds(bounds);
         float shortSide = Math.max(1f, Math.min(bounds.width(), bounds.height()));
         float innerRadius = Math.max(42f, shortSide * 0.055f);
-        float outerRadius = boundedHorizontalPinchRadius(focus, mapBounds, Math.max(innerRadius + 48f, shortSide * percent * 0.42f), innerRadius);
+        float percent = pinchPercentForScaleBand(scaleBand, quick, open) * percentScale;
+        float outerRadius = boundedHorizontalPinchRadius(focus, mapBounds, Math.max(innerRadius + 42f, shortSide * percent * 0.42f), innerRadius);
         float startRadius = open ? innerRadius : outerRadius;
         float endRadius = open ? outerRadius : innerRadius;
-        int clampedSteps = Math.max(8, steps);
-        long downTime = SystemClock.uptimeMillis();
-
-        MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[] {
-                pointerProperties(0),
-                pointerProperties(1)
-        };
-        MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[] {
-                pointerCoords(centerX - startRadius, centerY),
-                pointerCoords(centerX + startRadius, centerY)
-        };
-        injectMotion(downTime, downTime, MotionEvent.ACTION_DOWN, properties, coords, 1);
-        injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_POINTER_DOWN | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT), properties, coords, 2);
-        for (int step = 1; step <= clampedSteps; step++) {
-            float t = step / (float) clampedSteps;
-            float eased = t * t * (3f - 2f * t);
-            float radius = startRadius + (endRadius - startRadius) * eased;
-            coords[0].x = centerX - radius;
-            coords[0].y = centerY;
-            coords[1].x = centerX + radius;
-            coords[1].y = centerY;
-            injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, properties, coords, 2);
-            sleep(stepDelayMs);
-        }
-        injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_POINTER_UP | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT), properties, coords, 2);
-        injectMotion(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, properties, coords, 1);
-    }
-
-    private void driftingPinchWithCadence(UiObject2 app, String scaleBand, boolean open, int steps, long stepDelayMs) {
-        android.graphics.Rect bounds = app.getVisibleBounds();
-        android.graphics.Rect mapBounds = safeMapGestureBounds(bounds);
-        android.graphics.Point focus = anchoredMapFocus(app, bounds);
-        float shortSide = Math.max(1f, Math.min(bounds.width(), bounds.height()));
-        float innerRadius = Math.max(42f, shortSide * 0.055f);
-        float percent = pinchPercentForScaleBand(scaleBand, false, open);
-        float outerRadius = boundedHorizontalPinchRadius(focus, mapBounds, Math.max(innerRadius + 48f, shortSide * percent * 0.42f), innerRadius);
-        float startRadius = open ? innerRadius : outerRadius;
-        float endRadius = open ? outerRadius : innerRadius;
-        int clampedSteps = Math.max(8, steps);
-        float driftX = Math.min(Math.max(38f, bounds.width() * 0.055f), Math.max(24f, Math.min(focus.x - mapBounds.left - outerRadius, mapBounds.right - focus.x - outerRadius) - dp(12f)));
-        float driftY = Math.min(Math.max(28f, bounds.height() * 0.035f), Math.max(20f, Math.min(focus.y - mapBounds.top, mapBounds.bottom - focus.y) - dp(12f)));
+        int clampedSteps = Math.max(10, steps);
+        float maxShiftX = Math.min(dp(26f), Math.max(0f, Math.min(focus.x - mapBounds.left - outerRadius, mapBounds.right - focus.x - outerRadius) - dp(8f)));
+        float maxShiftY = Math.min(dp(18f), Math.max(0f, Math.min(focus.y - mapBounds.top, mapBounds.bottom - focus.y) - dp(8f)));
         long downTime = SystemClock.uptimeMillis();
 
         MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[] {
@@ -1158,11 +986,10 @@ public class FlightMapGesturePerfTest {
             float eased = t * t * (3f - 2f * t);
             float radius = startRadius + (endRadius - startRadius) * eased;
             float envelope = (float) Math.sin(Math.PI * eased);
-            float angle = (float) (Math.PI * 2.0 * eased);
-            float centerX = focus.x + envelope * driftX * (float) Math.cos(angle);
-            float centerY = focus.y + envelope * driftY * (float) Math.sin(angle);
+            float centerX = focus.x + envelope * maxShiftX * (open ? -0.7f : 0.7f);
+            float centerY = focus.y + envelope * maxShiftY * 0.45f * (float) Math.sin(Math.PI * 1.5f * eased);
             centerX = Math.max(mapBounds.left + radius, Math.min(mapBounds.right - radius, centerX));
-            centerY = Math.max(mapBounds.top + dp(12f), Math.min(mapBounds.bottom - dp(12f), centerY));
+            centerY = Math.max(mapBounds.top + dp(8f), Math.min(mapBounds.bottom - dp(8f), centerY));
             coords[0].x = centerX - radius;
             coords[0].y = centerY;
             coords[1].x = centerX + radius;
@@ -1190,16 +1017,6 @@ public class FlightMapGesturePerfTest {
         }
         if (!open) return quick ? 0.26f : 0.28f;
         return quick ? 0.36f : 0.40f;
-    }
-
-    private int anchoredPinchSteps(float startRadius, float endRadius, int speedPxPerSecond) {
-        float travel = Math.abs(endRadius - startRadius);
-        float durationMs = travel * 1000f / Math.max(1, speedPxPerSecond);
-        return Math.max(8, Math.min(42, Math.round(durationMs / 8f)));
-    }
-
-    private android.graphics.Point anchoredMapFocus(UiObject2 app, android.graphics.Rect bounds) {
-        return mapFocusForBounds(bounds);
     }
 
     private android.graphics.Point mapFocusForBounds(android.graphics.Rect bounds) {
@@ -1343,59 +1160,10 @@ public class FlightMapGesturePerfTest {
         }
     }
 
-    private void panMajorCityCorridor(UiObject2 app, int steps) throws Exception {
-        UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-        android.graphics.Rect appBounds = app.getVisibleBounds();
-        int width = appBounds.width();
-        int height = appBounds.height();
-        android.graphics.Rect bounds = safeMapGestureBounds(appBounds);
-        int cx = bounds.centerX();
-        int cy = bounds.centerY();
-        int horizontal = Math.max(Math.round(dp(96f)), Math.min(bounds.width() / 4, Math.round(width * 0.11f)));
-        int vertical = Math.max(Math.round(dp(72f)), Math.min(bounds.height() / 4, Math.round(height * 0.08f)));
-        int left = cx - horizontal;
-        int right = cx + horizontal;
-        int top = cy - vertical;
-        int middle = cy;
-        int bottom = cy + vertical;
-        device.swipe(right, top, left, top, steps);
-        sleep(90);
-        device.swipe(left, top, right, top, steps);
-        sleep(90);
-        device.swipe(right, middle, left, middle, steps);
-        sleep(90);
-        device.swipe(left, middle, right, middle, steps);
-        sleep(90);
-        device.swipe(right, bottom, left, bottom, steps);
-        sleep(90);
-        device.swipe(left, bottom, right, bottom, steps);
-        sleep(90);
-        device.swipe(cx, bottom, cx, top, steps);
-        sleep(90);
-        device.swipe(cx, top, cx, bottom, steps);
-        sleep(90);
-        device.swipe(right, bottom, left, top, steps);
-        sleep(90);
-        device.swipe(left, top, right, bottom, steps);
-        sleep(90);
-        device.swipe(left, bottom, right, top, steps);
-        sleep(90);
-        device.swipe(right, top, left, bottom, steps);
-        sleep(90);
-        ellipticalPanOverTraffic(app, Math.max(36, steps), 0.22f, 0.15f, true);
-        sleep(90);
-    }
-
-    private void smallPanOverTraffic(UiObject2 app, String scaleBand) throws Exception {
+    private void briefHumanPanOverTraffic(UiObject2 app, String scaleBand) throws Exception {
         PanEnvelope envelope = panEnvelopeForScaleBand(scaleBand);
-        ellipticalPanOverTraffic(app, 44, envelope.widthFraction, envelope.heightFraction, true, envelope.minRadiusDp, envelope.maxRadiusXDp, envelope.maxRadiusYDp);
-        sleep(70);
-        ellipticalPanOverTraffic(app, 44, envelope.widthFraction * 0.8f, envelope.heightFraction * 0.82f, false, envelope.minRadiusDp, envelope.maxRadiusXDp, envelope.maxRadiusYDp);
-        sleep(70);
-    }
-
-    private void ellipticalPanOverTraffic(UiObject2 app, int steps, float widthFraction, float heightFraction, boolean clockwise) throws Exception {
-        ellipticalPanOverTraffic(app, steps, widthFraction, heightFraction, clockwise, 42f, 156f, 112f);
+        ellipticalPanOverTraffic(app, 24, envelope.widthFraction * 0.55f, envelope.heightFraction * 0.52f, true, envelope.minRadiusDp, envelope.maxRadiusXDp * 0.65f, envelope.maxRadiusYDp * 0.65f);
+        sleep(45);
     }
 
     private void ellipticalPanOverTraffic(UiObject2 app, int steps, float widthFraction, float heightFraction, boolean clockwise, float minRadiusDp, float maxRadiusXDp, float maxRadiusYDp) throws Exception {
@@ -1444,33 +1212,6 @@ public class FlightMapGesturePerfTest {
             return new PanEnvelope(0.105f, 0.074f, 32f, 104f, 78f);
         }
         return new PanEnvelope(0.140f, 0.100f, 38f, 132f, 96f);
-    }
-
-    private void panSatelliteTransitionBand(UiObject2 app) throws Exception {
-        UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-        android.graphics.Rect appBounds = app.getVisibleBounds();
-        int width = appBounds.width();
-        int height = appBounds.height();
-        android.graphics.Rect bounds = safeMapGestureBounds(appBounds);
-        int cx = bounds.centerX();
-        int cy = bounds.centerY();
-        int dx = Math.max(Math.round(dp(12f)), Math.min(bounds.width() / 24, width / 42));
-        int dy = Math.max(Math.round(dp(10f)), Math.min(bounds.height() / 24, height / 44));
-        int left = cx - dx;
-        int right = cx + dx;
-        int top = cy - dy;
-        int middle = cy;
-        int bottom = cy + dy;
-        device.swipe(right, middle, left, middle, 34);
-        sleep(90);
-        device.swipe(left, middle, right, middle, 34);
-        sleep(90);
-        device.swipe(right, bottom, left, top, 38);
-        sleep(90);
-        device.swipe(left, top, right, bottom, 38);
-        sleep(90);
-        ellipticalPanOverTraffic(app, 36, 0.026f, 0.020f, true, 10f, 28f, 22f);
-        sleep(90);
     }
 
     private void clearPerfCounters() throws Exception {
@@ -1565,7 +1306,6 @@ public class FlightMapGesturePerfTest {
         writeShellArtifact("flightalert-perf-" + testName + "-gfxinfo.txt", "dumpsys gfxinfo " + PACKAGE_NAME);
         writeShellArtifact("flightalert-perf-" + testName + "-framestats.txt", "dumpsys gfxinfo " + PACKAGE_NAME + " framestats");
         writeShellArtifact("flightalert-perf-" + testName + "-activity.txt", "dumpsys activity activities");
-        writeShellArtifact("flightalert-perf-" + testName + "-logcat.txt", "logcat -d -t 3000");
     }
 
     private String currentPerfTargetDescription(String scaleBand) {
@@ -1584,6 +1324,7 @@ public class FlightMapGesturePerfTest {
         builder.append("skip_traffic_panel=").append(currentPerfSkipTrafficPanel).append('\n');
         builder.append("skip_traffic=").append(currentPerfSkipTraffic).append('\n');
         builder.append("traffic_detail_timing=").append(currentPerfTrafficDetailTiming).append('\n');
+        builder.append("map_detail_timing=").append(currentPerfMapDetailTiming).append('\n');
         builder.append("gesture_focus=").append(centeredPerfGestureFocus ? "screen-center" : "open-map").append('\n');
         builder.append("app_focus_open_map=").append(currentPerfFocusOpenMap).append('\n');
         builder.append("debug_focus_x_fraction=").append(Float.isNaN(currentPerfFocusXFraction) ? "unavailable" : currentPerfFocusXFraction).append('\n');
@@ -1598,7 +1339,7 @@ public class FlightMapGesturePerfTest {
         builder.append("gesture_trace_end\n");
         builder.append("actual_camera_log_source=paired logcat artifact; search for this run_id and Debug draw perf camera centerLat/centerLon lines.\n");
         builder.append("target_optimizer_safe=").append(currentPerfTargetOptimizerSafe).append('\n');
-        builder.append("target_rule=inland US major-airport traffic target plus bounded closed gestures for optimizer evidence; discard and rerun if the gesture focus drifts over water, empty terrain, or the launcher.\n");
+        builder.append("target_rule=timetable-backed US/EU major-airport traffic target plus bounded closed gestures for optimizer evidence; discard and rerun if the gesture focus drifts over water, empty terrain, an unintended desert/empty area, or the launcher.\n");
         builder.append("visual_evidence_land_safe=requires_review; screenshots/video must show the active gesture/focus over inland land/traffic. Incidental coastline or water at continent scale is acceptable only when focusLat/focusLon and visible motion stay over the requested inland traffic target.\n");
         builder.append("reject_evidence_if=gesture/focus over ocean/large lake/empty terrain/upper Canada/launcher/home screen, or focusLat/focusLon logs do not match the requested target/focus mode.\n");
         builder.append("phase_name=").append(currentPerfPhaseName).append('\n');
@@ -1608,7 +1349,7 @@ public class FlightMapGesturePerfTest {
         builder.append("scale_bands=continent,country,").append(COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND).append(',').append(COUNTRY_CONTINUITY_FULL_RANGE_BAND).append('\n');
         builder.append("country_phase_note=country launch zoom ").append(COUNTRY_CONTINUITY_COUNTRY_ZOOM).append(" intentionally pinches closed first, so active/quick screenshots can show country-to-global stress frames; do not treat those frames as pure city-centered country visual proof.\n");
         builder.append("regional100mi_phase_note=").append(COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND).append(" launch zoom ").append(COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM).append(" targets the 100 mi scale-bar neighborhood and pinches open first so the first active frames stay in the regional transition band before reversing.\n");
-        builder.append("full_range_phase_note=").append(COUNTRY_CONTINUITY_FULL_RANGE_BAND).append(" sweeps through the zoom range in/out, adds pan checkpoints, and logs planned zoom bands so framestats can be compared with logcat phase markers.\n");
+        builder.append("full_range_phase_note=").append(COUNTRY_CONTINUITY_FULL_RANGE_BAND).append(" sweeps through the zoom range in/out with anchored pinches, bounded pan checkpoints, and a relaunch/re-anchor over the selected US/EU target before reversing direction so zooming back in/out does not drift to unrelated terrain.\n");
         builder.append("fast_zoom_out_tile_load_note=fast tile-load tests start at close map detail, quickly pinch out to country/wide scale, then record the tile-load recovery window so unloaded-tile duration can be compared in logcat.\n");
         return builder.toString();
     }
@@ -1625,6 +1366,16 @@ public class FlightMapGesturePerfTest {
     private boolean instrumentationBooleanArgument(String name) {
         String value = InstrumentationRegistry.getArguments().getString(name);
         return "true".equalsIgnoreCase(value) || "1".equals(value) || "yes".equalsIgnoreCase(value);
+    }
+
+    private int instrumentationIntArgument(String name, int defaultValue) {
+        String value = InstrumentationRegistry.getArguments().getString(name);
+        if (value == null || value.trim().isEmpty()) return defaultValue;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException ignored) {
+            return defaultValue;
+        }
     }
 
     private Boolean instrumentationOptionalBooleanArgument(String name) {
@@ -1702,13 +1453,13 @@ public class FlightMapGesturePerfTest {
     private MajorTrafficCity randomMajorTrafficCity() {
         MajorTrafficCity fixed = fixedCityFromArguments(MAJOR_TRAFFIC_CITIES);
         rejectUnsupportedTargetCityIfRequested(fixed);
-        return fixed != null ? fixed : randomCityFrom(MAJOR_TRAFFIC_CITIES);
+        return fixed != null ? fixed : timetableTrafficCity(MAJOR_TRAFFIC_CITIES);
     }
 
     private MajorTrafficCity randomInlandTrafficCity() {
         MajorTrafficCity fixed = fixedCityFromArguments(INLAND_TRAFFIC_CITIES);
         rejectUnsupportedTargetCityIfRequested(fixed);
-        return fixed != null ? fixed : randomCityFrom(INLAND_TRAFFIC_CITIES);
+        return fixed != null ? fixed : timetableTrafficCity(INLAND_TRAFFIC_CITIES);
     }
 
     private MajorTrafficCity randomFullRangeLandSafeTrafficCity() {
@@ -1717,17 +1468,17 @@ public class FlightMapGesturePerfTest {
         String requested = InstrumentationRegistry.getArguments().getString("targetCity");
         if (requested != null && !requested.trim().isEmpty()) {
             throw new IllegalArgumentException(
-                    "targetCity=" + requested + " is not a full-range inland US optimizer target. Use Dallas-Fort Worth, Atlanta, Denver, Phoenix, or Las Vegas."
+                    "targetCity=" + requested + " is not a full-range land-safe optimizer target. Choose from the timetable-backed US/EU target list."
             );
         }
-        return randomCityFrom(FULL_RANGE_LAND_SAFE_TRAFFIC_CITIES);
+        return timetableTrafficCity(FULL_RANGE_LAND_SAFE_TRAFFIC_CITIES);
     }
 
     private void rejectUnsupportedTargetCityIfRequested(MajorTrafficCity fixed) {
         String requested = InstrumentationRegistry.getArguments().getString("targetCity");
         if (fixed == null && requested != null && !requested.trim().isEmpty()) {
             throw new IllegalArgumentException(
-                    "targetCity=" + requested + " is not a bounded inland US optimizer target for this test. Use Dallas-Fort Worth, Atlanta, Denver, Phoenix, or Las Vegas."
+                    "targetCity=" + requested + " is not a bounded land-safe optimizer target for this test. Choose from the timetable-backed US/EU target list."
             );
         }
     }
@@ -1741,9 +1492,16 @@ public class FlightMapGesturePerfTest {
         }
         if ("dfw".equals(key)) return findCity(cities, "Dallas-Fort Worth");
         if ("atl".equals(key)) return findCity(cities, "Atlanta");
-        if ("den".equals(key)) return findCity(cities, "Denver");
         if ("phx".equals(key)) return findCity(cities, "Phoenix");
         if ("las".equals(key) || "vegas".equals(key)) return findCity(cities, "Las Vegas");
+        if ("chi".equals(key) || "ord".equals(key)) return findCity(cities, "Chicago");
+        if ("nyc".equals(key) || "jfk".equals(key) || "ewr".equals(key) || "lga".equals(key)) return findCity(cities, "New York City");
+        if ("la".equals(key) || "lax".equals(key)) return findCity(cities, "Los Angeles");
+        if ("lhr".equals(key) || "lon".equals(key)) return findCity(cities, "London");
+        if ("ams".equals(key)) return findCity(cities, "Amsterdam");
+        if ("fra".equals(key)) return findCity(cities, "Frankfurt");
+        if ("cdg".equals(key) || "par".equals(key)) return findCity(cities, "Paris");
+        if ("mad".equals(key)) return findCity(cities, "Madrid");
         return null;
     }
 
@@ -1764,14 +1522,29 @@ public class FlightMapGesturePerfTest {
         return false;
     }
 
-    private String normalizeCityName(String value) {
-        return value.toLowerCase(java.util.Locale.US).replaceAll("[^a-z0-9]", "");
+    private MajorTrafficCity timetableTrafficCity(MajorTrafficCity[] cities) {
+        int utcHour = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+                .get(java.util.Calendar.HOUR_OF_DAY);
+        String[] preferredNames;
+        if ((utcHour >= 5 && utcHour < 15) || (utcHour >= 3 && utcHour < 5)) {
+            preferredNames = new String[] {"Frankfurt", "Paris", "Madrid", "London", "Amsterdam"};
+        } else if (utcHour >= 15 && utcHour < 22) {
+            preferredNames = new String[] {"Atlanta", "Dallas-Fort Worth", "Chicago", "New York City", "Los Angeles", "Phoenix", "Las Vegas"};
+        } else {
+            preferredNames = new String[] {"Dallas-Fort Worth", "Atlanta", "Los Angeles", "Chicago", "New York City", "Phoenix", "Las Vegas"};
+        }
+        for (String name : preferredNames) {
+            MajorTrafficCity city = findCity(cities, name);
+            if (city != null) {
+                System.out.println("Timetable-selected traffic city at UTC hour " + utcHour + ": " + city.name);
+                return city;
+            }
+        }
+        return cities[0];
     }
 
-    private MajorTrafficCity randomCityFrom(MajorTrafficCity[] cities) {
-        long seed = System.currentTimeMillis() ^ System.nanoTime();
-        int index = (int) Math.abs(seed % cities.length);
-        return cities[index];
+    private String normalizeCityName(String value) {
+        return value.toLowerCase(java.util.Locale.US).replaceAll("[^a-z0-9]", "");
     }
 
     private String runShell(String command) throws IOException {

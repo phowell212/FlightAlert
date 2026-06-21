@@ -11,7 +11,11 @@ import android.content.Context;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
 
-import com.flightalert.settings.FlightAlertSettings;
+import com.flightalert.AircraftAlertService;
+import com.flightalert.AlertAircraft;
+import com.flightalert.AlertAircraftClassifier;
+import com.flightalert.FlightAlertSettings;
+import com.flightalert.PriorityNotificationPresenter;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;

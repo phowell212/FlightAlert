@@ -134,7 +134,17 @@ import org.json.JSONObject
 // ============================================================================
 
 // Small primitives used across otherwise unrelated flows live here so their behavior
-// cannot drift between renderers, controllers, and data sources.
+// cannot drift between renderers, controllers, and data sources unless the user
+// explicitly requests it.
+private const val DEBUG_TICKER_REDRAW_NONE = 0
+private const val DEBUG_TICKER_REDRAW_INTERACTION_ONLY = 1
+private const val DEBUG_TICKER_REDRAW_INTERACTION_MOTION = 2
+private const val DEBUG_TICKER_REDRAW_APPEARANCE = 3
+private const val DEBUG_TICKER_REDRAW_FIRST_DRAW = 4
+private const val DEBUG_TICKER_REDRAW_MAX_INTERVAL = 5
+private const val DEBUG_TICKER_REDRAW_ALWAYS_ZOOM = 6
+private const val DEBUG_TICKER_REDRAW_MOTION_DELTA = 7
+
 private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float {
     val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
     return t * t * (3f - 2f * t)
@@ -4410,6 +4420,7 @@ class MainActivity : ComponentActivity() {
         val skip_controls = intent.optional_boolean_extra(EXTRA_PERF_SKIP_CONTROLS) == true
         val skip_traffic_panel = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TRAFFIC_PANEL) == true
         val traffic_detail_timing = intent.optional_boolean_extra(EXTRA_PERF_TRAFFIC_DETAIL_TIMING) == true
+        val map_detail_timing = intent.optional_boolean_extra(EXTRA_PERF_MAP_DETAIL_TIMING) == true
         flight_map_view?.apply_debug_perf_viewport(
             lat = lat,
             lon = lon,
@@ -4430,7 +4441,8 @@ class MainActivity : ComponentActivity() {
             perf_skip_top_status = skip_top_status,
             perf_skip_controls = skip_controls,
             perf_skip_traffic_panel = skip_traffic_panel,
-            perf_traffic_detail_timing = traffic_detail_timing
+            perf_traffic_detail_timing = traffic_detail_timing,
+            perf_map_detail_timing = map_detail_timing
         )
     }
 
@@ -4445,13 +4457,12 @@ class MainActivity : ComponentActivity() {
 
     private fun Intent.optional_boolean_extra(name: String): Boolean? {
         if (!hasExtra(name)) return null
-        getStringExtra(name)?.let { value ->
-            return value.equals("true", ignoreCase = true) || value == "1"
-        }
         return try {
             getBooleanExtra(name, false)
         } catch (_: ClassCastException) {
-            null
+            getStringExtra(name)?.let { value ->
+                value.equals("true", ignoreCase = true) || value == "1"
+            }
         }
     }
 
@@ -4487,6 +4498,7 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PERF_SKIP_CONTROLS = "com.flightalert.PERF_SKIP_CONTROLS"
         const val EXTRA_PERF_SKIP_TRAFFIC_PANEL = "com.flightalert.PERF_SKIP_TRAFFIC_PANEL"
         const val EXTRA_PERF_TRAFFIC_DETAIL_TIMING = "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING"
+        const val EXTRA_PERF_MAP_DETAIL_TIMING = "com.flightalert.PERF_MAP_DETAIL_TIMING"
         const val DEFAULT_PERF_ZOOM = FlightAlertSettings.PerfLaunch.DEFAULT_ZOOM
     }
 }
@@ -8846,6 +8858,24 @@ class FlightMapView(
     private var debug_last_traffic_symbol_count = 0
     private var debug_last_traffic_dot_count = 0
     private var debug_last_traffic_state_build_summary = ""
+    private var debug_ticker_redraw_reason = DEBUG_TICKER_REDRAW_NONE
+    private var debug_pending_ticker_redraw_reason = DEBUG_TICKER_REDRAW_NONE
+    private var debug_current_draw_ticker_reason = DEBUG_TICKER_REDRAW_NONE
+    private var debug_current_draw_same_camera_traffic = false
+    private var debug_ticker_posts = 0
+    private var debug_ticker_interaction_only_posts = 0
+    private var debug_ticker_interaction_motion_posts = 0
+    private var debug_ticker_appearance_posts = 0
+    private var debug_ticker_first_draw_posts = 0
+    private var debug_ticker_max_interval_posts = 0
+    private var debug_ticker_always_zoom_posts = 0
+    private var debug_ticker_motion_delta_posts = 0
+    private var debug_ticker_draws = 0
+    private var debug_ticker_same_camera_traffic_draws = 0
+    private var debug_ticker_interaction_only_same_camera_traffic_draws = 0
+    private var debug_ticker_same_camera_traffic_ns = 0L
+    private var debug_ticker_interaction_only_same_camera_traffic_ns = 0L
+    private var debug_last_draw_signature: DebugTickerDrawSignature? = null
 
     // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
@@ -8870,6 +8900,16 @@ class FlightMapView(
     private var deferred_aircraft_feed_publish: DeferredAircraftFeedPublish? = null
     private var deferred_aircraft_feed_publish_scheduled = false
 
+    private data class DebugTickerDrawSignature(
+        val center_x_bits: Long,
+        val center_y_bits: Long,
+        val zoom_bits: Long,
+        val width_bits: Int,
+        val height_bits: Int,
+        val traffic_token: Long,
+        val active_appearance: Boolean
+    )
+
     // Insets describe the safe drawing rectangle after Android bars, cutouts, and fold areas are removed.
     private var safe_inset_left = 0f
     private var safe_inset_top = 0f
@@ -8886,6 +8926,9 @@ class FlightMapView(
             }
             publish_priority_notification_snapshot_if_due(now)
             if (should_redraw_from_ticker(now)) {
+                if (debug_perf_viewport_active) {
+                    debug_record_ticker_redraw_post(debug_ticker_redraw_reason)
+                }
                 postInvalidateOnAnimation()
             }
             postOnAnimation(this)
@@ -8931,20 +8974,41 @@ class FlightMapView(
     }
 
     private fun should_redraw_from_ticker(now_elapsed_ms: Long): Boolean {
-        if (map_touch_active || pinch_in_progress || drag_started) return true
-        if (has_active_aircraft_appearance(now_elapsed_ms)) return true
-        if (debug_perf_viewport_active && debug_perf_skip_traffic) return false
+        val reason = ticker_redraw_reason(now_elapsed_ms)
+        debug_ticker_redraw_reason = reason
+        return reason != DEBUG_TICKER_REDRAW_NONE
+    }
+
+    private fun ticker_redraw_reason(now_elapsed_ms: Long): Int {
+        if (map_touch_active || pinch_in_progress || drag_started) {
+            if (!debug_perf_viewport_active) return DEBUG_TICKER_REDRAW_INTERACTION_ONLY
+            return if (ticker_motion_redraw_reason(now_elapsed_ms) == DEBUG_TICKER_REDRAW_NONE) {
+                DEBUG_TICKER_REDRAW_INTERACTION_ONLY
+            } else {
+                DEBUG_TICKER_REDRAW_INTERACTION_MOTION
+            }
+        }
+        if (has_active_aircraft_appearance(now_elapsed_ms)) return DEBUG_TICKER_REDRAW_APPEARANCE
+        if (debug_perf_viewport_active && debug_perf_skip_traffic) return DEBUG_TICKER_REDRAW_NONE
+        return ticker_motion_redraw_reason(now_elapsed_ms)
+    }
+
+    private fun ticker_motion_redraw_reason(now_elapsed_ms: Long): Int {
         val last_draw = last_traffic_draw_elapsed_ms
-        if (last_draw <= 0L) return true
+        if (last_draw <= 0L) return DEBUG_TICKER_REDRAW_FIRST_DRAW
         val elapsed_ms = now_elapsed_ms - last_draw
-        if (elapsed_ms <= 0L) return false
-        if (elapsed_ms >= AIRCRAFT_MOTION_REDRAW_MAX_INTERVAL_MS) return true
-        val viewport = current_interaction_viewport() ?: return false
-        if (viewport.zoom >= AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM) return true
+        if (elapsed_ms <= 0L) return DEBUG_TICKER_REDRAW_NONE
+        if (elapsed_ms >= AIRCRAFT_MOTION_REDRAW_MAX_INTERVAL_MS) return DEBUG_TICKER_REDRAW_MAX_INTERVAL
+        val viewport = current_interaction_viewport() ?: return DEBUG_TICKER_REDRAW_NONE
+        if (viewport.zoom >= AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM) return DEBUG_TICKER_REDRAW_ALWAYS_ZOOM
         val max_speed_zoom_zero = cached_traffic().max_projected_speed_zoom_zero
-        if (max_speed_zoom_zero <= 0.0 || !max_speed_zoom_zero.isFinite()) return false
+        if (max_speed_zoom_zero <= 0.0 || !max_speed_zoom_zero.isFinite()) return DEBUG_TICKER_REDRAW_NONE
         val max_motion_px = max_speed_zoom_zero * 2.0.pow(viewport.zoom) * elapsed_ms / 1000.0
-        return max_motion_px >= AIRCRAFT_MOTION_REDRAW_MIN_PIXEL_DELTA
+        return if (max_motion_px >= AIRCRAFT_MOTION_REDRAW_MIN_PIXEL_DELTA) {
+            DEBUG_TICKER_REDRAW_MOTION_DELTA
+        } else {
+            DEBUG_TICKER_REDRAW_NONE
+        }
     }
 
     private fun has_active_aircraft_appearance(now_elapsed_ms: Long): Boolean {
@@ -9078,7 +9142,8 @@ class FlightMapView(
         perf_skip_top_status: Boolean = false,
         perf_skip_controls: Boolean = false,
         perf_skip_traffic_panel: Boolean = false,
-        perf_traffic_detail_timing: Boolean = false
+        perf_traffic_detail_timing: Boolean = false,
+        perf_map_detail_timing: Boolean = false
     ) {
         if (!lat.isFinite() || !lon.isFinite() || !target_zoom.isFinite()) return
         zoom = target_zoom.coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
@@ -9127,6 +9192,7 @@ class FlightMapView(
         debug_perf_skip_controls = perf_skip_controls
         debug_perf_skip_traffic_panel = perf_skip_traffic_panel
         debug_perf_traffic_detail_timing = perf_traffic_detail_timing
+        map_tile_renderer.debug_collect_detail_timing = perf_map_detail_timing
         debug_perf_focus_open_map = perf_focus_open_map
         debug_perf_focus_applied = false
         debug_perf_focus_x_fraction = perf_focus_x_fraction?.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0)
@@ -9147,12 +9213,82 @@ class FlightMapView(
                 "skipTraffic=$debug_perf_skip_traffic skipChrome=$debug_perf_skip_chrome " +
                 "skipTopStatus=$debug_perf_skip_top_status skipControls=$debug_perf_skip_controls " +
                 "skipTrafficPanel=$debug_perf_skip_traffic_panel " +
-                "trafficDetailTiming=$debug_perf_traffic_detail_timing"
+                "trafficDetailTiming=$debug_perf_traffic_detail_timing mapDetailTiming=$perf_map_detail_timing"
         )
         mark_traffic_cache_dirty()
         map_status = "Loading map"
         if (latest_location != null) request_visible_aircraft_if_needed(force = true)
         postInvalidateOnAnimation()
+    }
+
+    private fun debug_record_ticker_redraw_post(reason: Int) {
+        if (!debug_perf_viewport_active || reason == DEBUG_TICKER_REDRAW_NONE) return
+        debug_pending_ticker_redraw_reason = reason
+        debug_ticker_posts++
+        when (reason) {
+            DEBUG_TICKER_REDRAW_INTERACTION_ONLY -> debug_ticker_interaction_only_posts++
+            DEBUG_TICKER_REDRAW_INTERACTION_MOTION -> debug_ticker_interaction_motion_posts++
+            DEBUG_TICKER_REDRAW_APPEARANCE -> debug_ticker_appearance_posts++
+            DEBUG_TICKER_REDRAW_FIRST_DRAW -> debug_ticker_first_draw_posts++
+            DEBUG_TICKER_REDRAW_MAX_INTERVAL -> debug_ticker_max_interval_posts++
+            DEBUG_TICKER_REDRAW_ALWAYS_ZOOM -> debug_ticker_always_zoom_posts++
+            DEBUG_TICKER_REDRAW_MOTION_DELTA -> debug_ticker_motion_delta_posts++
+        }
+    }
+
+    private fun debug_note_draw_start(viewport: Viewport, now_elapsed_ms: Long) {
+        if (!debug_perf_viewport_active) return
+        debug_current_draw_ticker_reason = DEBUG_TICKER_REDRAW_NONE
+        debug_current_draw_same_camera_traffic = false
+        val signature = debug_ticker_draw_signature(viewport, now_elapsed_ms)
+        val pending_reason = debug_pending_ticker_redraw_reason
+        if (pending_reason != DEBUG_TICKER_REDRAW_NONE) {
+            debug_pending_ticker_redraw_reason = DEBUG_TICKER_REDRAW_NONE
+            debug_current_draw_ticker_reason = pending_reason
+            debug_ticker_draws++
+            if (debug_last_draw_signature == signature) {
+                debug_current_draw_same_camera_traffic = true
+                debug_ticker_same_camera_traffic_draws++
+                if (pending_reason == DEBUG_TICKER_REDRAW_INTERACTION_ONLY) {
+                    debug_ticker_interaction_only_same_camera_traffic_draws++
+                }
+            }
+        }
+        debug_last_draw_signature = signature
+    }
+
+    private fun debug_ticker_draw_signature(viewport: Viewport, now_elapsed_ms: Long): DebugTickerDrawSignature {
+        return DebugTickerDrawSignature(
+            center_x_bits = java.lang.Double.doubleToLongBits(viewport.center_x),
+            center_y_bits = java.lang.Double.doubleToLongBits(viewport.center_y),
+            zoom_bits = java.lang.Double.doubleToLongBits(viewport.zoom),
+            width_bits = java.lang.Float.floatToIntBits(viewport.width),
+            height_bits = java.lang.Float.floatToIntBits(viewport.height),
+            traffic_token = traffic_cache_rebuild_token,
+            active_appearance = has_active_aircraft_appearance(now_elapsed_ms)
+        )
+    }
+
+    private fun debug_ticker_summary(): String {
+        if (debug_ticker_posts <= 0 && debug_ticker_draws <= 0) return ""
+        val same_avg = if (debug_ticker_same_camera_traffic_draws > 0) {
+            debug_ticker_same_camera_traffic_ns.ms(debug_ticker_same_camera_traffic_draws)
+        } else {
+            "0.00ms"
+        }
+        val same_interaction_avg = if (debug_ticker_interaction_only_same_camera_traffic_draws > 0) {
+            debug_ticker_interaction_only_same_camera_traffic_ns.ms(debug_ticker_interaction_only_same_camera_traffic_draws)
+        } else {
+            "0.00ms"
+        }
+        return "tickerPosts=$debug_ticker_posts " +
+            "iOnly=$debug_ticker_interaction_only_posts iMotion=$debug_ticker_interaction_motion_posts " +
+            "appearance=$debug_ticker_appearance_posts first=$debug_ticker_first_draw_posts " +
+            "maxInt=$debug_ticker_max_interval_posts alwaysZoom=$debug_ticker_always_zoom_posts " +
+            "motionDelta=$debug_ticker_motion_delta_posts tickerDraws=$debug_ticker_draws " +
+            "sameCameraTraffic=$debug_ticker_same_camera_traffic_draws sameCameraTrafficAvg=$same_avg " +
+            "iOnlySameCameraTraffic=$debug_ticker_interaction_only_same_camera_traffic_draws " +
+            "iOnlySameCameraTrafficAvg=$same_interaction_avg "
     }
 
     private fun debug_record_draw_perf(
@@ -9173,6 +9309,12 @@ class FlightMapView(
         debug_draw_perf_path_ns += path_ns
         debug_draw_perf_traffic_ns += traffic_ns
         debug_draw_perf_chrome_ns += chrome_ns
+        if (debug_current_draw_same_camera_traffic) {
+            debug_ticker_same_camera_traffic_ns += traffic_ns
+            if (debug_current_draw_ticker_reason == DEBUG_TICKER_REDRAW_INTERACTION_ONLY) {
+                debug_ticker_interaction_only_same_camera_traffic_ns += traffic_ns
+            }
+        }
         if (total_ns >= debug_draw_perf_max_ns) {
             debug_draw_perf_max_ns = total_ns
             debug_draw_perf_max_detail_summary = debug_current_draw_detail_summary()
@@ -9205,6 +9347,7 @@ class FlightMapView(
                 "lastLayerDraw=${layer_draw_ns.ms()} lastPath=${path_ns.ms()} lastTraffic=${traffic_ns.ms()} lastChrome=${chrome_ns.ms()} " +
                 "symbols=$debug_last_traffic_symbol_count dots=$debug_last_traffic_dot_count " +
                 debug_last_traffic_state_build_summary +
+                debug_ticker_summary() +
                 map_tile_renderer.debug_last_tile_summary +
                 traffic_overlay_renderer.debug_last_symbol_cache_summary +
                 traffic_overlay_renderer.debug_last_detail_timing_summary +
@@ -9257,6 +9400,19 @@ class FlightMapView(
         debug_draw_perf_chrome_ns = 0L
         debug_draw_perf_max_ns = 0L
         debug_draw_perf_max_detail_summary = ""
+        debug_ticker_posts = 0
+        debug_ticker_interaction_only_posts = 0
+        debug_ticker_interaction_motion_posts = 0
+        debug_ticker_appearance_posts = 0
+        debug_ticker_first_draw_posts = 0
+        debug_ticker_max_interval_posts = 0
+        debug_ticker_always_zoom_posts = 0
+        debug_ticker_motion_delta_posts = 0
+        debug_ticker_draws = 0
+        debug_ticker_same_camera_traffic_draws = 0
+        debug_ticker_interaction_only_same_camera_traffic_draws = 0
+        debug_ticker_same_camera_traffic_ns = 0L
+        debug_ticker_interaction_only_same_camera_traffic_ns = 0L
     }
 
     private fun Long.ms(divisor: Int = 1): String {
@@ -9312,6 +9468,7 @@ class FlightMapView(
             } else {
                 val viewport = viewport_for(location, w, h)
                 if (debug_perf_viewport_active) {
+                    debug_note_draw_start(viewport, SystemClock.elapsedRealtime())
                     debug_draw_start_ns = SystemClock.elapsedRealtimeNanos()
                     var section_start_ns = debug_draw_start_ns
                     if (!debug_perf_skip_map) {
@@ -19689,6 +19846,11 @@ class MapTileRenderer(
 
     var debug_last_tile_summary: String = ""
         private set
+    var debug_collect_detail_timing: Boolean
+        get() = satellite_renderer.debug_collect_detail_timing
+        set(value) {
+            satellite_renderer.debug_collect_detail_timing = value
+        }
 
     fun draw_tiles(
         canvas: Canvas,
@@ -19871,6 +20033,7 @@ internal class SatelliteMapTileRenderer(
     private val current_reference_tile_request_generations = mutableMapOf<String, Long>()
     private var current_reference_tile_request_generation = 0L
     private val reference_selected_tile_zooms = mutableMapOf<ReferenceTileOverlay, Int>()
+    private val reference_motion_coverage_alpha_floor = mutableMapOf<ReferenceTileOverlay, Float>()
     private val reference_tile_worker_id = AtomicInteger()
     private val reference_tile_task_sequence = AtomicLong()
     // Label/reference overlays deliberately run on their own small, prioritized worker pool so
@@ -19890,6 +20053,11 @@ internal class SatelliteMapTileRenderer(
         allowCoreThreadTimeOut(true)
     }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+    private val tile_destination = RectF()
+    private val reference_tile_destination = RectF()
+    private val interim_tile_destination = RectF()
+    private val interim_tile_test_rect = RectF()
+    private val satellite_child_destination = RectF()
     private val tile_decode_options = ThreadLocal.withInitial {
         BitmapFactory.Options().apply {
             inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -19901,6 +20069,8 @@ internal class SatelliteMapTileRenderer(
     private var tile_zoom_direction = 0
     private var last_satellite_buffer_request_key: String? = null
     private var last_satellite_buffer_request_ms = 0L
+    private var last_satellite_prefetch_request_key: String? = null
+    private var last_satellite_prefetch_request_ms = 0L
     private val local_reference_renderer = LocalReferenceOverlayRenderer(
         context = context,
         paint = paint,
@@ -19914,6 +20084,28 @@ internal class SatelliteMapTileRenderer(
 
     var debug_last_tile_summary: String = ""
         private set
+    var debug_collect_detail_timing = false
+    private var debug_detail_interim_ns = 0L
+    private var debug_detail_lower_ns = 0L
+    private var debug_detail_upper_ns = 0L
+    private var debug_detail_merge_ns = 0L
+    private var debug_detail_reference_ns = 0L
+    private var debug_detail_reference_plan_ns = 0L
+    private var debug_detail_reference_draw_ns = 0L
+    private var debug_detail_reference_prefetch_ns = 0L
+    private var debug_detail_reference_alpha_ns = 0L
+    private var debug_detail_reference_bookkeeping_ns = 0L
+    private var debug_detail_reference_generation_ns = 0L
+    private var debug_detail_reference_protection_ns = 0L
+    private var debug_detail_reference_overlay_count = 0
+    private var debug_detail_reference_prefetch_call_count = 0
+    private var debug_detail_reference_protected_count = 0
+    private var debug_detail_reference_previous_protected_count = 0
+    private var debug_detail_reference_history_start_count = 0
+    private var debug_detail_reference_history_count = 0
+    private var debug_detail_reference_history_stale_removed_count = 0
+    private var debug_detail_reference_history_overflow_removed_count = 0
+    private var debug_detail_local_reference_ns = 0L
 
     fun draw_tiles(
         canvas: Canvas,
@@ -19921,6 +20113,7 @@ internal class SatelliteMapTileRenderer(
         state: MapTileRenderState,
         style: MapTileRenderStyle
     ): String {
+        reset_detail_timing()
         val now_ms = SystemClock.elapsedRealtime()
         paint.style = Paint.Style.FILL
         paint.color = style.map_empty
@@ -19939,18 +20132,33 @@ internal class SatelliteMapTileRenderer(
             0f
         }
         val prefetch_upper_lod = has_upper_lod && zoom_fraction >= LOD_PREFETCH_START_FRACTION
+        val blend_active = has_upper_lod &&
+                upper_lod_alpha > MIN_LAYER_ALPHA &&
+                upper_lod_alpha < 1f - MIN_LAYER_ALPHA
 
         update_tile_zoom_transition(lower_tile_zoom, state)
         val request_generation = begin_tile_request_generation()
 
-        draw_interim_tiles(
-            canvas = canvas,
-            viewport = viewport,
-            state = state,
-            now_ms = now_ms
-        )
+        val interim_draw_needed = blend_active ||
+            !satellite_tile_grid_fully_available(
+                viewport = viewport,
+                state = state,
+                tile_zoom = lower_tile_zoom
+            )
+        val interim_drawn = if (interim_draw_needed) {
+            val detail_start_ns = detail_timing_start_ns()
+            draw_interim_tiles(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                now_ms = now_ms
+            ).also { debug_detail_interim_ns += detail_timing_elapsed_ns(detail_start_ns) }
+        } else {
+            false
+        }
         val loaded_interim_tiles = ArrayList<InterimRasterTile>()
 
+        val lower_detail_start_ns = detail_timing_start_ns()
         val lower_stats = draw_tile_grid_layer(
             canvas = canvas,
             viewport = viewport,
@@ -19962,11 +20170,13 @@ internal class SatelliteMapTileRenderer(
             draw_unavailable_if_missing = true,
             allow_parent_fallback = true,
             allow_child_fallback = true,
+            retain_as_interim = true,
             loaded_interim_tiles = loaded_interim_tiles,
             request_generation = request_generation
-        )
+        ).also { debug_detail_lower_ns += detail_timing_elapsed_ns(lower_detail_start_ns) }
 
-        val upper_stats = if (has_upper_lod && (upper_lod_alpha > MIN_LAYER_ALPHA || prefetch_upper_lod)) {
+        val upper_detail_start_ns = detail_timing_start_ns()
+        val upper_stats = if (has_upper_lod && upper_lod_alpha > MIN_LAYER_ALPHA) {
             draw_tile_grid_layer(
                 canvas = canvas,
                 viewport = viewport,
@@ -19978,29 +20188,43 @@ internal class SatelliteMapTileRenderer(
                 draw_unavailable_if_missing = false,
                 allow_parent_fallback = false,
                 allow_child_fallback = true,
+                retain_as_interim = upper_lod_alpha > MIN_LAYER_ALPHA,
                 loaded_interim_tiles = loaded_interim_tiles,
                 request_generation = request_generation
             )
         } else {
+            if (prefetch_upper_lod) {
+                request_satellite_prefetch_grid(
+                    viewport = viewport,
+                    state = state,
+                    tile_zoom = upper_tile_zoom,
+                    now_ms = now_ms,
+                    request_generation = request_generation
+                )
+            }
             TileLayerDrawStats(visible = 0, loaded = 0, requested = 0, fallback_drawn = 0, fading = false)
-        }
+        }.also { debug_detail_upper_ns += detail_timing_elapsed_ns(upper_detail_start_ns) }
 
-        val blend_active = has_upper_lod &&
-                upper_lod_alpha > MIN_LAYER_ALPHA &&
-                upper_lod_alpha < 1f - MIN_LAYER_ALPHA
         val required_tiles_ready = lower_stats.requested == 0 &&
                 (!has_upper_lod || upper_lod_alpha <= MIN_LAYER_ALPHA || upper_stats.requested == 0)
 
         if (loaded_interim_tiles.isNotEmpty()) {
+            val merge_detail_start_ns = detail_timing_start_ns()
             if (blend_active || !required_tiles_ready) {
                 merge_interim_tiles(loaded_interim_tiles)
             } else {
                 replace_interim_tiles(loaded_interim_tiles)
             }
+            debug_detail_merge_ns += detail_timing_elapsed_ns(merge_detail_start_ns)
         }
 
+        val reference_detail_start_ns = detail_timing_start_ns()
+        val reference_generation_detail_start_ns = detail_timing_start_ns()
         val reference_request_generation = begin_reference_tile_request_generation()
+        debug_detail_reference_generation_ns += detail_timing_elapsed_ns(reference_generation_detail_start_ns)
+        val reference_protection_detail_start_ns = detail_timing_start_ns()
         begin_reference_tile_protection_frame()
+        debug_detail_reference_protection_ns += detail_timing_elapsed_ns(reference_protection_detail_start_ns)
         val label_stats = draw_reference_overlay_layers(
             canvas = canvas,
             viewport = viewport,
@@ -20014,14 +20238,17 @@ internal class SatelliteMapTileRenderer(
             allow_exact_requests = true,
             request_generation = reference_request_generation
         )
+        debug_detail_reference_ns += detail_timing_elapsed_ns(reference_detail_start_ns)
         val settings_border_overlay_enabled =
             state.reference_overlay_layers.contains(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
+        val local_reference_detail_start_ns = detail_timing_start_ns()
         val local_reference_stats = local_reference_renderer.draw(
             canvas = canvas,
             viewport = viewport,
             enabled = state.map_borders_enabled && !settings_border_overlay_enabled,
             interaction_active = state.interaction_active
         )
+        debug_detail_local_reference_ns += detail_timing_elapsed_ns(local_reference_detail_start_ns)
 
         if (lower_stats.fading || upper_stats.fading || label_stats.fading) {
             request_redraw()
@@ -20034,15 +20261,77 @@ internal class SatelliteMapTileRenderer(
         debug_last_tile_summary =
             " mapTiles=$visible loaded=$loaded requested=$requested fallback=$fallback_drawn " +
                     "satLod=${lower_tile_zoom}->${upper_tile_zoom} lodAlpha=${"%.2f".format(Locale.US, upper_lod_alpha)} " +
-                    "blend=$blend_active interim=${interim_tiles.size} labels=${label_stats.loaded}/${label_stats.visible} " +
+                    "blend=$blend_active interim=${interim_tiles.size} interimDraw=$interim_drawn labels=${label_stats.loaded}/${label_stats.visible} " +
                     "labelReq=${label_stats.requested} labelFallback=${label_stats.fallback_drawn}" +
-                    label_stats.debug_summary + local_reference_stats.summary() + " "
+                    label_stats.debug_summary + local_reference_stats.summary() + detail_timing_summary() + " "
 
         return if (lower_stats.requested == 0 && lower_stats.loaded > 0) {
             "${TileSource.SATELLITE.display_name} loaded"
         } else {
             "Loading ${TileSource.SATELLITE.display_name.lowercase(Locale.US)} tiles"
         }
+    }
+
+    private fun reset_detail_timing() {
+        if (!debug_collect_detail_timing) return
+        debug_detail_interim_ns = 0L
+        debug_detail_lower_ns = 0L
+        debug_detail_upper_ns = 0L
+        debug_detail_merge_ns = 0L
+        debug_detail_reference_ns = 0L
+        debug_detail_reference_plan_ns = 0L
+        debug_detail_reference_draw_ns = 0L
+        debug_detail_reference_prefetch_ns = 0L
+        debug_detail_reference_alpha_ns = 0L
+        debug_detail_reference_bookkeeping_ns = 0L
+        debug_detail_reference_generation_ns = 0L
+        debug_detail_reference_protection_ns = 0L
+        debug_detail_reference_overlay_count = 0
+        debug_detail_reference_prefetch_call_count = 0
+        debug_detail_reference_protected_count = 0
+        debug_detail_reference_previous_protected_count = 0
+        debug_detail_reference_history_start_count = 0
+        debug_detail_reference_history_count = 0
+        debug_detail_reference_history_stale_removed_count = 0
+        debug_detail_reference_history_overflow_removed_count = 0
+        debug_detail_local_reference_ns = 0L
+    }
+
+    private fun detail_timing_start_ns(): Long {
+        return if (debug_collect_detail_timing) SystemClock.elapsedRealtimeNanos() else 0L
+    }
+
+    private fun detail_timing_elapsed_ns(start_ns: Long): Long {
+        return debug_elapsed_ns(debug_collect_detail_timing, start_ns)
+    }
+
+    private fun detail_timing_summary(): String {
+        if (!debug_collect_detail_timing) return ""
+        val reference_bucketed_ns = debug_detail_reference_plan_ns +
+            debug_detail_reference_draw_ns +
+            debug_detail_reference_prefetch_ns +
+            debug_detail_reference_alpha_ns +
+            debug_detail_reference_bookkeeping_ns +
+            debug_detail_reference_generation_ns +
+            debug_detail_reference_protection_ns
+        val reference_other_ns = (debug_detail_reference_ns - reference_bucketed_ns).coerceAtLeast(0L)
+        return " mapDetail interim=${debug_detail_interim_ns.ms_debug()} lower=${debug_detail_lower_ns.ms_debug()} " +
+            "upper=${debug_detail_upper_ns.ms_debug()} merge=${debug_detail_merge_ns.ms_debug()} " +
+            "reference=${debug_detail_reference_ns.ms_debug()} refPlan=${debug_detail_reference_plan_ns.ms_debug()} " +
+            "refDraw=${debug_detail_reference_draw_ns.ms_debug()} refPrefetch=${debug_detail_reference_prefetch_ns.ms_debug()} " +
+            "refAlpha=${debug_detail_reference_alpha_ns.ms_debug()} refBook=${debug_detail_reference_bookkeeping_ns.ms_debug()} " +
+            "refGen=${debug_detail_reference_generation_ns.ms_debug()} refProtect=${debug_detail_reference_protection_ns.ms_debug()} " +
+            "refOther=${reference_other_ns.ms_debug()} refOvl=$debug_detail_reference_overlay_count " +
+            "refPf=$debug_detail_reference_prefetch_call_count refProt=$debug_detail_reference_protected_count " +
+            "refPrev=$debug_detail_reference_previous_protected_count " +
+            "refHistStart=$debug_detail_reference_history_start_count refHist=$debug_detail_reference_history_count " +
+            "refStale=$debug_detail_reference_history_stale_removed_count " +
+            "refOverflow=$debug_detail_reference_history_overflow_removed_count " +
+            "localRef=${debug_detail_local_reference_ns.ms_debug()}"
+    }
+
+    private fun Long.ms_debug(): String {
+        return String.format(Locale.US, "%.2fms", this / 1_000_000.0)
     }
 
     fun clear() {
@@ -20063,6 +20352,7 @@ internal class SatelliteMapTileRenderer(
             current_reference_tile_request_generation = 0L
         }
         reference_selected_tile_zooms.clear()
+        reference_motion_coverage_alpha_floor.clear()
         local_reference_renderer.clear()
         transition_cache_key = null
         transition_map_source = null
@@ -20070,6 +20360,8 @@ internal class SatelliteMapTileRenderer(
         tile_zoom_direction = 0
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
+        last_satellite_prefetch_request_key = null
+        last_satellite_prefetch_request_ms = 0L
         debug_last_tile_summary = ""
     }
 
@@ -20080,6 +20372,8 @@ internal class SatelliteMapTileRenderer(
         tile_zoom_direction = 0
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
+        last_satellite_prefetch_request_key = null
+        last_satellite_prefetch_request_ms = 0L
         debug_last_tile_summary = ""
     }
 
@@ -20101,6 +20395,7 @@ internal class SatelliteMapTileRenderer(
         draw_unavailable_if_missing: Boolean,
         allow_parent_fallback: Boolean,
         allow_child_fallback: Boolean,
+        retain_as_interim: Boolean,
         loaded_interim_tiles: MutableList<InterimRasterTile>,
         request_generation: Long
     ): TileLayerDrawStats {
@@ -20142,19 +20437,21 @@ internal class SatelliteMapTileRenderer(
                 val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
                 val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
                 val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
-                val destination = RectF(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
+                tile_destination.set(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
                 visible++
 
                 val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
                 if (bitmap != null) {
-                    loaded_interim_tiles += InterimRasterTile(
-                        cache_key = state.cache_key,
-                        z = tile_zoom,
-                        x = tx,
-                        y = ty,
-                        bitmap = bitmap,
-                        last_used_ms = now_ms
-                    )
+                    if (retain_as_interim) {
+                        loaded_interim_tiles += InterimRasterTile(
+                            cache_key = state.cache_key,
+                            z = tile_zoom,
+                            x = tx,
+                            y = ty,
+                            bitmap = bitmap,
+                            last_used_ms = now_ms
+                        )
+                    }
                     loaded++
                     if (layer_visible) {
                         val load_alpha = satellite_tile_load_alpha(key, now_ms)
@@ -20165,7 +20462,7 @@ internal class SatelliteMapTileRenderer(
                                 x = tx,
                                 y = ty,
                                 state = state,
-                                destination = destination,
+                                destination = tile_destination,
                                 alpha = layer_alpha,
                                 allow_parent_fallback = allow_parent_fallback,
                                 allow_child_fallback = allow_child_fallback
@@ -20176,7 +20473,7 @@ internal class SatelliteMapTileRenderer(
                         val tile_alpha = if (fallback_underlay_drawn) load_alpha else 1f
                         val draw_alpha = (layer_alpha * tile_alpha).coerceIn(0f, 1f)
                         if (draw_alpha > MIN_LAYER_ALPHA) {
-                            draw_tile_bitmap(canvas, bitmap, null, destination, draw_alpha)
+                            draw_tile_bitmap(canvas, bitmap, null, tile_destination, draw_alpha)
                         }
                         if (fallback_underlay_drawn && load_alpha < 0.999f) fading = true
                     }
@@ -20201,7 +20498,7 @@ internal class SatelliteMapTileRenderer(
                                 x = tx,
                                 y = ty,
                                 state = state,
-                                destination = destination,
+                                destination = tile_destination,
                                 alpha = layer_alpha,
                                 allow_parent_fallback = allow_parent_fallback,
                                 allow_child_fallback = allow_child_fallback
@@ -20209,7 +20506,7 @@ internal class SatelliteMapTileRenderer(
                         ) {
                             fallback_drawn++
                         } else if (draw_unavailable_if_missing &&
-                            !retained_interim_intersects_destination(viewport, state.cache_key, destination)
+                            !retained_interim_intersects_destination(viewport, state.cache_key, tile_destination)
                         ) {
                             draw_unavailable_tile(canvas, screen_x, screen_y, tile_size_on_screen, style)
                         }
@@ -20225,6 +20522,31 @@ internal class SatelliteMapTileRenderer(
             fallback_drawn = fallback_drawn,
             fading = fading
         )
+    }
+
+    private fun satellite_tile_grid_fully_available(
+        viewport: Viewport,
+        state: MapTileRenderState,
+        tile_zoom: Int
+    ): Boolean {
+        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val tile_world_scale = 1.0 / tile_to_viewport_scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
+        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
+        val max_tile = 1 shl tile_zoom
+        for (ty in first_tile_y..last_tile_y) {
+            if (ty !in 0 until max_tile) continue
+            for (tx_raw in first_tile_x..last_tile_x) {
+                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
+                if (tile_bitmap(tile_zoom, tx, ty, key, state) == null) return false
+            }
+        }
+        return true
     }
 
     private fun draw_reference_overlay_layers(
@@ -20253,6 +20575,7 @@ internal class SatelliteMapTileRenderer(
         val debug_parts = ArrayList<String>(overlays.size)
 
         for (overlay in overlays) {
+            val plan_detail_start_ns = detail_timing_start_ns()
             val plan = reference_overlay_draw_plan(
                 overlay = overlay,
                 viewport = viewport,
@@ -20262,21 +20585,34 @@ internal class SatelliteMapTileRenderer(
                 has_upper_lod = has_upper_lod,
                 upper_lod_alpha = upper_lod_alpha,
                 prefetch_upper_lod = prefetch_upper_lod
-            ) ?: continue
+            )
+            debug_detail_reference_plan_ns += detail_timing_elapsed_ns(plan_detail_start_ns)
+            if (plan == null) continue
+            debug_detail_reference_overlay_count++
+            val alpha_detail_start_ns = detail_timing_start_ns()
             val overlay_alpha = reference_overlay_zoom_alpha(
                 overlay = overlay,
                 viewport_zoom = viewport.zoom
             )
-            val draw_alpha = overlay_alpha * reference_overlay_coverage_alpha(
+            val raw_coverage_alpha = reference_overlay_coverage_alpha(
                 overlay = overlay,
                 viewport_zoom = viewport.zoom,
                 coverage = plan.coverage
             )
+            val coverage_alpha = stable_reference_overlay_coverage_alpha(
+                overlay = overlay,
+                interaction_active = state.interaction_active,
+                overlay_alpha = overlay_alpha,
+                coverage_alpha = raw_coverage_alpha,
+                coverage = plan.coverage
+            )
+            val draw_alpha = overlay_alpha * coverage_alpha
             val requests_allowed_for_zoom = reference_overlay_requests_allowed(
                 overlay = overlay,
                 viewport_zoom = viewport.zoom,
                 overlay_alpha = overlay_alpha
             )
+            debug_detail_reference_alpha_ns += detail_timing_elapsed_ns(alpha_detail_start_ns)
             if (!requests_allowed_for_zoom && overlay_alpha <= MIN_LAYER_ALPHA) {
                 continue
             }
@@ -20284,6 +20620,7 @@ internal class SatelliteMapTileRenderer(
             var overlay_loaded = 0
             var overlay_requested = 0
             var overlay_fallback_drawn = 0
+            val draw_detail_start_ns = detail_timing_start_ns()
             val draw_stats = draw_reference_overlay_grid(
                 canvas = canvas,
                 viewport = viewport,
@@ -20298,13 +20635,16 @@ internal class SatelliteMapTileRenderer(
                 request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
                 request_generation = request_generation
             )
+            debug_detail_reference_draw_ns += detail_timing_elapsed_ns(draw_detail_start_ns)
             overlay_visible += draw_stats.visible
             overlay_loaded += draw_stats.loaded
             overlay_requested += draw_stats.requested
             overlay_fallback_drawn += draw_stats.fallback_drawn
             fading = fading || draw_stats.fading
 
+            val prefetch_detail_start_ns = detail_timing_start_ns()
             for (prefetch_tile_zoom in plan.prefetch_tile_zooms) {
+                debug_detail_reference_prefetch_call_count++
                 request_reference_overlay_prefetch_grid(
                     viewport = viewport,
                     state = state,
@@ -20330,6 +20670,7 @@ internal class SatelliteMapTileRenderer(
                 viewport_zoom = viewport.zoom
             )
             if (pan_prefetch_buffer > 0) {
+                debug_detail_reference_prefetch_call_count++
                 request_reference_overlay_prefetch_grid(
                     viewport = viewport,
                     state = state,
@@ -20342,6 +20683,8 @@ internal class SatelliteMapTileRenderer(
                     request_generation = request_generation
                 )
             }
+            debug_detail_reference_prefetch_ns += detail_timing_elapsed_ns(prefetch_detail_start_ns)
+            val bookkeeping_detail_start_ns = detail_timing_start_ns()
             visible += overlay_visible
             loaded += overlay_loaded
             requested += overlay_requested
@@ -20349,7 +20692,12 @@ internal class SatelliteMapTileRenderer(
             debug_parts += " ${reference_overlay_debug_name(overlay)}=$overlay_loaded/$overlay_visible" +
                 " req=$overlay_requested fallback=$overlay_fallback_drawn lod=${plan.draw_tile_zoom}" +
                 " ready=${plan.coverage.ready}/${plan.coverage.visible}" +
-                " center=${plan.coverage.center_ready}/${plan.coverage.center_visible}"
+                " center=${plan.coverage.center_ready}/${plan.coverage.center_visible}" +
+                " visual=${plan.coverage.visual_ready}/${plan.coverage.visible}" +
+                " centerVisual=${plan.coverage.center_visual_ready}/${plan.coverage.center_visible}" +
+                " alpha=${draw_alpha.alpha_debug()} coverageAlpha=${coverage_alpha.alpha_debug()}" +
+                " rawCoverageAlpha=${raw_coverage_alpha.alpha_debug()}"
+            debug_detail_reference_bookkeeping_ns += detail_timing_elapsed_ns(bookkeeping_detail_start_ns)
         }
 
         return TileLayerDrawStats(
@@ -20778,6 +21126,38 @@ internal class SatelliteMapTileRenderer(
         return smooth_step(min_loaded, full_loaded, usable_visual_ratio)
     }
 
+    private fun stable_reference_overlay_coverage_alpha(
+        overlay: ReferenceTileOverlay,
+        interaction_active: Boolean,
+        overlay_alpha: Float,
+        coverage_alpha: Float,
+        coverage: ReferenceTileCoverage
+    ): Float {
+        if (overlay != ReferenceTileOverlay.WORLD_TRANSPORTATION || overlay_alpha <= MIN_LAYER_ALPHA) {
+            if (overlay_alpha <= MIN_LAYER_ALPHA) {
+                reference_motion_coverage_alpha_floor.remove(overlay)
+            } else {
+                reference_motion_coverage_alpha_floor[overlay] = coverage_alpha
+            }
+            return coverage_alpha
+        }
+        if (!interaction_active) {
+            reference_motion_coverage_alpha_floor[overlay] = coverage_alpha
+            return coverage_alpha
+        }
+        val has_usable_visual_coverage =
+            coverage.visual_ratio >= REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_VISUAL_RATIO &&
+                coverage.center_visual_ratio >= REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_CENTER_RATIO
+        val previous_alpha = reference_motion_coverage_alpha_floor[overlay] ?: coverage_alpha
+        val stable_alpha = if (has_usable_visual_coverage) {
+            maxOf(coverage_alpha, previous_alpha)
+        } else {
+            coverage_alpha
+        }
+        reference_motion_coverage_alpha_floor[overlay] = stable_alpha
+        return stable_alpha
+    }
+
     private fun reference_overlay_prefetch_tile_buffer(
         draw_tile_zoom: Int,
         prefetch_tile_zoom: Int,
@@ -21007,7 +21387,7 @@ internal class SatelliteMapTileRenderer(
                 val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
                 val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
                 val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
-                val destination = RectF(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
+                reference_tile_destination.set(screen_x, screen_y, screen_x + tile_size_on_screen, screen_y + tile_size_on_screen)
                 visible++
 
                 val bitmap = reference_tile_bitmap(key)
@@ -21022,7 +21402,7 @@ internal class SatelliteMapTileRenderer(
                                 x = tx,
                                 y = ty,
                                 overlay = overlay,
-                                destination = destination,
+                                destination = reference_tile_destination,
                                 alpha = layer_alpha * (1f - load_alpha)
                             )
                         } else {
@@ -21030,7 +21410,7 @@ internal class SatelliteMapTileRenderer(
                         }
                         val draw_alpha = (layer_alpha * load_alpha).coerceIn(0f, 1f)
                         if (draw_alpha > MIN_LAYER_ALPHA) {
-                            draw_tile_bitmap(canvas, bitmap, null, destination, draw_alpha)
+                            draw_tile_bitmap(canvas, bitmap, null, reference_tile_destination, draw_alpha)
                         }
                         if (load_alpha < 0.999f || parent_underlay_drawn) fading = true
                     }
@@ -21073,7 +21453,7 @@ internal class SatelliteMapTileRenderer(
                             x = tx,
                             y = ty,
                             overlay = overlay,
-                            destination = destination,
+                            destination = reference_tile_destination,
                             alpha = layer_alpha
                         )
                     ) {
@@ -21124,6 +21504,10 @@ internal class SatelliteMapTileRenderer(
             ReferenceTileOverlay.WORLD_TRANSPORTATION -> "roads"
             ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> "borders"
         }
+    }
+
+    private fun Float.alpha_debug(): String {
+        return String.format(Locale.US, "%.2f", this)
     }
 
     private fun reference_tile_bitmap(key: String): Bitmap? {
@@ -21340,16 +21724,36 @@ internal class SatelliteMapTileRenderer(
     private fun begin_reference_tile_request_generation(): Long {
         synchronized(requested_reference_tiles) {
             current_reference_tile_request_generation++
+            val history_start_count = current_reference_tile_request_generations.size
+            var stale_removed_count = 0
+            var overflow_removed_count = 0
             if (current_reference_tile_request_generations.size > REFERENCE_TILE_REQUEST_HISTORY_MAX) {
                 val stale_before = current_reference_tile_request_generation - REFERENCE_TILE_REQUEST_HISTORY_AGE
                 val iterator = current_reference_tile_request_generations.iterator()
                 while (iterator.hasNext()) {
-                    if (iterator.next().value < stale_before) iterator.remove()
+                    if (iterator.next().value < stale_before) {
+                        iterator.remove()
+                        stale_removed_count++
+                    }
                 }
-                while (current_reference_tile_request_generations.size > REFERENCE_TILE_REQUEST_HISTORY_MAX) {
-                    val oldest_key = current_reference_tile_request_generations.minByOrNull { it.value }?.key ?: break
-                    current_reference_tile_request_generations.remove(oldest_key)
+                val overflow_count = current_reference_tile_request_generations.size - REFERENCE_TILE_REQUEST_HISTORY_MAX
+                if (overflow_count > 0) {
+                    val oldest_keys = current_reference_tile_request_generations.entries
+                        .sortedBy { it.value }
+                        .take(overflow_count)
+                        .map { it.key }
+                    for (oldest_key in oldest_keys) {
+                        if (current_reference_tile_request_generations.remove(oldest_key) != null) {
+                            overflow_removed_count++
+                        }
+                    }
                 }
+            }
+            if (debug_collect_detail_timing) {
+                debug_detail_reference_history_start_count = history_start_count
+                debug_detail_reference_history_count = current_reference_tile_request_generations.size
+                debug_detail_reference_history_stale_removed_count = stale_removed_count
+                debug_detail_reference_history_overflow_removed_count = overflow_removed_count
             }
             return current_reference_tile_request_generation
         }
@@ -21399,8 +21803,13 @@ internal class SatelliteMapTileRenderer(
 
     private fun begin_reference_tile_protection_frame() {
         synchronized(protected_reference_tile_keys) {
+            val protected_count = protected_reference_tile_keys.size
             previous_protected_reference_tile_keys.clear()
             previous_protected_reference_tile_keys.addAll(protected_reference_tile_keys)
+            if (debug_collect_detail_timing) {
+                debug_detail_reference_protected_count = protected_count
+                debug_detail_reference_previous_protected_count = previous_protected_reference_tile_keys.size
+            }
             protected_reference_tile_keys.clear()
         }
     }
@@ -21580,14 +21989,14 @@ internal class SatelliteMapTileRenderer(
         val repeat_end = floor((viewport.width - base_screen_x) / tile_world_width_at_zoom).toInt()
         for (repeat in repeat_start..repeat_end) {
             val screen_x = (base_screen_x + repeat * tile_world_width_at_zoom).toFloat()
-            val destination = RectF(
+            interim_tile_destination.set(
                 screen_x,
                 screen_y,
                 screen_x + tile_size_on_screen,
                 screen_y + tile_size_on_screen
             )
-            if (!rect_intersects_viewport(destination, viewport)) continue
-            draw_tile_bitmap(canvas, tile.bitmap, null, destination, 1f)
+            if (!rect_intersects_viewport(interim_tile_destination, viewport)) continue
+            draw_tile_bitmap(canvas, tile.bitmap, null, interim_tile_destination, 1f)
         }
     }
 
@@ -21638,13 +22047,13 @@ internal class SatelliteMapTileRenderer(
         val repeat_end = floor((destination.right - base_screen_x) / tile_world_width_at_zoom).toInt()
         for (repeat in repeat_start..repeat_end) {
             val screen_x = (base_screen_x + repeat * tile_world_width_at_zoom).toFloat()
-            val tile_rect = RectF(
+            interim_tile_test_rect.set(
                 screen_x,
                 screen_y,
                 screen_x + tile_size_on_screen,
                 screen_y + tile_size_on_screen
             )
-            if (RectF.intersects(tile_rect, destination)) return true
+            if (RectF.intersects(interim_tile_test_rect, destination)) return true
         }
         return false
     }
@@ -21791,7 +22200,8 @@ internal class SatelliteMapTileRenderer(
             val top = destination.top + child.child_y * height / child.child_scale
             val right = destination.left + (child.child_x + 1) * width / child.child_scale
             val bottom = destination.top + (child.child_y + 1) * height / child.child_scale
-            draw_tile_bitmap(canvas, child.bitmap, null, RectF(left, top, right, bottom), alpha)
+            satellite_child_destination.set(left, top, right, bottom)
+            draw_tile_bitmap(canvas, child.bitmap, null, satellite_child_destination, alpha)
         }
     }
 
@@ -21833,6 +22243,50 @@ internal class SatelliteMapTileRenderer(
                     state = state,
                     request_generation = request_generation,
                     request_priority = SATELLITE_TILE_REQUEST_PRIORITY_BUFFER
+                )
+            }
+        }
+    }
+
+    private fun request_satellite_prefetch_grid(
+        viewport: Viewport,
+        state: MapTileRenderState,
+        tile_zoom: Int,
+        now_ms: Long,
+        request_generation: Long
+    ) {
+        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val tile_world_scale = 1.0 / tile_to_viewport_scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
+        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
+        val max_tile = 1 shl tile_zoom
+        val request_key = "${state.cache_key}/$tile_zoom/$first_tile_x/$last_tile_x/$first_tile_y/$last_tile_y"
+        if (
+            request_key == last_satellite_prefetch_request_key &&
+            now_ms - last_satellite_prefetch_request_ms < SATELLITE_PREFETCH_REQUEST_THROTTLE_MS
+        ) {
+            return
+        }
+        last_satellite_prefetch_request_key = request_key
+        last_satellite_prefetch_request_ms = now_ms
+        for (ty in first_tile_y..last_tile_y) {
+            if (ty !in 0 until max_tile) continue
+            for (tx_raw in first_tile_x..last_tile_x) {
+                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
+                mark_current_tile_request(key, request_generation)
+                request_tile(
+                    z = tile_zoom,
+                    x = tx,
+                    y = ty,
+                    key = key,
+                    state = state,
+                    request_generation = request_generation,
+                    request_priority = SATELLITE_TILE_REQUEST_PRIORITY_PREFETCH
                 )
             }
         }
@@ -22077,6 +22531,7 @@ internal class SatelliteMapTileRenderer(
         const val RASTER_INTERIM_MAX_AGE_MS = 45_000L
         const val SATELLITE_REQUEST_TILE_BUFFER = 1
         const val SATELLITE_BUFFER_REQUEST_THROTTLE_MS = 180L
+        const val SATELLITE_PREFETCH_REQUEST_THROTTLE_MS = 120L
         const val SATELLITE_PARENT_REQUEST_DEPTH = 10
         const val SATELLITE_CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
@@ -22129,6 +22584,8 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM = 12.0f
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO = 0.2f
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO = 0.55f
+        const val REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_VISUAL_RATIO = 0.55f
+        const val REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_CENTER_RATIO = 0.55f
         const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_OFFSET = 1
         const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_STEP = 1
         const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT = 5
@@ -22168,6 +22625,7 @@ internal class SatelliteMapTileRenderer(
         const val SATELLITE_TILE_NETWORK_THREADS = 4
         const val SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE = 2
         const val SATELLITE_TILE_REQUEST_PRIORITY_EXACT = 6
+        const val SATELLITE_TILE_REQUEST_PRIORITY_PREFETCH = 5
         const val SATELLITE_TILE_REQUEST_PRIORITY_BUFFER = 10
         const val CURRENT_TILE_REQUEST_HISTORY_MAX = 900
         const val CURRENT_TILE_REQUEST_HISTORY_AGE = 6L
@@ -22790,6 +23248,7 @@ class TrafficOverlayRenderer(
     private var dot_overlay_recording_clear_y = 0
     private val dot_overlay_clear_rect = Rect()
     private var debug_symbol_cache_miss_reason = "none"
+    private var debug_symbol_cache_miss_detail = ""
     var debug_collect_detail_timing = false
     var debug_last_symbol_cache_summary: String = "symbolCache=none"
         private set
@@ -22951,6 +23410,7 @@ class TrafficOverlayRenderer(
         val cache_start_ns = debug_detail_start_ns()
         val cached_coverage = if (!draw_internal_dot && label_aircraft_count(marker_blend, viewport.zoom) == 0) {
             debug_symbol_cache_miss_reason = "none"
+            debug_symbol_cache_miss_detail = ""
             draw_symbol_overlay_pan_cache(
                 canvas = canvas,
                 aircraft = aircraft,
@@ -22965,6 +23425,7 @@ class TrafficOverlayRenderer(
             )
         } else {
             debug_symbol_cache_miss_reason = "labels_or_internal_dot"
+            debug_symbol_cache_miss_detail = ""
             null
         }
         debug_detail_cache_attempt_ns += debug_detail_elapsed_ns(cache_start_ns)
@@ -22984,7 +23445,10 @@ class TrafficOverlayRenderer(
                 translation_y = translation_y
             )
             debug_detail_direct_symbol_ns += debug_detail_elapsed_ns(direct_start_ns)
-            debug_last_symbol_cache_summary = "symbolCache=miss reason=$debug_symbol_cache_miss_reason direct=$direct_count"
+            val miss_detail = debug_symbol_cache_miss_detail
+            debug_last_symbol_cache_summary =
+                "symbolCache=miss reason=$debug_symbol_cache_miss_reason" +
+                    if (miss_detail.isNotEmpty()) " $miss_detail direct=$direct_count" else " direct=$direct_count"
         } else {
             if (!symbol_overlay_has_motion_exclusions &&
                 cached_symbol_overlay_covers_direct_fallback(cached_coverage, viewport)
@@ -23080,6 +23544,14 @@ class TrafficOverlayRenderer(
         return String.format(Locale.US, "%.2fms", this / 1_000_000.0)
     }
 
+    private fun Float.debug_decimal(): String {
+        return String.format(Locale.US, "%.1f", this)
+    }
+
+    private fun Double.debug_decimal(): String {
+        return String.format(Locale.US, "%.1f", this)
+    }
+
     private fun draw_symbol_overlay_pan_cache(
         canvas: Canvas,
         aircraft: List<TrafficAircraftOverlayState>,
@@ -23094,6 +23566,7 @@ class TrafficOverlayRenderer(
     ): RectF? {
         // The retained symbol bitmap is used only after the aircraft appearance bucket says full symbols are ready.
         val interaction_active = label_avoid_state.interaction_active
+        debug_symbol_cache_miss_detail = ""
         if (interaction_active) {
             symbol_overlay_saw_interaction = true
         }
@@ -23103,8 +23576,14 @@ class TrafficOverlayRenderer(
             debug_symbol_cache_miss_reason = "invalid_transform"
             return null
         }
-        if (abs(scale - 1f) > SYMBOL_OVERLAY_PAN_SCALE_EPSILON) {
+        val can_bridge_scaled_overlay = interaction_active &&
+            symbol_overlay_key != null &&
+            scale in SYMBOL_OVERLAY_INTERACTION_SCALE_MIN..SYMBOL_OVERLAY_INTERACTION_SCALE_MAX
+        if (abs(scale - 1f) > SYMBOL_OVERLAY_PAN_SCALE_EPSILON && !can_bridge_scaled_overlay) {
             debug_symbol_cache_miss_reason = "scale"
+            if (debug_collect_detail_timing) {
+                debug_symbol_cache_miss_detail = "scale=${scale.debug_decimal()} tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()}"
+            }
             return null
         }
         if (!interaction_active && symbol_overlay_key == null && symbol_overlay_recording_pending()) {
@@ -23128,8 +23607,16 @@ class TrafficOverlayRenderer(
         val center_matches =
             abs(symbol_overlay_center_x - source_center_x) <= SYMBOL_OVERLAY_CENTER_EPSILON &&
                 abs(symbol_overlay_center_y - source_center_y) <= SYMBOL_OVERLAY_CENTER_EPSILON
-        val cache_translation_x = (symbol_overlay_center_x - viewport.center_x).toFloat()
-        val cache_translation_y = (symbol_overlay_center_y - viewport.center_y).toFloat()
+        val cache_translation_x = if (interaction_active) {
+            translation_x
+        } else {
+            (symbol_overlay_center_x - viewport.center_x).toFloat()
+        }
+        val cache_translation_y = if (interaction_active) {
+            translation_y
+        } else {
+            (symbol_overlay_center_y - viewport.center_y).toFloat()
+        }
         val cache_left = cache_translation_x - padding * scale
         val cache_top = cache_translation_y - padding * scale
         val cache_right = cache_left + symbol_overlay_width * scale
@@ -23141,6 +23628,15 @@ class TrafficOverlayRenderer(
             cache_top <= viewport.height
         if (interaction_active && symbol_overlay_key != null && !cache_intersects_viewport) {
             debug_symbol_cache_miss_reason = "active_coverage"
+            if (debug_collect_detail_timing) {
+                debug_symbol_cache_miss_detail =
+                    "coverage l=${cache_left.debug_decimal()} t=${cache_top.debug_decimal()} " +
+                        "r=${cache_right.debug_decimal()} b=${cache_bottom.debug_decimal()} " +
+                        "scale=${scale.debug_decimal()} tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()} " +
+                        "centerDx=${(source_center_x - symbol_overlay_center_x).debug_decimal()} " +
+                        "centerDy=${(source_center_y - symbol_overlay_center_y).debug_decimal()} " +
+                        "size=${symbol_overlay_width}x$symbol_overlay_height"
+            }
             return null
         }
         val appearance_bucket = aircraft_symbol_overlay_appearance_bucket(aircraft)
@@ -23163,9 +23659,15 @@ class TrafficOverlayRenderer(
         }
         val key_matches = symbol_overlay_key == key && dimensions_match && center_matches
         val visual_key_matches = symbol_overlay_key?.visual_key_matches(key) == true && dimensions_match
+        val active_visual_bridge_matches = interaction_active &&
+            cache_intersects_viewport &&
+            dimensions_match &&
+            symbol_overlay_key?.let { cached_key ->
+                symbol_overlay_interaction_visual_bridge_matches(cached_key, key, scale)
+            } == true
         val active_key_matches = interaction_active &&
             cache_intersects_viewport &&
-            visual_key_matches
+            (visual_key_matches || active_visual_bridge_matches)
         val cold_idle_prewarm = !interaction_active &&
             !symbol_overlay_saw_interaction &&
             symbol_overlay_key == null &&
@@ -23177,6 +23679,30 @@ class TrafficOverlayRenderer(
             aircraft.isNotEmpty()
         if (!key_matches && interaction_active && !active_key_matches) {
             debug_symbol_cache_miss_reason = if (!cache_intersects_viewport) "active_coverage" else "active_visual_change"
+            if (debug_collect_detail_timing) {
+                debug_symbol_cache_miss_detail = if (debug_symbol_cache_miss_reason == "active_coverage") {
+                    symbol_overlay_active_coverage_miss_detail(
+                        cache_left = cache_left,
+                        cache_top = cache_top,
+                        cache_right = cache_right,
+                        cache_bottom = cache_bottom,
+                        scale = scale,
+                        translation_x = translation_x,
+                        translation_y = translation_y,
+                        source_center_x = source_center_x,
+                        source_center_y = source_center_y
+                    )
+                } else {
+                    symbol_overlay_active_visual_miss_detail(
+                        cached_key = symbol_overlay_key,
+                        current_key = key,
+                        scale = scale,
+                        visual_key_matches = visual_key_matches,
+                        center_matches = center_matches,
+                        dimensions_match = dimensions_match
+                    )
+                }
+            }
             return null
         }
         if (!key_matches && (cold_idle_prewarm || idle_visual_refresh)) {
@@ -23231,12 +23757,72 @@ class TrafficOverlayRenderer(
         } finally {
             canvas.restoreToCount(save_count)
         }
+        val cached_left = cache_translation_x - padding * scale
+        val cached_top = cache_translation_y - padding * scale
         return RectF(
-            cache_translation_x - padding,
-            cache_translation_y - padding,
-            cache_translation_x - padding + symbol_overlay_width,
-            cache_translation_y - padding + symbol_overlay_height
+            cached_left,
+            cached_top,
+            cached_left + symbol_overlay_width * scale,
+            cached_top + symbol_overlay_height * scale
         )
+    }
+
+    private fun symbol_overlay_interaction_visual_bridge_matches(
+        cached_key: AircraftSymbolOverlayCacheKey,
+        current_key: AircraftSymbolOverlayCacheKey,
+        scale: Float
+    ): Boolean {
+        if (cached_key.appearance_bucket != current_key.appearance_bucket ||
+            cached_key.theme_key != current_key.theme_key
+        ) {
+            return false
+        }
+        val scaled_icon_bucket = (cached_key.icon_scale_bucket * scale).roundToInt()
+        val scaled_dot_bucket = (cached_key.dot_scale_bucket * scale).roundToInt()
+        return abs(cached_key.marker_bucket - current_key.marker_bucket) <= SYMBOL_OVERLAY_INTERACTION_MARKER_BUCKET_TOLERANCE &&
+            abs(scaled_icon_bucket - current_key.icon_scale_bucket) <= SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE &&
+            abs(scaled_dot_bucket - current_key.dot_scale_bucket) <= SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE
+    }
+
+    private fun symbol_overlay_active_coverage_miss_detail(
+        cache_left: Float,
+        cache_top: Float,
+        cache_right: Float,
+        cache_bottom: Float,
+        scale: Float,
+        translation_x: Float,
+        translation_y: Float,
+        source_center_x: Double,
+        source_center_y: Double
+    ): String {
+        return "coverage l=${cache_left.debug_decimal()} t=${cache_top.debug_decimal()} " +
+            "r=${cache_right.debug_decimal()} b=${cache_bottom.debug_decimal()} " +
+            "scale=${scale.debug_decimal()} tx=${translation_x.debug_decimal()} ty=${translation_y.debug_decimal()} " +
+            "centerDx=${(source_center_x - symbol_overlay_center_x).debug_decimal()} " +
+            "centerDy=${(source_center_y - symbol_overlay_center_y).debug_decimal()} " +
+            "size=${symbol_overlay_width}x$symbol_overlay_height"
+    }
+
+    private fun symbol_overlay_active_visual_miss_detail(
+        cached_key: AircraftSymbolOverlayCacheKey?,
+        current_key: AircraftSymbolOverlayCacheKey,
+        scale: Float,
+        visual_key_matches: Boolean,
+        center_matches: Boolean,
+        dimensions_match: Boolean
+    ): String {
+        if (cached_key == null) {
+            return "bridge cachedKey=none scale=${scale.debug_decimal()} center=$center_matches dims=$dimensions_match"
+        }
+        val scaled_icon_bucket = (cached_key.icon_scale_bucket * scale).roundToInt()
+        val scaled_dot_bucket = (cached_key.dot_scale_bucket * scale).roundToInt()
+        return "bridge scale=${scale.debug_decimal()} visual=$visual_key_matches center=$center_matches dims=$dimensions_match " +
+            "markerD=${abs(cached_key.marker_bucket - current_key.marker_bucket)} " +
+            "iconD=${abs(scaled_icon_bucket - current_key.icon_scale_bucket)} " +
+            "dotD=${abs(scaled_dot_bucket - current_key.dot_scale_bucket)} " +
+            "sig=${cached_key.aircraft_signature == current_key.aircraft_signature} " +
+            "app=${cached_key.appearance_bucket == current_key.appearance_bucket} " +
+            "theme=${cached_key.theme_key == current_key.theme_key}"
     }
 
     private fun draw_cached_symbol_overlay_bitmap(canvas: Canvas, overlay_bitmap: Bitmap) {
@@ -25563,6 +26149,10 @@ class TrafficOverlayRenderer(
         const val SYMBOL_OVERLAY_DIRECT_FALLBACK_PADDING_DP = 96f
         const val SYMBOL_OVERLAY_SCALE_BUCKET = 1000f
         const val SYMBOL_OVERLAY_PAN_SCALE_EPSILON = 0.0025f
+        const val SYMBOL_OVERLAY_INTERACTION_SCALE_MIN = 0.62f
+        const val SYMBOL_OVERLAY_INTERACTION_SCALE_MAX = 1.62f
+        const val SYMBOL_OVERLAY_INTERACTION_MARKER_BUCKET_TOLERANCE = 6
+        const val SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE = 120
         const val SYMBOL_OVERLAY_CENTER_EPSILON = 0.5
         const val SYMBOL_OVERLAY_APPEARANCE_READY_BUCKET = 1
         const val SYMBOL_OVERLAY_READY_APPEARANCE_MIN = 0.82f
@@ -28485,11 +29075,13 @@ internal class TrafficOverlayStateBuilder(
         val zoom_delta = frame.viewport.zoom - dense_symbol_cache_zoom
         val zoom_changed = abs(zoom_delta) > DENSE_DOT_CACHE_ZOOM_EPSILON
         val interaction_reuse = can_reuse_dense_symbol_cache_during_interaction(frame.interaction)
+        val interaction_zoom_reuse = interaction_reuse &&
+            abs(zoom_delta) <= DENSE_SYMBOL_CACHE_INTERACTION_ZOOM_STEPS
         val idle_reuse = can_reuse_dense_symbol_cache_while_idle(source_changed, zoom_changed)
         if (!interaction_reuse && !idle_reuse) return null
         if (dense_symbol_cache_width != frame.viewport.width || dense_symbol_cache_height != frame.viewport.height) return null
         if (dense_symbol_cache_selected_key != selected_key || dense_symbol_cache_path_focus != path_focus) return null
-        if (zoom_changed) return null
+        if (zoom_changed && !interaction_zoom_reuse) return null
         if (source_changed && !interaction_reuse) return null
         val transform_scale_double = 2.0.pow(zoom_delta)
         val transform_scale = transform_scale_double.toFloat()
@@ -28534,12 +29126,21 @@ internal class TrafficOverlayStateBuilder(
         translation_y: Float
     ): List<TrafficAircraftOverlayState> {
         val grid = dense_symbol_cache_grid ?: return states
-        val padding = dense_symbol_max_render_padding_px(viewport.zoom) + dp(DENSE_SYMBOL_GRID_QUERY_EXTRA_DP)
-        val min_x = (-padding - translation_x) / transform_scale
-        val max_x = (viewport.width + padding - translation_x) / transform_scale
-        val min_y = (-padding - translation_y) / transform_scale
-        val max_y = (viewport.height + padding - translation_y) / transform_scale
+        val render_padding = dense_symbol_max_render_padding_px(viewport.zoom)
+        val motion_padding = dense_symbol_cache_motion_query_padding_px(grid)
+        val min_x = (-render_padding - translation_x) / transform_scale - motion_padding
+        val max_x = (viewport.width + render_padding - translation_x) / transform_scale + motion_padding
+        val min_y = (-render_padding - translation_y) / transform_scale - motion_padding
+        val max_y = (viewport.height + render_padding - translation_y) / transform_scale + motion_padding
         return grid.query(min_x, min_y, max_x, max_y)
+    }
+
+    private fun dense_symbol_cache_motion_query_padding_px(grid: DenseSymbolStateGrid): Float {
+        if (grid.max_axis_motion_speed_px_per_sec <= 0f || grid.max_motion_limit_sec <= 0f) return 0f
+        val age_sec = ((now_elapsed_ms() - dense_symbol_cache_built_ms).coerceAtLeast(0L) / 1000f)
+            .coerceAtMost(grid.max_motion_limit_sec)
+        if (age_sec <= 0f) return 0f
+        return grid.max_axis_motion_speed_px_per_sec * age_sec
     }
 
     private fun dense_symbol_max_render_padding_px(zoom: Double): Float {
@@ -28553,6 +29154,8 @@ internal class TrafficOverlayStateBuilder(
         var min_y = Float.POSITIVE_INFINITY
         var max_x = Float.NEGATIVE_INFINITY
         var max_y = Float.NEGATIVE_INFINITY
+        var max_axis_motion_speed_px_per_sec = 0f
+        var max_motion_limit_sec = 0f
         for (item in states) {
             val x = item.screen_point.x
             val y = item.screen_point.y
@@ -28560,6 +29163,13 @@ internal class TrafficOverlayStateBuilder(
             if (y < min_y) min_y = y
             if (x > max_x) max_x = x
             if (y > max_y) max_y = y
+            val axis_speed = max(abs(item.screen_velocity_x_px_per_sec), abs(item.screen_velocity_y_px_per_sec))
+            if (axis_speed.isFinite() && axis_speed > max_axis_motion_speed_px_per_sec) {
+                max_axis_motion_speed_px_per_sec = axis_speed
+            }
+            if (item.motion_limit_sec.isFinite() && item.motion_limit_sec > max_motion_limit_sec) {
+                max_motion_limit_sec = item.motion_limit_sec
+            }
         }
         if (!min_x.isFinite() || !min_y.isFinite() || !max_x.isFinite() || !max_y.isFinite()) return null
         val cell_size = dp(DENSE_SYMBOL_GRID_CELL_DP).coerceAtLeast(1f)
@@ -28573,7 +29183,16 @@ internal class TrafficOverlayStateBuilder(
             val row = floor((item.screen_point.y - origin_y) / cell_size).toInt().coerceIn(0, rows - 1)
             cells[row * columns + column].add(item)
         }
-        return DenseSymbolStateGrid(origin_x, origin_y, cell_size, columns, rows, cells)
+        return DenseSymbolStateGrid(
+            origin_x = origin_x,
+            origin_y = origin_y,
+            cell_size = cell_size,
+            columns = columns,
+            rows = rows,
+            max_axis_motion_speed_px_per_sec = max_axis_motion_speed_px_per_sec,
+            max_motion_limit_sec = max_motion_limit_sec,
+            cells = cells
+        )
     }
 
     private fun cache_dense_symbol_overlay(
@@ -28736,6 +29355,8 @@ internal class TrafficOverlayStateBuilder(
         val cell_size: Float,
         val columns: Int,
         val rows: Int,
+        val max_axis_motion_speed_px_per_sec: Float,
+        val max_motion_limit_sec: Float,
         val cells: Array<ArrayList<TrafficAircraftOverlayState>>
     ) {
         fun query(min_x: Float, min_y: Float, max_x: Float, max_y: Float): List<TrafficAircraftOverlayState> {
@@ -29119,7 +29740,6 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_SYMBOL_CACHE_WIDE_COVERAGE_REUSE_DP = 420f
         const val DENSE_SYMBOL_VISIBLE_FILTER_SCALE_EPSILON = 0.0025f
         const val DENSE_SYMBOL_GRID_CELL_DP = 180f
-        const val DENSE_SYMBOL_GRID_QUERY_EXTRA_DP = 180f
         const val DENSE_SYMBOL_MAX_SHAPE_RADIUS_DP = 31f
         const val DENSE_SYMBOL_SELECTED_RING_DP = 17f
         const val DENSE_SYMBOL_MAX_TYPE_SCALE = 1.18f
