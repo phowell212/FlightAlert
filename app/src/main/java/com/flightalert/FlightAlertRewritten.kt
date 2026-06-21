@@ -20432,6 +20432,13 @@ internal class SatelliteMapTileRenderer(
         val target_commit_ready = target_coverage?.let { coverage ->
             reference_lod_switch_commit_ready(overlay, coverage)
         } == true
+        val target_visual_holdable = previous == target_tile_zoom &&
+            target_coverage?.let { coverage ->
+                reference_close_pan_target_lod_holdable(
+                    viewport_zoom = viewport.zoom,
+                    coverage = coverage
+                )
+            } == true
         val selectable_coverages = coverages.entries.filter { (zoom, _) ->
             zoom != previous || retained_previous != null || zoom == target_tile_zoom
         }
@@ -20441,6 +20448,7 @@ internal class SatelliteMapTileRenderer(
         val best_ready = selectable_coverages.maxWithOrNull(reference_lod_coverage_comparator(overlay, previous))
         val draw_tile_zoom = when {
             target_coverage != null && target_commit_ready -> target_tile_zoom
+            target_visual_holdable -> target_tile_zoom
             retained_previous != null -> retained_previous.first
             best_committed != null -> best_committed.key
             best_ready != null -> best_ready.key
@@ -20604,6 +20612,16 @@ internal class SatelliteMapTileRenderer(
                         coverage = coverage
                     ) > MIN_LAYER_ALPHA
             )
+    }
+
+    private fun reference_close_pan_target_lod_holdable(
+        viewport_zoom: Double,
+        coverage: ReferenceTileCoverage
+    ): Boolean {
+        if (viewport_zoom.toFloat() < REFERENCE_CLOSE_PAN_TARGET_LOD_HOLD_ZOOM) return false
+        if (coverage.visible <= 0 || coverage.center_visible <= 0) return false
+        return coverage.visual_ready >= coverage.visible &&
+            coverage.center_visual_ready >= coverage.center_visible
     }
 
     private fun reference_lod_coverage_comparator(
@@ -22118,6 +22136,7 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_BOUNDARY_PAN_PREFETCH_START_ZOOM = 4.0f
         const val REFERENCE_TRANSPORTATION_PAN_PREFETCH_START_ZOOM = 7.2f
         const val REFERENCE_OVERLAY_PAN_PREFETCH_TILE_BUFFER = 1
+        const val REFERENCE_CLOSE_PAN_TARGET_LOD_HOLD_ZOOM = 11.5f
         const val REFERENCE_RETAINED_LOD_MIN_RATIO = 0.8f
         const val REFERENCE_LOD_SWITCH_READY_RATIO = 0.92f
         const val REFERENCE_LOD_SWITCH_COMMIT_RATIO = 1f
