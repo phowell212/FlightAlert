@@ -56,6 +56,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.edit
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.get
+import androidx.core.graphics.withRotation
 import androidx.core.graphics.withClip
 import androidx.core.graphics.withTranslation
 import androidx.core.net.toUri
@@ -87,7 +90,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -432,10 +434,10 @@ private fun write_cache_file_async(executor: Executor, file: File, bytes: ByteAr
     }
 }
 
-private fun is_fresh_cache_file(file: File, max_age_ms: Long): Boolean {
+private fun is_fresh_cache_file(file: File): Boolean {
     return file.exists() &&
         file.length() > 0L &&
-        System.currentTimeMillis() - file.lastModified() < max_age_ms
+        System.currentTimeMillis() - file.lastModified() < MAP_TILE_CACHE_MAX_AGE_MS
 }
 
 private fun map_tile_cache_file(context: Context, cache_key: String, z: Int, x: Int, y: Int): File {
@@ -1689,7 +1691,7 @@ class AircraftDetailsClient(private val user_agent: String) {
             val summary = fetch_wikipedia_summary(title) ?: continue
             if (!details_looks_like_aircraft_page(summary.title, summary.extract)) continue
             return InternetAircraftMetadata(
-                manufacturer = details_manufacturer_from_wikipedia_title(summary.title),
+                manufacturer = null,
                 model = summary.title,
                 source_name = "Wikipedia summary"
             )
@@ -1890,7 +1892,7 @@ class AircraftDetailsClient(private val user_agent: String) {
                 )
             )
             .toString()
-        val route = post_json_array("https://adsb.im/api/0/routeset", request_body)
+        val route = post_adsb_im_routeset(request_body)
             ?.optJSONObject(0)
             ?: return null
         val returned_callsign = route.details_json_string_or_null("callsign")?.replace(" ", "")?.uppercase(Locale.US)
@@ -1908,8 +1910,8 @@ class AircraftDetailsClient(private val user_agent: String) {
         return RouteLookup(display_route, airports.firstOrNull(), airports.lastOrNull()?.takeIf { airports.size >= 2 })
     }
 
-    private fun post_json_array(url: String, body: String): JSONArray? {
-        val safe_url = https_url(url) ?: return null
+    private fun post_adsb_im_routeset(body: String): JSONArray? {
+        val safe_url = https_url("https://adsb.im/api/0/routeset") ?: return null
         var connection: HttpURLConnection? = null
         return try {
             connection = (safe_url.openConnection() as HttpURLConnection).apply {
@@ -2008,11 +2010,6 @@ private fun details_looks_like_aircraft_page(title: String, text: String): Boole
     )
     return aircraft_terms.any { combined.contains(it) } &&
         rejected_topics.none { combined.contains(it) }
-}
-
-// Wikipedia titles are useful model hints, but the title alone is not a structured manufacturer field.
-private fun details_manufacturer_from_wikipedia_title(@Suppress("UNUSED_PARAMETER") title: String): String? {
-    return null
 }
 
 internal fun JSONObject.to_airplanes_live_metadata(source_name: String): AirplanesLiveMetadata {
@@ -2688,8 +2685,8 @@ class AircraftFeedClient(private val user_agent: String) {
             nic_baro = feed_json_number_as_string_or_null("nic_baro"),
             rc_m = feed_json_finite_double_or_null("rc"),
             rssi = feed_json_finite_double_or_null("rssi"),
-            message_rate = feed_json_first_double_or_null("message_rate", "msgRate", "messageRate"),
-            receiver_count_label = feed_json_first_count_label("receivers", "receiver_count", "receiverCount", "siteCount"),
+            message_rate = feed_json_message_rate_or_null(),
+            receiver_count_label = feed_json_receiver_count_label(),
             category_label = feed_json_string_or_null("category")
         )
         return telemetry.takeIf { it.has_values }
@@ -2814,12 +2811,14 @@ private fun JSONObject.feed_json_string_list(key: String): List<String> {
         .filter { it.isNotBlank() && !it.equals("n/a", ignoreCase = true) }
 }
 
-private fun JSONObject.feed_json_first_double_or_null(vararg keys: String): Double? {
-    return keys.firstNotNullOfOrNull { key -> feed_json_finite_double_or_null(key) }
+private fun JSONObject.feed_json_message_rate_or_null(): Double? {
+    return feed_json_finite_double_or_null("message_rate")
+        ?: feed_json_finite_double_or_null("msgRate")
+        ?: feed_json_finite_double_or_null("messageRate")
 }
 
-private fun JSONObject.feed_json_first_count_label(vararg keys: String): String? {
-    for (key in keys) {
+private fun JSONObject.feed_json_receiver_count_label(): String? {
+    for (key in listOf("receivers", "receiver_count", "receiverCount", "siteCount")) {
         if (!has(key) || isNull(key)) continue
         when (val raw = opt(key)) {
             is Number -> return raw.toInt().toString()
@@ -3159,8 +3158,7 @@ class FlightTraceClient(private val user_agent: String) {
     fun fetch_flight_trace(
         icao24: String,
         live_point: TrackPoint? = null,
-        type_code: String? = null,
-        category: Int? = null
+        type_code: String? = null
     ): FlightTrace? {
         val clean_icao = icao24.trim().lowercase(Locale.US)
         if (clean_icao.isEmpty()) return null
@@ -5452,7 +5450,7 @@ class AviationLayerController(
             request_warm_aviation_layers_if_needed(viewport)
             return
         }
-        val query_bounds = layer_bounds_for_viewport(viewport) ?: return
+        val query_bounds = layer_bounds_for_viewport(viewport)
         val visible_viewport_bounds = visible_bounds(viewport) ?: query_bounds
         val selection_key = selection_key(visibility)
         val now = now_ms()
@@ -5477,7 +5475,7 @@ class AviationLayerController(
     }
 
     private fun request_warm_aviation_layers_if_needed(viewport: Viewport) {
-        val query_bounds = layer_bounds_for_viewport(viewport) ?: return
+        val query_bounds = layer_bounds_for_viewport(viewport)
         val visible_viewport_bounds = visible_bounds(viewport) ?: query_bounds
         val visibility = WARM_AVIATION_LAYERS_VISIBILITY
         val selection_key = selection_key(visibility)
@@ -5606,7 +5604,7 @@ class AviationLayerController(
         request_redraw()
     }
 
-    private fun layer_bounds_for_viewport(viewport: Viewport): Bounds? {
+    private fun layer_bounds_for_viewport(viewport: Viewport): Bounds {
         val padding = max(viewport.width, viewport.height) * bounds_padding_fraction
         val left = viewport.center_x - viewport.width / 2.0 - padding
         val right = viewport.center_x + viewport.width / 2.0 + padding
@@ -5881,7 +5879,6 @@ class AircraftDetailsCoordinator(
     // Start metadata and photo work around one selected aircraft, then post only callbacks that still match its token.
     fun request_aircraft_details(
         aircraft: Aircraft,
-        mode: FlightAlertSettings.AircraftFeedMode,
         request_token: Long,
         is_current_request: (String, Long) -> Boolean,
         is_photo_available: () -> Boolean,
@@ -5892,7 +5889,7 @@ class AircraftDetailsCoordinator(
         on_photo_search_done: (String, Long) -> Unit
     ) {
         val requested_id = aircraft.icao24
-        val candidates = detail_candidates_for_aircraft(aircraft, mode)
+        val candidates = detail_candidates_for_aircraft(aircraft)
         val remaining = AtomicInteger(candidates.size)
         val photo_in_flight = AtomicInteger(0)
         val photo_found = AtomicBoolean(false)
@@ -5995,7 +5992,6 @@ class AircraftDetailsCoordinator(
     fun request_photo_gallery(
         aircraft: Aircraft,
         details: AircraftDetails,
-        mode: FlightAlertSettings.AircraftFeedMode,
         request_token: Long,
         is_current_request: (String, Long) -> Boolean,
         on_gallery: (String, Long, List<AircraftPhotoGalleryItem>) -> Unit
@@ -6011,10 +6007,7 @@ class AircraftDetailsCoordinator(
     }
 
     // Use current feed data as seed metadata, then enrich from documented registries and routes.
-    private fun detail_candidates_for_aircraft(
-        aircraft: Aircraft,
-        @Suppress("UNUSED_PARAMETER") mode: FlightAlertSettings.AircraftFeedMode
-    ): List<AircraftDetailCandidate> {
+    private fun detail_candidates_for_aircraft(aircraft: Aircraft): List<AircraftDetailCandidate> {
         val seed = AircraftDetailCandidate("Live feed seed") {
             seeded_aircraft_details(aircraft)
         }
@@ -6117,12 +6110,6 @@ class AircraftDetailsCoordinator(
                 details.type != null ||
                 details.type_code != null ||
                 details.owner != null
-        }
-
-        private fun has_route_metadata(details: AircraftDetails): Boolean {
-            return details.route != null ||
-                details.origin_airport != null ||
-                details.destination_airport != null
         }
     }
 }
@@ -7394,7 +7381,6 @@ class AircraftDetailsSession(
         coordinator.request_photo_gallery(
             aircraft = aircraft,
             details = details,
-            mode = feed_mode(),
             request_token = request_token,
             is_current_request = ::is_current_details_request,
             on_gallery = ::post_photo_gallery
@@ -7413,11 +7399,7 @@ class AircraftDetailsSession(
     }
 
     fun unavailable_photo_status(): String {
-        return when (feed_mode()) {
-            FlightAlertSettings.AircraftFeedMode.WEB -> "Exact, representative, and search photos unavailable"
-            FlightAlertSettings.AircraftFeedMode.API -> "Exact, representative, and search photos unavailable"
-            FlightAlertSettings.AircraftFeedMode.HYBRID -> "Exact, representative, and search photos unavailable"
-        }
+        return "Exact, representative, and search photos unavailable"
     }
 
     fun is_current_details_request(requested_id: String, request_token: Long): Boolean {
@@ -7436,7 +7418,6 @@ class AircraftDetailsSession(
         val request_token = ++details_request_token
         coordinator.request_aircraft_details(
             aircraft = aircraft,
-            mode = feed_mode(),
             request_token = request_token,
             is_current_request = ::is_current_details_request,
             is_photo_available = { aircraft_photo != null },
@@ -7727,7 +7708,6 @@ class AircraftDetailsWarmCache(
 
 class AircraftDetailsWarmRequester(
     private val coordinator: AircraftDetailsCoordinator,
-    private val feed_mode: () -> FlightAlertSettings.AircraftFeedMode,
     private val cache_key: (Aircraft) -> String,
     private val apply_entry: (String, AircraftDetailsWarmCacheEntry) -> Unit,
     max_entries: Int,
@@ -7769,7 +7749,6 @@ class AircraftDetailsWarmRequester(
         }
         coordinator.request_aircraft_details(
             aircraft = aircraft,
-            mode = feed_mode(),
             request_token = request_token,
             is_current_request = { requested_id, token ->
                 is_current_warmed_request(key, aircraft, requested_id, token)
@@ -8287,7 +8266,6 @@ object AircraftUsageAnalyzer {
     private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
         spherical_distance_meters(lat1, lon1, lat2, lon2)
 
-    private const val EARTH_RADIUS_M = 6371000.0
     private val USAGE_DAY_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE", Locale.US)
     private val USAGE_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d", Locale.US)
 }
@@ -8610,7 +8588,6 @@ class FlightMapView(
     // Keep source clients together so the coordinator can fetch traffic, details, photos, traces, and layers.
     private val map_tile_renderer = MapTileRenderer(
         context = context,
-        executor = executor,
         paint = paint,
         text_paint = text_paint,
         dp = { value -> dp(value) },
@@ -8708,7 +8685,6 @@ class FlightMapView(
     private val flight_path_requests = mutableSetOf<String>()
     private val aircraft_filter_controller = AircraftFilterController(prefs)
     private val traffic_cache_controller = TrafficCacheController(
-        all_aircraft_snapshot = ::all_aircraft_snapshot,
         passes_aircraft_filters = ::passes_aircraft_filters,
         distance_meters = ::reported_distance_meters,
         is_hazard_aircraft = ::is_hazard_aircraft,
@@ -8800,7 +8776,6 @@ class FlightMapView(
 
     private val aircraft_details_warm_requester = AircraftDetailsWarmRequester(
         coordinator = aircraft_details_coordinator,
-        feed_mode = { aircraft_feed_mode },
         cache_key = ::aircraft_details_cache_key,
         apply_entry = ::apply_warm_cache_to_current_details,
         max_entries = DETAILS_WARM_CACHE_MAX_ENTRIES,
@@ -10356,18 +10331,10 @@ class FlightMapView(
         }
     }
 
-    private fun aircraft_appearance_progress(aircraft: Aircraft): Float {
-        return aircraft_appearance_progress_for_key(aircraft.appearance_key(), aircraft)
-    }
-
     private fun aircraft_appearance_progress_for_key(key: String, aircraft: Aircraft): Float {
         val appearance = aircraft_appearance_snapshot[key] ?: return 1f
         val elapsed = SystemClock.elapsedRealtime() - appearance.first_seen_ms - appearance.delay_ms
         return smooth_step(0f, AIRCRAFT_APPEAR_DURATION_MS.toFloat(), elapsed.toFloat())
-    }
-
-    private fun aircraft_appearance(aircraft: Aircraft): AircraftAppearance? {
-        return aircraft_appearance_for_key(aircraft.appearance_key(), aircraft)
     }
 
     private fun aircraft_appearance_for_key(key: String, aircraft: Aircraft): AircraftAppearance? {
@@ -10397,8 +10364,7 @@ class FlightMapView(
                 val trace = flight_trace_client.fetch_flight_trace(
                     icao24 = key,
                     live_point = live_point,
-                    type_code = selected_aircraft?.type_code,
-                    category = selected_aircraft?.category
+                    type_code = selected_aircraft?.type_code
                 )
                 post {
                     if (selected_path_controller.is_selected_key(key)) {
@@ -10639,25 +10605,6 @@ class FlightMapView(
     }
 
     private fun screen_neighborhood_contains(
-        screen: ScreenPoint,
-        aircraft: Aircraft,
-        selected_key: String?,
-        viewport: Viewport
-    ): Boolean {
-        return traffic_screen_projector.screen_neighborhood_contains(screen, aircraft, selected_key, viewport)
-    }
-
-    private fun screen_neighborhood_contains(
-        x: Float,
-        y: Float,
-        aircraft: Aircraft,
-        selected_key: String?,
-        viewport: Viewport
-    ): Boolean {
-        return traffic_screen_projector.screen_neighborhood_contains(x, y, aircraft, selected_key, viewport)
-    }
-
-    private fun screen_neighborhood_contains(
         x: Float,
         y: Float,
         selected: Boolean,
@@ -10676,15 +10623,6 @@ class FlightMapView(
             info_panel_bounds(w, h).padded_copy(padding),
             settings_button_bounds(w, h).padded_copy(padding),
             filters_button_bounds(w, h).padded_copy(padding)
-        )
-    }
-
-    // When a path is open, keep context focused on selected and extreme aircraft instead of drawing the whole feed.
-    private fun visible_aircraft_snapshot(): List<Aircraft> {
-        return traffic_overlay_state_builder.visible_aircraft_snapshot(
-            cache = cached_traffic(),
-            selection = traffic_overlay_selection(),
-            filters_restrict_aircraft = filters_restrict_aircraft()
         )
     }
 
@@ -10768,8 +10706,6 @@ class FlightMapView(
     private fun previous_flights_button_bounds(w: Float, h: Float): RectF = layout.previous_flights_button_bounds(w, h, layout_state())
 
     private fun clear_flight_path_button_bounds(w: Float, h: Float): RectF = layout.clear_flight_path_button_bounds(w, h, layout_state())
-
-    private fun context_button_bounds(w: Float, h: Float, slot: Int): RectF = layout.context_button_bounds(w, h, slot)
 
     private fun draw_settings_button(canvas: Canvas, w: Float, h: Float) {
         val rect = settings_button_bounds(w, h)
@@ -10917,14 +10853,16 @@ class FlightMapView(
     private fun current_details_photo_bounds(panel: RectF, w: Float, h: Float): RectF {
         return details_panel_renderer.current_photo_bounds(panel, is_wide_layout(w, h), details_session.aircraft_photo != null)
     }
+
     private fun draw_wrapped_text(
-        canvas: Canvas, value: String, x: Float, y: Float, width: Float, max_lines: Int = PROOF_QUOTE_LINES
+        canvas: Canvas,
+        value: String,
+        x: Float,
+        y: Float,
+        width: Float,
+        max_lines: Int
     ): Float = draw_wrapped_text(canvas, text_paint, value, x, y, width, max_lines, dp(19))
 
-    private fun wrapped_text_lines(value: String, width: Float, max_lines: Int): List<String> =
-        wrapped_text_lines(text_paint, value, width, max_lines)
-
-    
     private fun RectF.padded_copy(padding: Float): RectF {
         return RectF(left - padding, top - padding, right + padding, bottom + padding)
     }
@@ -10980,9 +10918,6 @@ class FlightMapView(
         return trace_details_presenter.current_impact_trace_for(aircraft)
     }
 
-    private fun current_trace_segments_for_impact(aircraft: Aircraft): List<TraceSegment>? {
-        return trace_details_presenter.current_trace_segments_for_impact(aircraft)
-    }
     private fun impact_score_color(profile: ImpactProfile): Int {
         val score = AircraftImpactEstimator.score(profile)
         return when {
@@ -11334,7 +11269,7 @@ class FlightMapView(
 
     private fun priority_adjust_button_at(x: Float, y: Float): PriorityRangeAdjustButton? {
         if (!priority_tracker_open) return null
-        return PriorityRangeAdjustButton.values().firstOrNull { priority_adjust_button_bounds(it).contains(x, y) }
+        return PriorityRangeAdjustButton.entries.firstOrNull { priority_adjust_button_bounds(it).contains(x, y) }
     }
 
     private fun priority_adjust_button_bounds(button: PriorityRangeAdjustButton): RectF {
@@ -12185,12 +12120,10 @@ class FlightMapView(
     private fun impact_source_button_bounds(panel: RectF, index: Int): RectF = layout.impact_source_button_bounds(panel, index, AircraftImpactEstimator.source_labels.size)
     private fun map_street_labels_button_bounds(panel: RectF): RectF = layout.map_street_labels_button_bounds(panel)
     private fun map_borders_button_bounds(panel: RectF): RectF = layout.map_borders_button_bounds(panel)
-    private fun aviation_layer_status_bounds(panel: RectF): RectF = layout.aviation_layer_status_bounds(panel)
     private fun layer_atc_button_bounds(panel: RectF): RectF = layout.layer_atc_button_bounds(panel)
     private fun layer_restricted_button_bounds(panel: RectF): RectF = layout.layer_restricted_button_bounds(panel)
     private fun layer_oceanic_button_bounds(panel: RectF): RectF = layout.layer_oceanic_button_bounds(panel)
     private fun layer_airport_labels_button_bounds(panel: RectF): RectF = layout.layer_airport_labels_button_bounds(panel)
-    private fun layer_toggle_bounds(panel: RectF, row: Int, right_column: Boolean): RectF = layout.layer_toggle_bounds(panel, row, right_column)
     private fun filter_search_box_bounds(panel: RectF): RectF = layout.filter_search_box_bounds(panel)
     private fun filter_search_find_button_bounds(panel: RectF): RectF = layout.filter_search_find_button_bounds(panel)
     private fun filter_search_clear_button_bounds(panel: RectF): RectF = layout.filter_search_clear_button_bounds(panel)
@@ -12201,24 +12134,14 @@ class FlightMapView(
     private fun filter_age_button_bounds(panel: RectF): RectF = layout.filter_age_button_bounds(panel)
     private fun filter_alert_button_bounds(panel: RectF): RectF = layout.filter_alert_button_bounds(panel)
     private fun filter_reset_button_bounds(panel: RectF): RectF = layout.filter_reset_button_bounds(panel)
-    private fun filter_button_bounds(panel: RectF, row: Int, right_column: Boolean): RectF = layout.filter_button_bounds(panel, row, right_column)
     private fun priority_tracker_panel_bounds(w: Float, h: Float): RectF = layout.priority_tracker_panel_bounds(w, h)
     private fun priority_close_button_bounds(panel: RectF): RectF = layout.priority_close_button_bounds(panel)
     private fun priority_tracking_toggle_bounds(panel: RectF): RectF = layout.priority_tracking_toggle_bounds(panel)
     private fun priority_ring_toggle_bounds(panel: RectF): RectF = layout.priority_ring_toggle_bounds(panel)
-    private fun is_compact_settings_panel(panel: RectF): Boolean = layout.is_compact_settings_panel(panel)
-    private fun compact_settings_left_column(panel: RectF): RectF = layout.compact_settings_left_column(panel)
-    private fun compact_settings_right_column(panel: RectF): RectF = layout.compact_settings_right_column(panel)
-    private fun priority_alert_control_area(panel: RectF): RectF = layout.priority_alert_control_area(panel)
-    private fun adjuster_minus_bounds(panel: RectF, top: Float): RectF = layout.adjuster_minus_bounds(panel, top)
-    private fun adjuster_plus_bounds(panel: RectF, top: Float): RectF = layout.adjuster_plus_bounds(panel, top)
     private fun info_panel_bounds(w: Float, h: Float): RectF = layout.info_panel_bounds(w, h)
     private fun default_map_focus(w: Float, h: Float): ScreenPoint = layout.default_map_focus(w, h, layout_state())
     private fun largest_unblocked_map_rect(w: Float, h: Float): RectF = layout.largest_unblocked_map_rect(w, h, layout_state())
-    private fun map_obstacles(w: Float, h: Float): List<RectF> = layout.map_obstacles(w, h, layout_state())
     private fun is_wide_layout(w: Float, h: Float): Boolean = layout.is_wide_layout(w, h)
-
-    private fun nearest_aircraft(): Aircraft? = cached_traffic().nearest_aircraft
 
     private fun displayed_traffic(): TrafficDisplay {
         val cache = cached_traffic()
@@ -12342,13 +12265,7 @@ class FlightMapView(
         return AircraftColorResolver.aircraft_color(aircraft, visual_theme)
     }
 
-    private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        return MapProjection.distance_meters(lat1, lon1, lat2, lon2)
-    }
-
     private fun feet_to_meters(feet: Double): Double = feet / 3.28084
-
-    private fun meters_to_feet(meters: Double): Double = meters * 3.28084
 
     private fun meters_per_pixel_at(latitude: Double, z: Double): Double {
         return MapProjection.meters_per_pixel_at(latitude, z)
@@ -12382,9 +12299,7 @@ class FlightMapView(
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
 
-    private fun sp(value: Int): Float {
-        return sp(value.toFloat())
-    }
+    private fun sp(value: Int): Float = sp(value.toFloat())
 
     private fun sp(value: Float): Float {
         val metrics = resources.displayMetrics
@@ -12392,8 +12307,6 @@ class FlightMapView(
     }
 
     private fun chrome_style(): FlightMapChromeStyle = FlightMapChromeStyle(visual_theme)
-
-    private fun panel_radius(): Float = chrome_renderer.panel_radius(chrome_style())
 
     private fun control_radius(): Float = chrome_renderer.control_radius(chrome_style())
 
@@ -15944,22 +15857,19 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                 queries = AircraftPhotoCatalog.representative_photo_queries(details, model),
                 title = "Representative exterior",
                 caption = "Same make/model family: $model; not this exact aircraft",
-                view_type = AircraftPhotoViewType.EXTERIOR,
-                quality = PhotoQuality.REPRESENTATIVE
+                view_type = AircraftPhotoViewType.EXTERIOR
             )
             items += fetch_gallery_item_for_queries(
                 queries = listOf("\"$model\" cockpit", "$model cockpit"),
                 title = "Representative cockpit",
                 caption = "Representative cockpit view for $model; not this exact aircraft",
-                view_type = AircraftPhotoViewType.COCKPIT,
-                quality = PhotoQuality.REPRESENTATIVE
+                view_type = AircraftPhotoViewType.COCKPIT
             )
             items += fetch_gallery_item_for_queries(
                 queries = listOf("\"$model\" cabin interior", "$model cabin interior", "$model interior"),
                 title = "Representative interior",
                 caption = "Representative interior/cabin view for $model; not this exact aircraft",
-                view_type = AircraftPhotoViewType.INTERIOR,
-                quality = PhotoQuality.REPRESENTATIVE
+                view_type = AircraftPhotoViewType.INTERIOR
             )
         }
         if (items.isEmpty() && aircraft.icao24.isNotBlank()) {
@@ -15974,8 +15884,7 @@ class AircraftPhotoFetcher(private val user_agent: String) {
         queries: List<String>,
         title: String,
         caption: String,
-        view_type: AircraftPhotoViewType,
-        quality: PhotoQuality
+        view_type: AircraftPhotoViewType
     ): List<AircraftPhotoGalleryItem> {
         queries.distinct().forEach { query ->
             val candidates = fetch_wikimedia_search_image_candidates(query) +
@@ -15992,7 +15901,7 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                             title = title,
                             caption = caption,
                             evidence = candidate.gallery_evidence(query),
-                            quality = quality,
+                            quality = PhotoQuality.REPRESENTATIVE,
                             view_type = view_type
                         )
                     )
@@ -16633,22 +16542,8 @@ object PriorityRangeAdjuster {
 // region RENDERING PIPELINE
 
 object AircraftMarkerMorph {
-    fun marker_dot_blend(visible_count: Int, viewport: Viewport): Float {
-        return marker_dot_blend(
-            visible_count = visible_count,
-            zoom = viewport.zoom,
-            width = viewport.width,
-            height = viewport.height
-        )
-    }
-
-    fun marker_dot_blend(
-        visible_count: Int,
-        zoom: Double,
-        width: Float,
-        height: Float
-    ): Float {
-        return zoom_marker_dot_blend(zoom)
+    fun marker_dot_blend(viewport: Viewport): Float {
+        return zoom_marker_dot_blend(viewport.zoom)
     }
 
     fun zoom_marker_dot_blend(zoom: Double): Float {
@@ -17336,7 +17231,7 @@ class AviationLayerRenderer(
         }
         current?.recycle()
         return try {
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val bitmap = createBitmap(width, height, Bitmap.Config.ARGB_8888)
             settled_cache_bitmap = bitmap
             settled_cache_canvas = Canvas(bitmap)
             settled_cache_key = null
@@ -17801,7 +17696,7 @@ class AviationLayerRenderer(
         text_paint.color = style.accent_pink
 
         tracks.take(MAX_DRAWN_OCEANIC_TRACKS).forEach { track ->
-            val points = ring_to_screen_points(track.points, viewport, max_points = MAX_DRAWN_OCEANIC_POINTS)
+            val points = ring_to_screen_points(track.points, viewport)
             if (points.size < 2) return@forEach
             path.reset()
             points.forEachIndexed { index, point ->
@@ -17884,9 +17779,9 @@ class AviationLayerRenderer(
         text_paint.isFakeBoldText = false
     }
 
-    private fun ring_to_screen_points(points: List<AviationLayerPoint>, viewport: Viewport, max_points: Int): List<ScreenPoint> {
+    private fun ring_to_screen_points(points: List<AviationLayerPoint>, viewport: Viewport): List<ScreenPoint> {
         if (points.isEmpty()) return emptyList()
-        val step = max(1, points.size / max_points)
+        val step = max(1, points.size / MAX_DRAWN_OCEANIC_POINTS)
         val result = mutableListOf<ScreenPoint>()
         points.forEachIndexed { index, point ->
             if (index % step == 0 || index == points.lastIndex) {
@@ -18348,7 +18243,7 @@ class FlightMapChromeRenderer(
         create_surface: (Canvas, RectF) -> Unit
     ): Bitmap? {
         val bitmap = try {
-            Bitmap.createBitmap(key.width, key.height, Bitmap.Config.ARGB_8888)
+            createBitmap(key.width, key.height, Bitmap.Config.ARGB_8888)
         } catch (_: OutOfMemoryError) {
             return null
         }
@@ -19107,6 +19002,7 @@ private data class LocalReferenceOverlayCache(
     val labels_drawn: Int
 )
 
+@Suppress("ArrayInDataClass")
 private data class LocalReferenceLine(
     val kind: LocalReferenceKind,
     val min_zoom: Double,
@@ -19267,7 +19163,7 @@ internal class LocalReferenceOverlayRenderer(
         current?.takeIf { !it.isRecycled }?.recycle()
         overlay_cache = null
         overlay_cache_canvas = null
-        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        return createBitmap(width, height, Bitmap.Config.ARGB_8888)
     }
 
     private fun request_load_if_needed() {
@@ -19763,7 +19659,6 @@ internal class LocalReferenceOverlayRenderer(
 // Public facade kept stable for FlightMapView; source-specific behavior lives in the street/satellite renderers.
 class MapTileRenderer(
     context: Context,
-    executor: Executor,
     paint: Paint,
     text_paint: Paint,
     dp: (Float) -> Float,
@@ -19783,7 +19678,6 @@ class MapTileRenderer(
     )
     private val satellite_renderer = SatelliteMapTileRenderer(
         context = context,
-        executor = executor,
         paint = paint,
         text_paint = text_paint,
         dp = dp,
@@ -19920,7 +19814,6 @@ private data class ReferenceOverlayDrawPlan(
 // Labels/reference tiles are drawn afterward in their own cache so they cannot disturb base imagery.
 internal class SatelliteMapTileRenderer(
     private val context: Context,
-    @Suppress("UNUSED_PARAMETER") executor: Executor,
     private val paint: Paint,
     private val text_paint: Paint,
     private val dp: (Float) -> Float,
@@ -19943,7 +19836,7 @@ internal class SatelliteMapTileRenderer(
         SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
         PriorityBlockingQueue(),
-        ThreadFactory { runnable ->
+        { runnable ->
             Thread(runnable, "flightalert-satellite-tiles-${satellite_tile_worker_id.incrementAndGet()}").apply {
                 isDaemon = true
             }
@@ -19958,7 +19851,7 @@ internal class SatelliteMapTileRenderer(
         SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
         LinkedBlockingQueue(),
-        ThreadFactory { runnable ->
+        { runnable ->
             Thread({
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
                 runnable.run()
@@ -19988,7 +19881,7 @@ internal class SatelliteMapTileRenderer(
         SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
         PriorityBlockingQueue(),
-        ThreadFactory { runnable ->
+        { runnable ->
             Thread(runnable, "flightalert-satellite-labels-${reference_tile_worker_id.incrementAndGet()}").apply {
                 isDaemon = true
             }
@@ -20050,7 +19943,7 @@ internal class SatelliteMapTileRenderer(
         update_tile_zoom_transition(lower_tile_zoom, state)
         val request_generation = begin_tile_request_generation()
 
-        val retained_interim_drawn = draw_interim_tiles(
+        draw_interim_tiles(
             canvas = canvas,
             viewport = viewport,
             state = state,
@@ -20685,13 +20578,6 @@ internal class SatelliteMapTileRenderer(
             ReferenceTileOverlay.WORLD_TRANSPORTATION ->
                 minOf(coverage.ready_ratio, coverage.center_ready_ratio)
         }
-    }
-
-    private fun reference_lod_switch_ready(
-        overlay: ReferenceTileOverlay,
-        coverage: ReferenceTileCoverage
-    ): Boolean {
-        return reference_lod_ready_ratio(overlay, coverage) >= REFERENCE_LOD_SWITCH_READY_RATIO
     }
 
     private fun reference_lod_switch_commit_ready(
@@ -21529,7 +21415,7 @@ internal class SatelliteMapTileRenderer(
             val y = if (sample_rows == 1) bitmap.height / 2 else (row * (bitmap.height - 1) / (sample_rows - 1))
             for (col in 0 until sample_columns) {
                 val x = if (sample_columns == 1) bitmap.width / 2 else (col * (bitmap.width - 1) / (sample_columns - 1))
-                val alpha = (bitmap.getPixel(x, y) ushr 24) and 0xFF
+                val alpha = (bitmap[x, y] ushr 24) and 0xFF
                 if (alpha >= REFERENCE_OPAQUE_ALPHA_THRESHOLD) mostly_opaque_samples++
                 if (alpha >= REFERENCE_VISIBLE_ALPHA_THRESHOLD) visible_alpha_samples++
                 samples++
@@ -22113,7 +21999,7 @@ internal class SatelliteMapTileRenderer(
     }
 
     private fun is_fresh_tile_file(file: File): Boolean {
-        return is_fresh_cache_file(file, MAP_TILE_CACHE_MAX_AGE_MS)
+        return is_fresh_cache_file(file)
     }
 
     private fun decode_options(): BitmapFactory.Options {
@@ -22294,7 +22180,7 @@ internal class StreetMapTileRenderer(
         TILE_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
         PriorityBlockingQueue(),
-        ThreadFactory { runnable ->
+        { runnable ->
             Thread(runnable, "flightalert-street-tile-${worker_id.incrementAndGet()}").apply {
                 isDaemon = true
             }
@@ -22308,7 +22194,7 @@ internal class StreetMapTileRenderer(
         TILE_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
         LinkedBlockingQueue(),
-        ThreadFactory { runnable ->
+        { runnable ->
             Thread({
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
                 runnable.run()
@@ -22683,7 +22569,7 @@ internal class StreetMapTileRenderer(
     }
 
     private fun is_fresh_tile_file(file: File): Boolean {
-        return is_fresh_cache_file(file, MAP_TILE_CACHE_MAX_AGE_MS)
+        return is_fresh_cache_file(file)
     }
 
     private fun tile_file(z: Int, x: Int, y: Int, cache_key: String): File {
@@ -22752,6 +22638,7 @@ data class TrafficAircraftOverlayState(
     val appearance_delay_ms: Long = 0L
 )
 
+@Suppress("ArrayInDataClass")
 data class TrafficDotBatchOverlayState(
     val outline_points: FloatArray,
     val outline_count: Int,
@@ -22842,8 +22729,8 @@ class TrafficOverlayRenderer(
             return remove
         }
     }
-    private val aircraft_symbol_values = AircraftSymbol.values()
-    private val frame_symbol_masks = arrayOfNulls<AircraftSymbolMask>(AircraftSymbol.values().size)
+    private val aircraft_symbol_values = AircraftSymbol.entries
+    private val frame_symbol_masks = arrayOfNulls<AircraftSymbolMask>(AircraftSymbol.entries.size)
     private var symbol_overlay_bitmap: Bitmap? = null
     private var symbol_overlay_key: AircraftSymbolOverlayCacheKey? = null
     private var symbol_overlay_width = 0
@@ -22911,7 +22798,7 @@ class TrafficOverlayRenderer(
         rotorcraft_animation_frame_requested = false
         reset_debug_detail_timing()
         state.dot_batch?.let { batch ->
-            val marker_blend = smoothed_aircraft_marker_dot_blend(batch.visible_count, state.viewport)
+            val marker_blend = smoothed_aircraft_marker_dot_blend(state.viewport)
             val draw_symbols = state.aircraft.isNotEmpty() && marker_blend < AIRCRAFT_BATCH_DOT_BLEND
             if (draw_symbols) {
                 val dot_alpha = dense_batch_dot_alpha(marker_blend)
@@ -22947,7 +22834,7 @@ class TrafficOverlayRenderer(
             finish_debug_detail_timing()
             return
         }
-        val marker_blend = smoothed_aircraft_marker_dot_blend(state.aircraft.size, state.viewport)
+        val marker_blend = smoothed_aircraft_marker_dot_blend(state.viewport)
         if (marker_blend >= AIRCRAFT_BATCH_DOT_BLEND) {
             val dot_start_ns = debug_detail_start_ns()
             draw_aircraft_dot_batch(canvas, state.aircraft, state.selected_aircraft_id, state.viewport, style)
@@ -23652,10 +23539,8 @@ class TrafficOverlayRenderer(
         val repeat_spacing_px = batch.repeat_x_spacing * transform_scale
         val repeat_range = visible_repeat_range(batch, viewport, transform_scale, repeat_spacing_px)
         for (repeat in repeat_range.first..repeat_range.last) {
-            val save_count = canvas.save()
-            canvas.translate(batch.translation_x + repeat_spacing_px * repeat, batch.translation_y)
-            canvas.scale(transform_scale, transform_scale)
-            try {
+            canvas.withTranslation(batch.translation_x + repeat_spacing_px * repeat, batch.translation_y) {
+                scale(transform_scale, transform_scale)
                 paint.style = Paint.Style.STROKE
                 paint.strokeCap = Paint.Cap.ROUND
                 if (batch.outline_count > 0) {
@@ -23670,11 +23555,9 @@ class TrafficOverlayRenderer(
                     paint.color = with_scaled_alpha(batch_dot_group_color(group, colors), dot_alpha)
                     canvas.drawPoints(fill_draw_points[group], 0, count, paint)
                 }
-            } finally {
-                canvas.restoreToCount(save_count)
-                paint.strokeCap = old_cap
-                paint.alpha = 255
             }
+            paint.strokeCap = old_cap
+            paint.alpha = 255
         }
     }
 
@@ -23986,10 +23869,8 @@ class TrafficOverlayRenderer(
         val repeat_spacing_px = batch.repeat_x_spacing * transform_scale
         val repeat_range = visible_repeat_range(batch, viewport, transform_scale, repeat_spacing_px)
         for (repeat in repeat_range.first..repeat_range.last) {
-            val save_count = canvas.save()
-            canvas.translate(batch.translation_x + repeat_spacing_px * repeat, batch.translation_y)
-            canvas.scale(transform_scale, transform_scale)
-            try {
+            canvas.withTranslation(batch.translation_x + repeat_spacing_px * repeat, batch.translation_y) {
+                scale(transform_scale, transform_scale)
                 paint.style = Paint.Style.STROKE
                 paint.strokeCap = Paint.Cap.ROUND
                 if (phase == DOT_OVERLAY_RECORDING_PHASE_OUTLINE) {
@@ -24000,11 +23881,9 @@ class TrafficOverlayRenderer(
                     paint.color = with_scaled_alpha(batch_dot_group_color(phase, colors), dot_alpha)
                 }
                 canvas.drawPoints(points, offset, count, paint)
-            } finally {
-                canvas.restoreToCount(save_count)
-                paint.strokeCap = old_cap
-                paint.alpha = 255
             }
+            paint.strokeCap = old_cap
+            paint.alpha = 255
         }
     }
 
@@ -24018,7 +23897,7 @@ class TrafficOverlayRenderer(
             return current
         }
         current?.recycle()
-        return Bitmap.createBitmap(width_px, height_px, Bitmap.Config.ARGB_8888).also { bitmap ->
+        return createBitmap(width_px, height_px, Bitmap.Config.ARGB_8888).also { bitmap ->
             dot_overlay_recording_bitmap = bitmap
         }
     }
@@ -24605,11 +24484,10 @@ class TrafficOverlayRenderer(
         angle_deg: Float,
         blade_paint: Paint
     ) {
-        canvas.save()
-        canvas.rotate(angle_deg, center_x, center_y)
-        canvas.drawLine(center_x - half_length, center_y, center_x - center_gap, center_y, blade_paint)
-        canvas.drawLine(center_x + center_gap, center_y, center_x + half_length, center_y, blade_paint)
-        canvas.restore()
+        canvas.withRotation(angle_deg, center_x, center_y) {
+            drawLine(center_x - half_length, center_y, center_x - center_gap, center_y, blade_paint)
+            drawLine(center_x + center_gap, center_y, center_x + half_length, center_y, blade_paint)
+        }
     }
 
     private fun request_rotorcraft_animation_frame_once() {
@@ -24636,8 +24514,8 @@ class TrafficOverlayRenderer(
         val key = AircraftSymbolMaskKey(symbol, progress_bucket, size_px)
         symbol_mask_cache[key]?.let { return it }
         val progress = progress_bucket / SYMBOL_MASK_PROGRESS_STEPS.toFloat()
-        val fill = Bitmap.createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
-        val stroke = Bitmap.createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
+        val fill = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
+        val stroke = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
         val fill_canvas = Canvas(fill)
         val stroke_canvas = Canvas(stroke)
         val center = size_px / 2f
@@ -25034,13 +24912,13 @@ class TrafficOverlayRenderer(
     }
 
     // The zoom curve already eases the morph; following it directly keeps quick pinches visually locked to the map.
-    private fun smoothed_aircraft_marker_dot_blend(visible_count: Int, viewport: Viewport): Float {
-        return aircraft_marker_dot_blend(visible_count, viewport)
+    private fun smoothed_aircraft_marker_dot_blend(viewport: Viewport): Float {
+        return aircraft_marker_dot_blend(viewport)
     }
 
     // Blend toward dot markers by zoom only; density is handled by batching so the morph never locks.
-    private fun aircraft_marker_dot_blend(count: Int, viewport: Viewport): Float {
-        return AircraftMarkerMorph.marker_dot_blend(count, viewport)
+    private fun aircraft_marker_dot_blend(viewport: Viewport): Float {
+        return AircraftMarkerMorph.marker_dot_blend(viewport)
     }
 
     // Labels are intentionally limited so nearby aircraft remain visible and touch targets stay clear.
@@ -25155,6 +25033,7 @@ class TrafficOverlayRenderer(
         }
     }
 
+    @Suppress("ArrayInDataClass")
     private data class AircraftIconFrameStyle(
         val style: TrafficOverlayStyle,
         val colors: ThemeColors,
@@ -25259,7 +25138,7 @@ class TrafficOverlayRenderer(
             key: AircraftSymbolOverlayCacheKey,
             dp_scale: Float
         ): AircraftSymbolOverlayAsyncResult {
-            val bitmap = Bitmap.createBitmap(width_px, height_px, Bitmap.Config.ARGB_8888)
+            val bitmap = createBitmap(width_px, height_px, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             val masks = HashMap<RecorderMaskKey, RecorderMask>()
             val sprites = HashMap<RecorderSpriteKey, RecorderSprite>()
@@ -25509,7 +25388,7 @@ class TrafficOverlayRenderer(
             val key = RecorderSpriteKey(symbol, progress_bucket, size_px, fill, stroke)
             sprites[key]?.let { return it }
             val mask = aircraft_symbol_mask(symbol, progress_bucket, size_px, mask_resolution_scale, masks, dp)
-            val bitmap = Bitmap.createBitmap(size_px, size_px, Bitmap.Config.ARGB_8888)
+            val bitmap = createBitmap(size_px, size_px, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             mask_paint.color = fill
             canvas.drawBitmap(mask.fill, 0f, 0f, mask_paint)
@@ -25541,8 +25420,8 @@ class TrafficOverlayRenderer(
             val key = RecorderMaskKey(symbol, progress_bucket, size_px)
             masks[key]?.let { return it }
             val progress = progress_bucket / SYMBOL_MASK_PROGRESS_STEPS.toFloat()
-            val fill = Bitmap.createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
-            val stroke = Bitmap.createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
+            val fill = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
+            val stroke = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
             val center = size_px / 2f
             val mask_dp_scale = mask_resolution_scale.coerceAtLeast(0.001f)
             val mask_dp: (Float) -> Float = { value -> dp(value) * mask_dp_scale }
@@ -26251,7 +26130,6 @@ object CurrentRouteValidator {
         return abs((first - second + 540.0) % 360.0 - 180.0)
     }
 
-    private const val EARTH_RADIUS_M = 6371000.0
 }
 
 data class CurrentRouteValidation(
@@ -27799,6 +27677,7 @@ internal data class TrafficSpatialEntry(
     val color_theme_key: Int = 0
 )
 
+@Suppress("ArrayInDataClass")
 internal data class TrafficWorldDotBatch(
     val outline_points: FloatArray,
     val outline_count: Int,
@@ -27952,7 +27831,6 @@ internal object TrafficDotGrouper {
 
 
 internal class TrafficCacheController(
-    private val all_aircraft_snapshot: () -> List<Aircraft>,
     private val passes_aircraft_filters: (Aircraft, Double) -> Boolean,
     private val distance_meters: (Aircraft) -> Double,
     private val is_hazard_aircraft: (Aircraft) -> Boolean,
@@ -28439,12 +28317,10 @@ internal class TrafficOverlayStateBuilder(
         path_focus: Boolean
     ): TrafficDotBatchOverlayState? {
         if (!can_reuse_dense_dot_cache_during_interaction(frame.interaction)) return null
-        val source_changed = dense_dot_cache_aircraft !== frame.cache.aircraft
         val zoom_delta = frame.viewport.zoom - dense_dot_cache_zoom
         val zoom_changed = abs(zoom_delta) > DENSE_DOT_CACHE_ZOOM_EPSILON
         if (dense_dot_cache_width != frame.viewport.width || dense_dot_cache_height != frame.viewport.height) return null
         if (dense_dot_cache_selected_key != selected_key || dense_dot_cache_path_focus != path_focus) return null
-        if ((source_changed || zoom_changed) && !can_reuse_dense_dot_cache_during_interaction(frame.interaction)) return null
         if (zoom_changed && abs(zoom_delta) > DENSE_DOT_CACHE_INTERACTION_ZOOM_STEPS) return null
         val transform_scale_double = 2.0.pow(zoom_delta)
         val transform_scale = transform_scale_double.toFloat()
@@ -28550,7 +28426,7 @@ internal class TrafficOverlayStateBuilder(
         val now = now_elapsed_ms()
         val interacting = dense_dot_symbol_interacting(frame.interaction, now)
         val symbol_progress = AircraftMarkerMorph.symbol_progress(
-            AircraftMarkerMorph.marker_dot_blend(dot_batch.visible_count, frame.viewport)
+            AircraftMarkerMorph.marker_dot_blend(frame.viewport)
         )
         val min_symbol_progress = if (interacting) {
             AircraftMarkerMorph.SYMBOL_ACTIVE_MIN_PROGRESS
@@ -28595,8 +28471,7 @@ internal class TrafficOverlayStateBuilder(
         if (dense_symbol_cache_width != frame.viewport.width || dense_symbol_cache_height != frame.viewport.height) return null
         if (dense_symbol_cache_selected_key != selected_key || dense_symbol_cache_path_focus != path_focus) return null
         if (zoom_changed) return null
-        if ((source_changed || zoom_changed) && !interaction_reuse) return null
-        if (zoom_changed && abs(zoom_delta) > DENSE_SYMBOL_CACHE_INTERACTION_ZOOM_STEPS) return null
+        if (source_changed && !interaction_reuse) return null
         val transform_scale_double = 2.0.pow(zoom_delta)
         val transform_scale = transform_scale_double.toFloat()
         if (transform_scale <= 0f || transform_scale.isNaN() || transform_scale.isInfinite()) return null
@@ -28835,6 +28710,7 @@ internal class TrafficOverlayStateBuilder(
         val translation_y: Float = 0f
     )
 
+    @Suppress("ArrayInDataClass")
     private data class DenseSymbolStateGrid(
         val origin_x: Float,
         val origin_y: Float,
