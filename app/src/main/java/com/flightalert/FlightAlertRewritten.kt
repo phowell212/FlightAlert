@@ -19981,6 +19981,8 @@ internal class SatelliteMapTileRenderer(
     }
     private val reference_tile_cache = LinkedHashMap<String, Bitmap>(MAX_REFERENCE_MEMORY_TILES, 0.75f, true)
     private val reference_tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
+    private val protected_reference_tile_keys = HashSet<String>()
+    private val previous_protected_reference_tile_keys = HashSet<String>()
     private val requested_reference_tiles = mutableMapOf<String, Long>()
     private val requested_reference_tile_redraws = mutableSetOf<String>()
     private val current_reference_tile_request_generations = mutableMapOf<String, Long>()
@@ -20115,6 +20117,7 @@ internal class SatelliteMapTileRenderer(
         }
 
         val reference_request_generation = begin_reference_tile_request_generation()
+        begin_reference_tile_protection_frame()
         val label_stats = draw_reference_overlay_layers(
             canvas = canvas,
             viewport = viewport,
@@ -20536,20 +20539,36 @@ internal class SatelliteMapTileRenderer(
             coverages[zoom]?.let { coverage -> zoom to coverage }
         }
         val target_coverage = coverages[target_tile_zoom]
-        val retained_previous = previous_coverage
-            ?.takeIf { (_, coverage) ->
-                target_tile_zoom != previous &&
-                    reference_retained_lod_ratio(overlay, coverage) >= REFERENCE_RETAINED_LOD_MIN_RATIO &&
-                    (target_coverage == null ||
-                        !reference_lod_switch_ready(overlay, target_coverage))
-            }
-        val best_ready = coverages.entries.maxWithOrNull(reference_lod_coverage_comparator(overlay, previous))
+        val retained_previous = previous_coverage?.takeIf { (_, coverage) ->
+            reference_selected_lod_holdable(
+                overlay = overlay,
+                viewport_zoom = viewport.zoom,
+                coverage = coverage
+            )
+        }
+        val target_commit_ready = target_coverage?.let { coverage ->
+            reference_lod_switch_commit_ready(overlay, coverage)
+        } == true
+        val selectable_coverages = coverages.entries.filter { (zoom, _) ->
+            zoom != previous || retained_previous != null || zoom == target_tile_zoom
+        }
+        val best_committed = selectable_coverages
+            .filter { (_, coverage) -> reference_lod_switch_commit_ready(overlay, coverage) }
+            .maxWithOrNull(reference_lod_coverage_comparator(overlay, previous))
+        val best_ready = selectable_coverages.maxWithOrNull(reference_lod_coverage_comparator(overlay, previous))
         val draw_tile_zoom = when {
+            target_coverage != null && target_commit_ready -> target_tile_zoom
             retained_previous != null -> retained_previous.first
-            target_coverage != null &&
-                reference_lod_switch_ready(overlay, target_coverage) -> target_tile_zoom
+            best_committed != null -> best_committed.key
             best_ready != null -> best_ready.key
             else -> target_tile_zoom
+        }
+        if (draw_tile_zoom != target_tile_zoom) {
+            protect_reference_tile_grid(
+                overlay = overlay,
+                viewport = viewport,
+                tile_zoom = target_tile_zoom
+            )
         }
         reference_selected_tile_zooms[overlay] = draw_tile_zoom
 
@@ -20685,6 +20704,32 @@ internal class SatelliteMapTileRenderer(
         return reference_lod_ready_ratio(overlay, coverage) >= REFERENCE_LOD_SWITCH_READY_RATIO
     }
 
+    private fun reference_lod_switch_commit_ready(
+        overlay: ReferenceTileOverlay,
+        coverage: ReferenceTileCoverage
+    ): Boolean {
+        val loaded_ratio = reference_retained_lod_ratio(overlay, coverage)
+        val ready_ratio = reference_lod_ready_ratio(overlay, coverage)
+        return loaded_ratio >= REFERENCE_LOD_SWITCH_COMMIT_RATIO &&
+            ready_ratio >= REFERENCE_LOD_SWITCH_COMMIT_RATIO
+    }
+
+    private fun reference_selected_lod_holdable(
+        overlay: ReferenceTileOverlay,
+        viewport_zoom: Double,
+        coverage: ReferenceTileCoverage
+    ): Boolean {
+        return reference_lod_switch_commit_ready(overlay, coverage) &&
+            (
+                reference_retained_lod_ratio(overlay, coverage) >= REFERENCE_RETAINED_LOD_MIN_RATIO ||
+                    reference_overlay_coverage_alpha(
+                        overlay = overlay,
+                        viewport_zoom = viewport_zoom,
+                        coverage = coverage
+                    ) > MIN_LAYER_ALPHA
+            )
+    }
+
     private fun reference_lod_coverage_comparator(
         overlay: ReferenceTileOverlay,
         previous: Int?
@@ -20796,7 +20841,7 @@ internal class SatelliteMapTileRenderer(
             ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> smooth_step(
                 REFERENCE_BOUNDARY_DRAW_MIN_LOADED_RATIO,
                 REFERENCE_BOUNDARY_DRAW_FULL_LOADED_RATIO,
-                coverage.loaded_ratio
+                coverage.visual_ratio
             )
             ReferenceTileOverlay.WORLD_TRANSPORTATION -> reference_transportation_coverage_alpha(
                 viewport_zoom = viewport_zoom,
@@ -20810,18 +20855,18 @@ internal class SatelliteMapTileRenderer(
         coverage: ReferenceTileCoverage
     ): Float {
         val zoom = viewport_zoom.toFloat()
-        val usable_loaded_ratio = minOf(
-            coverage.loaded_ratio,
+        val usable_visual_ratio = minOf(
+            coverage.visual_ratio,
             maxOf(
-                coverage.center_loaded_ratio,
-                coverage.loaded_ratio * REFERENCE_TRANSPORTATION_CENTER_COVERAGE_FLOOR
+                coverage.center_visual_ratio,
+                coverage.visual_ratio * REFERENCE_TRANSPORTATION_CENTER_COVERAGE_FLOOR
             )
         )
         if (zoom >= REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM) {
             return smooth_step(
                 REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO,
                 REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO,
-                usable_loaded_ratio
+                usable_visual_ratio
             )
         }
 
@@ -20836,7 +20881,7 @@ internal class SatelliteMapTileRenderer(
         val full_loaded = REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO +
             (REFERENCE_TRANSPORTATION_MID_DRAW_FULL_LOADED_RATIO -
                 REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO) * relaxed
-        return smooth_step(min_loaded, full_loaded, usable_loaded_ratio)
+        return smooth_step(min_loaded, full_loaded, usable_visual_ratio)
     }
 
     private fun reference_overlay_prefetch_tile_buffer(
@@ -20954,6 +20999,29 @@ internal class SatelliteMapTileRenderer(
         )
     }
 
+    private fun protect_reference_tile_grid(
+        overlay: ReferenceTileOverlay,
+        viewport: Viewport,
+        tile_zoom: Int
+    ) {
+        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val tile_world_scale = 1.0 / tile_to_viewport_scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
+        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt()
+        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
+        val max_tile = 1 shl tile_zoom
+        for (ty in first_tile_y..last_tile_y) {
+            if (ty !in 0 until max_tile) continue
+            for (tx_raw in first_tile_x..last_tile_x) {
+                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                protect_visible_reference_tile("${overlay.cache_key}/$tile_zoom/$tx/$ty")
+            }
+        }
+    }
+
     private fun request_reference_overlay_prefetch_grid(
         viewport: Viewport,
         state: MapTileRenderState,
@@ -21041,6 +21109,7 @@ internal class SatelliteMapTileRenderer(
             for (tx_raw in first_tile_x..last_tile_x) {
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${overlay.cache_key}/$tile_zoom/$tx/$ty"
+                protect_visible_reference_tile(key)
                 val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
                 val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
                 val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
@@ -21427,9 +21496,32 @@ internal class SatelliteMapTileRenderer(
             reference_tile_loaded_elapsed_ms.remove(key)
         }
         while (reference_tile_cache.size > MAX_REFERENCE_MEMORY_TILES) {
-            val first_key = reference_tile_cache.keys.firstOrNull() ?: break
+            val first_key = reference_tile_cache.keys.firstOrNull { !is_protected_reference_tile(it) }
+                ?: reference_tile_cache.keys.firstOrNull()
+                ?: break
             reference_tile_cache.remove(first_key)
             reference_tile_loaded_elapsed_ms.remove(first_key)
+        }
+    }
+
+    private fun begin_reference_tile_protection_frame() {
+        synchronized(protected_reference_tile_keys) {
+            previous_protected_reference_tile_keys.clear()
+            previous_protected_reference_tile_keys.addAll(protected_reference_tile_keys)
+            protected_reference_tile_keys.clear()
+        }
+    }
+
+    private fun protect_visible_reference_tile(key: String) {
+        synchronized(protected_reference_tile_keys) {
+            protected_reference_tile_keys += key
+        }
+    }
+
+    private fun is_protected_reference_tile(key: String): Boolean {
+        return synchronized(protected_reference_tile_keys) {
+            protected_reference_tile_keys.contains(key) ||
+                previous_protected_reference_tile_keys.contains(key)
         }
     }
 
@@ -22121,14 +22213,14 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TRANSPORTATION_REQUEST_PRIORITY_OFFSET = 0
         const val REFERENCE_BOUNDARY_PARENT_REQUEST_DEPTH = 4
         const val REFERENCE_TRANSPORTATION_PARENT_REQUEST_DEPTH = 7
-        const val REFERENCE_BOUNDARY_PARENT_FALLBACK_DEPTH = 0
-        const val REFERENCE_TRANSPORTATION_PARENT_FALLBACK_DEPTH = 0
+        const val REFERENCE_BOUNDARY_PARENT_FALLBACK_DEPTH = 4
+        const val REFERENCE_TRANSPORTATION_PARENT_FALLBACK_DEPTH = 4
         const val REFERENCE_BOUNDARY_COARSE_LOD_DEPTH = 2
         const val REFERENCE_TRANSPORTATION_COARSE_LOD_DEPTH = 2
         const val REFERENCE_BOUNDARY_MAX_TILE_UPSCALE_DELTA = 1.65
         const val REFERENCE_TRANSPORTATION_MAX_TILE_UPSCALE_DELTA = 1.55
-        const val REFERENCE_BOUNDARY_RETAINED_MAX_DETAIL_DELTA = 1.45
-        const val REFERENCE_TRANSPORTATION_RETAINED_MAX_DETAIL_DELTA = 1.35
+        const val REFERENCE_BOUNDARY_RETAINED_MAX_DETAIL_DELTA = 0.75
+        const val REFERENCE_TRANSPORTATION_RETAINED_MAX_DETAIL_DELTA = 0.75
         const val REFERENCE_BOUNDARY_DRAW_MIN_LOADED_RATIO = 0.84f
         const val REFERENCE_BOUNDARY_DRAW_FULL_LOADED_RATIO = 0.98f
         const val REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_OFFSET = 3
@@ -22153,6 +22245,7 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_OVERLAY_PAN_PREFETCH_TILE_BUFFER = 1
         const val REFERENCE_RETAINED_LOD_MIN_RATIO = 0.8f
         const val REFERENCE_LOD_SWITCH_READY_RATIO = 0.92f
+        const val REFERENCE_LOD_SWITCH_COMMIT_RATIO = 1f
         const val REFERENCE_BOUNDARY_PREFETCH_LOD_LIMIT = 1
         const val REFERENCE_TRANSPORTATION_PREFETCH_LOD_LIMIT = 1
         const val REFERENCE_PREFETCH_LOADED_RATIO = 0.86f
