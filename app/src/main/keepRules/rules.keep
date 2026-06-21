@@ -24,6 +24,6 @@
     public <init>();
 }
 
--keep class com.flightalert.service.AircraftAlertService {
+-keep class com.flightalert.AircraftAlertService {
     public <init>();
 }
