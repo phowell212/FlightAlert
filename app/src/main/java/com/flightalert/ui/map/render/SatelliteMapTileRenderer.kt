@@ -920,6 +920,17 @@ internal class SatelliteMapTileRenderer(
                 .forEach { prefetch_zooms += it }
         }
         if (overlay == ReferenceTileOverlay.WORLD_TRANSPORTATION) {
+            if (reference_overlay_prefetch_allowed(overlay, coverage)) {
+                var zoom = reference_transportation_detail_tile_zoom(viewport_zoom) + 1
+                var count = 0
+                while (zoom <= TileSource.SATELLITE.max_native_zoom &&
+                    count < REFERENCE_TRANSPORTATION_ZOOM_IN_PREFETCH_COUNT
+                ) {
+                    if (zoom != draw_tile_zoom) prefetch_zooms += zoom
+                    zoom++
+                    count++
+                }
+            }
             val zoom_out_prefetch = ArrayList<Int>(REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT)
             var zoom = reference_transportation_detail_tile_zoom(viewport_zoom) -
                 REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_OFFSET
@@ -957,22 +968,45 @@ internal class SatelliteMapTileRenderer(
                 REFERENCE_BOUNDARY_DRAW_FULL_LOADED_RATIO,
                 coverage.loaded_ratio
             )
-            ReferenceTileOverlay.WORLD_TRANSPORTATION -> {
-                if (viewport_zoom.toFloat() >= REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM) {
-                    smooth_step(
-                        REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO,
-                        REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO,
-                        coverage.loaded_ratio
-                    )
-                } else {
-                    smooth_step(
-                        REFERENCE_TRANSPORTATION_DRAW_MIN_LOADED_RATIO,
-                        REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO,
-                        coverage.loaded_ratio
-                    )
-                }
-            }
+            ReferenceTileOverlay.WORLD_TRANSPORTATION -> reference_transportation_coverage_alpha(
+                viewport_zoom = viewport_zoom,
+                coverage = coverage
+            )
         }
+    }
+
+    private fun reference_transportation_coverage_alpha(
+        viewport_zoom: Double,
+        coverage: ReferenceTileCoverage
+    ): Float {
+        val zoom = viewport_zoom.toFloat()
+        val usable_loaded_ratio = minOf(
+            coverage.loaded_ratio,
+            maxOf(
+                coverage.center_loaded_ratio,
+                coverage.loaded_ratio * REFERENCE_TRANSPORTATION_CENTER_COVERAGE_FLOOR
+            )
+        )
+        if (zoom >= REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM) {
+            return smooth_step(
+                REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO,
+                REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO,
+                usable_loaded_ratio
+            )
+        }
+
+        val relaxed = smooth_step(
+            REFERENCE_TRANSPORTATION_RELAXED_DRAW_START_ZOOM,
+            REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM,
+            zoom
+        )
+        val min_loaded = REFERENCE_TRANSPORTATION_DRAW_MIN_LOADED_RATIO +
+            (REFERENCE_TRANSPORTATION_MID_DRAW_MIN_LOADED_RATIO -
+                REFERENCE_TRANSPORTATION_DRAW_MIN_LOADED_RATIO) * relaxed
+        val full_loaded = REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO +
+            (REFERENCE_TRANSPORTATION_MID_DRAW_FULL_LOADED_RATIO -
+                REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO) * relaxed
+        return smooth_step(min_loaded, full_loaded, usable_loaded_ratio)
     }
 
     private fun reference_overlay_prefetch_tile_buffer(
@@ -983,7 +1017,7 @@ internal class SatelliteMapTileRenderer(
         if (prefetch_tile_zoom >= draw_tile_zoom) return 0
         val zoom_gap = (viewport_zoom - prefetch_tile_zoom.toDouble()).coerceAtLeast(0.0)
         return when {
-            zoom_gap >= 3.0 -> 2
+            zoom_gap >= 3.0 -> 1
             zoom_gap >= 1.5 -> 1
             else -> 0
         }
@@ -2291,12 +2325,17 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TRANSPORTATION_DETAIL_ADVANCE = 0.28
         const val REFERENCE_TRANSPORTATION_DRAW_MIN_LOADED_RATIO = 0.9f
         const val REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO = 0.99f
+        const val REFERENCE_TRANSPORTATION_RELAXED_DRAW_START_ZOOM = 7.2f
+        const val REFERENCE_TRANSPORTATION_MID_DRAW_MIN_LOADED_RATIO = 0.46f
+        const val REFERENCE_TRANSPORTATION_MID_DRAW_FULL_LOADED_RATIO = 0.82f
+        const val REFERENCE_TRANSPORTATION_CENTER_COVERAGE_FLOOR = 0.55f
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM = 12.0f
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO = 0.2f
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO = 0.55f
-        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_OFFSET = 3
-        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_STEP = 2
-        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT = 4
+        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_OFFSET = 1
+        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_STEP = 1
+        const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT = 5
+        const val REFERENCE_TRANSPORTATION_ZOOM_IN_PREFETCH_COUNT = 2
         const val REFERENCE_BOUNDARY_PAN_PREFETCH_START_ZOOM = 4.0f
         const val REFERENCE_TRANSPORTATION_PAN_PREFETCH_START_ZOOM = 7.2f
         const val REFERENCE_OVERLAY_PAN_PREFETCH_TILE_BUFFER = 1
