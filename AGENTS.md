@@ -210,6 +210,8 @@ Use `tools/perf/BuildFlightAlertPerformanceWorkbook.mjs` to rebuild the workbook
 
 Keep this AGENTS file focused on rules and workflow. Do not paste long optimization-history entries here after June 22, 2026 unless the workbook is unavailable and the note is needed to prevent evidence loss; if that happens, migrate the note back into the workbook at the next opportunity.
 
+Temporary workbook-lock note to migrate: 2026-06-22 reference fallback availability shortcut was rejected and reverted. Candidate commit `67328e9` improved diagnostic `MapDetailTiming` refPlan/map timing (`tools/perf/out/eu-frankfurt-satellite-benchmarkpanzoom60s-refparentfast-mapdetail-diagnostic-20260622-r1`) but failed the clean no-detail workbook gate (`tools/perf/out/eu-frankfurt-satellite-benchmarkpanzoom60s-refparentfast-clean-20260622-r1`): git clean, route proof passed, aircraft evidence present, full FPS 17.1, present FPS 14.2, FrameTimeline P95 303.95ms, full P95 250ms, present P95 149.98ms, jank 94.28%. Reverted in `674ef77`; do not revive this shortcut without Pro-style frame-local reference-plan shadow tuple/pixel gates. Remove this note after the workbook is writable and updated.
+
 ## 17. Security / Privacy
 
 Prefer HTTPS-only APIs and assets. Do not hardcode API keys, tokens, secrets, credentials, personal device IDs, or private test artifacts.
