@@ -716,7 +716,9 @@ function Invoke-GradleInstallForSplitInstrumentation {
         }
         $installArgs += "--no-daemon"
         Write-Host "Installing debug and androidTest APKs before split instrumentation."
-        & $GradlewPath @installArgs 2>&1 | Tee-Object -FilePath $GradleInstallLogPath
+        & $GradlewPath @installArgs 2>&1 | Tee-Object -FilePath $GradleInstallLogPath | ForEach-Object {
+            Write-Host $_
+        }
         $exitCode = $LASTEXITCODE
         "FLIGHTALERT_GRADLE_INSTALL_EXIT_CODE=$exitCode" | Add-Content -Path $GradleInstallLogPath
         return $exitCode
