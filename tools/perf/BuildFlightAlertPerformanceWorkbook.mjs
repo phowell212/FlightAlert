@@ -720,11 +720,12 @@ function dexoptFingerprint(text) {
 
 function shortVersionLabel(row) {
   const version = workbookTestVersionLabel(row);
+  if (version.includes("symbol-overlay-compatible")) return "symOverlay";
   if (version.includes("one-huge-file")) return "one-huge-file";
   if (version.includes("optimizer-master-exhausted")) return "optbaseline";
   if (version.includes("current-before-refplanlazy")) return "current";
   if (version.includes("rejected-reference-fallback")) return "rejected-ref";
-  return safeText(version, 24);
+  return safeText(version, 32);
 }
 
 function shortChartRunLabel(row) {
@@ -741,6 +742,7 @@ function shortChartRunLabel(row) {
 
 function workbookTestVersionLabel(row) {
   const id = String(row.runId || "").toLowerCase();
+  if (id.includes("symbol-overlay-compatible")) return "symbol-overlay-compatible-20260622";
   if (id.includes("optbaseline")) return "optimizer-master-exhausted-baseline-20260621";
   if (id.includes("onehugefile") || id.includes("onehuge")) return "checkpoint-one-huge-file-20260621-fair-master";
   if (id.includes("refparentfast")) return "rejected-reference-fallback-20260622";
