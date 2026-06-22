@@ -545,12 +545,13 @@ function shortVersionLabel(row) {
   if (version.includes("one-huge-file")) return "one-huge-file";
   if (version.includes("optimizer-master-exhausted")) return "optbaseline";
   if (version.includes("current-before-refplanlazy")) return "current";
+  if (version.includes("rejected-reference-fallback")) return "rejected-ref";
   return safeText(version, 24);
 }
 
 function shortChartRunLabel(row) {
   const runId = String(row.runId || "");
-  const run = runId.match(/(?:^|-)r(\d+)(?:$|-)/i)?.[1];
+  const run = runId.match(/(?:^|-)r(\d+)(?:valid)?(?:$|-)/i)?.[1];
   const suffix = run ? ` r${run}` : "";
   const city = row.city ? ` ${row.city}` : "";
   return safeText(`${shortVersionLabel(row)}${suffix}${city}`, 52);
@@ -560,6 +561,7 @@ function workbookTestVersionLabel(row) {
   const id = String(row.runId || "").toLowerCase();
   if (id.includes("optbaseline")) return "optimizer-master-exhausted-baseline-20260621";
   if (id.includes("onehugefile")) return "checkpoint-one-huge-file-20260621-fair-master";
+  if (id.includes("refparentfast")) return "rejected-reference-fallback-20260622";
   if (id.includes("current")) return "backup/current-before-refplanlazy-restore-20260622";
   return "unlabeled-comparable-version";
 }
