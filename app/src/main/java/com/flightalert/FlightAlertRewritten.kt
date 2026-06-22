@@ -23979,7 +23979,6 @@ class TrafficOverlayRenderer(
     private var symbol_overlay_has_motion_exclusions = false
     private val symbol_overlay_src_rect = Rect()
     private val symbol_overlay_dst_rect = RectF()
-    private val symbol_overlay_cached_coverage_rect = RectF()
     private var symbol_overlay_saw_interaction = false
     private var symbol_overlay_last_interaction_visual_key: AircraftSymbolOverlayVisualKey? = null
     private var symbol_overlay_last_seen_center_x = Double.NaN
@@ -24867,13 +24866,12 @@ class TrafficOverlayRenderer(
         }
         val cached_left = cache_translation_x - padding * scale
         val cached_top = cache_translation_y - padding * scale
-        symbol_overlay_cached_coverage_rect.set(
+        return RectF(
             cached_left,
             cached_top,
             cached_left + symbol_overlay_width * scale,
             cached_top + symbol_overlay_height * scale
         )
-        return symbol_overlay_cached_coverage_rect
     }
 
     private fun symbol_overlay_interaction_visual_bridge_matches(
