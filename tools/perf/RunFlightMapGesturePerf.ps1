@@ -876,6 +876,7 @@ $screenshots = @($pulledPaths | Where-Object { $_ -like "*.png" })
 $videos = @(Get-ChildItem -Path $outDir -Filter "*.mp4" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $targetArtifacts = @($pulledPaths | Where-Object { $_ -like "*-target.txt" })
 $displayArtifacts = @($pulledPaths | Where-Object { $_ -like "*-display.txt" })
+$packageArtifacts = @($pulledPaths | Where-Object { $_ -like "*-package.txt" })
 $routeFocusEvidence = Test-RouteFocusEvidence -LogcatPath $logcatPath -TargetArtifacts $targetArtifacts
 $deviceEvidence = Get-BenchmarkDeviceEvidence -RepoRoot $repoRoot -PackageName $packageName
 $contactSheetPath = ""
@@ -921,7 +922,7 @@ $routeProof += "test_apk_last_write_utc=$($deviceEvidence.TestApkLastWriteUtc)"
 $routeProof += "test_apk_sha256=$($deviceEvidence.TestApkSha256)"
 $routeProof += "test_apk_error=$($deviceEvidence.TestApkError)"
 $routeProof += "device_package_paths=$($deviceEvidence.PackagePaths)"
-$routeProof += "package_compile_evidence=$($deviceEvidence.PackageCompileEvidence)"
+$routeProof += "post_run_package_compile_evidence=$($deviceEvidence.PackageCompileEvidence)"
 $routeProof += "battery_level=$($deviceEvidence.BatteryLevel)"
 $routeProof += "battery_temp_c=$($deviceEvidence.BatteryTempC)"
 $routeProof += "battery_status=$($deviceEvidence.BatteryStatus)"
@@ -952,6 +953,14 @@ if ($displayArtifacts.Count -gt 0) {
         $inRunDisplayLines += @(Select-String -Path $displayArtifact -Pattern "DisplayDeviceInfo|mActiveModeId|mActiveSfDisplayMode|mActiveRenderFrameRate|mDisplayModeSpecs|preferred|refresh|fps=" -CaseSensitive:$false -ErrorAction SilentlyContinue | Select-Object -First 80 | ForEach-Object { $_.Line })
     }
     $routeProof += "in_run_display_refresh_evidence=$(Join-BenchmarkEvidenceSnippet -Lines $inRunDisplayLines -MaxLines 80 -MaxChars 3200)"
+}
+$routeProof += "in_run_package_artifacts=$($packageArtifacts.Count)"
+if ($packageArtifacts.Count -gt 0) {
+    $inRunPackageLines = @()
+    foreach ($packageArtifact in $packageArtifacts) {
+        $inRunPackageLines += @(Select-String -Path $packageArtifact -Pattern "dexopt|compiler|compile|profile|speed|verify|oat|odex|codePath|resourcePath|primaryCpuAbi|status=|reason=" -CaseSensitive:$false -ErrorAction SilentlyContinue | Select-Object -First 100 | ForEach-Object { $_.Line })
+    }
+    $routeProof += "in_run_package_compile_evidence=$(Join-BenchmarkEvidenceSnippet -Lines $inRunPackageLines -MaxLines 100 -MaxChars 3600)"
 }
 $routeProof += "contact_sheet=$contactSheetPath"
 $routeProof += "road_motion_strip_required=$roadMotionStripRequired"
