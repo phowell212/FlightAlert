@@ -464,6 +464,8 @@ function comparableSeriesKey(row, includeCity = true) {
     row.mapSource || "",
     row.roads || "",
     row.borders || "",
+    detailTimingLabel(row.trafficDetailTiming),
+    detailTimingLabel(row.mapDetailTiming),
   ].join(" | ");
 }
 
@@ -473,6 +475,12 @@ function chartProducedFps(row) {
 
 function chartP95Ms(row) {
   return finiteNumber(row.androidP95Ms) ?? row.p95Ms ?? "";
+}
+
+function detailTimingLabel(value) {
+  if (isTrueValue(value)) return "On";
+  if (isFalseValue(value)) return "Off";
+  return "Unknown";
 }
 
 function shortChartRunLabel(row) {
@@ -916,7 +924,7 @@ async function collectPerformanceRows() {
           roads: route.map_roads_argument || "",
           borders: route.map_borders_argument || "",
           mapDetailTiming: targetKv.map_detail_timing || "",
-          trafficDetailTiming: runId.includes("trafficdetail") || runId.includes("detail") ? "true" : "",
+          trafficDetailTiming: targetKv.traffic_detail_timing || (runId.includes("trafficdetail") || runId.includes("detail") ? "true" : ""),
           skipChrome: route.skip_chrome || targetKv.skip_chrome || "",
           skipTopStatus: route.skip_top_status || targetKv.skip_top_status || "",
           skipControls: route.skip_controls || targetKv.skip_controls || "",
@@ -1666,6 +1674,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Map Source",
     "Roads",
     "Borders",
+    "Traffic Detail Timing",
+    "Map Detail Timing",
     "Max Run Seconds",
     "Workload Target ms",
     "Frame Sample Seconds",
@@ -1698,6 +1708,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.mapSource,
     row.roads,
     row.borders,
+    detailTimingLabel(row.trafficDetailTiming),
+    detailTimingLabel(row.mapDetailTiming),
     row.maxRunSeconds,
     row.workloadTargetMs,
     row.sampleSeconds,
@@ -1738,7 +1750,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     return compareRunPerformance(a, b);
   });
   const bestByWorkloadRows = [
-    ["Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Present P95 ms", "Android Jank %", "Max Run Seconds", "Workload Target ms", "Frame Sample Seconds", "Full Sample Seconds", "Route Max Km", "Run ID", "Artifact Dir"],
+    ["Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Present P95 ms", "Android Jank %", "Max Run Seconds", "Workload Target ms", "Frame Sample Seconds", "Full Sample Seconds", "Route Max Km", "Run ID", "Artifact Dir"],
     ...bestRows.map((row) => [
       row.workbookTestLane,
       row.benchmarkRegion,
@@ -1746,6 +1758,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       row.mapSource,
       row.roads,
       row.borders,
+      detailTimingLabel(row.trafficDetailTiming),
+      detailTimingLabel(row.mapDetailTiming),
       chartProducedFps(row),
       row.presentMeanFps,
       chartP95Ms(row),
@@ -1774,6 +1788,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         mapSource: row.mapSource,
         roads: row.roads,
         borders: row.borders,
+        trafficDetailTiming: detailTimingLabel(row.trafficDetailTiming),
+        mapDetailTiming: detailTimingLabel(row.mapDetailTiming),
         rows: [],
       });
     }
@@ -1793,7 +1809,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     return String(a.version).localeCompare(String(b.version));
   });
   const workbookTestSummaryRows = [
-    ["Version", "Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
+    ["Version", "Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
     ...versionSummary.map((group) => [
       group.version,
       group.workbookTestLane,
@@ -1802,6 +1818,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       group.mapSource,
       group.roads,
       group.borders,
+      group.trafficDetailTiming,
+      group.mapDetailTiming,
       group.rows.length,
       averageMetric(group.rows, chartProducedFps),
       bestHighMetric(group.rows, chartProducedFps),
@@ -1839,7 +1857,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
 
   const recent = activeChartRows.slice(-40);
   const chartRows = [
-    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
     ...recent.map((row) => [
       shortChartRunLabel(row),
       chartProducedFps(row),
@@ -1852,6 +1870,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       row.mapSource || "",
       row.roads || "",
       row.borders || "",
+      detailTimingLabel(row.trafficDetailTiming),
+      detailTimingLabel(row.mapDetailTiming),
       row.maxRunSeconds || "",
       row.workloadTargetMs || "",
       row.sampleSeconds || "",
@@ -1879,9 +1899,9 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Frame Correlations sheet", "Rows are parsed from frame-correlation-frames.csv artifacts. This sheet stores the detailed per-frame matched trace/log metrics used for correlation decisions, not only simplified summaries."],
     ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, route proof, accepted-evidence, and eligibility fields together."],
     ["Workbook Tests sheet", "This is the apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be full visible UI/traffic runs, route-proofed, non-video, non-diagnostic, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
-    ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
+    ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders/detail-timing state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
     ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty, diagnostic, hidden-aircraft, route-failed, video, too-short, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
-    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, and borders. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
+    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
     ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
     ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
   ];
@@ -1940,29 +1960,29 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       {
         name: "Workbook Tests",
         rows: workbookTestData,
-        widths: [20, 52, 44, 18, 22, 14, 10, 10, 16, 18, 18, 38, 18, 24, 24, 18, 18, 18, 14, 14, 14, 16, 16, 16, 18, 18, 16, 16, 42, 58],
+        widths: [20, 52, 44, 18, 22, 14, 10, 10, 18, 18, 16, 18, 18, 38, 18, 24, 24, 18, 18, 18, 14, 14, 14, 16, 16, 16, 18, 18, 16, 16, 42, 58],
         freeze: "B2",
         table: "WorkbookTests",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["I2:AB1048576", "0.0"]],
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["K2:AD1048576", "0.0"]],
         wrapCols: [2, 3, 11, 28, 29],
       },
       {
         name: "Workbook Test Summary",
         rows: workbookTestSummaryRows,
-        widths: [46, 44, 18, 22, 14, 10, 10, 16, 20, 20, 28, 24, 18, 18, 18, 18, 18, 78],
+        widths: [46, 44, 18, 22, 14, 10, 10, 18, 18, 16, 20, 20, 28, 24, 18, 18, 18, 18, 18, 78],
         freeze: "B2",
         table: "WorkbookTestSummary",
-        numberFormats: [["H2:Q1048576", "0.0"]],
-        wrapCols: [1, 2, 18],
+        numberFormats: [["J2:S1048576", "0.0"]],
+        wrapCols: [1, 2, 20],
       },
       {
         name: "Best By Workload",
         rows: bestByWorkloadRows,
-        widths: [44, 18, 22, 14, 10, 10, 18, 28, 14, 16, 16, 16, 18, 24, 18, 16, 42, 58],
+        widths: [44, 18, 22, 14, 10, 10, 18, 18, 18, 28, 14, 16, 16, 16, 18, 24, 18, 16, 42, 58],
         freeze: "A2",
         table: "BestByWorkload",
-        numberFormats: [["G2:P1048576", "0.0"]],
-        wrapCols: [1, 16, 17],
+        numberFormats: [["I2:R1048576", "0.0"]],
+        wrapCols: [1, 19, 20],
       },
       {
         name: "Workbook Test Exclusions",
@@ -1976,10 +1996,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       {
         name: "Chart Data",
         rows: chartRows,
-        widths: [52, 18, 28, 14, 18, 44, 18, 22, 14, 10, 10, 16, 18, 24, 18, 16, 16, 42, 58],
+        widths: [52, 18, 28, 14, 18, 44, 18, 22, 14, 10, 10, 18, 18, 16, 18, 24, 18, 16, 16, 42, 58],
         freeze: "A2",
         charts: true,
-        numberFormats: [["B2:E1048576", "0.0"], ["L2:Q1048576", "0.0"]],
+        numberFormats: [["B2:E1048576", "0.0"], ["N2:S1048576", "0.0"]],
       },
       {
         name: "Iteration Checks",
