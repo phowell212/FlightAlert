@@ -1678,6 +1678,19 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   const bestActiveEligible = activeChartRows.slice().sort(compareRunPerformance)[0] || {};
   const activeVersionSummary = buildVersionSummary(activeChartRows);
   const bestActiveVersionSummary = activeVersionSummary.slice().sort(compareVersionSummaryPerformance)[0] || {};
+  const recentRunIntakeRows = enrichedRunRows.slice(-10).reverse().map((row) => [
+    row.runId || "",
+    row.workbookTestEligible || "",
+    row.runId && activeChartRunIds.has(row.runId) ? "Yes" : "No",
+    row.workbookTestExclusionReason || row.chartExclusionReason || "",
+    chartProducedFps(row) || "",
+    row.presentMeanFps || "",
+    chartP95Ms(row) || "",
+    row.androidJankPct || "",
+    row.thermalStatus || "",
+    row.gitWorktreeDirty || "",
+    row.artifactDir || "",
+  ]);
   const dashboardRows = [
     ["Flight Alert Performance Workbook"],
     [],
@@ -1709,6 +1722,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Best single active workbook-test run", bestActiveEligible.runId || "", "Single-run marker only; use repeated same-lane rows and the Dashboard version average for checkpoint decisions"],
     ["Best active workbook-test version", bestActiveVersionSummary.version || "", `${bestActiveVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestActiveVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestActiveVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
     ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires clean git, aircraft draw evidence, thermal 0, matching package dexopt fingerprint/normalization mode, and InstallDefault ART; dirty/nonmatching/uncontrolled series stay out of Workbook Tests"],
+    [],
+    ["Recent Run Intake"],
+    ["Run ID", "Workbook Eligible", "In Workbook Tests", "Why Not In Chart / Workbook Tests", "Full FPS", "Present FPS", "Full P95 ms", "Jank %", "Thermal", "Dirty", "Artifact Dir"],
+    ...recentRunIntakeRows,
   ];
 
   const runHeaders = [
@@ -2237,6 +2254,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         widths: [18, 42, 48, 52, 8, 16, 18, 24, 20, 12, 14, 16, ...Array(DETAIL_KEYS.length).fill(12), 62, 70],
         freeze: "C2",
         numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"]],
+        hidden: true,
       },
       {
         name: "Trace Audits",
@@ -2245,6 +2263,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         freeze: "C2",
         numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["E2:AZ1048576", "0.0"]],
         wrapCols: [27, 38, 52, 53, 54],
+        hidden: true,
       },
       {
         name: "Frame Correlations",
@@ -2252,6 +2271,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         widths: [18, 42, 48, 58, 58, ...Array(frameCorrelationRows.headers.length).fill(13)],
         freeze: "F2",
         numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["F2:ZZ1048576", "0.00"]],
+        hidden: true,
       },
       {
         name: "Optimization Ledger",
@@ -2327,6 +2347,8 @@ for spec in model["sheets"]:
     rows = spec["rows"]
     max_col = max((len(row) for row in spec["rows"]), default=1)
     ws = workbook.add_worksheet(spec["name"][:31])
+    if spec.get("hidden"):
+        ws.hide()
     for index, width in enumerate(spec.get("widths", [])):
         ws.set_column(index, index, width)
     for col_index in spec.get("wrapCols", []):
