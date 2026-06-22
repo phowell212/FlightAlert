@@ -25,17 +25,9 @@ const CONTROLLED_DEXOPT_NORMALIZATION_MODE_NONE = "none";
 const CONTROLLED_DEXOPT_NORMALIZATION_MODE_POST_INSTALL_RESET = "post_install_reset_v1";
 const CONTROLLED_ART_COMPILE_MODE = "InstallDefault";
 
-const PALETTE = {
-  navy: "#1F4E79",
-  header: "#D9EAF7",
-  green: "#D9EAD3",
-  amber: "#FFF2CC",
-  line: "#C9D3DF",
-};
-
 const CHART_EXCLUSION_PATTERNS = [
   ["dirty/unaccepted run", /dirty|unaccepted|uncommitted/i],
-  ["rejected/reverted experiment", /refparentfast|rejected[-_]?ref|rejected[-_]?reference[-_]?fallback|reverted/i],
+  ["rejected/reverted experiment", /refparentfast|rectreuse|rejected[-_]?ref|rejected[-_]?reference[-_]?fallback|reverted/i],
   ["skip/layer isolation", /skiptraffic|skipchrome|skipcontrols|skiptopstatus|skiptrafficpanel|layeriso|maponly/i],
   ["trace/correlation diagnostic", /perfetto|atrace|framecorr|tracehook/i],
   ["diagnostic instrumentation", /diagnostic|diag|compileab|compilediag|artcompile|manualmatrix|densesymseen|sourcediag|symbolmiss|directcount|directsubphase|directicon|framefields|refpfcounters|refpfcpu|refpfphase|refpfkind|refpfqueuedgen|breakdown/i],
@@ -692,8 +684,12 @@ function shortChartRunLabel(row) {
   const runId = String(row.runId || "");
   const run = runId.match(/(?:^|-)r(\d+)(?:valid)?(?:$|-)/i)?.[1];
   const suffix = run ? ` r${run}` : "";
+  const hash = runId.match(/-([0-9a-f]{7,40})(?:-|$)/i)?.[1]?.slice(0, 7);
+  const version = hash ? `${shortVersionLabel(row)} ${hash}` : shortVersionLabel(row);
+  const rejected = /rectreuse|refparentfast|rejected/i.test(runId) ? " rejected" : "";
+  const restored = /restored/i.test(runId) ? " restored" : "";
   const city = row.city ? ` ${row.city}` : "";
-  return safeText(`${shortVersionLabel(row)}${suffix}${city}`, 52);
+  return safeText(`${version}${rejected}${restored}${suffix}${city}`, 52);
 }
 
 function workbookTestVersionLabel(row) {
@@ -712,16 +708,6 @@ function finiteMetricValues(rows, selector) {
 function averageMetric(rows, selector) {
   const values = finiteMetricValues(rows, selector);
   return values.length ? rounded(values.reduce((sum, value) => sum + value, 0) / values.length, 2) : "";
-}
-
-function bestHighMetric(rows, selector) {
-  const values = finiteMetricValues(rows, selector);
-  return values.length ? Math.max(...values) : "";
-}
-
-function bestLowMetric(rows, selector) {
-  const values = finiteMetricValues(rows, selector);
-  return values.length ? Math.min(...values) : "";
 }
 
 function buildVersionSummary(workbookTestRows) {
@@ -752,24 +738,6 @@ function buildVersionSummary(workbookTestRows) {
     groups.get(key).rows.push(row);
   }
   return Array.from(groups.values()).sort(compareVersionSummaryForDisplay);
-}
-
-function comparableVersionSummaryKey(group) {
-  return [
-    group.workbookTestLane || "",
-    group.harnessExecutionMode || "",
-    group.city || group.benchmarkRegion || "",
-    group.mapSource || "",
-    group.roads || "",
-    group.borders || "",
-    group.trafficDetailTiming || "",
-    group.mapDetailTiming || "",
-    group.packageDexoptState || "",
-    group.packageDexoptFingerprint || "",
-    group.artCompileMode || "",
-    group.controlledDexoptNormalizationMode || "",
-    group.controlledExpectedDexoptState || "",
-  ].join(" | ");
 }
 
 function compareVersionSummaryPerformance(a, b) {
@@ -1119,41 +1087,51 @@ function extraLedgerRows() {
 }
 
 async function previousLedgerRows() {
-  if (!(await exists(CANONICAL_WORKBOOK_PATH))) return [];
+  const sources = Array.from(new Set([CANONICAL_WORKBOOK_PATH, WORKBOOK_PATH]));
+  const existing = [];
+  for (const source of sources) {
+    if (await exists(source)) existing.push(source);
+  }
+  if (!existing.length) return [];
   try {
     const script = String.raw`
 import json
+import os
 import sys
 from openpyxl import load_workbook
 
-path = sys.argv[1]
-wb = load_workbook(path, read_only=True, data_only=True)
-if "Optimization Ledger" not in wb.sheetnames:
-    print("[]")
-    raise SystemExit(0)
-ws = wb["Optimization Ledger"]
 rows = []
-for row in ws.iter_rows(min_row=2, values_only=True):
-    if not row or not any(cell not in (None, "") for cell in row):
+for path in sys.argv[1:]:
+    if not path or not os.path.exists(path):
         continue
-    values = list(row) + [""] * 12
-    rows.append({
-        "source": values[0] or "",
-        "section": values[1] or "",
-        "line": values[2] or "",
-        "status": values[3] or "",
-        "title": values[4] or "",
-        "dateText": values[5] or "",
-        "artifactCount": values[6] or "",
-        "artifacts": values[7] or "",
-        "metrics": values[8] or "",
-        "note1": values[9] or "",
-        "note2": values[10] or "",
-        "note3": values[11] or "",
-    })
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        continue
+    if "Optimization Ledger" not in wb.sheetnames:
+        continue
+    ws = wb["Optimization Ledger"]
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or not any(cell not in (None, "") for cell in row):
+            continue
+        values = list(row) + [""] * 12
+        rows.append({
+            "source": values[0] or "",
+            "section": values[1] or "",
+            "line": values[2] or "",
+            "status": values[3] or "",
+            "title": values[4] or "",
+            "dateText": values[5] or "",
+            "artifactCount": values[6] or "",
+            "artifacts": values[7] or "",
+            "metrics": values[8] or "",
+            "note1": values[9] or "",
+            "note2": values[10] or "",
+            "note3": values[11] or "",
+        })
 print(json.dumps(rows, default=str))
 `;
-    const stdout = await runPython(script, [CANONICAL_WORKBOOK_PATH], "read previous ledger");
+    const stdout = await runPython(script, existing, "read previous ledger");
     const parsed = JSON.parse(stdout || "[]");
     if (!Array.isArray(parsed)) return [];
     return parsed.map((row) => {
@@ -1632,36 +1610,6 @@ async function collectFrameCorrelationRows() {
   return { headers, rows };
 }
 
-function writeMatrix(sheet, row, col, rows, headerFill = PALETTE.navy) {
-  if (!rows.length) return;
-  const range = sheet.getRangeByIndexes(row, col, rows.length, rows[0].length);
-  range.values = rows;
-  const header = sheet.getRangeByIndexes(row, col, 1, rows[0].length);
-  header.format = {
-    fill: headerFill,
-    font: { bold: true, color: "#FFFFFF" },
-    wrapText: true,
-  };
-}
-
-function addTable(sheet, rowCount, colCount, name) {
-  try {
-    if (rowCount >= 2) sheet.tables.add(sheet.getRangeByIndexes(0, 0, rowCount, colCount), true, name);
-  } catch {
-    // Tables are usability polish; the workbook remains valid as plain ranges.
-  }
-}
-
-function setWidths(sheet, widths) {
-  widths.forEach((width, index) => {
-    try {
-      sheet.getRangeByIndexes(0, index, 1, 1).format.columnWidth = width;
-    } catch {
-      // Ignore unsupported column width writes in older renderers.
-    }
-  });
-}
-
 function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelationRows, ledgerRows) {
   const aircraftEvidenceByRun = buildAircraftEvidenceByRun(auditRows);
   const enrichedRunRows = runRows.map((row) => withChartEligibility(row, aircraftEvidenceByRun.get(row.runId)));
@@ -1676,10 +1624,13 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   const activeChartRows = activeChartKey
     ? workbookTestRows.filter((row) => comparableSeriesKey(row, true) === activeChartKey)
     : workbookTestRows;
+  const activeChartRecentRows = activeChartRows.slice(-40);
+  const activeChartRunIds = new Set(activeChartRecentRows.map((row) => row.runId).filter(Boolean));
   const dashboardRows = [
     ["Flight Alert Performance Workbook"],
     [],
     ["Metric", "Value", "Notes"],
+    ["Workbook generated at", new Date().toISOString(), "If the workbook open in Excel does not show this timestamp, it is a stale/locked copy; rebuild or close Excel and rerun the builder."],
     ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
     ["Chart-eligible full runs", eligibleChartRows.length, "Route proof passed, full UI/traffic visibility explicit, no skip/video/diagnostic run, holistic workload, thermal 0, controlled dexopt lane, InstallDefault ART"],
     ["Workbook-test comparable runs", workbookTestRows.length, "Controlled standardized benchmark lane used for charts and checkpoint decisions"],
@@ -1687,21 +1638,24 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Trace audit rows", traceAuditRows.length, "Parsed FrameTimeline/Perfetto summaries where present"],
     ["Frame correlation rows", frameCorrelationRows.rows.length, "One row per matched frame-tokened Perfetto frame"],
     ["Optimization ledger rows", ledgerRows.length, "Moved from AGENTS.md; full notes are split across text columns"],
-    ["Latest raw run (all artifacts)", latest.runId || "", "May be excluded from Chart Data; artifact: " + (latest.artifactDir || "")],
+    ["Latest raw run (all artifacts)", latest.runId || "", "May be excluded from Workbook Tests; artifact: " + (latest.artifactDir || "")],
     ["Latest raw full produced FPS", chartProducedFps(latest) || "", "Raw latest artifact; from Android full-window gfxinfo when available, otherwise FrameTimeline"],
     ["Latest raw FrameTimeline produced FPS", latest.producedFps || "", "Raw latest artifact from summary-120hz.csv FrameTimeline rows"],
     ["Latest raw present mean FPS", latest.presentMeanFps || "", "Raw latest artifact from FrameTimeline present intervals"],
     ["Latest raw full P95 ms", chartP95Ms(latest) || "", "Raw latest artifact; from Android full-window gfxinfo when available, otherwise FrameTimeline"],
     ["Latest raw FrameTimeline P95 ms", latest.p95Ms || "", "Raw latest artifact FrameTimeline p95"],
     ["Latest raw Android jank %", latest.androidJankPct || "", "Raw latest artifact parsed AndroidJank percentage"],
+    ["Latest raw workbook-test eligible", latest.workbookTestEligible || "", latest.workbookTestExclusionReason || "If No, see Runs eligibility/reason columns"],
+    ["Latest raw chart eligible", latest.chartEligible || "", latest.chartExclusionReason || "If No, see Runs eligibility/reason columns"],
+    ["Latest raw in Workbook Tests chart", latest.runId && activeChartRunIds.has(latest.runId) ? "Yes" : "No", "Workbook Tests shows the latest active comparable chart lane; all runs remain in Runs"],
     ["Latest workbook-test run", latestEligible.runId || "", latestEligible.artifactDir || ""],
     ["Latest workbook-test full produced FPS", chartProducedFps(latestEligible) || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Latest workbook-test present mean FPS", latestEligible.presentMeanFps || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Latest workbook-test full P95 ms", chartP95Ms(latestEligible) || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Latest workbook-test Android jank %", latestEligible.androidJankPct || "", "Chart-eligible comparable run used for checkpoint decisions"],
-    ["Best single workbook-test run", bestEligible.runId || "", "Single-run marker only; use Best By Workload and Workbook Test Summary for checkpoint decisions"],
+    ["Best single workbook-test run", bestEligible.runId || "", "Single-run marker only; use repeated same-lane rows and the Dashboard version average for checkpoint decisions"],
     ["Best workbook-test version", bestVersionSummary.version || "", `${bestVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
-    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires clean git, aircraft draw evidence, thermal 0, matching package dexopt fingerprint/normalization mode, and InstallDefault ART; dirty/nonmatching/uncontrolled series stay out of Chart Data"],
+    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires clean git, aircraft draw evidence, thermal 0, matching package dexopt fingerprint/normalization mode, and InstallDefault ART; dirty/nonmatching/uncontrolled series stay out of Workbook Tests"],
   ];
 
   const runHeaders = [
@@ -2151,205 +2105,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.note3,
   ])];
 
-  const workbookTestHeaders = [
-    "Run Date",
-    "Run",
-    "Workbook Test Lane",
-    "Harness Execution Mode",
-    "Controlled Preflight Passed",
-    "Controlled Expected Dexopt",
-    "Controlled Dexopt Normalization Mode",
-    "Benchmark Region",
-    "City",
-    "Map Source",
-    "Roads",
-    "Borders",
-    "Traffic Detail Timing",
-    "Map Detail Timing",
-    "Max Run Seconds",
-    "Workload Target ms",
-    "Frame Sample Seconds",
-    "Scale Bands",
-    "Git Branch",
-    "Git Commit",
-    "Aircraft Draw Evidence",
-    "Battery Temp C",
-    "Thermal Status",
-    "Package Dexopt State",
-    "Package Dexopt Fingerprint",
-    "Post-Run Package Dexopt State",
-    "ART Compile Mode",
-    "Full Produced FPS",
-    "FrameTimeline Produced FPS",
-    "Present Mean FPS",
-    "FrameTimeline P50 ms",
-    "FrameTimeline P95 ms",
-    "FrameTimeline P99 ms",
-    "Full P50 ms",
-    "Full P95 ms",
-    "Full P99 ms",
-    "Present P50 ms",
-    "Present P95 ms",
-    "Present P99 ms",
-    "Present Drop 120 %",
-    "Latency Miss 120 %",
-    "Android Jank %",
-    "Route Max Km",
-    "Run ID",
-    "Artifact Dir",
-  ];
-  const workbookTestData = [workbookTestHeaders, ...workbookTestRows.map((row) => [
-    row.runDate,
-    shortChartRunLabel(row),
-    row.workbookTestLane,
-    row.harnessExecutionMode,
-    row.controlledPreflightPassed,
-    row.controlledExpectedDexoptState,
-    row.controlledDexoptNormalizationModeLabel,
-    row.benchmarkRegion,
-    row.city,
-    row.mapSource,
-    row.roads,
-    row.borders,
-    detailTimingLabel(row.trafficDetailTiming),
-    detailTimingLabel(row.mapDetailTiming),
-    row.maxRunSeconds,
-    row.workloadTargetMs,
-    row.sampleSeconds,
-    row.scaleBands,
-    row.gitBranch,
-    row.gitCommit,
-    row.aircraftDrawEvidence,
-    row.batteryTempC,
-    row.thermalStatus,
-    row.packageDexoptState,
-    row.packageDexoptFingerprint,
-    row.postRunPackageDexoptState,
-    row.artCompileMode,
-    chartProducedFps(row),
-    row.producedFps,
-    row.presentMeanFps,
-    row.p50Ms,
-    row.p95Ms,
-    row.p99Ms,
-    row.androidP50Ms,
-    chartP95Ms(row),
-    row.androidP99Ms,
-    row.presentP50Ms,
-    row.presentP95Ms,
-    row.presentP99Ms,
-    row.presentDrop120Pct,
-    row.latencyMiss120Pct,
-    row.androidJankPct,
-    row.maxDistanceKm,
-    row.runId,
-    row.artifactDir,
-  ])];
-
-  const bestVersionGroups = new Map();
-  for (const group of versionSummary) {
-    const key = comparableVersionSummaryKey(group);
-    const current = bestVersionGroups.get(key);
-    if (!current || compareVersionSummaryPerformance(group, current) < 0) bestVersionGroups.set(key, group);
-  }
-  const bestVersionRows = Array.from(bestVersionGroups.values()).sort(compareVersionSummaryForDisplay);
-  const bestByWorkloadRows = [
-    ["Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Package Dexopt State", "Package Dexopt Fingerprint", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Best Version", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
-    ...bestVersionRows.map((group) => [
-      group.workbookTestLane,
-      group.harnessExecutionMode,
-      group.benchmarkRegion,
-      group.city,
-      group.mapSource,
-      group.roads,
-      group.borders,
-      group.trafficDetailTiming,
-      group.mapDetailTiming,
-      group.packageDexoptState,
-      group.packageDexoptFingerprint,
-      group.artCompileMode,
-      group.controlledExpectedDexoptState,
-      group.controlledDexoptNormalizationMode,
-      group.version,
-      group.rows.length,
-      averageMetric(group.rows, chartProducedFps),
-      bestHighMetric(group.rows, chartProducedFps),
-      averageMetric(group.rows, (row) => row.producedFps),
-      averageMetric(group.rows, (row) => row.presentMeanFps),
-      averageMetric(group.rows, chartP95Ms),
-      bestLowMetric(group.rows, chartP95Ms),
-      averageMetric(group.rows, (row) => row.presentP95Ms),
-      averageMetric(group.rows, (row) => row.androidJankPct),
-      averageMetric(group.rows, (row) => row.maxDistanceKm),
-      group.rows.map((row) => row.runId).join("\n"),
-    ]),
-  ];
-  const workbookTestSummaryRows = [
-    ["Version", "Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Package Dexopt State", "Package Dexopt Fingerprint", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
-    ...versionSummary.map((group) => [
-      group.version,
-      group.workbookTestLane,
-      group.harnessExecutionMode,
-      group.benchmarkRegion,
-      group.city,
-      group.mapSource,
-      group.roads,
-      group.borders,
-      group.trafficDetailTiming,
-      group.mapDetailTiming,
-      group.packageDexoptState,
-      group.packageDexoptFingerprint,
-      group.artCompileMode,
-      group.controlledExpectedDexoptState,
-      group.controlledDexoptNormalizationMode,
-      group.rows.length,
-      averageMetric(group.rows, chartProducedFps),
-      bestHighMetric(group.rows, chartProducedFps),
-      averageMetric(group.rows, (row) => row.producedFps),
-      averageMetric(group.rows, (row) => row.presentMeanFps),
-      averageMetric(group.rows, chartP95Ms),
-      bestLowMetric(group.rows, chartP95Ms),
-      averageMetric(group.rows, (row) => row.presentP95Ms),
-      averageMetric(group.rows, (row) => row.androidJankPct),
-      averageMetric(group.rows, (row) => row.maxDistanceKm),
-      group.rows.map((row) => row.runId).join("\n"),
-    ]),
-  ];
-
-  const workbookExclusionRows = [
-    ["Run Date", "Run ID", "Test", "City", "Map Source", "Git Metadata", "Git Worktree Dirty", "Git Status Count", "Battery Temp C", "Thermal Status", "Package Dexopt State", "Package Dexopt Fingerprint", "Post-Run Package Dexopt State", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Aircraft Draw Evidence", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
-    ...enrichedRunRows
-      .filter((row) => row.workbookTestEligible !== "Yes")
-      .map((row) => [
-        row.runDate,
-        row.runId,
-        row.testName,
-        row.city,
-        row.mapSource,
-        row.gitMetadataAvailable,
-        row.gitWorktreeDirty,
-        row.gitStatusCount,
-        row.batteryTempC,
-        row.thermalStatus,
-        row.packageDexoptState,
-        row.packageDexoptFingerprint,
-        row.postRunPackageDexoptState,
-        row.artCompileMode,
-        row.controlledExpectedDexoptState,
-        row.controlledDexoptNormalizationModeLabel,
-        row.aircraftDrawEvidence,
-        row.routeFocusPassed,
-        row.maxRunSeconds,
-        row.workloadTargetMs,
-        row.skipTraffic,
-        row.recordVideo,
-        row.workbookTestLane,
-        row.workbookTestExclusionReason,
-        row.artifactDir,
-      ]),
-  ];
-
-  const recent = activeChartRows.slice(-40);
+  const recent = activeChartRecentRows;
   const chartNote = recent.length < 2
     ? "Controlled chart needs at least two comparable rows in the same workload and dexopt lane. Rerun suspected versions under thermal 0, matching package dexopt fingerprint/normalization mode, unchanged post-run dexopt, and InstallDefault ART before selecting a best iteration."
     : "";
@@ -2375,30 +2131,18 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       row.harnessExecutionMode || "",
     ]),
   ];
-  const now = new Date().toISOString();
-  const checkRows = [
-    ["When", "Category", "Status", "Evidence / Command", "Notes"],
-    [now, "Android Studio warning audit", "clean", "android-studio-mcp-call --file-problems app/src/androidTest/java/com/flightalert/perf/FlightMapGesturePerfTest.java --warnings --timeout 150000", "Returned no warnings/errors for the touched Android test harness file"],
-    [now, "Gradle androidTest compile", "passed", ".\\gradlew.bat compileDebugAndroidTestJavaWithJavac", "Main and compare-worktree benchmark harness compiles succeeded before physical-device runs"],
-    [now, "Android Studio build_project", "passed", "android-studio-mcp-call --build-project --timeout 180000", "Build succeeded with buildDiagnostics.failureClass=none"],
-    [now, "Workbook formula scan", "passed", "BuildFlightAlertPerformanceWorkbook.mjs", "Workbook rebuild reported formulaErrorMatches=[]"],
-    [now, "Workbook policy", "active", "docs/flightalert-performance-metrics.xlsx", "Detailed audits and optimization ledger live here; AGENTS keeps rules and pointer"],
+  const workbookRuleRows = [
+    ["Topic", "Rule", "How To Satisfy / Where To Check"],
+    ["Every optimization iteration", "Run one chart-grade apples-to-apples workbook test unless the iteration is explicitly diagnostic-only or preflight rejects before capture.", "Use the standard harness command with BenchmarkRole=Workbook, SplitInstall, InstallDefault, RequireControlledPreflight, ControlledDexoptNormalizationMode=PostInstallResetV1, timetable-selected dense EU/US city, full visible UI/traffic, and no detail timing/video unless the run is intentionally diagnostic."],
+    ["Workbook Tests", "Only valid active-lane workbook tests appear here and power the user-facing charts.", "A new run must be clean git, route-proofed, full traffic/UI, aircraft draw evidence present, non-video, non-diagnostic, thermal_status=0, controlled package dexopt state/fingerprint present, post-run dexopt unchanged, ART InstallDefault, and same active lane/city/map/roads/borders/detail flags."],
+    ["When a new run is missing from the chart", "Do not guess; check Runs first.", "Runs includes Chart Eligible, Chart Exclusion Reason, Workbook Test Eligible, Workbook Test Exclusion Reason, aircraft evidence, thermal, dexopt, and route-proof fields for every parsed artifact."],
+    ["Checkpoint decisions", "Use the active apples-to-apples chart lane plus repeated same-version evidence.", "Use Dashboard best-version summaries for averages; do not pick a best checkpoint from one lucky run."],
+    ["Runs", "Every parsed perf artifact belongs here even if it is not chartable.", "If a run is absent from Runs, the artifact path/prefix was not parsed by BuildFlightAlertPerformanceWorkbook.mjs or the artifact was not copied into tools/perf/out."],
+    ["Detailed Audits", "Keep detailed Debug draw perf timing/counter rows.", "Use this sheet for phase-level evidence and to ensure diagnostics are not reduced to simplified summaries."],
+    ["Canonical workbook locking", "If Excel has docs/flightalert-performance-metrics.xlsx open, the builder cannot overwrite it.", "The builder will fail with PermissionError for the canonical file. Close Excel or use the verified preview at %TEMP%\\flightalert-performance-preview.xlsx, then rerun the builder."],
+    ["Experiment rows", "Diagnostic/detail/video/dirty/thermal/dexopt-invalid rows stay out of Workbook Tests.", "They remain in Runs, Detailed Audits, Trace Audits, Frame Correlations, and Optimization Ledger for auditability; their exclusion reasons are visible in Runs."],
+    ["Visual claims", "Satellite roads/labels/borders visual claims require motion-video evidence.", "Workbook metrics prove frame timing, not temporal visual fidelity. Store video artifact paths in the run/ledger notes."],
   ];
-  const noteRows = [
-    ["Topic", "Note"],
-    ["Source of truth", "This workbook is the ongoing source for performance runs, detailed Debug draw perf audits, optimization attempts, accepted keepers, rejected experiments, and notable gains. AGENTS.md points here instead of accumulating long optimization history."],
-    ["Detailed Audits sheet", `Rows are parsed from Debug draw perf logcat lines as current and maxFrameDetail rows where present. The sheet stores detailed phase/timing/counter columns, not only simplified run summaries. Raw detail snippets are capped at ${AUDIT_RAW_SNIPPET_MAX_CHARS} characters because all structured timing/counter values are stored in their own columns.`],
-    ["Trace Audits sheet", "Rows are parsed from frametimeline-summary.json, exclusive-traffic-summary.json, renderthread-frame-summary.json, and frame-correlation-summary.json artifacts produced from Perfetto Trace Processor SQL. Use these for AppDeadlineMissed, buffer/display composition, direct-symbol gates, exclusive-traffic gates, RenderThread/postAndWait/GPU-wait diagnostics, and frame-correlation stop/go summaries."],
-    ["Frame Correlations sheet", "Rows are parsed from frame-correlation-frames.csv artifacts. This sheet stores the detailed per-frame matched trace/log metrics used for correlation decisions, not only simplified summaries."],
-    ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, APK hash, package compile evidence, battery/thermal/display evidence, route proof, accepted-evidence, and eligibility fields together."],
-    ["Workbook Tests sheet", "This is the controlled apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be explicit clean-git runs, full visible UI/traffic runs with aircraft draw evidence, route-proofed, non-video, non-diagnostic, thermal status 0, controlled package dexopt state/fingerprint, matching normalization mode, unchanged post-run dexopt, InstallDefault ART mode, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
-    ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders/detail-timing state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
-    ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty or missing-git-stamp, diagnostic, hidden-aircraft/no-aircraft-evidence, route-failed, video, too-short, uncontrolled thermal/dexopt/ART state, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
-    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, detail-timing flags, package dexopt state/fingerprint, ART compile mode, expected dexopt state, and dexopt normalization mode. Chart rows require git_worktree_dirty=false recorded at run start, aircraft draw evidence in Debug draw perf, thermal status 0, controlled package dexopt state, unchanged post-run dexopt, and InstallDefault ART mode. Raw recent runs, nonmatching cities/series, and uncontrolled environment rows stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
-    ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
-    ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
-  ];
-
   return {
     workbookPath: WORKBOOK_PATH,
     sheets: [
@@ -2410,6 +2154,14 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         merges: ["A1:F1"],
         titleCells: ["A1"],
         numberFormats: [["B12:B17", "0.0"], ["B19:B22", "0.0"]],
+      },
+      {
+        name: "Rules",
+        rows: workbookRuleRows,
+        widths: [30, 72, 112],
+        freeze: "A2",
+        table: "WorkbookRules",
+        wrapCols: [2, 3],
       },
       {
         name: "Runs",
@@ -2452,61 +2204,13 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       },
       {
         name: "Workbook Tests",
-        rows: workbookTestData,
-        widths: [20, 52, 44, 18, 22, 24, 30, 18, 18, 16, 10, 10, 18, 18, 18, 20, 20, 38, 36, 18, 42, 14, 14, 18, 42, 22, 18, 16, 16, 16, 18, 18, 16, 16, 16, 16, 16, 18, 18, 16, 16, 42, 58],
-        freeze: "B2",
-        table: "WorkbookTests",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["M2:AF1048576", "0.0"]],
-        wrapCols: [2, 3, 13, 30, 31],
-      },
-      {
-        name: "Workbook Test Summary",
-        rows: workbookTestSummaryRows,
-        widths: [46, 44, 18, 22, 14, 10, 10, 18, 18, 16, 20, 20, 28, 24, 18, 18, 18, 18, 18, 78],
-        freeze: "B2",
-        table: "WorkbookTestSummary",
-        numberFormats: [["K2:T1048576", "0.0"]],
-        wrapCols: [1, 2, 21],
-      },
-      {
-        name: "Best By Workload",
-        rows: bestByWorkloadRows,
-        widths: [44, 18, 22, 14, 10, 10, 18, 18, 18, 28, 14, 16, 16, 16, 18, 24, 18, 16, 42, 58],
-        freeze: "A2",
-        table: "BestByWorkload",
-        numberFormats: [["K2:T1048576", "0.0"]],
-        wrapCols: [1, 20, 21],
-      },
-      {
-        name: "Workbook Test Exclusions",
-        rows: workbookExclusionRows,
-        widths: [20, 42, 34, 22, 14, 12, 16, 18, 18, 14, 18, 42, 22, 18, 26, 32, 24, 12, 14, 18, 16, 14, 44, 78, 58],
-        freeze: "B2",
-        table: "WorkbookTestExclusions",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["H2:J1048576", "0.0"], ["S2:T1048576", "0.0"]],
-        wrapCols: [16, 23, 24, 25],
-      },
-      {
-        name: "Chart Data",
         rows: chartRows,
         widths: [52, 18, 28, 14, 18, 14, 22, 42, 24, 18, 26, 32, 58, 72, 72, 58, 22],
         freeze: "A2",
+        table: "WorkbookTests",
         charts: recent.length >= 2,
         numberFormats: [["B2:E1048576", "0.0"], ["F2:F1048576", "0.0"]],
         wrapCols: [8, 13, 14, 15, 16],
-      },
-      {
-        name: "Iteration Checks",
-        rows: checkRows,
-        widths: [20, 34, 20, 74, 92],
-        freeze: "A2",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"]],
-      },
-      {
-        name: "Notes",
-        rows: noteRows,
-        widths: [28, 120],
-        wrapCols: [2],
       },
     ],
   };
@@ -2617,7 +2321,7 @@ workbook.close()
 verify = load_workbook(output_path, read_only=True, data_only=False)
 error_tokens = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#N/A")
 matches = []
-for sheet_name in ("Dashboard", "Chart Data", "Iteration Checks"):
+for sheet_name in ("Dashboard", "Rules", "Workbook Tests"):
     if sheet_name not in verify.sheetnames:
         continue
     ws = verify[sheet_name]
@@ -2640,245 +2344,6 @@ print(json.dumps({
 `;
   const stdout = await runPython(script, [modelPath, WORKBOOK_PATH], "xlsxwriter workbook export");
   return JSON.parse(stdout);
-}
-
-function buildWorkbook(runRows, auditRows, ledgerRows) {
-  const workbook = Workbook.create();
-  const dashboard = workbook.worksheets.add("Dashboard");
-  dashboard.showGridLines = false;
-  dashboard.getRange("A1:F1").merge();
-  dashboard.getRange("A1").values = [["Flight Alert Performance Workbook"]];
-  dashboard.getRange("A1").format = { fill: PALETTE.navy, font: { bold: true, color: "#FFFFFF", size: 16 } };
-  const latest = runRows[runRows.length - 1] || {};
-  writeMatrix(dashboard, 2, 0, [
-    ["Metric", "Value", "Notes"],
-    ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
-    ["Detailed audit rows", auditRows.length, "Parsed Debug draw perf current/maxFrameDetail rows with phase-level timing columns"],
-    ["Optimization ledger rows", ledgerRows.length, "Moved from AGENTS.md; full notes are split across text columns"],
-    ["Latest run", latest.runId || "", latest.artifactDir || ""],
-    ["Latest produced FPS", latest.producedFps || "", "From summary-120hz.csv"],
-    ["Latest present mean FPS", latest.presentMeanFps || "", "From FrameTimeline present intervals"],
-    ["Latest p95 ms", latest.p95Ms || "", "Frame timing p95"],
-    ["Latest Android jank %", latest.androidJankPct || "", "Parsed AndroidJank percentage"],
-  ]);
-  dashboard.getRange("B7:B10").format.numberFormat = "0.0";
-  setWidths(dashboard, [28, 64, 96, 12, 12, 12, 16, 16, 16, 16, 16, 16]);
-  dashboard.freezePanes.freezeRows(3);
-
-  const runsSheet = workbook.worksheets.add("Runs");
-  runsSheet.showGridLines = false;
-  const runHeaders = [
-    "Run Date",
-    "Run ID",
-    "Artifact Dir",
-    "Test",
-    "City",
-    "Expected City",
-    "Map Source",
-    "Roads",
-    "Borders",
-    "Map Detail Timing",
-    "Traffic Detail Timing",
-    "Route Proof",
-    "Accepted Evidence",
-    "Accepted Reason",
-    "Route Samples",
-    "Max Distance Km",
-    "Frames",
-    "Sample Seconds",
-    "Produced FPS",
-    "Present Mean FPS",
-    "P50 ms",
-    "P95 ms",
-    "P99 ms",
-    "Present P50 ms",
-    "Present P95 ms",
-    "Present P99 ms",
-    "Present Drop 120 %",
-    "Latency Miss 120 %",
-    "Android Jank %",
-    "Summary File",
-  ];
-  const runData = [runHeaders, ...runRows.map((row) => [
-    row.runDate,
-    row.runId,
-    row.artifactDir,
-    row.testName,
-    row.city,
-    row.expectedCity,
-    row.mapSource,
-    row.roads,
-    row.borders,
-    row.mapDetailTiming,
-    row.trafficDetailTiming,
-    row.routeFocusPassed,
-    row.acceptedEvidence,
-    safeText(row.acceptedReason, 1000),
-    row.samples,
-    row.maxDistanceKm,
-    row.frames,
-    row.sampleSeconds,
-    row.producedFps,
-    row.presentMeanFps,
-    row.p50Ms,
-    row.p95Ms,
-    row.p99Ms,
-    row.presentP50Ms,
-    row.presentP95Ms,
-    row.presentP99Ms,
-    row.presentDrop120Pct,
-    row.latencyMiss120Pct,
-    row.androidJankPct,
-    row.summaryFile,
-  ])];
-  writeMatrix(runsSheet, 0, 0, runData);
-  addTable(runsSheet, runData.length, runHeaders.length, "PerformanceRuns");
-  runsSheet.freezePanes.freezeRows(1);
-  runsSheet.freezePanes.freezeColumns(2);
-  runsSheet.getRangeByIndexes(1, 0, Math.max(1, runData.length - 1), 1).format.numberFormat = "yyyy-mm-dd hh:mm";
-  runsSheet.getRangeByIndexes(1, 14, Math.max(1, runData.length - 1), 15).format.numberFormat = "0.0";
-  setWidths(runsSheet, [20, 42, 54, 34, 22, 22, 14, 10, 10, 16, 18, 12, 16, 60, 12, 16, 10, 14, 14, 18, 12, 12, 12, 16, 16, 16, 18, 18, 16, 58]);
-
-  const auditSheet = workbook.worksheets.add("Detailed Audits");
-  auditSheet.showGridLines = false;
-  const auditHeaders = [
-    "Run Date",
-    "Run ID",
-    "Artifact Dir",
-    "Log File",
-    "Seq",
-    "Kind",
-    "Timestamp",
-    "Phase",
-    "City",
-    "Route Proof",
-    "Map Source",
-    "Map Detail Timing",
-    ...DETAIL_KEYS,
-    "Source Detail Tokens",
-    "Raw Detail Snippet",
-  ];
-  const auditData = [auditHeaders, ...auditRows.map((row) => [
-    row.runDate,
-    row.runId,
-    row.artifactDir,
-    row.logFile,
-    row.sequence,
-    row.kind,
-    row.timestamp,
-    row.phase,
-    row.city,
-    row.routeFocusPassed,
-    row.mapSource,
-    row.mapDetailTiming,
-    ...DETAIL_KEYS.map((key) => row[key]),
-    row.sourceDetailTokens,
-    row.rawSnippet,
-  ])];
-  writeMatrix(auditSheet, 0, 0, auditData);
-  auditSheet.freezePanes.freezeRows(1);
-  auditSheet.freezePanes.freezeColumns(2);
-  auditSheet.getRangeByIndexes(1, 0, Math.max(1, auditData.length - 1), 1).format.numberFormat = "yyyy-mm-dd hh:mm";
-  auditSheet.getRangeByIndexes(1, 12, Math.max(1, auditData.length - 1), DETAIL_KEYS.length).format.numberFormat = "0.00";
-  setWidths(auditSheet, [18, 42, 48, 52, 8, 16, 18, 24, 20, 12, 14, 16, ...Array(DETAIL_KEYS.length).fill(12), 62, 70]);
-
-  const ledgerSheet = workbook.worksheets.add("Optimization Ledger");
-  ledgerSheet.showGridLines = false;
-  const ledgerHeaders = [
-    "Source",
-    "Section",
-    "AGENTS Line",
-    "Status",
-    "Title",
-    "Date Text",
-    "Artifact Count",
-    "Artifacts",
-    "Metrics Mentioned",
-    "Full Note 1",
-    "Full Note 2",
-    "Full Note 3",
-  ];
-  const ledgerData = [ledgerHeaders, ...ledgerRows.map((row) => [
-    row.source,
-    row.section,
-    row.line,
-    row.status,
-    row.title,
-    row.dateText,
-    row.artifactCount,
-    row.artifacts,
-    row.metrics,
-    row.note1,
-    row.note2,
-    row.note3,
-  ])];
-  writeMatrix(ledgerSheet, 0, 0, ledgerData);
-  addTable(ledgerSheet, ledgerData.length, ledgerHeaders.length, "OptimizationLedger");
-  ledgerSheet.freezePanes.freezeRows(1);
-  ledgerSheet.freezePanes.freezeColumns(4);
-  ledgerSheet.getRangeByIndexes(1, 7, Math.max(1, ledgerData.length - 1), 5).format.wrapText = true;
-  setWidths(ledgerSheet, [22, 34, 12, 24, 48, 18, 12, 58, 64, 100, 100, 100]);
-
-  const chartData = workbook.worksheets.add("Chart Data");
-  chartData.showGridLines = false;
-  const recent = runRows.slice(-40);
-  const chartHeaders = ["Run", "Produced FPS", "Present Mean FPS", "P95 ms", "Android Jank %"];
-  const chartRows = [chartHeaders, ...recent.map((row) => [
-    String(row.runId || "").slice(-38),
-    row.producedFps || "",
-    row.presentMeanFps || "",
-    row.p95Ms || "",
-    row.androidJankPct || "",
-  ])];
-  writeMatrix(chartData, 0, 0, chartRows);
-  chartData.freezePanes.freezeRows(1);
-  setWidths(chartData, [52, 18, 28, 14, 18, 14, 22, 42, 24, 18, 26, 32, 58, 72, 72, 58, 22]);
-  try {
-    const fpsChart = chartData.charts.add("line", chartData.getRangeByIndexes(0, 0, chartRows.length, 3));
-    fpsChart.title = "Recent Runs: Produced vs Present FPS";
-    fpsChart.hasLegend = true;
-    fpsChart.yAxis = { numberFormatCode: "0.0" };
-    fpsChart.xAxis = { axisType: "textAxis", textStyle: { fontSize: 8 } };
-    fpsChart.setPosition("S2", "Z18");
-    const p95Chart = chartData.charts.add("line", chartData.getRangeByIndexes(0, 0, chartRows.length, 4));
-    p95Chart.title = "Recent Runs: P95 Frame Time";
-    p95Chart.hasLegend = true;
-    p95Chart.yAxis = { numberFormatCode: "0.0" };
-    p95Chart.xAxis = { axisType: "textAxis", textStyle: { fontSize: 8 } };
-    p95Chart.setPosition("S20", "Z36");
-  } catch {
-    chartData.getRange("S2").values = [["Chart creation skipped by renderer"]];
-  }
-
-  const checks = workbook.worksheets.add("Iteration Checks");
-  checks.showGridLines = false;
-  const checkRows = [
-    ["When", "Category", "Status", "Evidence / Command", "Notes"],
-    [new Date(), "Android Studio warning audit", "clean", "android-studio-mcp-call --file-problems FlightAlertRewritten.kt --warnings --timeout 120000", "Returned no warnings after scoped cleanup"],
-    [new Date(), "Gradle compile", "passed", ".\\gradlew.bat compileDebugKotlin", "Build successful"],
-    [new Date(), "Gradle assemble", "passed", ".\\gradlew.bat assembleDebug", "Build successful"],
-    [new Date(), "Android Studio build_project", "reported/recovered", "android-studio-mcp-call --build-project --timeout 180000", "Use first-class wrapper command; if Kotlin incremental cache corruption appears, trust Gradle and retry IDE rebuild once"],
-    [new Date(), "Workbook policy", "active", "docs/flightalert-performance-metrics.xlsx", "Detailed audits and optimization ledger live here; AGENTS keeps rules and pointer"],
-  ];
-  writeMatrix(checks, 0, 0, checkRows);
-  checks.freezePanes.freezeRows(1);
-  checks.getRangeByIndexes(1, 0, checkRows.length - 1, 1).format.numberFormat = "yyyy-mm-dd hh:mm";
-  setWidths(checks, [20, 34, 20, 74, 92]);
-
-  const notes = workbook.worksheets.add("Notes");
-  notes.showGridLines = false;
-  const noteRows = [
-    ["Topic", "Note"],
-    ["Source of truth", "This workbook is the ongoing source for performance runs, detailed Debug draw perf audits, optimization attempts, accepted keepers, rejected experiments, and notable gains. AGENTS.md points here instead of accumulating long optimization history."],
-    ["Detailed Audits sheet", "Rows are parsed from Debug draw perf logcat lines as current and maxFrameDetail rows where present. The sheet stores detailed phase/timing/counter columns, not only simplified run summaries."],
-    ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, route proof, and accepted-evidence fields together."],
-    ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
-    ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
-  ];
-  writeMatrix(notes, 0, 0, noteRows);
-  notes.getRange("B2:B6").format.wrapText = true;
-  setWidths(notes, [28, 120]);
-  return workbook;
 }
 
 async function main() {
