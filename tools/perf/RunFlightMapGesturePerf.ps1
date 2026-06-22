@@ -780,6 +780,12 @@ function Invoke-ArtCompileControl {
         "output=$($result.Output)"
         "package_compile_evidence=$($result.PackageCompileEvidence)"
     ) | Set-Content -Path $OutputPath
+    if ($Mode -eq "Verify" -and $result.PackageCompileEvidence -notmatch "\[status=verify\]") {
+        throw "ART compile proof rejected: requested Verify but package evidence did not report status=verify. See $OutputPath."
+    }
+    if ($Mode -eq "Speed" -and $result.PackageCompileEvidence -notmatch "\[status=speed\]") {
+        throw "ART compile proof rejected: requested Speed but package evidence did not report status=speed. See $OutputPath."
+    }
     return [pscustomobject]$result
 }
 
