@@ -19,7 +19,10 @@ const PREVIEW_DIR = path.join(
   "flightalert-performance-workbook-preview"
 );
 const CONTROLLED_THERMAL_STATUS = 0;
-const CONTROLLED_PACKAGE_DEXOPT_STATE = "verify/install-speg";
+const CONTROLLED_PACKAGE_DEXOPT_STATE_DEFAULT = "verify/install-speg";
+const CONTROLLED_PACKAGE_DEXOPT_STATE_RESET_INSTALL = "verify/install";
+const CONTROLLED_DEXOPT_NORMALIZATION_MODE_NONE = "none";
+const CONTROLLED_DEXOPT_NORMALIZATION_MODE_POST_INSTALL_RESET = "post_install_reset_v1";
 const CONTROLLED_ART_COMPILE_MODE = "InstallDefault";
 
 const PALETTE = {
@@ -507,6 +510,33 @@ function isChartControlledHarness(row) {
   return mode === "splitinstall" && isTrueValue(row.controlledPreflightPassed);
 }
 
+function normalizeDexoptNormalizationMode(value) {
+  const mode = String(value || "").trim();
+  if (!mode || /^none$/i.test(mode)) return CONTROLLED_DEXOPT_NORMALIZATION_MODE_NONE;
+  if (/^(post[-_ ]?install[-_ ]?reset[-_ ]?v?1|postinstallresetv1|resetinstall)$/i.test(mode)) {
+    return CONTROLLED_DEXOPT_NORMALIZATION_MODE_POST_INSTALL_RESET;
+  }
+  return mode;
+}
+
+function controlledDexoptNormalizationMode(row) {
+  return normalizeDexoptNormalizationMode(row.controlledDexoptNormalizationMode || row.controlledPreflightRepairMode || "");
+}
+
+function controlledExpectedDexoptState(row) {
+  const recorded = String(row.controlledPreflightExpectedDexopt || "").trim();
+  if (recorded) return recorded;
+  const normalizationMode = controlledDexoptNormalizationMode(row).toLowerCase();
+  if (normalizationMode === CONTROLLED_DEXOPT_NORMALIZATION_MODE_POST_INSTALL_RESET.toLowerCase()) {
+    return CONTROLLED_PACKAGE_DEXOPT_STATE_RESET_INSTALL;
+  }
+  return CONTROLLED_PACKAGE_DEXOPT_STATE_DEFAULT;
+}
+
+function controlledDexoptLaneLabel(row) {
+  return `${controlledExpectedDexoptState(row)} via ${controlledDexoptNormalizationMode(row)}`;
+}
+
 function comparisonEnvironmentControlReasons(row) {
   const reasons = [];
   const thermalStatus = finiteNumber(row.thermalStatus);
@@ -516,11 +546,39 @@ function comparisonEnvironmentControlReasons(row) {
     reasons.push(`thermal status ${row.thermalStatus} != ${CONTROLLED_THERMAL_STATUS}`);
   }
 
+  const normalizationMode = controlledDexoptNormalizationMode(row);
+  const normalizationModeKey = normalizationMode.toLowerCase();
+  const allowedNormalizationModes = new Set([
+    CONTROLLED_DEXOPT_NORMALIZATION_MODE_NONE.toLowerCase(),
+    CONTROLLED_DEXOPT_NORMALIZATION_MODE_POST_INSTALL_RESET.toLowerCase(),
+  ]);
+  if (!allowedNormalizationModes.has(normalizationModeKey)) {
+    reasons.push(`unknown controlled dexopt normalization mode ${normalizationMode}`);
+  }
+
   const packageDexoptState = String(row.packageDexoptState || "").trim();
+  const expectedDexoptState = controlledExpectedDexoptState(row);
   if (!packageDexoptState) {
     reasons.push("missing package dexopt state");
-  } else if (packageDexoptState.toLowerCase() !== CONTROLLED_PACKAGE_DEXOPT_STATE) {
-    reasons.push(`package dexopt state ${packageDexoptState} != ${CONTROLLED_PACKAGE_DEXOPT_STATE}`);
+  } else if (packageDexoptState.toLowerCase() !== expectedDexoptState.toLowerCase()) {
+    reasons.push(`package dexopt state ${packageDexoptState} != ${expectedDexoptState} for ${normalizationMode} lane`);
+  }
+
+  const postRunPackageDexoptState = String(row.postRunPackageDexoptState || "").trim();
+  if (!postRunPackageDexoptState) {
+    reasons.push("missing post-run package dexopt recheck");
+  } else if (postRunPackageDexoptState.toLowerCase() !== expectedDexoptState.toLowerCase()) {
+    reasons.push(`post-run package dexopt state ${postRunPackageDexoptState} != ${expectedDexoptState}`);
+  }
+
+  const packageDexoptFingerprint = String(row.packageDexoptFingerprint || "").trim();
+  const postRunPackageDexoptFingerprint = String(row.postRunPackageDexoptFingerprint || "").trim();
+  if (!packageDexoptFingerprint) {
+    reasons.push("missing package dexopt fingerprint");
+  } else if (!postRunPackageDexoptFingerprint) {
+    reasons.push("missing post-run package dexopt fingerprint");
+  } else if (packageDexoptFingerprint.toLowerCase() !== postRunPackageDexoptFingerprint.toLowerCase()) {
+    reasons.push("post-run package dexopt fingerprint changed");
   }
 
   const artCompileMode = String(row.artCompileMode || "").trim();
@@ -553,6 +611,9 @@ function withChartEligibility(row, aircraftEvidence = null) {
     aircraftDrawEvidence: aircraftEvidenceLabel(aircraftEvidence),
     workbookTestLane: lane,
     benchmarkRegion: benchmarkRegion(row),
+    controlledDexoptNormalizationModeLabel: controlledDexoptNormalizationMode(row),
+    controlledExpectedDexoptState: controlledExpectedDexoptState(row),
+    controlledDexoptLane: controlledDexoptLaneLabel(row),
     workbookTestEligible: workbookReasons.length ? "No" : "Yes",
     workbookTestExclusionReason: Array.from(new Set(workbookReasons)).join("; "),
   };
@@ -582,6 +643,11 @@ function comparableSeriesKey(row, includeCity = true) {
     row.borders || "",
     detailTimingLabel(row.trafficDetailTiming),
     detailTimingLabel(row.mapDetailTiming),
+    row.packageDexoptState || "",
+    row.packageDexoptFingerprint || "",
+    row.artCompileMode || "",
+    controlledDexoptNormalizationMode(row),
+    controlledExpectedDexoptState(row),
   ].join(" | ");
 }
 
@@ -602,6 +668,15 @@ function detailTimingLabel(value) {
 function dexoptSummary(text) {
   const match = String(text || "").match(/Dexopt state:.*?arm64:\s*\[status=([^\]]+)\]\s*\[reason=([^\]]+)\]/s);
   return match ? `${match[1]}/${match[2]}` : "";
+}
+
+function dexoptFingerprint(text) {
+  const entries = [];
+  const regex = /([A-Za-z0-9_.-]+):\s*\[status=([^\]]+)\]\s*\[reason=([^\]]+)\]/g;
+  for (const match of String(text || "").matchAll(regex)) {
+    entries.push(`${match[1]}=${match[2]}/${match[3]}`);
+  }
+  return entries.sort().join(";");
 }
 
 function shortVersionLabel(row) {
@@ -666,6 +741,11 @@ function buildVersionSummary(workbookTestRows) {
         borders: row.borders,
         trafficDetailTiming: detailTimingLabel(row.trafficDetailTiming),
         mapDetailTiming: detailTimingLabel(row.mapDetailTiming),
+        packageDexoptState: row.packageDexoptState,
+        packageDexoptFingerprint: row.packageDexoptFingerprint,
+        artCompileMode: row.artCompileMode,
+        controlledDexoptNormalizationMode: row.controlledDexoptNormalizationModeLabel,
+        controlledExpectedDexoptState: row.controlledExpectedDexoptState,
         rows: [],
       });
     }
@@ -684,6 +764,11 @@ function comparableVersionSummaryKey(group) {
     group.borders || "",
     group.trafficDetailTiming || "",
     group.mapDetailTiming || "",
+    group.packageDexoptState || "",
+    group.packageDexoptFingerprint || "",
+    group.artCompileMode || "",
+    group.controlledDexoptNormalizationMode || "",
+    group.controlledExpectedDexoptState || "",
   ].join(" | ");
 }
 
@@ -1110,6 +1195,13 @@ async function collectPerformanceRows() {
         );
         const inRunPackageCompileEvidence = route.in_run_package_compile_evidence || route.package_compile_evidence || "";
         const postRunPackageCompileEvidence = route.post_run_package_compile_evidence || "";
+        const artCompilePackageEvidence = route.art_compile_package_evidence || "";
+        const inRunPackageDexoptState = dexoptSummary(inRunPackageCompileEvidence);
+        const postRunPackageDexoptState = route.post_run_package_dexopt_state || dexoptSummary(postRunPackageCompileEvidence);
+        const artCompilePackageDexoptState = dexoptSummary(artCompilePackageEvidence);
+        const inRunPackageDexoptFingerprint = dexoptFingerprint(inRunPackageCompileEvidence);
+        const postRunPackageDexoptFingerprint = route.post_run_package_dexopt_fingerprint || dexoptFingerprint(postRunPackageCompileEvidence);
+        const artCompilePackageDexoptFingerprint = dexoptFingerprint(artCompilePackageEvidence);
         runRows.push({
           runDate: stat.mtime || "",
           runId,
@@ -1126,14 +1218,25 @@ async function collectPerformanceRows() {
           harnessExecutionMode: route.harness_execution_mode || "",
           controlledPreflightRequired: route.controlled_preflight_required || "",
           controlledPreflightPassed: route.controlled_preflight_passed || "",
+          controlledPreflightExpectedDexopt: route.controlled_preflight_expected_dexopt || "",
+          controlledDexoptNormalizationMode: route.controlled_dexopt_normalization_mode || route.controlled_preflight_repair_mode || "",
           controlledPreflightEvidence: route.controlled_preflight_evidence || "",
+          controlledDexoptNormalizationFile: route.controlled_dexopt_normalization_file || route.controlled_dexopt_repair_file || "",
+          controlledDexoptNormalizationCommand: route.controlled_dexopt_normalization_command || route.controlled_dexopt_repair_command || "",
+          controlledDexoptNormalizationExitCode: maybeNumber(route.controlled_dexopt_normalization_exit_code || route.controlled_dexopt_repair_exit_code),
+          controlledDexoptNormalizationOutput: route.controlled_dexopt_normalization_output || route.controlled_dexopt_repair_output || "",
+          controlledDexoptNormalizationPreState: route.controlled_dexopt_normalization_pre_state || "",
+          controlledDexoptNormalizationPreFingerprint: route.controlled_dexopt_normalization_pre_fingerprint || "",
+          controlledDexoptNormalizationPackageState: route.controlled_dexopt_normalization_package_state || route.controlled_dexopt_repair_package_state || "",
+          controlledDexoptNormalizationPackageFingerprint: route.controlled_dexopt_normalization_package_fingerprint || "",
+          controlledDexoptNormalizationPackageEvidence: route.controlled_dexopt_normalization_package_evidence || route.controlled_dexopt_repair_package_evidence || "",
           instrumentationComponent: route.instrumentation_component || "",
           splitInstallExitCode: maybeNumber(route.split_install_exit_code),
           artCompileMode: route.art_compile_mode || "",
           artCompileCommand: route.art_compile_command || "",
           artCompileExitCode: maybeNumber(route.art_compile_exit_code),
           artCompileOutput: route.art_compile_output || "",
-          artCompilePackageEvidence: route.art_compile_package_evidence || "",
+          artCompilePackageEvidence,
           debugApkSha256: route.debug_apk_sha256 || "",
           debugApkPath: route.debug_apk_path || "",
           debugApkBytes: maybeNumber(route.debug_apk_bytes),
@@ -1145,7 +1248,14 @@ async function collectPerformanceRows() {
           devicePackagePaths: route.device_package_paths || "",
           inRunPackageCompileEvidence,
           postRunPackageCompileEvidence,
-          packageDexoptState: dexoptSummary(inRunPackageCompileEvidence) || dexoptSummary(postRunPackageCompileEvidence) || dexoptSummary(route.art_compile_package_evidence),
+          inRunPackageDexoptState,
+          postRunPackageDexoptState,
+          artCompilePackageDexoptState,
+          packageDexoptState: inRunPackageDexoptState || postRunPackageDexoptState || artCompilePackageDexoptState,
+          inRunPackageDexoptFingerprint,
+          postRunPackageDexoptFingerprint,
+          artCompilePackageDexoptFingerprint,
+          packageDexoptFingerprint: inRunPackageDexoptFingerprint || postRunPackageDexoptFingerprint || artCompilePackageDexoptFingerprint,
           batteryLevel: maybeNumber(route.battery_level),
           batteryTempC: maybeNumber(route.battery_temp_c),
           batteryStatus: route.battery_status || "",
@@ -1154,6 +1264,10 @@ async function collectPerformanceRows() {
           thermalEvidence: route.thermal_evidence || "",
           inRunDisplayRefreshEvidence: route.in_run_display_refresh_evidence || "",
           postRunDisplayRefreshEvidence: route.post_run_display_refresh_evidence || route.display_refresh_evidence || "",
+          deviceBuildFingerprint: route.device_build_fingerprint || "",
+          deviceBuildVersion: route.device_build_version || "",
+          deviceBuildSdk: route.device_build_sdk || "",
+          deviceArtEvidence: route.device_art_evidence || "",
           deviceEvidenceError: route.device_evidence_error || "",
           city: route.route_focus_city || targetKv.city || "",
           expectedCity: route.route_focus_expected_city || "",
@@ -1566,7 +1680,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     [],
     ["Metric", "Value", "Notes"],
     ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
-    ["Chart-eligible full runs", eligibleChartRows.length, "Route proof passed, full UI/traffic visibility explicit, no skip/video/diagnostic run, holistic workload, thermal 0, known baseline dexopt/ART"],
+    ["Chart-eligible full runs", eligibleChartRows.length, "Route proof passed, full UI/traffic visibility explicit, no skip/video/diagnostic run, holistic workload, thermal 0, controlled dexopt lane, InstallDefault ART"],
     ["Workbook-test comparable runs", workbookTestRows.length, "Controlled standardized benchmark lane used for charts and checkpoint decisions"],
     ["Detailed audit rows", auditRows.length, "Parsed Debug draw perf current/maxFrameDetail rows with phase-level timing columns"],
     ["Trace audit rows", traceAuditRows.length, "Parsed FrameTimeline/Perfetto summaries where present"],
@@ -1586,7 +1700,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Latest workbook-test Android jank %", latestEligible.androidJankPct || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Best single workbook-test run", bestEligible.runId || "", "Single-run marker only; use Best By Workload and Workbook Test Summary for checkpoint decisions"],
     ["Best workbook-test version", bestVersionSummary.version || "", `${bestVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
-    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires clean git, aircraft draw evidence, thermal 0, known baseline package dexopt, and InstallDefault ART; dirty/nonmatching/uncontrolled series stay out of Chart Data"],
+    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires clean git, aircraft draw evidence, thermal 0, matching package dexopt fingerprint/normalization mode, and InstallDefault ART; dirty/nonmatching/uncontrolled series stay out of Chart Data"],
   ];
 
   const runHeaders = [
@@ -1605,7 +1719,18 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Harness Execution Mode",
     "Controlled Preflight Required",
     "Controlled Preflight Passed",
+    "Controlled Expected Dexopt",
+    "Controlled Dexopt Normalization Mode",
     "Controlled Preflight Evidence",
+    "Controlled Dexopt Normalization File",
+    "Controlled Dexopt Normalization Command",
+    "Controlled Dexopt Normalization Exit Code",
+    "Controlled Dexopt Normalization Output",
+    "Controlled Dexopt Normalization Pre State",
+    "Controlled Dexopt Normalization Pre Fingerprint",
+    "Controlled Dexopt Normalization Package State",
+    "Controlled Dexopt Normalization Package Fingerprint",
+    "Controlled Dexopt Normalization Package Evidence",
     "Instrumentation Component",
     "Split Install Exit Code",
     "ART Compile Mode",
@@ -1624,7 +1749,14 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Device Package Paths",
     "In-Run Package Compile Evidence",
     "Post-Run Package Compile Evidence",
+    "In-Run Package Dexopt State",
+    "In-Run Package Dexopt Fingerprint",
+    "Post-Run Package Dexopt State",
+    "Post-Run Package Dexopt Fingerprint",
+    "ART Compile Package Dexopt State",
+    "ART Compile Package Dexopt Fingerprint",
     "Package Dexopt State",
+    "Package Dexopt Fingerprint",
     "Battery Level",
     "Battery Temp C",
     "Battery Status",
@@ -1633,6 +1765,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Thermal Evidence",
     "In-Run Display Refresh Evidence",
     "Post-Run Display Refresh Evidence",
+    "Device Build Fingerprint",
+    "Device Build Version",
+    "Device Build SDK",
+    "Device ART Evidence",
     "Device Evidence Error",
     "City",
     "Expected City",
@@ -1709,7 +1845,18 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.harnessExecutionMode,
     row.controlledPreflightRequired,
     row.controlledPreflightPassed,
+    row.controlledExpectedDexoptState,
+    row.controlledDexoptNormalizationModeLabel,
     safeText(row.controlledPreflightEvidence, 2400),
+    safeText(row.controlledDexoptNormalizationFile, 1000),
+    safeText(row.controlledDexoptNormalizationCommand, 1000),
+    row.controlledDexoptNormalizationExitCode,
+    safeText(row.controlledDexoptNormalizationOutput, 2400),
+    row.controlledDexoptNormalizationPreState,
+    row.controlledDexoptNormalizationPreFingerprint,
+    row.controlledDexoptNormalizationPackageState,
+    row.controlledDexoptNormalizationPackageFingerprint,
+    safeText(row.controlledDexoptNormalizationPackageEvidence, 3600),
     row.instrumentationComponent,
     row.splitInstallExitCode,
     row.artCompileMode,
@@ -1728,7 +1875,14 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     safeText(row.devicePackagePaths, 1200),
     safeText(row.inRunPackageCompileEvidence, 3600),
     safeText(row.postRunPackageCompileEvidence, 2200),
+    row.inRunPackageDexoptState,
+    row.inRunPackageDexoptFingerprint,
+    row.postRunPackageDexoptState,
+    row.postRunPackageDexoptFingerprint,
+    row.artCompilePackageDexoptState,
+    row.artCompilePackageDexoptFingerprint,
     row.packageDexoptState,
+    row.packageDexoptFingerprint,
     row.batteryLevel,
     row.batteryTempC,
     row.batteryStatus,
@@ -1737,6 +1891,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     safeText(row.thermalEvidence, 1800),
     safeText(row.inRunDisplayRefreshEvidence, 3200),
     safeText(row.postRunDisplayRefreshEvidence, 2200),
+    safeText(row.deviceBuildFingerprint, 1000),
+    row.deviceBuildVersion,
+    row.deviceBuildSdk,
+    safeText(row.deviceArtEvidence, 2600),
     safeText(row.deviceEvidenceError, 1000),
     row.city,
     row.expectedCity,
@@ -1998,6 +2156,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Workbook Test Lane",
     "Harness Execution Mode",
     "Controlled Preflight Passed",
+    "Controlled Expected Dexopt",
+    "Controlled Dexopt Normalization Mode",
     "Benchmark Region",
     "City",
     "Map Source",
@@ -2015,6 +2175,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Battery Temp C",
     "Thermal Status",
     "Package Dexopt State",
+    "Package Dexopt Fingerprint",
+    "Post-Run Package Dexopt State",
     "ART Compile Mode",
     "Full Produced FPS",
     "FrameTimeline Produced FPS",
@@ -2041,6 +2203,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.workbookTestLane,
     row.harnessExecutionMode,
     row.controlledPreflightPassed,
+    row.controlledExpectedDexoptState,
+    row.controlledDexoptNormalizationModeLabel,
     row.benchmarkRegion,
     row.city,
     row.mapSource,
@@ -2058,6 +2222,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.batteryTempC,
     row.thermalStatus,
     row.packageDexoptState,
+    row.packageDexoptFingerprint,
+    row.postRunPackageDexoptState,
     row.artCompileMode,
     chartProducedFps(row),
     row.producedFps,
@@ -2087,7 +2253,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   }
   const bestVersionRows = Array.from(bestVersionGroups.values()).sort(compareVersionSummaryForDisplay);
   const bestByWorkloadRows = [
-    ["Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Best Version", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
+    ["Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Package Dexopt State", "Package Dexopt Fingerprint", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Best Version", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
     ...bestVersionRows.map((group) => [
       group.workbookTestLane,
       group.harnessExecutionMode,
@@ -2098,6 +2264,11 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       group.borders,
       group.trafficDetailTiming,
       group.mapDetailTiming,
+      group.packageDexoptState,
+      group.packageDexoptFingerprint,
+      group.artCompileMode,
+      group.controlledExpectedDexoptState,
+      group.controlledDexoptNormalizationMode,
       group.version,
       group.rows.length,
       averageMetric(group.rows, chartProducedFps),
@@ -2113,7 +2284,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ]),
   ];
   const workbookTestSummaryRows = [
-    ["Version", "Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
+    ["Version", "Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Package Dexopt State", "Package Dexopt Fingerprint", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
     ...versionSummary.map((group) => [
       group.version,
       group.workbookTestLane,
@@ -2125,6 +2296,11 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       group.borders,
       group.trafficDetailTiming,
       group.mapDetailTiming,
+      group.packageDexoptState,
+      group.packageDexoptFingerprint,
+      group.artCompileMode,
+      group.controlledExpectedDexoptState,
+      group.controlledDexoptNormalizationMode,
       group.rows.length,
       averageMetric(group.rows, chartProducedFps),
       bestHighMetric(group.rows, chartProducedFps),
@@ -2140,7 +2316,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   ];
 
   const workbookExclusionRows = [
-    ["Run Date", "Run ID", "Test", "City", "Map Source", "Git Metadata", "Git Worktree Dirty", "Git Status Count", "Battery Temp C", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Aircraft Draw Evidence", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
+    ["Run Date", "Run ID", "Test", "City", "Map Source", "Git Metadata", "Git Worktree Dirty", "Git Status Count", "Battery Temp C", "Thermal Status", "Package Dexopt State", "Package Dexopt Fingerprint", "Post-Run Package Dexopt State", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Aircraft Draw Evidence", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
     ...enrichedRunRows
       .filter((row) => row.workbookTestEligible !== "Yes")
       .map((row) => [
@@ -2155,7 +2331,11 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         row.batteryTempC,
         row.thermalStatus,
         row.packageDexoptState,
+        row.packageDexoptFingerprint,
+        row.postRunPackageDexoptState,
         row.artCompileMode,
+        row.controlledExpectedDexoptState,
+        row.controlledDexoptNormalizationModeLabel,
         row.aircraftDrawEvidence,
         row.routeFocusPassed,
         row.maxRunSeconds,
@@ -2170,10 +2350,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
 
   const recent = activeChartRows.slice(-40);
   const chartNote = recent.length < 2
-    ? "Controlled chart needs at least two comparable rows. Rerun suspected versions under thermal 0, verify/install-speg package dexopt, and InstallDefault ART before selecting a best iteration."
+    ? "Controlled chart needs at least two comparable rows in the same workload and dexopt lane. Rerun suspected versions under thermal 0, matching package dexopt fingerprint/normalization mode, unchanged post-run dexopt, and InstallDefault ART before selecting a best iteration."
     : "";
   const chartRows = [
-    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Aircraft Draw Evidence", "Run ID", "Artifact Dir", "Chart Status", "Harness Execution Mode"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Thermal Status", "Package Dexopt State", "Package Dexopt Fingerprint", "Post-Run Package Dexopt State", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Aircraft Draw Evidence", "Run ID", "Artifact Dir", "Chart Status", "Harness Execution Mode"],
     ...recent.map((row) => [
       shortChartRunLabel(row),
       chartProducedFps(row),
@@ -2182,7 +2362,11 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       row.androidJankPct || "",
       row.thermalStatus || "",
       row.packageDexoptState || "",
+      row.packageDexoptFingerprint || "",
+      row.postRunPackageDexoptState || "",
       row.artCompileMode || "",
+      row.controlledExpectedDexoptState || "",
+      row.controlledDexoptNormalizationModeLabel || "",
       row.aircraftDrawEvidence || "",
       row.runId || "",
       row.artifactDir || "",
@@ -2206,10 +2390,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Trace Audits sheet", "Rows are parsed from frametimeline-summary.json, exclusive-traffic-summary.json, renderthread-frame-summary.json, and frame-correlation-summary.json artifacts produced from Perfetto Trace Processor SQL. Use these for AppDeadlineMissed, buffer/display composition, direct-symbol gates, exclusive-traffic gates, RenderThread/postAndWait/GPU-wait diagnostics, and frame-correlation stop/go summaries."],
     ["Frame Correlations sheet", "Rows are parsed from frame-correlation-frames.csv artifacts. This sheet stores the detailed per-frame matched trace/log metrics used for correlation decisions, not only simplified summaries."],
     ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, APK hash, package compile evidence, battery/thermal/display evidence, route proof, accepted-evidence, and eligibility fields together."],
-    ["Workbook Tests sheet", "This is the controlled apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be explicit clean-git runs, full visible UI/traffic runs with aircraft draw evidence, route-proofed, non-video, non-diagnostic, thermal status 0, known baseline package dexopt state, InstallDefault ART mode, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
+    ["Workbook Tests sheet", "This is the controlled apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be explicit clean-git runs, full visible UI/traffic runs with aircraft draw evidence, route-proofed, non-video, non-diagnostic, thermal status 0, controlled package dexopt state/fingerprint, matching normalization mode, unchanged post-run dexopt, InstallDefault ART mode, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
     ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders/detail-timing state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
     ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty or missing-git-stamp, diagnostic, hidden-aircraft/no-aircraft-evidence, route-failed, video, too-short, uncontrolled thermal/dexopt/ART state, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
-    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Chart rows require git_worktree_dirty=false recorded at run start, aircraft draw evidence in Debug draw perf, thermal status 0, known baseline package dexopt state, and InstallDefault ART mode. Raw recent runs, nonmatching cities/series, and uncontrolled environment rows stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
+    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, detail-timing flags, package dexopt state/fingerprint, ART compile mode, expected dexopt state, and dexopt normalization mode. Chart rows require git_worktree_dirty=false recorded at run start, aircraft draw evidence in Debug draw perf, thermal status 0, controlled package dexopt state, unchanged post-run dexopt, and InstallDefault ART mode. Raw recent runs, nonmatching cities/series, and uncontrolled environment rows stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
     ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
     ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
   ];
@@ -2268,7 +2452,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       {
         name: "Workbook Tests",
         rows: workbookTestData,
-        widths: [20, 52, 44, 18, 22, 14, 10, 10, 18, 18, 16, 18, 18, 38, 18, 24, 24, 18, 18, 18, 14, 14, 14, 16, 16, 16, 18, 18, 16, 16, 42, 58],
+        widths: [20, 52, 44, 18, 22, 24, 30, 18, 18, 16, 10, 10, 18, 18, 18, 20, 20, 38, 36, 18, 42, 14, 14, 18, 42, 22, 18, 16, 16, 16, 18, 18, 16, 16, 16, 16, 16, 18, 18, 16, 16, 42, 58],
         freeze: "B2",
         table: "WorkbookTests",
         numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["M2:AF1048576", "0.0"]],
@@ -2295,20 +2479,20 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       {
         name: "Workbook Test Exclusions",
         rows: workbookExclusionRows,
-        widths: [20, 42, 34, 22, 14, 12, 16, 18, 18, 14, 18, 18, 24, 12, 14, 18, 16, 14, 44, 78, 58],
+        widths: [20, 42, 34, 22, 14, 12, 16, 18, 18, 14, 18, 42, 22, 18, 26, 32, 24, 12, 14, 18, 16, 14, 44, 78, 58],
         freeze: "B2",
         table: "WorkbookTestExclusions",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["H2:J1048576", "0.0"], ["O2:P1048576", "0.0"]],
-        wrapCols: [13, 19, 20, 21],
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["H2:J1048576", "0.0"], ["S2:T1048576", "0.0"]],
+        wrapCols: [16, 23, 24, 25],
       },
       {
         name: "Chart Data",
         rows: chartRows,
-        widths: [52, 18, 28, 14, 18, 14, 18, 18, 32, 42, 58, 72, 22],
+        widths: [52, 18, 28, 14, 18, 14, 22, 42, 24, 18, 26, 32, 58, 72, 72, 58, 22],
         freeze: "A2",
         charts: recent.length >= 2,
         numberFormats: [["B2:E1048576", "0.0"], ["F2:F1048576", "0.0"]],
-        wrapCols: [12],
+        wrapCols: [8, 13, 14, 15, 16],
       },
       {
         name: "Iteration Checks",
@@ -2412,7 +2596,7 @@ for spec in model["sheets"]:
                 "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
                 "marker": {"type": "circle", "size": 5},
             })
-        ws.insert_chart("M2", fps, {"x_scale": 1.45, "y_scale": 1.25})
+        ws.insert_chart("S2", fps, {"x_scale": 1.45, "y_scale": 1.25})
 
         timing = workbook.add_chart({"type": "line"})
         timing.set_title({"name": "Workbook Tests: Full P95 Frame Time And Jank"})
@@ -2424,7 +2608,7 @@ for spec in model["sheets"]:
                 "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
                 "marker": {"type": "circle", "size": 5},
             })
-        ws.insert_chart("M20", timing, {"x_scale": 1.45, "y_scale": 1.25})
+        ws.insert_chart("S20", timing, {"x_scale": 1.45, "y_scale": 1.25})
 
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 workbook.close()
@@ -2647,22 +2831,22 @@ function buildWorkbook(runRows, auditRows, ledgerRows) {
   ])];
   writeMatrix(chartData, 0, 0, chartRows);
   chartData.freezePanes.freezeRows(1);
-  setWidths(chartData, [44, 16, 20, 14, 18]);
+  setWidths(chartData, [52, 18, 28, 14, 18, 14, 22, 42, 24, 18, 26, 32, 58, 72, 72, 58, 22]);
   try {
     const fpsChart = chartData.charts.add("line", chartData.getRangeByIndexes(0, 0, chartRows.length, 3));
     fpsChart.title = "Recent Runs: Produced vs Present FPS";
     fpsChart.hasLegend = true;
     fpsChart.yAxis = { numberFormatCode: "0.0" };
     fpsChart.xAxis = { axisType: "textAxis", textStyle: { fontSize: 8 } };
-    fpsChart.setPosition("G2", "N18");
+    fpsChart.setPosition("S2", "Z18");
     const p95Chart = chartData.charts.add("line", chartData.getRangeByIndexes(0, 0, chartRows.length, 4));
     p95Chart.title = "Recent Runs: P95 Frame Time";
     p95Chart.hasLegend = true;
     p95Chart.yAxis = { numberFormatCode: "0.0" };
     p95Chart.xAxis = { axisType: "textAxis", textStyle: { fontSize: 8 } };
-    p95Chart.setPosition("G20", "N36");
+    p95Chart.setPosition("S20", "Z36");
   } catch {
-    chartData.getRange("G2").values = [["Chart creation skipped by renderer"]];
+    chartData.getRange("S2").values = [["Chart creation skipped by renderer"]];
   }
 
   const checks = workbook.worksheets.add("Iteration Checks");

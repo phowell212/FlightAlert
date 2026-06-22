@@ -30,6 +30,8 @@ param(
     [string]$BenchmarkRole = "Workbook",
     [switch]$RequireControlledPreflight,
     [int]$ControlledPreflightTimeoutSeconds = 120,
+    [ValidateSet("None", "PostInstallResetV1")]
+    [string]$ControlledDexoptNormalizationMode = "None",
     [ValidateSet("Unchecked", "Pass", "Fail")]
     [string]$VisibleEvidenceLandSafe = "Unchecked",
     [string]$VisibleEvidenceReviewer = ""
@@ -104,6 +106,15 @@ if ($RequireControlledPreflight -and $BenchmarkRole -ne "Workbook") {
 }
 if ($RequireControlledPreflight -and $ArtCompileMode -ne "InstallDefault") {
     throw "RequireControlledPreflight expects -ArtCompileMode InstallDefault; explicit compile modes are diagnostic-only."
+}
+if ($ControlledDexoptNormalizationMode -ne "None" -and -not $RequireControlledPreflight) {
+    throw "ControlledDexoptNormalizationMode=$ControlledDexoptNormalizationMode is only allowed with -RequireControlledPreflight so normalized dexopt states are recorded as their own chart lane."
+}
+if ($ControlledDexoptNormalizationMode -ne "None" -and $HarnessExecutionMode -ne "SplitInstall") {
+    throw "ControlledDexoptNormalizationMode=$ControlledDexoptNormalizationMode requires -HarnessExecutionMode SplitInstall."
+}
+if ($ControlledDexoptNormalizationMode -ne "None" -and $ArtCompileMode -ne "InstallDefault") {
+    throw "ControlledDexoptNormalizationMode=$ControlledDexoptNormalizationMode expects -ArtCompileMode InstallDefault; explicit compile modes remain diagnostic-only."
 }
 if ($ControlledPreflightTimeoutSeconds -lt 30 -or $ControlledPreflightTimeoutSeconds -gt 180) {
     throw "ControlledPreflightTimeoutSeconds=$ControlledPreflightTimeoutSeconds must be between 30 and 180 seconds."
@@ -277,6 +288,10 @@ function Get-BenchmarkDeviceEvidence {
         ThermalStatus = ""
         ThermalEvidence = ""
         DisplayRefreshEvidence = ""
+        DeviceBuildFingerprint = ""
+        DeviceBuildVersion = ""
+        DeviceBuildSdk = ""
+        DeviceArtEvidence = ""
         Error = ""
     }
     try {
@@ -321,6 +336,18 @@ function Get-BenchmarkDeviceEvidence {
     } catch {
         $evidence.DisplayRefreshEvidence = "unavailable: $($_.Exception.Message)"
     }
+    try {
+        $props = @(Invoke-Adb shell getprop 2>$null)
+        foreach ($line in $props) {
+            if ($line -match "^\[ro\.build\.fingerprint\]:\s*\[(.*)\]") { $evidence.DeviceBuildFingerprint = $Matches[1] }
+            if ($line -match "^\[ro\.build\.version\.release\]:\s*\[(.*)\]") { $evidence.DeviceBuildVersion = $Matches[1] }
+            if ($line -match "^\[ro\.build\.version\.sdk\]:\s*\[(.*)\]") { $evidence.DeviceBuildSdk = $Matches[1] }
+        }
+        $artLines = @($props | Where-Object { $_ -match "(?i)\[(dalvik\.vm|persist\.device_config\.runtime_native|pm\.dexopt|ro\.dalvik|dalvik\.vm\.usejit)" })
+        $evidence.DeviceArtEvidence = Join-BenchmarkEvidenceSnippet -Lines $artLines -MaxLines 45 -MaxChars 2600
+    } catch {
+        $evidence.DeviceArtEvidence = "unavailable: $($_.Exception.Message)"
+    }
     return [pscustomobject]$evidence
 }
 
@@ -331,6 +358,103 @@ function Get-PackageDexoptState {
     return "$($match.Groups[1].Value)/$($match.Groups[2].Value)"
 }
 
+function Get-PackageDexoptEntries {
+    param([string]$CompileEvidence)
+    $matches = [regex]::Matches($CompileEvidence, "(?<isa>[A-Za-z0-9_.-]+):\s*\[status=(?<status>[^\]]+)\]\s*\[reason=(?<reason>[^\]]+)\]", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $entries = @()
+    foreach ($match in $matches) {
+        $entries += [pscustomobject]@{
+            Isa = $match.Groups["isa"].Value
+            State = "$($match.Groups["status"].Value)/$($match.Groups["reason"].Value)"
+        }
+    }
+    return $entries
+}
+
+function Get-PackageDexoptFingerprint {
+    param([string]$CompileEvidence)
+    $entries = @(Get-PackageDexoptEntries -CompileEvidence $CompileEvidence)
+    if ($entries.Count -eq 0) { return "" }
+    return (@($entries | Sort-Object Isa, State | ForEach-Object { "$($_.Isa)=$($_.State)" }) -join ";")
+}
+
+function Test-PackageDexoptAllEntriesMatch {
+    param(
+        [string]$CompileEvidence,
+        [string]$ExpectedState
+    )
+    $entries = @(Get-PackageDexoptEntries -CompileEvidence $CompileEvidence)
+    if ($entries.Count -eq 0) { return $false }
+    foreach ($entry in $entries) {
+        if ($entry.State -ne $ExpectedState) { return $false }
+    }
+    return $true
+}
+
+function Get-ControlledExpectedDexoptState {
+    param([string]$NormalizationMode)
+    if ($NormalizationMode -eq "PostInstallResetV1") { return "verify/install" }
+    return "verify/install-speg"
+}
+
+function Invoke-ControlledDexoptNormalization {
+    param(
+        [string]$Mode,
+        [string]$PackageName,
+        [string]$OutputPath
+    )
+    $result = [ordered]@{
+        Mode = $Mode
+        Command = ""
+        ExitCode = ""
+        Output = ""
+        PackageCompileEvidence = ""
+        PackageDexoptState = ""
+        PackageDexoptFingerprint = ""
+    }
+    if ($Mode -eq "None") {
+        $result.Command = "none; preserving post-install package dexopt state"
+        $result.ExitCode = 0
+    } elseif ($Mode -eq "PostInstallResetV1") {
+        $commandArgs = @("shell", "cmd", "package", "compile", "--reset", $PackageName)
+        $result.Command = "adb $($commandArgs -join ' ')"
+        Write-Host "Applying controlled dexopt normalization $Mode with: $($result.Command)"
+        $normalizationOutput = @(Invoke-Adb @commandArgs 2>&1)
+        $result.ExitCode = $LASTEXITCODE
+        $result.Output = Join-BenchmarkEvidenceSnippet -Lines $normalizationOutput -MaxLines 60 -MaxChars 2400
+        if ($result.ExitCode -ne 0) {
+            @(
+                "mode=$($result.Mode)"
+                "command=$($result.Command)"
+                "exit_code=$($result.ExitCode)"
+                "output=$($result.Output)"
+            ) | Set-Content -Path $OutputPath
+            throw "Controlled dexopt normalization failed with exit code $($result.ExitCode): $($result.Output)"
+        }
+    } else {
+        throw "Unsupported controlled dexopt normalization mode: $Mode"
+    }
+    try {
+        $packageDump = @(Invoke-Adb shell dumpsys package $PackageName 2>$null)
+        $compileLines = @($packageDump | Where-Object { $_ -match "(?i)dexopt|compiler|compile|profile|speed|verify|oat|odex|status=|reason=" })
+        $result.PackageCompileEvidence = Join-BenchmarkEvidenceSnippet -Lines $compileLines -MaxLines 80 -MaxChars 3600
+        $result.PackageDexoptState = Get-PackageDexoptState -CompileEvidence $result.PackageCompileEvidence
+        $result.PackageDexoptFingerprint = Get-PackageDexoptFingerprint -CompileEvidence $result.PackageCompileEvidence
+    } catch {
+        $result.PackageCompileEvidence = "unavailable: $($_.Exception.Message)"
+    }
+    @(
+        "mode=$($result.Mode)"
+        "command=$($result.Command)"
+        "exit_code=$($result.ExitCode)"
+        "output=$($result.Output)"
+        "package_dexopt_state=$($result.PackageDexoptState)"
+        "package_dexopt_fingerprint=$($result.PackageDexoptFingerprint)"
+        "package_compile_evidence=$($result.PackageCompileEvidence)"
+    ) | Set-Content -Path $OutputPath
+    return [pscustomobject]$result
+}
+
 function Invoke-ControlledBenchmarkPreflight {
     param(
         [string]$RepoRoot,
@@ -338,9 +462,11 @@ function Invoke-ControlledBenchmarkPreflight {
         [string]$OutputPath,
         [pscustomobject]$GitEvidence,
         [string]$ArtCompileMode,
+        [string]$ExpectedDexoptState,
+        [string]$NormalizationMode,
         [int]$TimeoutSeconds
     )
-    $expectedDexopt = "verify/install-speg"
+    $expectedDexopt = if ([string]::IsNullOrWhiteSpace($ExpectedDexoptState)) { Get-ControlledExpectedDexoptState -NormalizationMode $NormalizationMode } else { $ExpectedDexoptState }
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $samples = @()
     $thermalZeroCount = 0
@@ -348,6 +474,7 @@ function Invoke-ControlledBenchmarkPreflight {
     while ((Get-Date) -lt $deadline) {
         $lastEvidence = Get-BenchmarkDeviceEvidence -RepoRoot $RepoRoot -PackageName $PackageName
         $dexoptState = Get-PackageDexoptState -CompileEvidence $lastEvidence.PackageCompileEvidence
+        $dexoptFingerprint = Get-PackageDexoptFingerprint -CompileEvidence $lastEvidence.PackageCompileEvidence
         $thermalStatus = "$($lastEvidence.ThermalStatus)".Trim()
         if ($thermalStatus -eq "0") {
             $thermalZeroCount += 1
@@ -355,17 +482,19 @@ function Invoke-ControlledBenchmarkPreflight {
             $thermalZeroCount = 0
         }
         $gitClean = ($GitEvidence.Available -eq $true -and "$($GitEvidence.WorktreeDirty)" -eq "False")
-        $dexoptOk = ($dexoptState -eq $expectedDexopt)
+        $dexoptOk = Test-PackageDexoptAllEntriesMatch -CompileEvidence $lastEvidence.PackageCompileEvidence -ExpectedState $expectedDexopt
         $artOk = ($ArtCompileMode -eq "InstallDefault")
-        $samples += "utc=$((Get-Date).ToUniversalTime().ToString("o")) thermal=$thermalStatus consecutiveThermalZero=$thermalZeroCount dexopt=$dexoptState art=$ArtCompileMode gitClean=$gitClean"
+        $samples += "utc=$((Get-Date).ToUniversalTime().ToString("o")) thermal=$thermalStatus consecutiveThermalZero=$thermalZeroCount dexopt=$dexoptState fingerprint=$dexoptFingerprint expectedDexopt=$expectedDexopt normalizationMode=$NormalizationMode art=$ArtCompileMode gitClean=$gitClean"
         if ($gitClean -and $dexoptOk -and $artOk -and $thermalZeroCount -ge 2) {
             $summary = Join-BenchmarkEvidenceSnippet -Lines $samples -MaxLines 20 -MaxChars 1800
             @(
                 "required=True"
                 "passed=True"
                 "expected_dexopt=$expectedDexopt"
+                "normalization_mode=$NormalizationMode"
                 "thermal_zero_samples=$thermalZeroCount"
                 "package_dexopt_state=$dexoptState"
+                "package_dexopt_fingerprint=$dexoptFingerprint"
                 "git_clean=$gitClean"
                 "art_compile_mode=$ArtCompileMode"
                 "evidence=$summary"
@@ -374,20 +503,26 @@ function Invoke-ControlledBenchmarkPreflight {
                 Passed = $true
                 Evidence = $summary
                 PackageDexoptState = $dexoptState
+                PackageDexoptFingerprint = $dexoptFingerprint
+                ExpectedDexoptState = $expectedDexopt
+                NormalizationMode = $NormalizationMode
                 ThermalZeroSamples = $thermalZeroCount
             }
         }
         Start-Sleep -Seconds ([Math]::Min(10, [Math]::Max(1, [int][Math]::Floor(($deadline - (Get-Date)).TotalSeconds))))
     }
     $lastDexopt = if ($lastEvidence) { Get-PackageDexoptState -CompileEvidence $lastEvidence.PackageCompileEvidence } else { "" }
+    $lastFingerprint = if ($lastEvidence) { Get-PackageDexoptFingerprint -CompileEvidence $lastEvidence.PackageCompileEvidence } else { "" }
     $lastThermal = if ($lastEvidence) { "$($lastEvidence.ThermalStatus)".Trim() } else { "" }
     $finalSummary = Join-BenchmarkEvidenceSnippet -Lines $samples -MaxLines 30 -MaxChars 2400
     @(
         "required=True"
         "passed=False"
         "expected_dexopt=$expectedDexopt"
+        "normalization_mode=$NormalizationMode"
         "last_thermal_status=$lastThermal"
         "last_package_dexopt_state=$lastDexopt"
+        "last_package_dexopt_fingerprint=$lastFingerprint"
         "git_clean=$($GitEvidence.Available -eq $true -and "$($GitEvidence.WorktreeDirty)" -eq "False")"
         "art_compile_mode=$ArtCompileMode"
         "evidence=$finalSummary"
@@ -995,8 +1130,18 @@ $artCompileExit = ""
 $artCompileOutput = ""
 $artCompilePackageEvidence = ""
 $controlledPreflightPath = ""
+$controlledPreflightExpectedDexopt = Get-ControlledExpectedDexoptState -NormalizationMode $ControlledDexoptNormalizationMode
 $controlledPreflightPassed = $false
 $controlledPreflightEvidence = ""
+$controlledDexoptNormalizationPath = ""
+$controlledDexoptNormalizationCommand = ""
+$controlledDexoptNormalizationExit = ""
+$controlledDexoptNormalizationOutput = ""
+$controlledDexoptNormalizationPreState = ""
+$controlledDexoptNormalizationPreFingerprint = ""
+$controlledDexoptNormalizationPackageEvidence = ""
+$controlledDexoptNormalizationPackageState = ""
+$controlledDexoptNormalizationPackageFingerprint = ""
 $instrumentationComponent = "$testPackageName/$instrumentationRunner"
 
 Push-Location $repoRoot
@@ -1005,6 +1150,7 @@ try {
     $gradleLog = Join-Path $outDir "$OutputName-gradle.txt"
     $splitInstallLog = Join-Path $outDir "$OutputName-install.txt"
     $artCompilePath = Join-Path $outDir "$OutputName-art-compile.txt"
+    $controlledDexoptNormalizationPath = Join-Path $outDir "$OutputName-controlled-dexopt-normalization.txt"
     $instrumentationArgs = [ordered]@{
         class = "$testClass#$TestName"
     }
@@ -1069,8 +1215,19 @@ try {
         $artCompileOutput = $compileResult.Output
         $artCompilePackageEvidence = $compileResult.PackageCompileEvidence
         if ($RequireControlledPreflight) {
+            $controlledDexoptNormalizationPreState = Get-PackageDexoptState -CompileEvidence $artCompilePackageEvidence
+            $controlledDexoptNormalizationPreFingerprint = Get-PackageDexoptFingerprint -CompileEvidence $artCompilePackageEvidence
+            Invoke-Adb shell "am force-stop $packageName >/dev/null 2>&1 || true" | Out-Null
+            Invoke-Adb shell "am force-stop $testPackageName >/dev/null 2>&1 || true" | Out-Null
+            $normalizationResult = Invoke-ControlledDexoptNormalization -Mode $ControlledDexoptNormalizationMode -PackageName $packageName -OutputPath $controlledDexoptNormalizationPath
+            $controlledDexoptNormalizationCommand = $normalizationResult.Command
+            $controlledDexoptNormalizationExit = $normalizationResult.ExitCode
+            $controlledDexoptNormalizationOutput = $normalizationResult.Output
+            $controlledDexoptNormalizationPackageEvidence = $normalizationResult.PackageCompileEvidence
+            $controlledDexoptNormalizationPackageState = $normalizationResult.PackageDexoptState
+            $controlledDexoptNormalizationPackageFingerprint = $normalizationResult.PackageDexoptFingerprint
             $controlledPreflightPath = Join-Path $outDir "$OutputName-controlled-preflight.txt"
-            $preflightResult = Invoke-ControlledBenchmarkPreflight -RepoRoot $repoRoot -PackageName $packageName -OutputPath $controlledPreflightPath -GitEvidence $gitEvidence -ArtCompileMode $ArtCompileMode -TimeoutSeconds $ControlledPreflightTimeoutSeconds
+            $preflightResult = Invoke-ControlledBenchmarkPreflight -RepoRoot $repoRoot -PackageName $packageName -OutputPath $controlledPreflightPath -GitEvidence $gitEvidence -ArtCompileMode $ArtCompileMode -ExpectedDexoptState $controlledPreflightExpectedDexopt -NormalizationMode $ControlledDexoptNormalizationMode -TimeoutSeconds $ControlledPreflightTimeoutSeconds
             $controlledPreflightPassed = $preflightResult.Passed
             $controlledPreflightEvidence = $preflightResult.Evidence
         }
@@ -1192,9 +1349,20 @@ $routeProof += "art_compile_output=$artCompileOutput"
 $routeProof += "art_compile_package_evidence=$artCompilePackageEvidence"
 $routeProof += "controlled_preflight_required=$($RequireControlledPreflight.IsPresent)"
 $routeProof += "controlled_preflight_timeout_seconds=$ControlledPreflightTimeoutSeconds"
+$routeProof += "controlled_preflight_expected_dexopt=$controlledPreflightExpectedDexopt"
+$routeProof += "controlled_dexopt_normalization_mode=$ControlledDexoptNormalizationMode"
 $routeProof += "controlled_preflight_passed=$controlledPreflightPassed"
 $routeProof += "controlled_preflight_file=$controlledPreflightPath"
 $routeProof += "controlled_preflight_evidence=$controlledPreflightEvidence"
+$routeProof += "controlled_dexopt_normalization_file=$controlledDexoptNormalizationPath"
+$routeProof += "controlled_dexopt_normalization_command=$controlledDexoptNormalizationCommand"
+$routeProof += "controlled_dexopt_normalization_exit_code=$controlledDexoptNormalizationExit"
+$routeProof += "controlled_dexopt_normalization_output=$controlledDexoptNormalizationOutput"
+$routeProof += "controlled_dexopt_normalization_pre_state=$controlledDexoptNormalizationPreState"
+$routeProof += "controlled_dexopt_normalization_pre_fingerprint=$controlledDexoptNormalizationPreFingerprint"
+$routeProof += "controlled_dexopt_normalization_package_state=$controlledDexoptNormalizationPackageState"
+$routeProof += "controlled_dexopt_normalization_package_fingerprint=$controlledDexoptNormalizationPackageFingerprint"
+$routeProof += "controlled_dexopt_normalization_package_evidence=$controlledDexoptNormalizationPackageEvidence"
 $routeProof += "git_metadata_available=$($gitEvidence.Available)"
 $routeProof += "git_branch=$($gitEvidence.Branch)"
 $routeProof += "git_commit=$($gitEvidence.Commit)"
@@ -1216,6 +1384,8 @@ $routeProof += "test_apk_sha256=$($deviceEvidence.TestApkSha256)"
 $routeProof += "test_apk_error=$($deviceEvidence.TestApkError)"
 $routeProof += "device_package_paths=$($deviceEvidence.PackagePaths)"
 $routeProof += "post_run_package_compile_evidence=$($deviceEvidence.PackageCompileEvidence)"
+$routeProof += "post_run_package_dexopt_state=$(Get-PackageDexoptState -CompileEvidence $deviceEvidence.PackageCompileEvidence)"
+$routeProof += "post_run_package_dexopt_fingerprint=$(Get-PackageDexoptFingerprint -CompileEvidence $deviceEvidence.PackageCompileEvidence)"
 $routeProof += "battery_level=$($deviceEvidence.BatteryLevel)"
 $routeProof += "battery_temp_c=$($deviceEvidence.BatteryTempC)"
 $routeProof += "battery_status=$($deviceEvidence.BatteryStatus)"
@@ -1223,6 +1393,10 @@ $routeProof += "battery_plugged=$($deviceEvidence.BatteryPlugged)"
 $routeProof += "thermal_status=$($deviceEvidence.ThermalStatus)"
 $routeProof += "thermal_evidence=$($deviceEvidence.ThermalEvidence)"
 $routeProof += "post_run_display_refresh_evidence=$($deviceEvidence.DisplayRefreshEvidence)"
+$routeProof += "device_build_fingerprint=$($deviceEvidence.DeviceBuildFingerprint)"
+$routeProof += "device_build_version=$($deviceEvidence.DeviceBuildVersion)"
+$routeProof += "device_build_sdk=$($deviceEvidence.DeviceBuildSdk)"
+$routeProof += "device_art_evidence=$($deviceEvidence.DeviceArtEvidence)"
 $routeProof += "device_evidence_error=$($deviceEvidence.Error)"
 $routeProof += "city_argument=$City"
 $routeProof += "map_roads_argument=$MapRoads"
