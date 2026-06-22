@@ -28,6 +28,8 @@ param(
     [string]$ArtCompileMode = "InstallDefault",
     [ValidateSet("Workbook", "Diagnostic")]
     [string]$BenchmarkRole = "Workbook",
+    [switch]$RequireControlledPreflight,
+    [int]$ControlledPreflightTimeoutSeconds = 120,
     [ValidateSet("Unchecked", "Pass", "Fail")]
     [string]$VisibleEvidenceLandSafe = "Unchecked",
     [string]$VisibleEvidenceReviewer = ""
@@ -94,8 +96,20 @@ if (($MapRoads -eq "Current") -xor ($MapBorders -eq "Current")) {
 if ($HarnessExecutionMode -ne "SplitInstall" -and $ArtCompileMode -ne "InstallDefault") {
     throw "ArtCompileMode=$ArtCompileMode requires -HarnessExecutionMode SplitInstall so compilation happens after install and before instrumentation launch."
 }
-if ($HarnessExecutionMode -eq "SplitInstall" -and $BenchmarkRole -ne "Diagnostic") {
-    throw "SplitInstall execution is currently diagnostic-only. Pass -BenchmarkRole Diagnostic so these runs stay out of Chart Data."
+if ($RequireControlledPreflight -and $HarnessExecutionMode -ne "SplitInstall") {
+    throw "RequireControlledPreflight needs -HarnessExecutionMode SplitInstall so install, thermal, and dexopt can be checked before instrumentation."
+}
+if ($RequireControlledPreflight -and $BenchmarkRole -ne "Workbook") {
+    throw "RequireControlledPreflight is only for chart-grade -BenchmarkRole Workbook runs."
+}
+if ($RequireControlledPreflight -and $ArtCompileMode -ne "InstallDefault") {
+    throw "RequireControlledPreflight expects -ArtCompileMode InstallDefault; explicit compile modes are diagnostic-only."
+}
+if ($ControlledPreflightTimeoutSeconds -lt 30 -or $ControlledPreflightTimeoutSeconds -gt 180) {
+    throw "ControlledPreflightTimeoutSeconds=$ControlledPreflightTimeoutSeconds must be between 30 and 180 seconds."
+}
+if ($HarnessExecutionMode -eq "SplitInstall" -and $BenchmarkRole -ne "Diagnostic" -and -not $RequireControlledPreflight) {
+    throw "SplitInstall workbook runs require -RequireControlledPreflight. Otherwise pass -BenchmarkRole Diagnostic so they stay out of Chart Data."
 }
 
 function Invoke-Adb {
@@ -308,6 +322,77 @@ function Get-BenchmarkDeviceEvidence {
         $evidence.DisplayRefreshEvidence = "unavailable: $($_.Exception.Message)"
     }
     return [pscustomobject]$evidence
+}
+
+function Get-PackageDexoptState {
+    param([string]$CompileEvidence)
+    $match = [regex]::Match($CompileEvidence, "Dexopt state:.*?arm64:\s*\[status=([^\]]+)\]\s*\[reason=([^\]]+)\]", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if (-not $match.Success) { return "" }
+    return "$($match.Groups[1].Value)/$($match.Groups[2].Value)"
+}
+
+function Invoke-ControlledBenchmarkPreflight {
+    param(
+        [string]$RepoRoot,
+        [string]$PackageName,
+        [string]$OutputPath,
+        [pscustomobject]$GitEvidence,
+        [string]$ArtCompileMode,
+        [int]$TimeoutSeconds
+    )
+    $expectedDexopt = "verify/install-speg"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $samples = @()
+    $thermalZeroCount = 0
+    $lastEvidence = $null
+    while ((Get-Date) -lt $deadline) {
+        $lastEvidence = Get-BenchmarkDeviceEvidence -RepoRoot $RepoRoot -PackageName $PackageName
+        $dexoptState = Get-PackageDexoptState -CompileEvidence $lastEvidence.PackageCompileEvidence
+        $thermalStatus = "$($lastEvidence.ThermalStatus)".Trim()
+        if ($thermalStatus -eq "0") {
+            $thermalZeroCount += 1
+        } else {
+            $thermalZeroCount = 0
+        }
+        $gitClean = ($GitEvidence.Available -eq $true -and "$($GitEvidence.WorktreeDirty)" -eq "False")
+        $dexoptOk = ($dexoptState -eq $expectedDexopt)
+        $artOk = ($ArtCompileMode -eq "InstallDefault")
+        $samples += "utc=$((Get-Date).ToUniversalTime().ToString("o")) thermal=$thermalStatus consecutiveThermalZero=$thermalZeroCount dexopt=$dexoptState art=$ArtCompileMode gitClean=$gitClean"
+        if ($gitClean -and $dexoptOk -and $artOk -and $thermalZeroCount -ge 2) {
+            $summary = Join-BenchmarkEvidenceSnippet -Lines $samples -MaxLines 20 -MaxChars 1800
+            @(
+                "required=True"
+                "passed=True"
+                "expected_dexopt=$expectedDexopt"
+                "thermal_zero_samples=$thermalZeroCount"
+                "package_dexopt_state=$dexoptState"
+                "git_clean=$gitClean"
+                "art_compile_mode=$ArtCompileMode"
+                "evidence=$summary"
+            ) | Set-Content -Path $OutputPath
+            return [pscustomobject]@{
+                Passed = $true
+                Evidence = $summary
+                PackageDexoptState = $dexoptState
+                ThermalZeroSamples = $thermalZeroCount
+            }
+        }
+        Start-Sleep -Seconds ([Math]::Min(10, [Math]::Max(1, [int][Math]::Floor(($deadline - (Get-Date)).TotalSeconds))))
+    }
+    $lastDexopt = if ($lastEvidence) { Get-PackageDexoptState -CompileEvidence $lastEvidence.PackageCompileEvidence } else { "" }
+    $lastThermal = if ($lastEvidence) { "$($lastEvidence.ThermalStatus)".Trim() } else { "" }
+    $finalSummary = Join-BenchmarkEvidenceSnippet -Lines $samples -MaxLines 30 -MaxChars 2400
+    @(
+        "required=True"
+        "passed=False"
+        "expected_dexopt=$expectedDexopt"
+        "last_thermal_status=$lastThermal"
+        "last_package_dexopt_state=$lastDexopt"
+        "git_clean=$($GitEvidence.Available -eq $true -and "$($GitEvidence.WorktreeDirty)" -eq "False")"
+        "art_compile_mode=$ArtCompileMode"
+        "evidence=$finalSummary"
+    ) | Set-Content -Path $OutputPath
+    throw "Controlled preflight rejected before benchmark capture: thermal=$lastThermal dexopt=$lastDexopt expectedDexopt=$expectedDexopt. See $OutputPath."
 }
 
 function Assert-InlandCityArgument {
@@ -909,6 +994,9 @@ $artCompileCommand = ""
 $artCompileExit = ""
 $artCompileOutput = ""
 $artCompilePackageEvidence = ""
+$controlledPreflightPath = ""
+$controlledPreflightPassed = $false
+$controlledPreflightEvidence = ""
 $instrumentationComponent = "$testPackageName/$instrumentationRunner"
 
 Push-Location $repoRoot
@@ -980,6 +1068,12 @@ try {
         $artCompileExit = $compileResult.ExitCode
         $artCompileOutput = $compileResult.Output
         $artCompilePackageEvidence = $compileResult.PackageCompileEvidence
+        if ($RequireControlledPreflight) {
+            $controlledPreflightPath = Join-Path $outDir "$OutputName-controlled-preflight.txt"
+            $preflightResult = Invoke-ControlledBenchmarkPreflight -RepoRoot $repoRoot -PackageName $packageName -OutputPath $controlledPreflightPath -GitEvidence $gitEvidence -ArtCompileMode $ArtCompileMode -TimeoutSeconds $ControlledPreflightTimeoutSeconds
+            $controlledPreflightPassed = $preflightResult.Passed
+            $controlledPreflightEvidence = $preflightResult.Evidence
+        }
         Invoke-Adb shell "am force-stop $packageName >/dev/null 2>&1 || true" | Out-Null
         Invoke-Adb shell "am force-stop $testPackageName >/dev/null 2>&1 || true" | Out-Null
     }
@@ -1096,6 +1190,11 @@ $routeProof += "art_compile_command=$artCompileCommand"
 $routeProof += "art_compile_exit_code=$artCompileExit"
 $routeProof += "art_compile_output=$artCompileOutput"
 $routeProof += "art_compile_package_evidence=$artCompilePackageEvidence"
+$routeProof += "controlled_preflight_required=$($RequireControlledPreflight.IsPresent)"
+$routeProof += "controlled_preflight_timeout_seconds=$ControlledPreflightTimeoutSeconds"
+$routeProof += "controlled_preflight_passed=$controlledPreflightPassed"
+$routeProof += "controlled_preflight_file=$controlledPreflightPath"
+$routeProof += "controlled_preflight_evidence=$controlledPreflightEvidence"
 $routeProof += "git_metadata_available=$($gitEvidence.Available)"
 $routeProof += "git_branch=$($gitEvidence.Branch)"
 $routeProof += "git_commit=$($gitEvidence.Commit)"

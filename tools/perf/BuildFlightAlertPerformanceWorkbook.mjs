@@ -482,7 +482,7 @@ function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
   if (row.benchmarkRole && !/^workbook$/i.test(String(row.benchmarkRole))) {
     reasons.push(`benchmark role is ${row.benchmarkRole}`);
   }
-  if (row.harnessExecutionMode && !/^gradleconnected$/i.test(String(row.harnessExecutionMode))) {
+  if (row.harnessExecutionMode && !isChartControlledHarness(row)) {
     reasons.push(`nonstandard harness execution: ${row.harnessExecutionMode}`);
   }
   reasons.push(...comparisonEnvironmentControlReasons(row));
@@ -499,6 +499,12 @@ function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
     if (finiteNumber(value) == null) reasons.push(`missing ${label}`);
   }
   return Array.from(new Set(reasons)).join("; ");
+}
+
+function isChartControlledHarness(row) {
+  const mode = String(row.harnessExecutionMode || "").trim().toLowerCase();
+  if (!mode || mode === "gradleconnected") return true;
+  return mode === "splitinstall" && isTrueValue(row.controlledPreflightPassed);
 }
 
 function comparisonEnvironmentControlReasons(row) {
@@ -569,6 +575,7 @@ function compareRunPerformance(a, b) {
 function comparableSeriesKey(row, includeCity = true) {
   return [
     row.workbookTestLane || "",
+    row.harnessExecutionMode || "",
     includeCity ? (row.city || "") : (row.benchmarkRegion || ""),
     row.mapSource || "",
     row.roads || "",
@@ -651,6 +658,7 @@ function buildVersionSummary(workbookTestRows) {
       groups.set(key, {
         version,
         workbookTestLane: row.workbookTestLane,
+        harnessExecutionMode: row.harnessExecutionMode,
         benchmarkRegion: row.benchmarkRegion,
         city: row.city,
         mapSource: row.mapSource,
@@ -669,6 +677,7 @@ function buildVersionSummary(workbookTestRows) {
 function comparableVersionSummaryKey(group) {
   return [
     group.workbookTestLane || "",
+    group.harnessExecutionMode || "",
     group.city || group.benchmarkRegion || "",
     group.mapSource || "",
     group.roads || "",
@@ -1115,6 +1124,9 @@ async function collectPerformanceRows() {
           gitError: route.git_error || "",
           benchmarkRole: route.benchmark_role || "",
           harnessExecutionMode: route.harness_execution_mode || "",
+          controlledPreflightRequired: route.controlled_preflight_required || "",
+          controlledPreflightPassed: route.controlled_preflight_passed || "",
+          controlledPreflightEvidence: route.controlled_preflight_evidence || "",
           instrumentationComponent: route.instrumentation_component || "",
           splitInstallExitCode: maybeNumber(route.split_install_exit_code),
           artCompileMode: route.art_compile_mode || "",
@@ -1591,6 +1603,9 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Git Error",
     "Benchmark Role",
     "Harness Execution Mode",
+    "Controlled Preflight Required",
+    "Controlled Preflight Passed",
+    "Controlled Preflight Evidence",
     "Instrumentation Component",
     "Split Install Exit Code",
     "ART Compile Mode",
@@ -1692,6 +1707,9 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     safeText(row.gitError, 1000),
     row.benchmarkRole,
     row.harnessExecutionMode,
+    row.controlledPreflightRequired,
+    row.controlledPreflightPassed,
+    safeText(row.controlledPreflightEvidence, 2400),
     row.instrumentationComponent,
     row.splitInstallExitCode,
     row.artCompileMode,
@@ -1978,6 +1996,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Run Date",
     "Run",
     "Workbook Test Lane",
+    "Harness Execution Mode",
+    "Controlled Preflight Passed",
     "Benchmark Region",
     "City",
     "Map Source",
@@ -2019,6 +2039,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.runDate,
     shortChartRunLabel(row),
     row.workbookTestLane,
+    row.harnessExecutionMode,
+    row.controlledPreflightPassed,
     row.benchmarkRegion,
     row.city,
     row.mapSource,
@@ -2065,9 +2087,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   }
   const bestVersionRows = Array.from(bestVersionGroups.values()).sort(compareVersionSummaryForDisplay);
   const bestByWorkloadRows = [
-    ["Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Best Version", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
+    ["Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Best Version", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
     ...bestVersionRows.map((group) => [
       group.workbookTestLane,
+      group.harnessExecutionMode,
       group.benchmarkRegion,
       group.city,
       group.mapSource,
@@ -2090,10 +2113,11 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ]),
   ];
   const workbookTestSummaryRows = [
-    ["Version", "Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
+    ["Version", "Workbook Test Lane", "Harness Execution Mode", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
     ...versionSummary.map((group) => [
       group.version,
       group.workbookTestLane,
+      group.harnessExecutionMode,
       group.benchmarkRegion,
       group.city,
       group.mapSource,
@@ -2149,7 +2173,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ? "Controlled chart needs at least two comparable rows. Rerun suspected versions under thermal 0, verify/install-speg package dexopt, and InstallDefault ART before selecting a best iteration."
     : "";
   const chartRows = [
-    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Aircraft Draw Evidence", "Run ID", "Artifact Dir", "Chart Status"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Aircraft Draw Evidence", "Run ID", "Artifact Dir", "Chart Status", "Harness Execution Mode"],
     ...recent.map((row) => [
       shortChartRunLabel(row),
       chartProducedFps(row),
@@ -2163,6 +2187,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       row.runId || "",
       row.artifactDir || "",
       chartNote,
+      row.harnessExecutionMode || "",
     ]),
   ];
   const now = new Date().toISOString();
@@ -2246,8 +2271,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         widths: [20, 52, 44, 18, 22, 14, 10, 10, 18, 18, 16, 18, 18, 38, 18, 24, 24, 18, 18, 18, 14, 14, 14, 16, 16, 16, 18, 18, 16, 16, 42, 58],
         freeze: "B2",
         table: "WorkbookTests",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["K2:AD1048576", "0.0"]],
-        wrapCols: [2, 3, 11, 28, 29],
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["M2:AF1048576", "0.0"]],
+        wrapCols: [2, 3, 13, 30, 31],
       },
       {
         name: "Workbook Test Summary",
@@ -2255,8 +2280,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         widths: [46, 44, 18, 22, 14, 10, 10, 18, 18, 16, 20, 20, 28, 24, 18, 18, 18, 18, 18, 78],
         freeze: "B2",
         table: "WorkbookTestSummary",
-        numberFormats: [["J2:S1048576", "0.0"]],
-        wrapCols: [1, 2, 20],
+        numberFormats: [["K2:T1048576", "0.0"]],
+        wrapCols: [1, 2, 21],
       },
       {
         name: "Best By Workload",
@@ -2264,8 +2289,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         widths: [44, 18, 22, 14, 10, 10, 18, 18, 18, 28, 14, 16, 16, 16, 18, 24, 18, 16, 42, 58],
         freeze: "A2",
         table: "BestByWorkload",
-        numberFormats: [["I2:R1048576", "0.0"]],
-        wrapCols: [1, 19, 20],
+        numberFormats: [["K2:T1048576", "0.0"]],
+        wrapCols: [1, 20, 21],
       },
       {
         name: "Workbook Test Exclusions",
@@ -2279,7 +2304,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       {
         name: "Chart Data",
         rows: chartRows,
-        widths: [52, 18, 28, 14, 18, 14, 18, 18, 32, 42, 58, 72],
+        widths: [52, 18, 28, 14, 18, 14, 18, 18, 32, 42, 58, 72, 22],
         freeze: "A2",
         charts: recent.length >= 2,
         numberFormats: [["B2:E1048576", "0.0"], ["F2:F1048576", "0.0"]],
