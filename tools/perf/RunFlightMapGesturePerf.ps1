@@ -119,6 +119,44 @@ function Get-TimetableDefaultCity {
     return "Frankfurt"
 }
 
+function Get-GitWorktreeEvidence {
+    param([string]$RepoRoot)
+    $evidence = [ordered]@{
+        Available = $false
+        Branch = ""
+        Commit = ""
+        WorktreeDirty = ""
+        StatusCount = ""
+        StatusShort = ""
+        Error = ""
+    }
+    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        $evidence.Error = "git command unavailable"
+        return [pscustomobject]$evidence
+    }
+    Push-Location $RepoRoot
+    try {
+        $branch = @(& git rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1)
+        $commit = @(& git rev-parse HEAD 2>$null | Select-Object -First 1)
+        $statusLines = @(& git status --porcelain=v1 2>$null)
+        $evidence.Available = $true
+        $evidence.Branch = if ($branch.Count -gt 0) { "$($branch[0])" } else { "" }
+        $evidence.Commit = if ($commit.Count -gt 0) { "$($commit[0])" } else { "" }
+        $evidence.WorktreeDirty = $statusLines.Count -gt 0
+        $evidence.StatusCount = $statusLines.Count
+        $evidence.StatusShort = (($statusLines | Select-Object -First 25) -join " | ") -replace "`r|`n", " "
+        if ($statusLines.Count -gt 25) {
+            $evidence.StatusShort = "$($evidence.StatusShort) | ...+$($statusLines.Count - 25) more"
+        }
+    } catch {
+        $evidence.Error = $_.Exception.Message
+    } finally {
+        Pop-Location
+    }
+    return [pscustomobject]$evidence
+}
+
 function Assert-InlandCityArgument {
     if ([string]::IsNullOrWhiteSpace($City)) { return }
     $target = Get-LandSafeTarget -Name $City
@@ -556,6 +594,7 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 if ([string]::IsNullOrWhiteSpace($OutputName)) {
     $OutputName = "instrumentation-$ArtifactName-$stamp"
 }
+$gitEvidence = Get-GitWorktreeEvidence -RepoRoot $repoRoot
 $outDir = Join-Path $outRoot $OutputName
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
@@ -721,6 +760,13 @@ $routeProof += "test_class=$testClass"
 $routeProof += "test_name=$TestName"
 $routeProof += "artifact_prefix=$artifactPrefix"
 $routeProof += "device=$Device"
+$routeProof += "git_metadata_available=$($gitEvidence.Available)"
+$routeProof += "git_branch=$($gitEvidence.Branch)"
+$routeProof += "git_commit=$($gitEvidence.Commit)"
+$routeProof += "git_worktree_dirty=$($gitEvidence.WorktreeDirty)"
+$routeProof += "git_status_count=$($gitEvidence.StatusCount)"
+$routeProof += "git_status_short=$($gitEvidence.StatusShort)"
+$routeProof += "git_error=$($gitEvidence.Error)"
 $routeProof += "city_argument=$City"
 $routeProof += "map_roads_argument=$MapRoads"
 $routeProof += "map_borders_argument=$MapBorders"

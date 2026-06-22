@@ -398,12 +398,60 @@ function fullVisibilityExclusionReason(row) {
   return "";
 }
 
-function chartExclusionReason(row, workloadLevel) {
+function gitCleanExclusionReason(row) {
+  if (!isTrueValue(row.gitMetadataAvailable)) return "git metadata missing/unavailable";
+  const dirty = normalizeBoolean(row.gitWorktreeDirty);
+  if (dirty == null) return "git worktree cleanliness missing";
+  if (!dirty) return "";
+  const status = safeText(row.gitStatusShort, 160);
+  return status ? `dirty git worktree at run start: ${status}` : "dirty git worktree at run start";
+}
+
+function hasAircraftDrawEvidence(evidence) {
+  return Boolean(evidence && evidence.hasAircraftDrawEvidence);
+}
+
+function aircraftEvidenceLabel(evidence) {
+  if (!evidence) return "";
+  return [
+    `symbols=${evidence.maxSymbols || 0}`,
+    `dots=${evidence.maxDots || 0}`,
+    `direct=${evidence.maxDirect || 0}`,
+    `drawn=${evidence.maxDirectDrawn || 0}`,
+  ].join(" ");
+}
+
+function buildAircraftEvidenceByRun(auditRows) {
+  const byRun = new Map();
+  for (const row of auditRows) {
+    const runId = row.runId || "";
+    if (!runId) continue;
+    const current = byRun.get(runId) || {
+      maxSymbols: 0,
+      maxDots: 0,
+      maxDirect: 0,
+      maxDirectDrawn: 0,
+      hasAircraftDrawEvidence: false,
+    };
+    current.maxSymbols = Math.max(current.maxSymbols, finiteNumber(row.symbols) || 0);
+    current.maxDots = Math.max(current.maxDots, finiteNumber(row.dots) || 0);
+    current.maxDirect = Math.max(current.maxDirect, finiteNumber(row.direct) || 0);
+    current.maxDirectDrawn = Math.max(current.maxDirectDrawn, finiteNumber(row.directDrawn) || 0);
+    current.hasAircraftDrawEvidence = current.maxSymbols > 0 || current.maxDots > 0 || current.maxDirect > 0 || current.maxDirectDrawn > 0;
+    byRun.set(runId, current);
+  }
+  return byRun;
+}
+
+function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
   const reasons = [];
   if (!workloadLevel) reasons.push("not a holistic benchmark workload");
+  const gitReason = gitCleanExclusionReason(row);
+  if (gitReason) reasons.push(gitReason);
   if (!isTrueValue(row.routeFocusPassed)) reasons.push("route proof failed or missing");
   const visibilityReason = fullVisibilityExclusionReason(row);
   if (visibilityReason) reasons.push(visibilityReason);
+  if (!hasAircraftDrawEvidence(aircraftEvidence)) reasons.push("no aircraft draw evidence in Debug draw perf");
   if (isTrueValue(row.recordVideo) || (finiteNumber(row.videosCount) || 0) > 0) reasons.push("video capture run");
   const diagnosticReason = chartDiagnosticReason(row);
   if (diagnosticReason) reasons.push(diagnosticReason);
@@ -418,9 +466,9 @@ function chartExclusionReason(row, workloadLevel) {
   return Array.from(new Set(reasons)).join("; ");
 }
 
-function withChartEligibility(row) {
+function withChartEligibility(row, aircraftEvidence = null) {
   const workloadLevel = chartWorkloadLevel(row);
-  const exclusionReason = chartExclusionReason(row, workloadLevel);
+  const exclusionReason = chartExclusionReason(row, workloadLevel, aircraftEvidence);
   const lane = workbookTestLane(row);
   const workbookReasons = [];
   if (exclusionReason) workbookReasons.push(exclusionReason);
@@ -436,6 +484,7 @@ function withChartEligibility(row) {
     chartWorkloadLevel: workloadLevel,
     chartEligible: exclusionReason ? "No" : "Yes",
     chartExclusionReason: exclusionReason,
+    aircraftDrawEvidence: aircraftEvidenceLabel(aircraftEvidence),
     workbookTestLane: lane,
     benchmarkRegion: benchmarkRegion(row),
     workbookTestEligible: workbookReasons.length ? "No" : "Yes",
@@ -918,6 +967,13 @@ async function collectPerformanceRows() {
           runId,
           artifactDir: path.relative(ROOT, dir).replace(/\\/g, "/"),
           testName: String(row.File || "").replace(/^flightalert-perf-/, "").replace(/-framestats\.txt$/, ""),
+          gitMetadataAvailable: route.git_metadata_available || "",
+          gitBranch: route.git_branch || "",
+          gitCommit: route.git_commit || "",
+          gitWorktreeDirty: route.git_worktree_dirty || "",
+          gitStatusCount: maybeNumber(route.git_status_count),
+          gitStatusShort: route.git_status_short || "",
+          gitError: route.git_error || "",
           city: route.route_focus_city || targetKv.city || "",
           expectedCity: route.route_focus_expected_city || "",
           mapSource: targetKv.map_source || "",
@@ -1311,7 +1367,8 @@ function setWidths(sheet, widths) {
 }
 
 function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelationRows, ledgerRows) {
-  const enrichedRunRows = runRows.map(withChartEligibility);
+  const aircraftEvidenceByRun = buildAircraftEvidenceByRun(auditRows);
+  const enrichedRunRows = runRows.map((row) => withChartEligibility(row, aircraftEvidenceByRun.get(row.runId)));
   const eligibleChartRows = enrichedRunRows.filter((row) => row.chartEligible === "Yes");
   const workbookTestRows = enrichedRunRows.filter((row) => row.workbookTestEligible === "Yes");
   const latest = enrichedRunRows[enrichedRunRows.length - 1] || {};
@@ -1341,7 +1398,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Latest Android jank %", latest.androidJankPct || "", "Parsed AndroidJank percentage"],
     ["Latest workbook-test run", latestEligible.runId || "", latestEligible.artifactDir || ""],
     ["Best workbook-test run", bestEligible.runId || "", bestEligible.artifactDir || ""],
-    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; dirty/nonmatching series stay out of Chart Data"],
+    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires explicit clean git stamp and aircraft draw evidence; dirty/nonmatching series stay out of Chart Data"],
   ];
 
   const runHeaders = [
@@ -1349,6 +1406,13 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Run ID",
     "Artifact Dir",
     "Test",
+    "Git Metadata",
+    "Git Branch",
+    "Git Commit",
+    "Git Worktree Dirty",
+    "Git Status Count",
+    "Git Status Short",
+    "Git Error",
     "City",
     "Expected City",
     "Map Source",
@@ -1373,6 +1437,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Chart Eligible",
     "Chart Workload Level",
     "Chart Exclusion Reason",
+    "Aircraft Draw Evidence",
     "Workbook Test Eligible",
     "Workbook Test Lane",
     "Benchmark Region",
@@ -1412,6 +1477,13 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.runId,
     row.artifactDir,
     row.testName,
+    row.gitMetadataAvailable,
+    row.gitBranch,
+    row.gitCommit,
+    row.gitWorktreeDirty,
+    row.gitStatusCount,
+    safeText(row.gitStatusShort, 1000),
+    safeText(row.gitError, 1000),
     row.city,
     row.expectedCity,
     row.mapSource,
@@ -1436,6 +1508,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.chartEligible,
     row.chartWorkloadLevel,
     row.chartExclusionReason,
+    row.aircraftDrawEvidence,
     row.workbookTestEligible,
     row.workbookTestLane,
     row.benchmarkRegion,
@@ -1680,6 +1753,9 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Workload Target ms",
     "Frame Sample Seconds",
     "Scale Bands",
+    "Git Branch",
+    "Git Commit",
+    "Aircraft Draw Evidence",
     "Full Produced FPS",
     "FrameTimeline Produced FPS",
     "Present Mean FPS",
@@ -1714,6 +1790,9 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.workloadTargetMs,
     row.sampleSeconds,
     row.scaleBands,
+    row.gitBranch,
+    row.gitCommit,
+    row.aircraftDrawEvidence,
     chartProducedFps(row),
     row.producedFps,
     row.presentMeanFps,
@@ -1835,7 +1914,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   ];
 
   const workbookExclusionRows = [
-    ["Run Date", "Run ID", "Test", "City", "Map Source", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
+    ["Run Date", "Run ID", "Test", "City", "Map Source", "Git Metadata", "Git Worktree Dirty", "Git Status Count", "Aircraft Draw Evidence", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
     ...enrichedRunRows
       .filter((row) => row.workbookTestEligible !== "Yes")
       .map((row) => [
@@ -1844,6 +1923,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         row.testName,
         row.city,
         row.mapSource,
+        row.gitMetadataAvailable,
+        row.gitWorktreeDirty,
+        row.gitStatusCount,
+        row.aircraftDrawEvidence,
         row.routeFocusPassed,
         row.maxRunSeconds,
         row.workloadTargetMs,
@@ -1857,7 +1940,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
 
   const recent = activeChartRows.slice(-40);
   const chartRows = [
-    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Git Branch", "Git Commit", "Aircraft Draw Evidence", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
     ...recent.map((row) => [
       shortChartRunLabel(row),
       chartProducedFps(row),
@@ -1872,6 +1955,9 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       row.borders || "",
       detailTimingLabel(row.trafficDetailTiming),
       detailTimingLabel(row.mapDetailTiming),
+      row.gitBranch || "",
+      row.gitCommit || "",
+      row.aircraftDrawEvidence || "",
       row.maxRunSeconds || "",
       row.workloadTargetMs || "",
       row.sampleSeconds || "",
@@ -1898,10 +1984,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Trace Audits sheet", "Rows are parsed from frametimeline-summary.json, exclusive-traffic-summary.json, renderthread-frame-summary.json, and frame-correlation-summary.json artifacts produced from Perfetto Trace Processor SQL. Use these for AppDeadlineMissed, buffer/display composition, direct-symbol gates, exclusive-traffic gates, RenderThread/postAndWait/GPU-wait diagnostics, and frame-correlation stop/go summaries."],
     ["Frame Correlations sheet", "Rows are parsed from frame-correlation-frames.csv artifacts. This sheet stores the detailed per-frame matched trace/log metrics used for correlation decisions, not only simplified summaries."],
     ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, route proof, accepted-evidence, and eligibility fields together."],
-    ["Workbook Tests sheet", "This is the apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be full visible UI/traffic runs, route-proofed, non-video, non-diagnostic, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
+    ["Workbook Tests sheet", "This is the apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be explicit clean-git runs, full visible UI/traffic runs with aircraft draw evidence, route-proofed, non-video, non-diagnostic, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
     ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders/detail-timing state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
-    ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty, diagnostic, hidden-aircraft, route-failed, video, too-short, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
-    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
+    ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty or missing-git-stamp, diagnostic, hidden-aircraft/no-aircraft-evidence, route-failed, video, too-short, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
+    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Chart rows require git_worktree_dirty=false recorded at run start and aircraft draw evidence in Debug draw perf. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
     ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
     ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
   ];
@@ -2090,7 +2176,7 @@ for spec in model["sheets"]:
             ws.write(row_index, col_index, value, cell_format)
     if rows and max_col:
         ws.autofilter(0, 0, max(len(rows) - 1, 0), max_col - 1)
-    if spec.get("charts") and len(rows) >= 3:
+    if spec.get("charts") and len(rows) >= 2:
         last_row = len(rows)
         sheet_name = spec["name"]
         fps = workbook.add_chart({"type": "line"})
