@@ -699,7 +699,7 @@ function shortChartRunLabel(row) {
 function workbookTestVersionLabel(row) {
   const id = String(row.runId || "").toLowerCase();
   if (id.includes("optbaseline")) return "optimizer-master-exhausted-baseline-20260621";
-  if (id.includes("onehugefile")) return "checkpoint-one-huge-file-20260621-fair-master";
+  if (id.includes("onehugefile") || id.includes("onehuge")) return "checkpoint-one-huge-file-20260621-fair-master";
   if (id.includes("refparentfast")) return "rejected-reference-fallback-20260622";
   if (id.includes("current")) return "backup/current-before-refplanlazy-restore-20260622";
   return "unlabeled-comparable-version";
