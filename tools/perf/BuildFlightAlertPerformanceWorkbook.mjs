@@ -29,7 +29,7 @@ const CHART_EXCLUSION_PATTERNS = [
   ["dirty/unaccepted run", /dirty|unaccepted|uncommitted/i],
   ["rejected/reverted experiment", /refparentfast|rectreuse|rejected[-_]?ref|rejected[-_]?reference[-_]?fallback|reverted/i],
   ["skip/layer isolation", /skiptraffic|skipchrome|skipcontrols|skiptopstatus|skiptrafficpanel|layeriso|maponly/i],
-  ["trace/correlation diagnostic", /perfetto|atrace|framecorr|framemetrics|tracehook/i],
+  ["trace/correlation diagnostic", /perfetto|atrace|framecorr|tracehook/i],
   ["diagnostic instrumentation", /diagnostic|diag|compileab|compilediag|artcompile|manualmatrix|densesymseen|sourcediag|symbolmiss|directcount|directsubphase|directicon|framefields|refpfcounters|refpfcpu|refpfphase|refpfkind|refpfqueuedgen|breakdown/i],
   ["video/visual-evidence run", /(?:^|[\\/_-])(?:video|roadmotion|motionstrip)(?:[\\/_-]|$)/i],
   ["sample-only run", /directionsample|sample\b/i],
@@ -408,6 +408,7 @@ function benchmarkRegion(row) {
 }
 
 function chartDiagnosticReason(row) {
+  if (isTrueValue(row.frameMetricsProbe)) return "FrameMetrics probe diagnostic";
   const text = [
     row.runId,
     row.artifactDir,
@@ -1650,15 +1651,15 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   const workbookTestRows = enrichedRunRows.filter((row) => row.workbookTestEligible === "Yes");
   const latest = enrichedRunRows[enrichedRunRows.length - 1] || {};
   const latestEligible = workbookTestRows[workbookTestRows.length - 1] || {};
-  const bestEligible = workbookTestRows.slice().sort(compareRunPerformance)[0] || {};
-  const versionSummary = buildVersionSummary(workbookTestRows);
-  const bestVersionSummary = versionSummary.slice().sort(compareVersionSummaryPerformance)[0] || {};
   const activeChartKey = latestEligible.runId ? comparableSeriesKey(latestEligible, true) : "";
   const activeChartRows = activeChartKey
     ? workbookTestRows.filter((row) => comparableSeriesKey(row, true) === activeChartKey)
     : workbookTestRows;
   const activeChartRecentRows = activeChartRows.slice(-40);
   const activeChartRunIds = new Set(activeChartRecentRows.map((row) => row.runId).filter(Boolean));
+  const bestActiveEligible = activeChartRows.slice().sort(compareRunPerformance)[0] || {};
+  const activeVersionSummary = buildVersionSummary(activeChartRows);
+  const bestActiveVersionSummary = activeVersionSummary.slice().sort(compareVersionSummaryPerformance)[0] || {};
   const dashboardRows = [
     ["Flight Alert Performance Workbook"],
     [],
@@ -1666,7 +1667,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Workbook generated at", new Date().toISOString(), "If the workbook open in Excel does not show this timestamp, it is a stale/locked copy; rebuild or close Excel and rerun the builder."],
     ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
     ["Chart-eligible full runs", eligibleChartRows.length, "Route proof passed, full UI/traffic visibility explicit, no skip/video/diagnostic run, holistic workload, thermal 0, controlled dexopt lane, InstallDefault ART"],
-    ["Workbook-test comparable runs", workbookTestRows.length, "Controlled standardized benchmark lane used for charts and checkpoint decisions"],
+    ["Workbook-test eligible runs (all lanes)", workbookTestRows.length, "Controlled standardized benchmark runs before active-lane filtering; use Runs to inspect why rows are or are not eligible"],
+    ["Active Workbook Tests chart rows", activeChartRows.length, "Only the latest comparable workbook-test lane appears in Workbook Tests and powers checkpoint chart decisions"],
     ["Detailed audit rows", auditRows.length, "Parsed Debug draw perf current/maxFrameDetail rows with phase-level timing columns"],
     ["Trace audit rows", traceAuditRows.length, "Parsed FrameTimeline/Perfetto summaries where present"],
     ["Frame correlation rows", frameCorrelationRows.rows.length, "One row per matched frame-tokened Perfetto frame"],
@@ -1686,8 +1688,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Latest workbook-test present mean FPS", latestEligible.presentMeanFps || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Latest workbook-test full P95 ms", chartP95Ms(latestEligible) || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Latest workbook-test Android jank %", latestEligible.androidJankPct || "", "Chart-eligible comparable run used for checkpoint decisions"],
-    ["Best single workbook-test run", bestEligible.runId || "", "Single-run marker only; use repeated same-lane rows and the Dashboard version average for checkpoint decisions"],
-    ["Best workbook-test version", bestVersionSummary.version || "", `${bestVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
+    ["Best single active workbook-test run", bestActiveEligible.runId || "", "Single-run marker only; use repeated same-lane rows and the Dashboard version average for checkpoint decisions"],
+    ["Best active workbook-test version", bestActiveVersionSummary.version || "", `${bestActiveVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestActiveVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestActiveVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
     ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires clean git, aircraft draw evidence, thermal 0, matching package dexopt fingerprint/normalization mode, and InstallDefault ART; dirty/nonmatching/uncontrolled series stay out of Workbook Tests"],
   ];
 
