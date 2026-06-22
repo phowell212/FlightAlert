@@ -29,6 +29,7 @@ const PALETTE = {
 
 const CHART_EXCLUSION_PATTERNS = [
   ["dirty/unaccepted run", /dirty|unaccepted|uncommitted/i],
+  ["rejected/reverted experiment", /refparentfast|rejected[-_]?ref|rejected[-_]?reference[-_]?fallback|reverted/i],
   ["skip/layer isolation", /skiptraffic|skipchrome|skipcontrols|skiptopstatus|skiptrafficpanel|layeriso|maponly/i],
   ["trace/correlation diagnostic", /perfetto|atrace|framecorr|tracehook/i],
   ["diagnostic instrumentation", /diagnostic|diag|manualmatrix|densesymseen|sourcediag|symbolmiss|directcount|directsubphase|directicon|framefields|refpfcounters|refpfcpu|refpfphase|refpfkind|refpfqueuedgen|breakdown/i],
@@ -460,6 +461,7 @@ function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
   const visibilityReason = fullVisibilityExclusionReason(row);
   if (visibilityReason) reasons.push(visibilityReason);
   if (!hasAircraftDrawEvidence(aircraftEvidence)) reasons.push("no aircraft draw evidence in Debug draw perf");
+  if (isTrueValue(row.trafficDetailTiming) || isTrueValue(row.mapDetailTiming)) reasons.push("detail-timing diagnostic run");
   if (isTrueValue(row.recordVideo) || (finiteNumber(row.videosCount) || 0) > 0) reasons.push("video capture run");
   const diagnosticReason = chartDiagnosticReason(row);
   if (diagnosticReason) reasons.push(diagnosticReason);
@@ -583,6 +585,66 @@ function bestHighMetric(rows, selector) {
 function bestLowMetric(rows, selector) {
   const values = finiteMetricValues(rows, selector);
   return values.length ? Math.min(...values) : "";
+}
+
+function buildVersionSummary(workbookTestRows) {
+  const groups = new Map();
+  for (const row of workbookTestRows) {
+    const version = workbookTestVersionLabel(row);
+    const key = [version, comparableSeriesKey(row, true)].join(" | ");
+    if (!groups.has(key)) {
+      groups.set(key, {
+        version,
+        workbookTestLane: row.workbookTestLane,
+        benchmarkRegion: row.benchmarkRegion,
+        city: row.city,
+        mapSource: row.mapSource,
+        roads: row.roads,
+        borders: row.borders,
+        trafficDetailTiming: detailTimingLabel(row.trafficDetailTiming),
+        mapDetailTiming: detailTimingLabel(row.mapDetailTiming),
+        rows: [],
+      });
+    }
+    groups.get(key).rows.push(row);
+  }
+  return Array.from(groups.values()).sort(compareVersionSummaryForDisplay);
+}
+
+function comparableVersionSummaryKey(group) {
+  return [
+    group.workbookTestLane || "",
+    group.city || group.benchmarkRegion || "",
+    group.mapSource || "",
+    group.roads || "",
+    group.borders || "",
+    group.trafficDetailTiming || "",
+    group.mapDetailTiming || "",
+  ].join(" | ");
+}
+
+function compareVersionSummaryPerformance(a, b) {
+  const producedDelta = (finiteNumber(averageMetric(b.rows, chartProducedFps)) ?? -Infinity) - (finiteNumber(averageMetric(a.rows, chartProducedFps)) ?? -Infinity);
+  if (producedDelta) return producedDelta;
+  const presentDelta = (finiteNumber(averageMetric(b.rows, (row) => row.presentMeanFps)) ?? -Infinity) - (finiteNumber(averageMetric(a.rows, (row) => row.presentMeanFps)) ?? -Infinity);
+  if (presentDelta) return presentDelta;
+  const p95Delta = (finiteNumber(averageMetric(a.rows, chartP95Ms)) ?? Infinity) - (finiteNumber(averageMetric(b.rows, chartP95Ms)) ?? Infinity);
+  if (p95Delta) return p95Delta;
+  const jankDelta = (finiteNumber(averageMetric(a.rows, (row) => row.androidJankPct)) ?? Infinity) - (finiteNumber(averageMetric(b.rows, (row) => row.androidJankPct)) ?? Infinity);
+  if (jankDelta) return jankDelta;
+  const runCountDelta = (b.rows?.length || 0) - (a.rows?.length || 0);
+  if (runCountDelta) return runCountDelta;
+  return String(a.version || "").localeCompare(String(b.version || ""));
+}
+
+function compareVersionSummaryForDisplay(a, b) {
+  const byLane = String(a.workbookTestLane).localeCompare(String(b.workbookTestLane));
+  if (byLane) return byLane;
+  const byRegion = String(a.benchmarkRegion).localeCompare(String(b.benchmarkRegion));
+  if (byRegion) return byRegion;
+  const byCity = String(a.city).localeCompare(String(b.city));
+  if (byCity) return byCity;
+  return compareVersionSummaryPerformance(a, b);
 }
 
 async function exists(filePath) {
@@ -1394,6 +1456,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   const latest = enrichedRunRows[enrichedRunRows.length - 1] || {};
   const latestEligible = workbookTestRows[workbookTestRows.length - 1] || {};
   const bestEligible = workbookTestRows.slice().sort(compareRunPerformance)[0] || {};
+  const versionSummary = buildVersionSummary(workbookTestRows);
+  const bestVersionSummary = versionSummary.slice().sort(compareVersionSummaryPerformance)[0] || {};
   const activeChartKey = latestEligible.runId ? comparableSeriesKey(latestEligible, true) : "";
   const activeChartRows = activeChartKey
     ? workbookTestRows.filter((row) => comparableSeriesKey(row, true) === activeChartKey)
@@ -1421,7 +1485,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Latest workbook-test present mean FPS", latestEligible.presentMeanFps || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Latest workbook-test full P95 ms", chartP95Ms(latestEligible) || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Latest workbook-test Android jank %", latestEligible.androidJankPct || "", "Chart-eligible comparable run used for checkpoint decisions"],
-    ["Best workbook-test run", bestEligible.runId || "", bestEligible.artifactDir || ""],
+    ["Best single workbook-test run", bestEligible.runId || "", "Single-run marker only; use Best By Workload and Workbook Test Summary for checkpoint decisions"],
+    ["Best workbook-test version", bestVersionSummary.version || "", `${bestVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
     ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires explicit clean git stamp and aircraft draw evidence; dirty/nonmatching series stay out of Chart Data"],
   ];
 
@@ -1837,80 +1902,38 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.artifactDir,
   ])];
 
-  const bestGroups = new Map();
-  for (const row of workbookTestRows) {
-    const key = comparableSeriesKey(row, true);
-    const current = bestGroups.get(key);
-    if (!current || compareRunPerformance(row, current) < 0) bestGroups.set(key, row);
+  const bestVersionGroups = new Map();
+  for (const group of versionSummary) {
+    const key = comparableVersionSummaryKey(group);
+    const current = bestVersionGroups.get(key);
+    if (!current || compareVersionSummaryPerformance(group, current) < 0) bestVersionGroups.set(key, group);
   }
-  const bestRows = Array.from(bestGroups.values()).sort((a, b) => {
-    const byLane = String(a.workbookTestLane).localeCompare(String(b.workbookTestLane));
-    if (byLane) return byLane;
-    const byRegion = String(a.benchmarkRegion).localeCompare(String(b.benchmarkRegion));
-    if (byRegion) return byRegion;
-    const byCity = String(a.city).localeCompare(String(b.city));
-    if (byCity) return byCity;
-    return compareRunPerformance(a, b);
-  });
+  const bestVersionRows = Array.from(bestVersionGroups.values()).sort(compareVersionSummaryForDisplay);
   const bestByWorkloadRows = [
-    ["Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Present P95 ms", "Android Jank %", "Max Run Seconds", "Workload Target ms", "Frame Sample Seconds", "Full Sample Seconds", "Route Max Km", "Run ID", "Artifact Dir"],
-    ...bestRows.map((row) => [
-      row.workbookTestLane,
-      row.benchmarkRegion,
-      row.city,
-      row.mapSource,
-      row.roads,
-      row.borders,
-      detailTimingLabel(row.trafficDetailTiming),
-      detailTimingLabel(row.mapDetailTiming),
-      chartProducedFps(row),
-      row.presentMeanFps,
-      chartP95Ms(row),
-      row.presentP95Ms,
-      row.androidJankPct,
-      row.maxRunSeconds,
-      row.workloadTargetMs,
-      row.sampleSeconds,
-      row.androidSampleSeconds,
-      row.maxDistanceKm,
-      row.runId,
-      row.artifactDir,
+    ["Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Best Version", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
+    ...bestVersionRows.map((group) => [
+      group.workbookTestLane,
+      group.benchmarkRegion,
+      group.city,
+      group.mapSource,
+      group.roads,
+      group.borders,
+      group.trafficDetailTiming,
+      group.mapDetailTiming,
+      group.version,
+      group.rows.length,
+      averageMetric(group.rows, chartProducedFps),
+      bestHighMetric(group.rows, chartProducedFps),
+      averageMetric(group.rows, (row) => row.producedFps),
+      averageMetric(group.rows, (row) => row.presentMeanFps),
+      averageMetric(group.rows, chartP95Ms),
+      bestLowMetric(group.rows, chartP95Ms),
+      averageMetric(group.rows, (row) => row.presentP95Ms),
+      averageMetric(group.rows, (row) => row.androidJankPct),
+      averageMetric(group.rows, (row) => row.maxDistanceKm),
+      group.rows.map((row) => row.runId).join("\n"),
     ]),
   ];
-
-  const versionSummaryGroups = new Map();
-  for (const row of workbookTestRows) {
-    const version = workbookTestVersionLabel(row);
-    const key = [version, comparableSeriesKey(row, true)].join(" | ");
-    if (!versionSummaryGroups.has(key)) {
-      versionSummaryGroups.set(key, {
-        version,
-        workbookTestLane: row.workbookTestLane,
-        benchmarkRegion: row.benchmarkRegion,
-        city: row.city,
-        mapSource: row.mapSource,
-        roads: row.roads,
-        borders: row.borders,
-        trafficDetailTiming: detailTimingLabel(row.trafficDetailTiming),
-        mapDetailTiming: detailTimingLabel(row.mapDetailTiming),
-        rows: [],
-      });
-    }
-    versionSummaryGroups.get(key).rows.push(row);
-  }
-  const versionSummary = Array.from(versionSummaryGroups.values()).sort((a, b) => {
-    const byLane = String(a.workbookTestLane).localeCompare(String(b.workbookTestLane));
-    if (byLane) return byLane;
-    const byRegion = String(a.benchmarkRegion).localeCompare(String(b.benchmarkRegion));
-    if (byRegion) return byRegion;
-    const byCity = String(a.city).localeCompare(String(b.city));
-    if (byCity) return byCity;
-    const producedDelta = (averageMetric(b.rows, chartProducedFps) || -Infinity) - (averageMetric(a.rows, chartProducedFps) || -Infinity);
-    if (producedDelta) return producedDelta;
-    const presentDelta = (averageMetric(b.rows, (row) => row.presentMeanFps) || -Infinity) - (averageMetric(a.rows, (row) => row.presentMeanFps) || -Infinity);
-    if (presentDelta) return presentDelta;
-    return String(a.version).localeCompare(String(b.version));
-  });
   const workbookTestSummaryRows = [
     ["Version", "Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
     ...versionSummary.map((group) => [
