@@ -775,6 +775,19 @@ function averageMetric(rows, selector) {
   return values.length ? rounded(values.reduce((sum, value) => sum + value, 0) / values.length, 2) : "";
 }
 
+function countRows(rows, predicate) {
+  return rows.reduce((count, row) => count + (predicate(row) ? 1 : 0), 0);
+}
+
+function ledgerStatusCount(ledgerRows, predicate) {
+  return ledgerRows.reduce((count, row) => {
+    const status = String(row.status || "").toLowerCase();
+    const title = String(row.title || "").toLowerCase();
+    const note = `${row.note1 || ""} ${row.note2 || ""} ${row.note3 || ""}`.toLowerCase();
+    return count + (predicate(status, title, note) ? 1 : 0);
+  }, 0);
+}
+
 function buildVersionSummary(workbookTestRows) {
   const groups = new Map();
   for (const row of workbookTestRows) {
@@ -1173,27 +1186,36 @@ for path in sys.argv[1:]:
         wb = load_workbook(path, read_only=True, data_only=True)
     except Exception:
         continue
-    if "Optimization Ledger" not in wb.sheetnames:
-        continue
-    ws = wb["Optimization Ledger"]
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row or not any(cell not in (None, "") for cell in row):
-            continue
-        values = list(row) + [""] * 12
-        rows.append({
-            "source": values[0] or "",
-            "section": values[1] or "",
-            "line": values[2] or "",
-            "status": values[3] or "",
-            "title": values[4] or "",
-            "dateText": values[5] or "",
-            "artifactCount": values[6] or "",
-            "artifacts": values[7] or "",
-            "metrics": values[8] or "",
-            "note1": values[9] or "",
-            "note2": values[10] or "",
-            "note3": values[11] or "",
-        })
+    ledger_sources = []
+    if "Optimization Ledger" in wb.sheetnames:
+        ledger_sources.append((wb["Optimization Ledger"], 2))
+    if "Performance Notes" in wb.sheetnames:
+        notes = wb["Performance Notes"]
+        for index, row in enumerate(notes.iter_rows(values_only=True), start=1):
+            if row and row[0] == "Optimization Ledger":
+                ledger_sources.append((notes, index + 2))
+                break
+    for ws, min_row in ledger_sources:
+        for row in ws.iter_rows(min_row=min_row, values_only=True):
+            if not row or not any(cell not in (None, "") for cell in row):
+                continue
+            if row[0] in ("Source", "Dashboard", "Rules", "Optimization Ledger"):
+                continue
+            values = list(row) + [""] * 12
+            rows.append({
+                "source": values[0] or "",
+                "section": values[1] or "",
+                "line": values[2] or "",
+                "status": values[3] or "",
+                "title": values[4] or "",
+                "dateText": values[5] or "",
+                "artifactCount": values[6] or "",
+                "artifacts": values[7] or "",
+                "metrics": values[8] or "",
+                "note1": values[9] or "",
+                "note2": values[10] or "",
+                "note3": values[11] or "",
+            })
 print(json.dumps(rows, default=str))
 `;
     const stdout = await runPython(script, existing, "read previous ledger");
@@ -1694,6 +1716,46 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   const bestActiveEligible = activeChartRows.slice().sort(compareRunPerformance)[0] || {};
   const activeVersionSummary = buildVersionSummary(activeChartRows);
   const bestActiveVersionSummary = activeVersionSummary.slice().sort(compareVersionSummaryPerformance)[0] || {};
+  const diagnosticRunCount = countRows(enrichedRunRows, (row) =>
+    String(row.benchmarkRole || "").toLowerCase() === "diagnostic" ||
+    isTrueValue(row.trafficDetailTiming) ||
+    isTrueValue(row.mapDetailTiming) ||
+    isTrueValue(row.frameMetricsProbe) ||
+    Boolean(chartDiagnosticReason(row))
+  );
+  const dirtyRunCount = countRows(enrichedRunRows, (row) => isTrueValue(row.gitWorktreeDirty));
+  const thermalInvalidCount = countRows(enrichedRunRows, (row) => {
+    const thermal = finiteNumber(row.thermalStatus);
+    return thermal != null && thermal !== 0;
+  });
+  const routeInvalidCount = countRows(enrichedRunRows, (row) => !isTrueValue(row.routeFocusPassed));
+  const nonWorkbookTestCount = Math.max(0, enrichedRunRows.length - workbookTestRows.length);
+  const rejectedLedgerCount = ledgerStatusCount(ledgerRows, (status, title, note) =>
+    status.includes("reject") || title.includes("reject") || note.includes("reverted") || note.includes("do not retry")
+  );
+  const diagnosticLedgerCount = ledgerStatusCount(ledgerRows, (status, title) =>
+    status.includes("diagnostic") || title.includes("diagnostic")
+  );
+  const keeperLedgerCount = ledgerStatusCount(ledgerRows, (status, title) =>
+    status.includes("keeper") || status.includes("accepted") || title.includes("keeper") || title.includes("accepted")
+  );
+  const chartInventoryRows = [
+    ["Run Inventory"],
+    ["Total captured perf runs", enrichedRunRows.length, "Every parsed framestats artifact in Data/Runs, including diagnostics and excluded experiments."],
+    ["Chart-eligible full runs", eligibleChartRows.length, "Full UI/traffic, route-proofed, clean enough for chart consideration before active-lane filtering."],
+    ["Workbook-test eligible runs across all lanes", workbookTestRows.length, "Controlled clean workbook tests before filtering to the active comparable lane."],
+    ["Active chart rows shown below", activeChartRows.length, "Comparable lane only; this is not the total iteration count."],
+    ["Runs excluded from Workbook Tests", nonWorkbookTestCount, "Diagnostics, dirty runs, route/thermal/dexopt invalid rows, video/layer-isolation, trace/perfetto, or nonmatching lanes."],
+    ["Diagnostic/detail/trace run rows", diagnosticRunCount, "Useful for finding hotspots, intentionally excluded from the user-facing progress charts."],
+    ["Dirty-worktree run rows", dirtyRunCount, "Excluded from Workbook Tests so experiments do not masquerade as clean checkpoint evidence."],
+    ["Thermal-invalid run rows", thermalInvalidCount, "Excluded because device thermal state was not comparable."],
+    ["Route-failed or missing route-proof rows", routeInvalidCount, "Excluded because the workload drifted or route evidence was insufficient."],
+    ["Optimization ledger entries", ledgerRows.length, "Full notes are preserved on Performance Notes."],
+    ["Rejected / do-not-retry notes", rejectedLedgerCount, "Attempts that should guide future work away from known traps."],
+    ["Diagnostic notes", diagnosticLedgerCount, "Evidence-only instrumentation or analysis keepers."],
+    ["Keeper / accepted notes", keeperLedgerCount, "Accepted behavior-preserving work or diagnostic keepers."],
+    ["Iteration accountability", activeChartRows.length, "From now on, every non-diagnostic optimization iteration should add one chart-grade workbook run or record a preflight/thermal blocker."],
+  ];
   const recentRunIntakeRows = enrichedRunRows.slice(-10).reverse().map((row) => [
     row.runId || "",
     row.workbookTestEligible || "",
@@ -2229,8 +2291,9 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   ];
   const workbookRuleRows = [
     ["Topic", "Rule", "How To Satisfy / Where To Check"],
-    ["Every optimization iteration", "Run one chart-grade apples-to-apples workbook test unless the iteration is explicitly diagnostic-only or preflight rejects before capture.", "Use the standard harness command with BenchmarkRole=Workbook, SplitInstall, InstallDefault, RequireControlledPreflight, ControlledDexoptNormalizationMode=PostInstallResetV1, timetable-selected dense EU/US city, full visible UI/traffic, and no detail timing/video unless the run is intentionally diagnostic."],
+    ["Every optimization iteration", "Run an apples-to-apples comparison for every optimization attempt, including rejected attempts.", "Use a chart-grade Workbook run after accepted/non-diagnostic changes. For speculative or rejected changes, run a diagnostic apples-to-apples comparison against the previous accepted attempt, log both artifacts and the failure reason, then restore the previous accepted app state before continuing."],
     ["Workbook Tests", "Only valid active-lane workbook tests appear here and power the user-facing charts.", "A new run must be clean git, route-proofed, full traffic/UI, aircraft draw evidence present, non-video, non-diagnostic, thermal_status=0, controlled package dexopt state/fingerprint present, post-run dexopt unchanged, ART InstallDefault, and same active lane/city/map/roads/borders/detail flags."],
+    ["Rejected attempts", "Rejected optimizations still need diagnostic apples-to-apples evidence.", "Log the iteration name, candidate artifact, comparison baseline/checkpoint artifact, FPS/p95/p99/jank deltas, route proof, warning/build status, and exact reject reason in Performance Notes. Do not leave rejected behavior in app code."],
     ["When a new run is missing from the chart", "Do not guess; check Runs first.", "Runs includes Chart Eligible, Chart Exclusion Reason, Workbook Test Eligible, Workbook Test Exclusion Reason, aircraft evidence, thermal, dexopt, and route-proof fields for every parsed artifact."],
     ["Checkpoint decisions", "Use the active apples-to-apples chart lane plus repeated same-version evidence.", "Use Dashboard best-version summaries for averages; do not pick a best checkpoint from one lucky run."],
     ["Runs", "Every parsed perf artifact belongs here even if it is not chartable.", "If a run is absent from Runs, the artifact path/prefix was not parsed by BuildFlightAlertPerformanceWorkbook.mjs or the artifact was not copied into tools/perf/out."],
@@ -2286,6 +2349,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
           ["These charts use the Workbook Tests block at the top of the Data sheet."],
           ["Charted rows", recent.length],
           ["Latest charted run", recent.length ? shortChartRunLabel(recent[recent.length - 1]) : ""],
+          [],
+          ...chartInventoryRows,
         ],
         widths: [42, 72, 18, 18, 18, 18],
         merges: ["A1:F1"],
@@ -2402,10 +2467,10 @@ for spec in model["sheets"]:
                 })
             ws.insert_chart(cell, chart, {"x_scale": 1.55, "y_scale": scale_y})
 
-        add_line_chart("A6", "Average FPS By Workbook Run", "FPS", ("B", "C"))
-        add_line_chart("A24", "P95 FPS By Workbook Run", "FPS", ("F",))
-        add_line_chart("J6", "P99 FPS By Workbook Run", "FPS", ("H",))
-        add_line_chart("J24", "Android Jank By Workbook Run", "Janky frames %", ("I",))
+        add_line_chart("A24", "Average FPS By Workbook Run", "FPS", ("B", "C"))
+        add_line_chart("A42", "P95 FPS By Workbook Run", "FPS", ("F",))
+        add_line_chart("J24", "P99 FPS By Workbook Run", "FPS", ("H",))
+        add_line_chart("J42", "Android Jank By Workbook Run", "Janky frames %", ("I",))
 
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 workbook.close()
