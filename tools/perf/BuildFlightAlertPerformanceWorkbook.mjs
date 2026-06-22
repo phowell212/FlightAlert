@@ -1039,7 +1039,8 @@ function extractMetricsText(note) {
 }
 
 function parseAgentsLedger(text) {
-  const start = text.indexOf("## 16. Optimization Ledger");
+  const sectionMatch = text.match(/^##\s+16\.\s+.*Optimization Ledger.*$/m);
+  const start = sectionMatch ? sectionMatch.index : -1;
   const end = text.indexOf("\n## 17.", start);
   if (start < 0 || end < 0) return [];
   const sectionText = text.slice(start, end);
@@ -2887,7 +2888,7 @@ async function main() {
   const agentsText = await fs.readFile(AGENTS_PATH, "utf8");
   let ledgerRows = parseAgentsLedger(agentsText);
   const previous = await previousLedgerRows();
-  if (ledgerRows.length < 10 && previous.length > ledgerRows.length) ledgerRows = previous;
+  if (ledgerRows.length < 10 && previous.length > ledgerRows.length) ledgerRows = [...ledgerRows, ...previous];
   ledgerRows = dedupeLedgerRows([...ledgerRows, ...previous, ...extraLedgerRows()]);
   const model = buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelationRows, ledgerRows);
   const exportResult = await exportWorkbookWithOpenpyxl(model);
