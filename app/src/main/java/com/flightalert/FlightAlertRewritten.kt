@@ -25144,6 +25144,14 @@ class TrafficOverlayRenderer(
         }
         val dimensions_match = symbol_overlay_width == width_px &&
             symbol_overlay_height == height_px
+        val recorded_padding = symbol_overlay_recorded_padding_px
+        val active_dimensions_compatible = dimensions_match ||
+            (interaction_active &&
+                recorded_padding >= padding &&
+                symbol_overlay_width >= width_px &&
+                symbol_overlay_height >= height_px &&
+                abs((symbol_overlay_width - width_px).toFloat() - (recorded_padding - padding) * 2f) <= 2f &&
+                abs((symbol_overlay_height - height_px).toFloat() - (recorded_padding - padding) * 2f) <= 2f)
         val center_matches =
             abs(symbol_overlay_center_x - source_center_x) <= SYMBOL_OVERLAY_CENTER_EPSILON &&
                 abs(symbol_overlay_center_y - source_center_y) <= SYMBOL_OVERLAY_CENTER_EPSILON
@@ -25157,11 +25165,16 @@ class TrafficOverlayRenderer(
         } else {
             (symbol_overlay_center_y - viewport.center_y).toFloat()
         }
-        val cache_left = cache_translation_x - padding * scale
-        val cache_top = cache_translation_y - padding * scale
+        val draw_padding = if (active_dimensions_compatible && !dimensions_match && interaction_active) {
+            recorded_padding
+        } else {
+            padding
+        }
+        val cache_left = cache_translation_x - draw_padding * scale
+        val cache_top = cache_translation_y - draw_padding * scale
         val cache_right = cache_left + symbol_overlay_width * scale
         val cache_bottom = cache_top + symbol_overlay_height * scale
-        val cache_intersects_viewport = dimensions_match &&
+        val cache_intersects_viewport = active_dimensions_compatible &&
             cache_right >= 0f &&
             cache_bottom >= 0f &&
             cache_left <= viewport.width &&
@@ -25183,6 +25196,8 @@ class TrafficOverlayRenderer(
                     current_width_px = width_px,
                     current_height_px = height_px,
                     current_padding_px = padding,
+                    draw_padding_px = draw_padding,
+                    dimensions_compatible = active_dimensions_compatible,
                     zoom = viewport.zoom
                 )
             }
@@ -25207,10 +25222,11 @@ class TrafficOverlayRenderer(
             symbol_overlay_last_interaction_visual_key = visual_key
         }
         val key_matches = symbol_overlay_key == key && dimensions_match && center_matches
-        val visual_key_matches = symbol_overlay_key?.visual_key_matches(key) == true && dimensions_match
+        val visual_key_matches = symbol_overlay_key?.visual_key_matches(key) == true &&
+            if (interaction_active) active_dimensions_compatible else dimensions_match
         val active_visual_bridge_matches = interaction_active &&
             cache_intersects_viewport &&
-            dimensions_match &&
+            active_dimensions_compatible &&
             symbol_overlay_key?.let { cached_key ->
                 symbol_overlay_interaction_visual_bridge_matches(cached_key, key, scale)
             } == true
@@ -25244,6 +25260,8 @@ class TrafficOverlayRenderer(
                         current_width_px = width_px,
                         current_height_px = height_px,
                         current_padding_px = padding,
+                        draw_padding_px = draw_padding,
+                        dimensions_compatible = active_dimensions_compatible,
                         zoom = viewport.zoom
                     )
                 } else {
@@ -25318,14 +25336,14 @@ class TrafficOverlayRenderer(
                 translation_x = cache_translation_x,
                 translation_y = cache_translation_y
             )
-            canvas.translate(cache_translation_x - padding * scale, cache_translation_y - padding * scale)
+            canvas.translate(cache_translation_x - draw_padding * scale, cache_translation_y - draw_padding * scale)
             canvas.scale(scale, scale)
             draw_cached_symbol_overlay_bitmap(canvas, overlay_bitmap)
         } finally {
             canvas.restoreToCount(save_count)
         }
-        val cached_left = cache_translation_x - padding * scale
-        val cached_top = cache_translation_y - padding * scale
+        val cached_left = cache_translation_x - draw_padding * scale
+        val cached_top = cache_translation_y - draw_padding * scale
         return RectF(
             cached_left,
             cached_top,
@@ -25365,8 +25383,23 @@ class TrafficOverlayRenderer(
         current_width_px: Int,
         current_height_px: Int,
         current_padding_px: Float,
+        draw_padding_px: Float,
+        dimensions_compatible: Boolean,
         zoom: Double
     ): String {
+        val cache_intersects_without_dim_match =
+            cache_right >= 0f &&
+                cache_bottom >= 0f &&
+                cache_left <= current_width_px - current_padding_px * 2f &&
+                cache_top <= current_height_px - current_padding_px * 2f
+        val edge_padding = chrome.dp(SYMBOL_OVERLAY_DIRECT_FALLBACK_PADDING_DP)
+        val covers_direct_fallback_without_dim_match =
+            cache_left <= -edge_padding &&
+                cache_top <= -edge_padding &&
+                cache_right >= current_width_px - current_padding_px * 2f + edge_padding &&
+                cache_bottom >= current_height_px - current_padding_px * 2f + edge_padding
+        val width_delta = symbol_overlay_width - current_width_px
+        val height_delta = symbol_overlay_height - current_height_px
         return "coverage l=${cache_left.debug_decimal()} t=${cache_top.debug_decimal()} " +
             "r=${cache_right.debug_decimal()} b=${cache_bottom.debug_decimal()} " +
             "zoom=${String.format(Locale.US, "%.2f", zoom)} scale=${scale.debug_decimal()} " +
@@ -25375,7 +25408,12 @@ class TrafficOverlayRenderer(
             "centerDy=${(source_center_y - symbol_overlay_center_y).debug_decimal()} " +
             "dims=$dimensions_match expected=${current_width_px}x$current_height_px " +
             "cached=${symbol_overlay_width}x$symbol_overlay_height " +
-            "pad=${current_padding_px.debug_decimal()} recPad=${symbol_overlay_recorded_padding_px.debug_decimal()}"
+            "dimDelta=${width_delta}x$height_delta " +
+            "dimCompat=$dimensions_compatible " +
+            "pad=${current_padding_px.debug_decimal()} recPad=${symbol_overlay_recorded_padding_px.debug_decimal()} " +
+            "drawPad=${draw_padding_px.debug_decimal()} " +
+            "intersectsNoDim=$cache_intersects_without_dim_match " +
+            "fallbackNoDim=$covers_direct_fallback_without_dim_match"
     }
 
     private fun symbol_overlay_scale_miss_detail(
