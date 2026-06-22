@@ -22,6 +22,12 @@ param(
     [switch]$SkipTraffic,
     [switch]$TrafficDetailTiming,
     [switch]$MapDetailTiming,
+    [ValidateSet("GradleConnected", "SplitInstall")]
+    [string]$HarnessExecutionMode = "GradleConnected",
+    [ValidateSet("InstallDefault", "Verify", "Speed")]
+    [string]$ArtCompileMode = "InstallDefault",
+    [ValidateSet("Workbook", "Diagnostic")]
+    [string]$BenchmarkRole = "Workbook",
     [ValidateSet("Unchecked", "Pass", "Fail")]
     [string]$VisibleEvidenceLandSafe = "Unchecked",
     [string]$VisibleEvidenceReviewer = ""
@@ -36,7 +42,9 @@ $gradlew = Join-Path $repoRoot "gradlew.bat"
 $summarizer = Join-Path $PSScriptRoot "SummarizeFrameStats.ps1"
 $outRoot = Join-Path $PSScriptRoot "out"
 $packageName = "com.flightalert"
+$testPackageName = "com.flightalert.test"
 $testClass = "com.flightalert.perf.FlightMapGesturePerfTest"
+$instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 $landSafeTargets = @{
     "dallasfortworth" = [pscustomobject]@{ Name = "Dallas-Fort Worth"; Lat = 32.90; Lon = -97.04; MinLat = 29.7; MaxLat = 35.8; MinLon = -101.6; MaxLon = -92.8; MaxDistanceKm = 620.0 }
     "dfw" = [pscustomobject]@{ Name = "Dallas-Fort Worth"; Lat = 32.90; Lon = -97.04; MinLat = 29.7; MaxLat = 35.8; MinLon = -101.6; MaxLon = -92.8; MaxDistanceKm = 620.0 }
@@ -82,6 +90,12 @@ if ($VideoTimeLimitSeconds -gt $MaxRunSeconds) { throw "VideoTimeLimitSeconds=$V
 if ($RecordVideo -and $MaxRunSeconds -lt 45) { throw "RecordVideo needs MaxRunSeconds of at least 45 seconds so the app can stay foreground while the video finishes." }
 if (($MapRoads -eq "Current") -xor ($MapBorders -eq "Current")) {
     throw "When testing split map labels, provide both -MapRoads and -MapBorders so the run does not inherit half of the state from device preferences."
+}
+if ($HarnessExecutionMode -ne "SplitInstall" -and $ArtCompileMode -ne "InstallDefault") {
+    throw "ArtCompileMode=$ArtCompileMode requires -HarnessExecutionMode SplitInstall so compilation happens after install and before instrumentation launch."
+}
+if ($HarnessExecutionMode -eq "SplitInstall" -and $BenchmarkRole -ne "Diagnostic") {
+    throw "SplitInstall execution is currently diagnostic-only. Pass -BenchmarkRole Diagnostic so these runs stay out of Chart Data."
 }
 
 function Invoke-Adb {
@@ -644,6 +658,7 @@ function Get-RemainingRunSeconds {
 function Stop-FlightAlertPerfRun {
     Invoke-Adb shell "pkill -2 screenrecord >/dev/null 2>&1 || true" | Out-Null
     Invoke-Adb shell "am force-stop $packageName >/dev/null 2>&1 || true" | Out-Null
+    Invoke-Adb shell "am force-stop $testPackageName >/dev/null 2>&1 || true" | Out-Null
 }
 
 function Stop-GradleInstrumentationProcesses {
@@ -682,6 +697,132 @@ function Start-GradleInstrumentationJob {
         & $JobGradlewPath connectedDebugAndroidTest @JobRunnerArgs --no-daemon 2>&1 | Tee-Object -FilePath $JobGradleLogPath
         "FLIGHTALERT_GRADLE_EXIT_CODE=$LASTEXITCODE"
     } -ArgumentList $RepoRoot, $GradlewPath, $RunnerArgs, $GradleLogPath, $DeviceSerial
+}
+
+function Invoke-GradleInstallForSplitInstrumentation {
+    param(
+        [string]$RepoRoot,
+        [string]$GradlewPath,
+        [string]$GradleInstallLogPath,
+        [string]$DeviceSerial
+    )
+    Push-Location $RepoRoot
+    $previousSerial = $env:ANDROID_SERIAL
+    try {
+        $installArgs = @("installDebug", "installDebugAndroidTest")
+        if (-not [string]::IsNullOrWhiteSpace($DeviceSerial)) {
+            $env:ANDROID_SERIAL = $DeviceSerial
+            $installArgs += "-Pandroid.injected.device.serial=$DeviceSerial"
+        }
+        $installArgs += "--no-daemon"
+        Write-Host "Installing debug and androidTest APKs before split instrumentation."
+        & $GradlewPath @installArgs 2>&1 | Tee-Object -FilePath $GradleInstallLogPath
+        $exitCode = $LASTEXITCODE
+        "FLIGHTALERT_GRADLE_INSTALL_EXIT_CODE=$exitCode" | Add-Content -Path $GradleInstallLogPath
+        return $exitCode
+    } finally {
+        if ($null -eq $previousSerial) {
+            Remove-Item Env:\ANDROID_SERIAL -ErrorAction SilentlyContinue
+        } else {
+            $env:ANDROID_SERIAL = $previousSerial
+        }
+        Pop-Location
+    }
+}
+
+function Invoke-ArtCompileControl {
+    param(
+        [string]$Mode,
+        [string]$PackageName,
+        [string]$OutputPath
+    )
+    $result = [ordered]@{
+        Mode = $Mode
+        Command = ""
+        ExitCode = ""
+        Output = ""
+        PackageCompileEvidence = ""
+    }
+    if ($Mode -eq "InstallDefault") {
+        $result.Command = "none; using post-install package default"
+        $result.ExitCode = 0
+    } else {
+        $compilerMode = if ($Mode -eq "Speed") { "speed" } else { "verify" }
+        $commandArgs = @("shell", "cmd", "package", "compile", "-m", $compilerMode, "-f", $PackageName)
+        $result.Command = "adb $($commandArgs -join ' ')"
+        Write-Host "Applying ART compile mode $Mode with: $($result.Command)"
+        $compileOutput = @(Invoke-Adb @commandArgs 2>&1)
+        $result.ExitCode = $LASTEXITCODE
+        $result.Output = Join-BenchmarkEvidenceSnippet -Lines $compileOutput -MaxLines 60 -MaxChars 2400
+        if ($result.ExitCode -ne 0) {
+            @(
+                "mode=$($result.Mode)"
+                "command=$($result.Command)"
+                "exit_code=$($result.ExitCode)"
+                "output=$($result.Output)"
+            ) | Set-Content -Path $OutputPath
+            throw "ART compile command failed with exit code $($result.ExitCode): $($result.Output)"
+        }
+    }
+    try {
+        $packageDump = @(Invoke-Adb shell dumpsys package $PackageName 2>$null)
+        $compileLines = @($packageDump | Where-Object { $_ -match "(?i)dexopt|compiler|compile|profile|speed|verify|oat|odex|status=|reason=" })
+        $result.PackageCompileEvidence = Join-BenchmarkEvidenceSnippet -Lines $compileLines -MaxLines 80 -MaxChars 3600
+    } catch {
+        $result.PackageCompileEvidence = "unavailable: $($_.Exception.Message)"
+    }
+    @(
+        "mode=$($result.Mode)"
+        "command=$($result.Command)"
+        "exit_code=$($result.ExitCode)"
+        "output=$($result.Output)"
+        "package_compile_evidence=$($result.PackageCompileEvidence)"
+    ) | Set-Content -Path $OutputPath
+    return [pscustomobject]$result
+}
+
+function Start-AmInstrumentationJob {
+    param(
+        [string]$AdbPath,
+        [string[]]$InstrumentArgs,
+        [string]$InstrumentationComponent,
+        [string]$InstrumentationLogPath,
+        [string]$DeviceSerial
+    )
+    Start-Job -ScriptBlock {
+        param($JobAdbPath, $JobInstrumentArgs, $JobInstrumentationComponent, $JobInstrumentationLogPath, $JobDeviceSerial)
+        $adbArgs = @()
+        if (-not [string]::IsNullOrWhiteSpace($JobDeviceSerial)) {
+            $adbArgs += "-s"
+            $adbArgs += $JobDeviceSerial
+        }
+        $adbArgs += "shell"
+        $adbArgs += "am"
+        $adbArgs += "instrument"
+        $adbArgs += "-w"
+        $adbArgs += "-r"
+        $adbArgs += $JobInstrumentArgs
+        $adbArgs += $JobInstrumentationComponent
+        & $JobAdbPath @adbArgs 2>&1 | Tee-Object -FilePath $JobInstrumentationLogPath
+        "FLIGHTALERT_GRADLE_EXIT_CODE=$LASTEXITCODE"
+    } -ArgumentList $AdbPath, $InstrumentArgs, $InstrumentationComponent, $InstrumentationLogPath, $DeviceSerial
+}
+
+function Start-FlightAlertInstrumentationJob {
+    param(
+        [string]$Mode,
+        [string]$RepoRoot,
+        [string]$GradlewPath,
+        [string[]]$GradleRunnerArgs,
+        [string[]]$InstrumentArgs,
+        [string]$InstrumentationComponent,
+        [string]$InstrumentationLogPath,
+        [string]$DeviceSerial
+    )
+    if ($Mode -eq "SplitInstall") {
+        return Start-AmInstrumentationJob -AdbPath $adb -InstrumentArgs $InstrumentArgs -InstrumentationComponent $InstrumentationComponent -InstrumentationLogPath $InstrumentationLogPath -DeviceSerial $DeviceSerial
+    }
+    return Start-GradleInstrumentationJob -RepoRoot $RepoRoot -GradlewPath $GradlewPath -RunnerArgs $GradleRunnerArgs -GradleLogPath $InstrumentationLogPath -DeviceSerial $DeviceSerial
 }
 
 function Wait-GradleInstrumentationJob {
@@ -753,55 +894,90 @@ $videoSkippedReason = ""
 $videoEvidenceHoldSeconds = 0
 $gradleExit = 1
 $gradleTimedOut = $false
+$splitInstallLog = ""
+$splitInstallExit = ""
+$artCompilePath = ""
+$artCompileCommand = ""
+$artCompileExit = ""
+$artCompileOutput = ""
+$artCompilePackageEvidence = ""
+$instrumentationComponent = "$testPackageName/$instrumentationRunner"
 
 Push-Location $repoRoot
 $previousAndroidSerial = $env:ANDROID_SERIAL
 try {
     $gradleLog = Join-Path $outDir "$OutputName-gradle.txt"
-    $runnerArgs = @("-Pandroid.testInstrumentationRunnerArguments.class=$testClass#$TestName")
+    $splitInstallLog = Join-Path $outDir "$OutputName-install.txt"
+    $artCompilePath = Join-Path $outDir "$OutputName-art-compile.txt"
+    $instrumentationArgs = [ordered]@{
+        class = "$testClass#$TestName"
+    }
     if (-not [string]::IsNullOrWhiteSpace($Device)) {
         $env:ANDROID_SERIAL = $Device
-        $runnerArgs += "-Pandroid.injected.device.serial=$Device"
     }
     if (-not [string]::IsNullOrWhiteSpace($City)) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.targetCity=$City"
+        $instrumentationArgs.targetCity = $City
     }
     if ($MapRoads -ne "Current") {
         $mapRoadsValue = if ($MapRoads -eq "On") { "true" } else { "false" }
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.mapRoads=$mapRoadsValue"
+        $instrumentationArgs.mapRoads = $mapRoadsValue
     }
     if ($MapBorders -ne "Current") {
         $mapBordersValue = if ($MapBorders -eq "On") { "true" } else { "false" }
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.mapBorders=$mapBordersValue"
+        $instrumentationArgs.mapBorders = $mapBordersValue
     }
     if ($SkipChrome) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipChrome=true"
+        $instrumentationArgs.skipChrome = "true"
     }
     if ($SkipTopStatus) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipTopStatus=true"
+        $instrumentationArgs.skipTopStatus = "true"
     }
     if ($SkipControls) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipControls=true"
+        $instrumentationArgs.skipControls = "true"
     }
     if ($SkipTrafficPanel) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipTrafficPanel=true"
+        $instrumentationArgs.skipTrafficPanel = "true"
     }
     if ($SkipTraffic) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.skipTraffic=true"
+        $instrumentationArgs.skipTraffic = "true"
     }
     if ($TrafficDetailTiming) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.trafficDetailTiming=true"
+        $instrumentationArgs.trafficDetailTiming = "true"
     }
     if ($MapDetailTiming) {
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.mapDetailTiming=true"
+        $instrumentationArgs.mapDetailTiming = "true"
     }
     if ($RecordVideo) {
         $videoEvidenceHoldSeconds = [Math]::Min($VideoTimeLimitSeconds, [Math]::Max(6, $MaxRunSeconds - 45))
-        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.videoEvidenceHoldSeconds=$videoEvidenceHoldSeconds"
+        $instrumentationArgs.videoEvidenceHoldSeconds = "$videoEvidenceHoldSeconds"
+    }
+    $runnerArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($Device)) {
+        $runnerArgs += "-Pandroid.injected.device.serial=$Device"
+    }
+    $amRunnerArgs = @()
+    foreach ($entry in $instrumentationArgs.GetEnumerator()) {
+        $runnerArgs += "-Pandroid.testInstrumentationRunnerArguments.$($entry.Key)=$($entry.Value)"
+        $amRunnerArgs += "-e"
+        $amRunnerArgs += "$($entry.Key)"
+        $amRunnerArgs += "$($entry.Value)"
+    }
+    if ($HarnessExecutionMode -eq "SplitInstall") {
+        $splitInstallExit = Invoke-GradleInstallForSplitInstrumentation -RepoRoot $repoRoot -GradlewPath $gradlew -GradleInstallLogPath $splitInstallLog -DeviceSerial $Device
+        if ($splitInstallExit -ne 0) {
+            throw "Split instrumentation install failed with exit code $splitInstallExit. See $splitInstallLog."
+        }
+        $compileResult = Invoke-ArtCompileControl -Mode $ArtCompileMode -PackageName $packageName -OutputPath $artCompilePath
+        $artCompileCommand = $compileResult.Command
+        $artCompileExit = $compileResult.ExitCode
+        $artCompileOutput = $compileResult.Output
+        $artCompilePackageEvidence = $compileResult.PackageCompileEvidence
+        Invoke-Adb shell "am force-stop $packageName >/dev/null 2>&1 || true" | Out-Null
+        Invoke-Adb shell "am force-stop $testPackageName >/dev/null 2>&1 || true" | Out-Null
     }
     $runDeadline = (Get-Date).AddSeconds($MaxRunSeconds)
     if ($RecordVideo) {
-        $gradleJob = Start-GradleInstrumentationJob -RepoRoot $repoRoot -GradlewPath $gradlew -RunnerArgs $runnerArgs -GradleLogPath $gradleLog -DeviceSerial $Device
+        $gradleJob = Start-FlightAlertInstrumentationJob -Mode $HarnessExecutionMode -RepoRoot $repoRoot -GradlewPath $gradlew -GradleRunnerArgs $runnerArgs -InstrumentArgs $amRunnerArgs -InstrumentationComponent $instrumentationComponent -InstrumentationLogPath $gradleLog -DeviceSerial $Device
         $foregroundTimeout = [Math]::Min(30, (Get-RemainingRunSeconds -Deadline $runDeadline))
         if (Wait-FlightAlertForeground -TimeoutSeconds $foregroundTimeout) {
             Start-Sleep -Milliseconds 1200
@@ -829,7 +1005,7 @@ try {
         $gradleExit = $jobResult.ExitCode
         $gradleTimedOut = $jobResult.TimedOut
     } else {
-        $gradleJob = Start-GradleInstrumentationJob -RepoRoot $repoRoot -GradlewPath $gradlew -RunnerArgs $runnerArgs -GradleLogPath $gradleLog -DeviceSerial $Device
+        $gradleJob = Start-FlightAlertInstrumentationJob -Mode $HarnessExecutionMode -RepoRoot $repoRoot -GradlewPath $gradlew -GradleRunnerArgs $runnerArgs -InstrumentArgs $amRunnerArgs -InstrumentationComponent $instrumentationComponent -InstrumentationLogPath $gradleLog -DeviceSerial $Device
         $jobResult = Wait-GradleInstrumentationJob -Job $gradleJob -TimeoutSeconds (Get-RemainingRunSeconds -Deadline $runDeadline)
         $gradleExit = $jobResult.ExitCode
         $gradleTimedOut = $jobResult.TimedOut
@@ -902,6 +1078,16 @@ $routeProof += "test_class=$testClass"
 $routeProof += "test_name=$TestName"
 $routeProof += "artifact_prefix=$artifactPrefix"
 $routeProof += "device=$Device"
+$routeProof += "benchmark_role=$BenchmarkRole"
+$routeProof += "harness_execution_mode=$HarnessExecutionMode"
+$routeProof += "instrumentation_component=$instrumentationComponent"
+$routeProof += "split_install_log=$splitInstallLog"
+$routeProof += "split_install_exit_code=$splitInstallExit"
+$routeProof += "art_compile_mode=$ArtCompileMode"
+$routeProof += "art_compile_command=$artCompileCommand"
+$routeProof += "art_compile_exit_code=$artCompileExit"
+$routeProof += "art_compile_output=$artCompileOutput"
+$routeProof += "art_compile_package_evidence=$artCompilePackageEvidence"
 $routeProof += "git_metadata_available=$($gitEvidence.Available)"
 $routeProof += "git_branch=$($gitEvidence.Branch)"
 $routeProof += "git_commit=$($gitEvidence.Commit)"
@@ -934,6 +1120,11 @@ $routeProof += "device_evidence_error=$($deviceEvidence.Error)"
 $routeProof += "city_argument=$City"
 $routeProof += "map_roads_argument=$MapRoads"
 $routeProof += "map_borders_argument=$MapBorders"
+$routeProof += "skip_chrome=$SkipChrome"
+$routeProof += "skip_top_status=$SkipTopStatus"
+$routeProof += "skip_controls=$SkipControls"
+$routeProof += "skip_traffic_panel=$SkipTrafficPanel"
+$routeProof += "skip_traffic=$SkipTraffic"
 $routeProof += "record_video=$RecordVideo"
 $routeProof += "max_run_seconds=$MaxRunSeconds"
 $routeProof += "video_time_limit_seconds=$VideoTimeLimitSeconds"

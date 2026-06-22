@@ -32,7 +32,7 @@ const CHART_EXCLUSION_PATTERNS = [
   ["rejected/reverted experiment", /refparentfast|rejected[-_]?ref|rejected[-_]?reference[-_]?fallback|reverted/i],
   ["skip/layer isolation", /skiptraffic|skipchrome|skipcontrols|skiptopstatus|skiptrafficpanel|layeriso|maponly/i],
   ["trace/correlation diagnostic", /perfetto|atrace|framecorr|tracehook/i],
-  ["diagnostic instrumentation", /diagnostic|diag|manualmatrix|densesymseen|sourcediag|symbolmiss|directcount|directsubphase|directicon|framefields|refpfcounters|refpfcpu|refpfphase|refpfkind|refpfqueuedgen|breakdown/i],
+  ["diagnostic instrumentation", /diagnostic|diag|compileab|compilediag|artcompile|manualmatrix|densesymseen|sourcediag|symbolmiss|directcount|directsubphase|directicon|framefields|refpfcounters|refpfcpu|refpfphase|refpfkind|refpfqueuedgen|breakdown/i],
   ["video/visual-evidence run", /(?:^|[\\/_-])(?:video|roadmotion|motionstrip)(?:[\\/_-]|$)/i],
   ["sample-only run", /directionsample|sample\b/i],
 ];
@@ -385,6 +385,9 @@ function chartDiagnosticReason(row) {
     row.artifactDir,
     row.testName,
     row.summaryFile,
+    row.benchmarkRole,
+    row.harnessExecutionMode,
+    row.artCompileMode,
   ].filter(Boolean).join(" ");
   for (const [reason, pattern] of CHART_EXCLUSION_PATTERNS) {
     if (pattern.test(text)) return reason;
@@ -461,6 +464,15 @@ function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
   const visibilityReason = fullVisibilityExclusionReason(row);
   if (visibilityReason) reasons.push(visibilityReason);
   if (!hasAircraftDrawEvidence(aircraftEvidence)) reasons.push("no aircraft draw evidence in Debug draw perf");
+  if (row.benchmarkRole && !/^workbook$/i.test(String(row.benchmarkRole))) {
+    reasons.push(`benchmark role is ${row.benchmarkRole}`);
+  }
+  if (row.harnessExecutionMode && !/^gradleconnected$/i.test(String(row.harnessExecutionMode))) {
+    reasons.push(`nonstandard harness execution: ${row.harnessExecutionMode}`);
+  }
+  if (row.artCompileMode && !/^installdefault$/i.test(String(row.artCompileMode))) {
+    reasons.push(`nondefault ART compile mode: ${row.artCompileMode}`);
+  }
   if (isTrueValue(row.trafficDetailTiming) || isTrueValue(row.mapDetailTiming)) reasons.push("detail-timing diagnostic run");
   if (isTrueValue(row.recordVideo) || (finiteNumber(row.videosCount) || 0) > 0) reasons.push("video capture run");
   const diagnosticReason = chartDiagnosticReason(row);
@@ -1056,6 +1068,15 @@ async function collectPerformanceRows() {
           gitStatusCount: maybeNumber(route.git_status_count),
           gitStatusShort: route.git_status_short || "",
           gitError: route.git_error || "",
+          benchmarkRole: route.benchmark_role || "",
+          harnessExecutionMode: route.harness_execution_mode || "",
+          instrumentationComponent: route.instrumentation_component || "",
+          splitInstallExitCode: maybeNumber(route.split_install_exit_code),
+          artCompileMode: route.art_compile_mode || "",
+          artCompileCommand: route.art_compile_command || "",
+          artCompileExitCode: maybeNumber(route.art_compile_exit_code),
+          artCompileOutput: route.art_compile_output || "",
+          artCompilePackageEvidence: route.art_compile_package_evidence || "",
           debugApkSha256: route.debug_apk_sha256 || "",
           debugApkPath: route.debug_apk_path || "",
           debugApkBytes: maybeNumber(route.debug_apk_bytes),
@@ -1522,6 +1543,15 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Git Status Count",
     "Git Status Short",
     "Git Error",
+    "Benchmark Role",
+    "Harness Execution Mode",
+    "Instrumentation Component",
+    "Split Install Exit Code",
+    "ART Compile Mode",
+    "ART Compile Command",
+    "ART Compile Exit Code",
+    "ART Compile Output",
+    "ART Compile Package Evidence",
     "Debug APK SHA256",
     "Debug APK Path",
     "Debug APK Bytes",
@@ -1613,6 +1643,15 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.gitStatusCount,
     safeText(row.gitStatusShort, 1000),
     safeText(row.gitError, 1000),
+    row.benchmarkRole,
+    row.harnessExecutionMode,
+    row.instrumentationComponent,
+    row.splitInstallExitCode,
+    row.artCompileMode,
+    safeText(row.artCompileCommand, 1000),
+    row.artCompileExitCode,
+    safeText(row.artCompileOutput, 2400),
+    safeText(row.artCompilePackageEvidence, 3600),
     row.debugApkSha256,
     safeText(row.debugApkPath, 1000),
     row.debugApkBytes,
