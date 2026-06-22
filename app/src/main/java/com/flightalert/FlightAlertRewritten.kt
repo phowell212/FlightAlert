@@ -25366,7 +25366,7 @@ class TrafficOverlayRenderer(
         val scaled_dot_bucket = (cached_key.dot_scale_bucket * scale).roundToInt()
         return abs(cached_key.marker_bucket - current_key.marker_bucket) <= SYMBOL_OVERLAY_INTERACTION_MARKER_BUCKET_TOLERANCE &&
             abs(scaled_icon_bucket - current_key.icon_scale_bucket) <= SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE &&
-            abs(scaled_dot_bucket - current_key.dot_scale_bucket) <= SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE
+            abs(scaled_dot_bucket - current_key.dot_scale_bucket) <= SYMBOL_OVERLAY_INTERACTION_DOT_SCALE_BUCKET_TOLERANCE
     }
 
     private fun symbol_overlay_active_coverage_miss_detail(
@@ -28152,6 +28152,7 @@ class TrafficOverlayRenderer(
         const val SYMBOL_OVERLAY_INTERACTION_SCALE_MAX = 1.62f
         const val SYMBOL_OVERLAY_INTERACTION_MARKER_BUCKET_TOLERANCE = 18
         const val SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE = 120
+        const val SYMBOL_OVERLAY_INTERACTION_DOT_SCALE_BUCKET_TOLERANCE = 130
         const val SYMBOL_OVERLAY_CENTER_EPSILON = 0.5
         const val SYMBOL_OVERLAY_APPEARANCE_READY_BUCKET = 1
         const val SYMBOL_OVERLAY_READY_APPEARANCE_MIN = 0.82f
