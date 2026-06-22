@@ -20649,23 +20649,6 @@ internal class SatelliteMapTileRenderer(
     }.apply {
         allowCoreThreadTimeOut(true)
     }
-    private val reference_lod_prefetch_worker_id = AtomicInteger()
-    private val reference_lod_prefetch_executor = ThreadPoolExecutor(
-        1,
-        1,
-        SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue()
-    ) { runnable ->
-        Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            runnable.run()
-        }, "flightalert-reference-lod-prefetch-${reference_lod_prefetch_worker_id.incrementAndGet()}").apply {
-            isDaemon = true
-        }
-    }.apply {
-        allowCoreThreadTimeOut(true)
-    }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val tile_destination = RectF()
     private val reference_tile_destination = RectF()
@@ -21159,7 +21142,6 @@ internal class SatelliteMapTileRenderer(
         satellite_tile_executor.shutdownNow()
         tile_disk_executor.shutdownNow()
         reference_tile_executor.shutdownNow()
-        reference_lod_prefetch_executor.shutdownNow()
         clear()
     }
 
@@ -21631,9 +21613,17 @@ internal class SatelliteMapTileRenderer(
     }
 
     private fun enqueue_reference_lod_prefetch_drain() {
-        reference_lod_prefetch_executor.execute {
-            drain_reference_lod_prefetch_batches()
+        val task_generation = synchronized(requested_reference_tiles) {
+            current_reference_tile_request_generation
         }
+        reference_tile_executor.execute(
+            ReferenceTileRequestTask(
+                generation = task_generation,
+                priority = REFERENCE_TILE_REQUEST_PRIORITY_ZOOM_OUT_PREFETCH,
+                sequence = reference_tile_task_sequence.incrementAndGet(),
+                action = { drain_reference_lod_prefetch_batches() }
+            )
+        )
     }
 
     private fun drain_reference_lod_prefetch_batches() {
