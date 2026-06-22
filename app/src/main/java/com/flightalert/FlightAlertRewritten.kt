@@ -24440,6 +24440,8 @@ class TrafficOverlayRenderer(
     private var symbol_overlay_recording_install_mode = "none"
     private var symbol_overlay_recording_request_reason = "none"
     private var symbol_overlay_recording_elapsed_ms = 0L
+    private var symbol_overlay_active_visual_refresh_requested_count = 0
+    private var symbol_overlay_active_visual_refresh_skipped_count = 0
     private val symbol_overlay_async_lock = Any()
     private val symbol_overlay_main_handler = Handler(Looper.getMainLooper())
     private var symbol_overlay_async_generation = 0
@@ -25358,6 +25360,21 @@ class TrafficOverlayRenderer(
                     )
                 }
             }
+            if (debug_symbol_cache_miss_reason == "active_visual_change") {
+                maybe_request_active_symbol_overlay_visual_refresh(
+                    aircraft = aircraft,
+                    selected_aircraft_id = selected_aircraft_id,
+                    viewport = viewport,
+                    style = style,
+                    marker_blend = marker_blend,
+                    padding = padding,
+                    width_px = width_px,
+                    height_px = height_px,
+                    center_x = source_center_x,
+                    center_y = source_center_y,
+                    key = key
+                )
+            }
             return null
         }
         if (!key_matches && (cold_idle_prewarm || idle_visual_refresh)) {
@@ -25815,11 +25832,47 @@ class TrafficOverlayRenderer(
             "recCur=$current_aircraft_count " +
             "recInstall=$symbol_overlay_recording_install_mode " +
             "recAgeMs=$recording_age_ms " +
-            "recReq=$symbol_overlay_recording_request_reason"
+            "recReq=$symbol_overlay_recording_request_reason " +
+            "actVisReq=$symbol_overlay_active_visual_refresh_requested_count " +
+            "actVisSkip=$symbol_overlay_active_visual_refresh_skipped_count"
     }
 
     private fun symbol_overlay_recording_pending(): Boolean {
         return synchronized(symbol_overlay_async_lock) { symbol_overlay_async_key != null }
+    }
+
+    private fun maybe_request_active_symbol_overlay_visual_refresh(
+        aircraft: List<TrafficAircraftOverlayState>,
+        selected_aircraft_id: String?,
+        viewport: Viewport,
+        style: TrafficOverlayStyle,
+        marker_blend: Float,
+        padding: Float,
+        width_px: Int,
+        height_px: Int,
+        center_x: Double,
+        center_y: Double,
+        key: AircraftSymbolOverlayCacheKey
+    ) {
+        if (symbol_overlay_recording_pending()) {
+            if (debug_collect_detail_timing) symbol_overlay_active_visual_refresh_skipped_count++
+            return
+        }
+        if (debug_collect_detail_timing) symbol_overlay_active_visual_refresh_requested_count++
+        request_symbol_overlay_cache_recording(
+            aircraft = aircraft,
+            selected_aircraft_id = selected_aircraft_id,
+            viewport = viewport,
+            style = style,
+            marker_blend = marker_blend,
+            padding = padding,
+            width_px = width_px,
+            height_px = height_px,
+            center_x = center_x,
+            center_y = center_y,
+            key = key,
+            reason = "active_visual"
+        )
     }
 
     private fun request_symbol_overlay_cache_recording(
