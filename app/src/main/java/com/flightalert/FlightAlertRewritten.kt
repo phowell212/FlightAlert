@@ -22036,6 +22036,9 @@ internal class SatelliteMapTileRenderer(
         viewport_zoom: Double,
         coverage: ReferenceTileCoverage
     ): Boolean {
+        if (reference_close_pan_target_lod_holdable(viewport_zoom, coverage)) {
+            return true
+        }
         return reference_lod_switch_commit_ready(overlay, coverage) &&
             (
                 reference_retained_lod_ratio(overlay, coverage) >= REFERENCE_RETAINED_LOD_MIN_RATIO ||
@@ -22230,15 +22233,8 @@ internal class SatelliteMapTileRenderer(
             reference_motion_coverage_alpha_floor[overlay] = coverage_alpha
             return coverage_alpha
         }
-        val has_usable_visual_coverage =
-            coverage.visual_ratio >= REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_VISUAL_RATIO &&
-                coverage.center_visual_ratio >= REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_CENTER_RATIO
         val previous_alpha = reference_motion_coverage_alpha_floor[overlay] ?: coverage_alpha
-        val stable_alpha = if (has_usable_visual_coverage) {
-            maxOf(coverage_alpha, previous_alpha)
-        } else {
-            coverage_alpha
-        }
+        val stable_alpha = maxOf(coverage_alpha, previous_alpha)
         reference_motion_coverage_alpha_floor[overlay] = stable_alpha
         return stable_alpha
     }
@@ -22880,7 +22876,7 @@ internal class SatelliteMapTileRenderer(
                     val bytes = connection.inputStream.use { it.readBytes() }
                     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decode_options())
                     if (bitmap != null && reference_overlay_tile_is_safe(bitmap)) {
-                        synchronized(reference_tile_cache) { put_reference_tile_in_memory(key, bitmap, fade = true) }
+                        synchronized(reference_tile_cache) { put_reference_tile_in_memory(key, bitmap, fade = false) }
                         if (should_redraw_reference_tile_request(key, redraw_when_loaded)) {
                             redrew_when_loaded = true
                             request_redraw()
@@ -23092,6 +23088,7 @@ internal class SatelliteMapTileRenderer(
             val parent_y = y / scale
             val parent_key = "${overlay.cache_key}/$fallback_z/$parent_x/$parent_y"
             val bitmap = reference_tile_bitmap(parent_key) ?: continue
+            protect_visible_reference_tile(parent_key)
             val src_width = (bitmap.width / scale).coerceAtLeast(1)
             val src_height = (bitmap.height / scale).coerceAtLeast(1)
             val child_x = x % scale
@@ -23789,8 +23786,6 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_KEEP_VISIBLE_ZOOM = 12.0f
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_MIN_LOADED_RATIO = 0.2f
         const val REFERENCE_TRANSPORTATION_CLOSE_PAN_DRAW_FULL_LOADED_RATIO = 0.55f
-        const val REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_VISUAL_RATIO = 0.55f
-        const val REFERENCE_TRANSPORTATION_MOTION_ALPHA_HOLD_MIN_CENTER_RATIO = 0.55f
         const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_OFFSET = 1
         const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_STEP = 1
         const val REFERENCE_TRANSPORTATION_ZOOM_OUT_PREFETCH_COUNT = 5
