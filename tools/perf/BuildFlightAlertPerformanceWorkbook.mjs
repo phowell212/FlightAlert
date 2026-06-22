@@ -7,7 +7,10 @@ const ROOT = process.argv.includes("--root")
   : "C:\\Users\\h\\AndroidStudioProjects\\FlightAlert";
 const PERF_OUT = path.join(ROOT, "tools", "perf", "out");
 const AGENTS_PATH = path.join(ROOT, "AGENTS.md");
-const WORKBOOK_PATH = path.join(ROOT, "docs", "flightalert-performance-metrics.xlsx");
+const CANONICAL_WORKBOOK_PATH = path.join(ROOT, "docs", "flightalert-performance-metrics.xlsx");
+const WORKBOOK_PATH = process.argv.includes("--output")
+  ? path.resolve(process.argv[process.argv.indexOf("--output") + 1])
+  : CANONICAL_WORKBOOK_PATH;
 const AUDIT_RAW_SNIPPET_MAX_CHARS = 600;
 const PYTHON = process.env.FLIGHTALERT_PYTHON
   || "C:\\Users\\h\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe";
@@ -146,6 +149,8 @@ const DETAIL_KEYS = [
   "directDrawn",
   "directCull",
   "directIcon",
+  "directGeometry",
+  "directCanvasSubmit",
   "directSymbolFg",
   "directRotorFg",
   "directDotIcon",
@@ -153,6 +158,8 @@ const DETAIL_KEYS = [
   "directRotorCount",
   "directSurfaceCount",
   "directDotCount",
+  "directMatrix",
+  "directCanvasCalls",
   "directIconSampPhase",
   "directIconSamp",
   "directIconSampNonRotor",
@@ -194,6 +201,7 @@ const DETAIL_KEYS = [
   "symbolMaskPixels",
   "symbolMaskMiss",
   "symbolMaskGenPixels",
+  "directLabels",
   "labels",
   "labelsDrawn",
   "centerLat",
@@ -897,7 +905,7 @@ function extraLedgerRows() {
 }
 
 async function previousLedgerRows() {
-  if (!(await exists(WORKBOOK_PATH))) return [];
+  if (!(await exists(CANONICAL_WORKBOOK_PATH))) return [];
   try {
     const script = String.raw`
 import json
@@ -931,7 +939,7 @@ for row in ws.iter_rows(min_row=2, values_only=True):
     })
 print(json.dumps(rows, default=str))
 `;
-    const stdout = await runPython(script, [WORKBOOK_PATH], "read previous ledger");
+    const stdout = await runPython(script, [CANONICAL_WORKBOOK_PATH], "read previous ledger");
     const parsed = JSON.parse(stdout || "[]");
     if (!Array.isArray(parsed)) return [];
     return parsed.map((row) => {

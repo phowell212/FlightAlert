@@ -15,6 +15,9 @@ const APP_METRICS = [
   "flightalert_dense_dot_state",
   "flightalert_dense_symbol_state",
   "flightalert_symbol_cache",
+  "flightalert_sat_interim",
+  "flightalert_sat_lower",
+  "flightalert_sat_upper",
   "flightalert_ref_draw",
   "flightalert_ref_prefetch",
 ];
@@ -49,7 +52,12 @@ const LOG_METRICS = [
   "directSymbols",
   "directDrawn",
   "directIcon",
+  "directGeometry",
+  "directCanvasSubmit",
   "directCull",
+  "directMatrix",
+  "directCanvasCalls",
+  "directLabels",
   "symbolMaskPixels",
 ];
 
@@ -275,6 +283,9 @@ app_metrics as (
       when 'FlightAlert.denseDotState' then 'flightalert_dense_dot_state'
       when 'FlightAlert.denseSymbolState' then 'flightalert_dense_symbol_state'
       when 'FlightAlert.symbolCache' then 'flightalert_symbol_cache'
+      when 'FlightAlert.satInterim' then 'flightalert_sat_interim'
+      when 'FlightAlert.satLower' then 'flightalert_sat_lower'
+      when 'FlightAlert.satUpper' then 'flightalert_sat_upper'
       when 'FlightAlert.refDraw' then 'flightalert_ref_draw'
       when 'FlightAlert.refPrefetch' then 'flightalert_ref_prefetch'
       else s.name
@@ -294,6 +305,9 @@ app_metrics as (
      'FlightAlert.denseDotState',
      'FlightAlert.denseSymbolState',
      'FlightAlert.symbolCache',
+     'FlightAlert.satInterim',
+     'FlightAlert.satLower',
+     'FlightAlert.satUpper',
      'FlightAlert.refDraw',
      'FlightAlert.refPrefetch'
    )
