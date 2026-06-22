@@ -698,6 +698,15 @@ function chartP95Ms(row) {
   return finiteNumber(row.androidP95Ms) ?? row.p95Ms ?? "";
 }
 
+function chartP99Ms(row) {
+  return finiteNumber(row.androidP99Ms) ?? row.p99Ms ?? "";
+}
+
+function fpsFromMs(value) {
+  const ms = finiteNumber(value);
+  return ms && ms > 0 ? rounded(1000.0 / ms, 1) : "";
+}
+
 function detailTimingLabel(value) {
   if (isTrueValue(value)) return "On";
   if (isFalseValue(value)) return "Off";
@@ -2193,12 +2202,16 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ? "Controlled chart needs at least two comparable rows in the same workload and dexopt lane. Rerun suspected versions under thermal 0, matching package dexopt fingerprint/normalization mode, unchanged post-run dexopt, and InstallDefault ART before selecting a best iteration."
     : "";
   const chartRows = [
-    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Thermal Status", "Package Dexopt State", "Package Dexopt Fingerprint", "Post-Run Package Dexopt State", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Aircraft Draw Evidence", "Run ID", "Artifact Dir", "Chart Status", "Harness Execution Mode"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Avg FPS", "Full P95 ms", "P95 FPS", "Full P99 ms", "P99 FPS", "Android Jank %", "Thermal Status", "Package Dexopt State", "Package Dexopt Fingerprint", "Post-Run Package Dexopt State", "ART Compile Mode", "Controlled Expected Dexopt", "Controlled Dexopt Normalization Mode", "Aircraft Draw Evidence", "Run ID", "Artifact Dir", "Chart Status", "Harness Execution Mode"],
     ...recent.map((row) => [
       shortChartRunLabel(row),
       chartProducedFps(row),
       row.presentMeanFps || "",
+      chartProducedFps(row),
       chartP95Ms(row),
+      fpsFromMs(chartP95Ms(row)),
+      chartP99Ms(row),
+      fpsFromMs(chartP99Ms(row)),
       row.androidJankPct || "",
       row.thermalStatus || "",
       row.packageDexoptState || "",
@@ -2226,77 +2239,69 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Experiment rows", "Diagnostic/detail/video/dirty/thermal/dexopt-invalid rows stay out of Workbook Tests.", "They remain in Runs, Detailed Audits, Trace Audits, Frame Correlations, and Optimization Ledger for auditability; their exclusion reasons are visible in Runs."],
     ["Visual claims", "Satellite roads/labels/borders visual claims require motion-video evidence.", "Workbook metrics prove frame timing, not temporal visual fidelity. Store video artifact paths in the run/ledger notes."],
   ];
+  const dataRows = [
+    ["Workbook Tests"],
+    ...chartRows,
+    [],
+    ["Runs"],
+    ...runData,
+    [],
+    ["Detailed Audits"],
+    ...auditData,
+    [],
+    ["Trace Audits"],
+    ...traceAuditData,
+    [],
+    ["Frame Correlations"],
+    ...frameCorrelationData,
+  ];
+  const notesRows = [
+    ["Dashboard"],
+    ...dashboardRows,
+    [],
+    ["Rules"],
+    ...workbookRuleRows,
+    [],
+    ["Optimization Ledger"],
+    ...ledgerData,
+  ];
+  const chartHeaderRow = 2;
+  const chartFirstDataRow = 3;
+  const chartLastDataRow = chartFirstDataRow + recent.length - 1;
   return {
     workbookPath: WORKBOOK_PATH,
     sheets: [
       {
-        name: "Dashboard",
-        rows: dashboardRows,
-        widths: [40, 74, 108, 12, 12, 12],
-        freeze: "A3",
+        name: "Data",
+        rows: dataRows,
+        widths: [52, 18, 28, 14, 14, 12, 14, 12, 18, 14, 22, 42, 24, 18, 26, 32, 58, 72, 72, 58, 22, 42, 54, 34, 22, 22, 14, 10, 10, 16, 18, 12, 16, 12, 18, 12, 14, 10, 12, 16, 18, 18, 18, 50, 34, 44, 22, 58],
+        freeze: "A2",
+        numberFormats: [["B2:J1048576", "0.0"]],
+        wrapCols: [12, 17, 18, 19, 20],
+      },
+      {
+        name: "Charts",
+        rows: [
+          ["Flight Alert Progress Charts"],
+          ["These charts use the Workbook Tests block at the top of the Data sheet."],
+          ["Charted rows", recent.length],
+          ["Latest charted run", recent.length ? shortChartRunLabel(recent[recent.length - 1]) : ""],
+        ],
+        widths: [42, 72, 18, 18, 18, 18],
         merges: ["A1:F1"],
-        titleCells: ["A1"],
-        numberFormats: [["B12:B17", "0.0"], ["B19:B22", "0.0"]],
-      },
-      {
-        name: "Rules",
-        rows: workbookRuleRows,
-        widths: [30, 72, 112],
-        freeze: "A2",
-        table: "WorkbookRules",
-        wrapCols: [2, 3],
-      },
-      {
-        name: "Runs",
-        rows: runData,
-        widths: [20, 42, 54, 34, 22, 22, 14, 10, 10, 16, 18, 12, 16, 12, 18, 12, 14, 10, 12, 16, 18, 18, 18, 50, 34, 44, 22, 58, 12, 16, 60, 12, 16, 10, 18, 16, 16, 14, 14, 18, 12, 12, 12, 16, 16, 16, 18, 18, 16, 58],
-        freeze: "C2",
-        table: "PerformanceRuns",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["Q2:T1048576", "0.0"], ["AE2:AV1048576", "0.0"]],
-        wrapCols: [23, 27, 30],
-      },
-      {
-        name: "Detailed Audits",
-        rows: auditData,
-        widths: [18, 42, 48, 52, 8, 16, 18, 24, 20, 12, 14, 16, ...Array(DETAIL_KEYS.length).fill(12), 62, 70],
-        freeze: "C2",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"]],
-        hidden: true,
-      },
-      {
-        name: "Trace Audits",
-        rows: traceAuditData,
-        widths: [18, 42, 48, 58, 12, 10, 18, 16, 22, 12, 14, 14, 18, 20, 20, 28, 22, 22, 22, 26, 26, 26, 26, 28, 28, 30, 76, 22, 22, 26, 32, 28, 34, 34, 22, 24, 26, 86, 16, 16, 18, 22, 18, 22, 28, 18, 22, 20, 24, 34, 86, 72, 92, 52],
-        freeze: "C2",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["E2:AZ1048576", "0.0"]],
-        wrapCols: [27, 38, 52, 53, 54],
-        hidden: true,
-      },
-      {
-        name: "Frame Correlations",
-        rows: frameCorrelationData,
-        widths: [18, 42, 48, 58, 58, ...Array(frameCorrelationRows.headers.length).fill(13)],
-        freeze: "F2",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["F2:ZZ1048576", "0.00"]],
-        hidden: true,
-      },
-      {
-        name: "Optimization Ledger",
-        rows: ledgerData,
-        widths: [22, 34, 12, 24, 48, 18, 12, 58, 64, 100, 100, 100],
-        freeze: "E2",
-        table: "OptimizationLedger",
-        wrapCols: [8, 9, 10, 11, 12],
-      },
-      {
-        name: "Workbook Tests",
-        rows: chartRows,
-        widths: [52, 18, 28, 14, 18, 14, 22, 42, 24, 18, 26, 32, 58, 72, 72, 58, 22],
-        freeze: "A2",
-        table: "WorkbookTests",
         charts: recent.length >= 2,
-        numberFormats: [["B2:E1048576", "0.0"], ["F2:F1048576", "0.0"]],
-        wrapCols: [8, 13, 14, 15, 16],
+        chartSourceSheet: "Data",
+        chartHeaderRow,
+        chartFirstDataRow,
+        chartLastDataRow,
+      },
+      {
+        name: "Performance Notes",
+        rows: notesRows,
+        widths: [40, 72, 108, 24, 48, 18, 12, 58, 64, 100, 100, 100],
+        freeze: "A2",
+        merges: ["A2:F2"],
+        wrapCols: [2, 3, 8, 9, 10, 11, 12],
       },
     ],
   };
@@ -2376,32 +2381,31 @@ for spec in model["sheets"]:
             ws.write(row_index, col_index, value, cell_format)
     if rows and max_col:
         ws.autofilter(0, 0, max(len(rows) - 1, 0), max_col - 1)
-    if spec.get("charts") and len(rows) >= 2:
-        last_row = len(rows)
-        sheet_name = spec["name"]
-        fps = workbook.add_chart({"type": "line"})
-        fps.set_title({"name": "Workbook Tests: Full Produced vs Present FPS"})
-        fps.set_y_axis({"name": "FPS"})
-        for col in ("B", "C"):
-            fps.add_series({
-                "name": "='%s'!$%s$1" % (sheet_name, col),
-                "categories": "='%s'!$A$2:$A$%d" % (sheet_name, last_row),
-                "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
-                "marker": {"type": "circle", "size": 5},
-            })
-        ws.insert_chart("S2", fps, {"x_scale": 1.45, "y_scale": 1.25})
+    if spec.get("charts") and spec.get("chartSourceSheet") and spec.get("chartLastDataRow", 0) >= spec.get("chartFirstDataRow", 1):
+        source_sheet = spec["chartSourceSheet"]
+        header_row = spec["chartHeaderRow"]
+        first_row = spec["chartFirstDataRow"]
+        last_row = spec["chartLastDataRow"]
 
-        timing = workbook.add_chart({"type": "line"})
-        timing.set_title({"name": "Workbook Tests: Full P95 Frame Time And Jank"})
-        timing.set_y_axis({"name": "ms / %"})
-        for col in ("D", "E"):
-            timing.add_series({
-                "name": "='%s'!$%s$1" % (sheet_name, col),
-                "categories": "='%s'!$A$2:$A$%d" % (sheet_name, last_row),
-                "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
-                "marker": {"type": "circle", "size": 5},
-            })
-        ws.insert_chart("S20", timing, {"x_scale": 1.45, "y_scale": 1.25})
+        def add_line_chart(cell, title, y_axis, columns, scale_y=1.18):
+            chart = workbook.add_chart({"type": "line"})
+            chart.set_title({"name": title})
+            chart.set_y_axis({"name": y_axis})
+            chart.set_x_axis({"name": "Run"})
+            chart.set_legend({"position": "bottom"})
+            for col in columns:
+                chart.add_series({
+                    "name": "='%s'!$%s$%d" % (source_sheet, col, header_row),
+                    "categories": "='%s'!$A$%d:$A$%d" % (source_sheet, first_row, last_row),
+                    "values": "='%s'!$%s$%d:$%s$%d" % (source_sheet, col, first_row, col, last_row),
+                    "marker": {"type": "circle", "size": 5},
+                })
+            ws.insert_chart(cell, chart, {"x_scale": 1.55, "y_scale": scale_y})
+
+        add_line_chart("A6", "Average FPS By Workbook Run", "FPS", ("B", "C"))
+        add_line_chart("A24", "P95 FPS By Workbook Run", "FPS", ("F",))
+        add_line_chart("J6", "P99 FPS By Workbook Run", "FPS", ("H",))
+        add_line_chart("J24", "Android Jank By Workbook Run", "Janky frames %", ("I",))
 
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 workbook.close()
@@ -2409,7 +2413,7 @@ workbook.close()
 verify = load_workbook(output_path, read_only=True, data_only=False)
 error_tokens = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#N/A")
 matches = []
-for sheet_name in ("Dashboard", "Rules", "Workbook Tests"):
+for sheet_name in ("Data", "Charts", "Performance Notes"):
     if sheet_name not in verify.sheetnames:
         continue
     ws = verify[sheet_name]
