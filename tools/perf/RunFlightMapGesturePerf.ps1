@@ -198,20 +198,44 @@ function Get-LocalApkEvidence {
     return [pscustomobject]$evidence
 }
 
+function Find-LatestApkPath {
+    param(
+        [string]$RepoRoot,
+        [string]$RelativeDirectory,
+        [string]$NamePattern
+    )
+    $candidates = @(
+        Join-Path $RepoRoot $RelativeDirectory
+        Join-Path $RepoRoot ("app\" + $RelativeDirectory)
+    )
+    foreach ($dir in $candidates) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $file = Get-ChildItem -LiteralPath $dir -Filter $NamePattern -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($file) { return $file.FullName }
+    }
+    return Join-Path $RepoRoot ("app\" + $RelativeDirectory + "\" + $NamePattern)
+}
+
 function Get-BenchmarkDeviceEvidence {
     param(
         [string]$RepoRoot,
         [string]$PackageName
     )
-    $debugApk = Get-LocalApkEvidence -Path (Join-Path $RepoRoot "app\build\outputs\apk\debug\app-debug.apk")
-    $testApk = Get-LocalApkEvidence -Path (Join-Path $RepoRoot "app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk")
+    $debugApkPath = Find-LatestApkPath -RepoRoot $RepoRoot -RelativeDirectory "build\outputs\apk\debug" -NamePattern "*debug.apk"
+    $testApkPath = Find-LatestApkPath -RepoRoot $RepoRoot -RelativeDirectory "build\outputs\apk\androidTest\debug" -NamePattern "*androidTest.apk"
+    $debugApk = Get-LocalApkEvidence -Path $debugApkPath
+    $testApk = Get-LocalApkEvidence -Path $testApkPath
     $evidence = [ordered]@{
         DebugApkExists = $debugApk.Exists
+        DebugApkPath = $debugApkPath
         DebugApkBytes = $debugApk.Bytes
         DebugApkLastWriteUtc = $debugApk.LastWriteUtc
         DebugApkSha256 = $debugApk.Sha256
         DebugApkError = $debugApk.Error
         TestApkExists = $testApk.Exists
+        TestApkPath = $testApkPath
         TestApkBytes = $testApk.Bytes
         TestApkLastWriteUtc = $testApk.LastWriteUtc
         TestApkSha256 = $testApk.Sha256
@@ -851,6 +875,7 @@ if (-not $KeepDeviceArtifacts) {
 $screenshots = @($pulledPaths | Where-Object { $_ -like "*.png" })
 $videos = @(Get-ChildItem -Path $outDir -Filter "*.mp4" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $targetArtifacts = @($pulledPaths | Where-Object { $_ -like "*-target.txt" })
+$displayArtifacts = @($pulledPaths | Where-Object { $_ -like "*-display.txt" })
 $routeFocusEvidence = Test-RouteFocusEvidence -LogcatPath $logcatPath -TargetArtifacts $targetArtifacts
 $deviceEvidence = Get-BenchmarkDeviceEvidence -RepoRoot $repoRoot -PackageName $packageName
 $contactSheetPath = ""
@@ -884,11 +909,13 @@ $routeProof += "git_status_count=$($gitEvidence.StatusCount)"
 $routeProof += "git_status_short=$($gitEvidence.StatusShort)"
 $routeProof += "git_error=$($gitEvidence.Error)"
 $routeProof += "debug_apk_exists=$($deviceEvidence.DebugApkExists)"
+$routeProof += "debug_apk_path=$($deviceEvidence.DebugApkPath)"
 $routeProof += "debug_apk_bytes=$($deviceEvidence.DebugApkBytes)"
 $routeProof += "debug_apk_last_write_utc=$($deviceEvidence.DebugApkLastWriteUtc)"
 $routeProof += "debug_apk_sha256=$($deviceEvidence.DebugApkSha256)"
 $routeProof += "debug_apk_error=$($deviceEvidence.DebugApkError)"
 $routeProof += "test_apk_exists=$($deviceEvidence.TestApkExists)"
+$routeProof += "test_apk_path=$($deviceEvidence.TestApkPath)"
 $routeProof += "test_apk_bytes=$($deviceEvidence.TestApkBytes)"
 $routeProof += "test_apk_last_write_utc=$($deviceEvidence.TestApkLastWriteUtc)"
 $routeProof += "test_apk_sha256=$($deviceEvidence.TestApkSha256)"
@@ -901,7 +928,7 @@ $routeProof += "battery_status=$($deviceEvidence.BatteryStatus)"
 $routeProof += "battery_plugged=$($deviceEvidence.BatteryPlugged)"
 $routeProof += "thermal_status=$($deviceEvidence.ThermalStatus)"
 $routeProof += "thermal_evidence=$($deviceEvidence.ThermalEvidence)"
-$routeProof += "display_refresh_evidence=$($deviceEvidence.DisplayRefreshEvidence)"
+$routeProof += "post_run_display_refresh_evidence=$($deviceEvidence.DisplayRefreshEvidence)"
 $routeProof += "device_evidence_error=$($deviceEvidence.Error)"
 $routeProof += "city_argument=$City"
 $routeProof += "map_roads_argument=$MapRoads"
@@ -918,6 +945,14 @@ $routeProof += "visible_evidence_reviewer=$VisibleEvidenceReviewer"
 $routeProof += "visible_evidence_rule=Pass only after screenshots/video and focusLat/focusLon logs show active gesture focus over the timetable-backed US/EU land/traffic target. Incidental coastline/water in a continent-scale viewport is acceptable only when the focus stays on the requested target."
 $routeProof += "screenshots_count=$($screenshots.Count)"
 $routeProof += "videos_count=$($videos.Count)"
+$routeProof += "in_run_display_artifacts=$($displayArtifacts.Count)"
+if ($displayArtifacts.Count -gt 0) {
+    $inRunDisplayLines = @()
+    foreach ($displayArtifact in $displayArtifacts) {
+        $inRunDisplayLines += @(Select-String -Path $displayArtifact -Pattern "DisplayDeviceInfo|mActiveModeId|mActiveSfDisplayMode|mActiveRenderFrameRate|mDisplayModeSpecs|preferred|refresh|fps=" -CaseSensitive:$false -ErrorAction SilentlyContinue | Select-Object -First 80 | ForEach-Object { $_.Line })
+    }
+    $routeProof += "in_run_display_refresh_evidence=$(Join-BenchmarkEvidenceSnippet -Lines $inRunDisplayLines -MaxLines 80 -MaxChars 3200)"
+}
 $routeProof += "contact_sheet=$contactSheetPath"
 $routeProof += "road_motion_strip_required=$roadMotionStripRequired"
 $routeProof += "road_motion_strip=$roadMotionStripPath"

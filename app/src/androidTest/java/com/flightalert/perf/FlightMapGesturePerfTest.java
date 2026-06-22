@@ -1352,6 +1352,7 @@ public class FlightMapGesturePerfTest {
         writeTextArtifact("flightalert-perf-" + testName + "-target.txt", currentPerfTargetDescription(scaleBandFromArtifactName(testName)));
         writeShellArtifact("flightalert-perf-" + testName + "-gfxinfo.txt", "dumpsys gfxinfo " + PACKAGE_NAME);
         writeShellArtifact("flightalert-perf-" + testName + "-framestats.txt", "dumpsys gfxinfo " + PACKAGE_NAME + " framestats");
+        writeShellArtifact("flightalert-perf-" + testName + "-display.txt", "dumpsys display");
         writeShellArtifact("flightalert-perf-" + testName + "-activity.txt", "dumpsys activity activities");
     }
 
