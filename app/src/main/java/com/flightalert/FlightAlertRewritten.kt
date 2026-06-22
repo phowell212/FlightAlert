@@ -24496,6 +24496,12 @@ class TrafficOverlayRenderer(
     private var debug_detail_direct_rotor_icon_count = 0
     private var debug_detail_direct_surface_icon_count = 0
     private var debug_detail_direct_dot_icon_count = 0
+    private var debug_detail_direct_batch_candidate_count = 0
+    private var debug_detail_direct_batch_run_count = 0
+    private var debug_detail_direct_batch_max_run = 0
+    private var debug_detail_direct_batch_same_state_count = 0
+    private var debug_detail_direct_batch_disjoint_count = 0
+    private var debug_detail_direct_batch_overlap_count = 0
     private var debug_detail_direct_icon_sample_frame_index = 0
     private var debug_detail_direct_icon_sample_phase = 0
     private var debug_detail_direct_icon_sample_index = 0
@@ -24645,6 +24651,69 @@ class TrafficOverlayRenderer(
         val draw_any_labels = draw_labels && label_count > 0
         val max_cull_icon_scale = max(aircraft_dot_scale(viewport.zoom), aircraft_icon_scale(viewport.zoom))
         val collect_detail = debug_collect_detail_timing
+        var batch_run_key = 0
+        var batch_run_length = 0
+        var batch_last_left = 0f
+        var batch_last_top = 0f
+        var batch_last_right = 0f
+        var batch_last_bottom = 0f
+        fun finish_batch_run() {
+            if (batch_run_length > 0) {
+                debug_detail_direct_batch_run_count++
+                if (batch_run_length > debug_detail_direct_batch_max_run) {
+                    debug_detail_direct_batch_max_run = batch_run_length
+                }
+            }
+            batch_run_key = 0
+            batch_run_length = 0
+        }
+        fun record_direct_batch_candidate(item: TrafficAircraftOverlayState, selected: Boolean, x: Float, y: Float) {
+            val appear = current_aircraft_appearance_progress_at(item, now_ms)
+            val symbol_alpha = (appear * frame_style.symbol_visibility * 255).toInt().coerceIn(0, 255)
+            val alpha = (appear * 255).toInt().coerceIn(0, 255)
+            if (alpha <= 4 || symbol_alpha <= 4 || selected || item.symbol == AircraftSymbol.ROTORCRAFT) {
+                finish_batch_run()
+                return
+            }
+            if (draw_internal_dot && frame_style.blend >= AIRCRAFT_FAST_DOT_BLEND) {
+                finish_batch_run()
+                return
+            }
+            debug_detail_direct_batch_candidate_count++
+            val fill = with_alpha(item.color, symbol_alpha)
+            val stroke = with_alpha(
+                frame_style.colors.scrim,
+                (235 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 235)
+            )
+            val key = 31 * fill + stroke
+            val type_scale = item.symbol_scale
+            val icon_scale = frame_style.base_icon_scale * type_scale * appear.let { 0.18f + 0.82f * it }
+            val mask = frame_style.mask_for(item.symbol)
+            val draw_scale = icon_scale / frame_style.mask_resolution_scale.coerceAtLeast(0.001f)
+            val half_width = mask.fill.width * draw_scale * 0.5f
+            val half_height = mask.fill.height * draw_scale * 0.5f
+            val left = x - half_width
+            val top = y - half_height
+            val right = x + half_width
+            val bottom = y + half_height
+            if (batch_run_key == key && batch_run_length > 0) {
+                debug_detail_direct_batch_same_state_count++
+                if (right < batch_last_left || left > batch_last_right || bottom < batch_last_top || top > batch_last_bottom) {
+                    debug_detail_direct_batch_disjoint_count++
+                } else {
+                    debug_detail_direct_batch_overlap_count++
+                }
+                batch_run_length++
+            } else {
+                finish_batch_run()
+                batch_run_key = key
+                batch_run_length = 1
+            }
+            batch_last_left = left
+            batch_last_top = top
+            batch_last_right = right
+            batch_last_bottom = bottom
+        }
         if (collect_detail) {
             debug_detail_direct_call_count++
             if (exclude_centers_in != null) debug_detail_direct_partial_call_count++
@@ -24674,6 +24743,7 @@ class TrafficOverlayRenderer(
                 continue
             }
             if (collect_detail) debug_detail_direct_cull_ns += debug_detail_elapsed_ns(cull_start_ns)
+            if (collect_detail) record_direct_batch_candidate(item, selected, x, y)
             val icon_start_ns = debug_detail_start_ns()
             draw_aircraft_icon(
                 canvas = canvas,
@@ -24695,6 +24765,7 @@ class TrafficOverlayRenderer(
             drawn_count++
             if (collect_detail) debug_detail_direct_drawn_count++
         }
+        if (collect_detail) finish_batch_run()
         return drawn_count
     }
 
@@ -24884,6 +24955,12 @@ class TrafficOverlayRenderer(
         debug_detail_direct_rotor_icon_count = 0
         debug_detail_direct_surface_icon_count = 0
         debug_detail_direct_dot_icon_count = 0
+        debug_detail_direct_batch_candidate_count = 0
+        debug_detail_direct_batch_run_count = 0
+        debug_detail_direct_batch_max_run = 0
+        debug_detail_direct_batch_same_state_count = 0
+        debug_detail_direct_batch_disjoint_count = 0
+        debug_detail_direct_batch_overlap_count = 0
         debug_detail_direct_icon_sample_phase =
             debug_detail_direct_icon_sample_frame_index % DIRECT_ICON_DETAIL_SAMPLE_PERIOD
         debug_detail_direct_icon_sample_frame_index =
@@ -24978,6 +25055,12 @@ class TrafficOverlayRenderer(
                 "directRotorCount=$debug_detail_direct_rotor_icon_count " +
                 "directSurfaceCount=$debug_detail_direct_surface_icon_count " +
                 "directDotCount=$debug_detail_direct_dot_icon_count " +
+                "directBatchCand=$debug_detail_direct_batch_candidate_count " +
+                "directBatchRuns=$debug_detail_direct_batch_run_count " +
+                "directBatchMax=$debug_detail_direct_batch_max_run " +
+                "directBatchSame=$debug_detail_direct_batch_same_state_count " +
+                "directBatchDisjoint=$debug_detail_direct_batch_disjoint_count " +
+                "directBatchOverlap=$debug_detail_direct_batch_overlap_count " +
                 "directIconSampPhase=$debug_detail_direct_icon_sample_phase " +
                 "directIconSamp=$debug_detail_direct_icon_sample_count " +
                 "directIconSampNonRotor=$debug_detail_direct_icon_sample_non_rotor_count " +
