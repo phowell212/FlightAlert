@@ -287,7 +287,7 @@ function Get-BenchmarkDeviceEvidence {
     }
     try {
         $packageDump = @(Invoke-Adb shell dumpsys package $PackageName 2>$null)
-        $compileLines = @($packageDump | Where-Object { $_ -match "(?i)dexopt|compiler|compile|profile|speed|verify|oat|odex" })
+        $compileLines = @($packageDump | Where-Object { $_ -match "(?i)dexopt|compiler|compile|profile|speed|verify|oat|odex|status=|reason=" })
         $evidence.PackageCompileEvidence = Join-BenchmarkEvidenceSnippet -Lines $compileLines -MaxLines 40 -MaxChars 2200
     } catch {
         $evidence.PackageCompileEvidence = "unavailable: $($_.Exception.Message)"
