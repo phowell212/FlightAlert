@@ -9403,16 +9403,7 @@ class FlightMapView(
         }
         if (total_ns >= debug_draw_perf_max_ns) {
             debug_draw_perf_max_ns = total_ns
-            debug_draw_perf_max_detail_summary = debug_same_frame_draw_detail_summary(
-                total_ns = total_ns,
-                map_ns = map_ns,
-                layer_request_ns = layer_request_ns,
-                layer_draw_ns = layer_draw_ns,
-                path_ns = path_ns,
-                traffic_ns = traffic_ns,
-                chrome_ns = chrome_ns,
-                draw_seq = draw_seq
-            ) + debug_current_draw_detail_summary()
+            debug_draw_perf_max_detail_summary = debug_current_draw_detail_summary()
         }
         if (debug_draw_perf_frames >= DEBUG_DRAW_PERF_LOG_INTERVAL || total_ns >= DEBUG_DRAW_PERF_SLOW_NS) {
             debug_log_draw_perf(total_ns, map_ns, layer_request_ns, layer_draw_ns, path_ns, traffic_ns, chrome_ns, location)
@@ -9457,59 +9448,8 @@ class FlightMapView(
             Log.d(
                 TAG,
                 "Debug draw perf detailBlock=traffic frames=$frames" +
-                    debug_same_frame_draw_detail_summary(
-                        total_ns = total_ns,
-                        map_ns = map_ns,
-                        layer_request_ns = layer_request_ns,
-                        layer_draw_ns = layer_draw_ns,
-                        path_ns = path_ns,
-                        traffic_ns = traffic_ns,
-                        chrome_ns = chrome_ns,
-                        draw_seq = debug_draw_perf_last_seq
-                    ) +
                     traffic_detail_summary
             )
-        }
-    }
-
-    private fun debug_same_frame_draw_detail_summary(
-        total_ns: Long,
-        map_ns: Long,
-        layer_request_ns: Long,
-        layer_draw_ns: Long,
-        path_ns: Long,
-        traffic_ns: Long,
-        chrome_ns: Long,
-        draw_seq: Long
-    ): String {
-        return " frameSeq=$draw_seq " +
-            "frameTotal=${total_ns.ms()} frameMap=${map_ns.ms()} " +
-            "frameLayerReq=${layer_request_ns.ms()} frameLayerDraw=${layer_draw_ns.ms()} " +
-            "framePath=${path_ns.ms()} frameTraffic=${traffic_ns.ms()} frameChrome=${chrome_ns.ms()} " +
-            "frameInteraction=${debug_draw_interaction_label()} "
-    }
-
-    private fun debug_draw_interaction_label(): String {
-        val motion = when {
-            pinch_in_progress -> "pinch"
-            drag_started -> "drag"
-            map_touch_active -> "touch"
-            else -> "idle"
-        }
-        val reason = debug_ticker_reason_label(debug_current_draw_ticker_reason)
-        return "$motion:$reason"
-    }
-
-    private fun debug_ticker_reason_label(reason: Int): String {
-        return when (reason) {
-            DEBUG_TICKER_REDRAW_INTERACTION_ONLY -> "interaction_only"
-            DEBUG_TICKER_REDRAW_INTERACTION_MOTION -> "interaction_motion"
-            DEBUG_TICKER_REDRAW_APPEARANCE -> "appearance"
-            DEBUG_TICKER_REDRAW_FIRST_DRAW -> "first_draw"
-            DEBUG_TICKER_REDRAW_MAX_INTERVAL -> "max_interval"
-            DEBUG_TICKER_REDRAW_ALWAYS_ZOOM -> "always_zoom"
-            DEBUG_TICKER_REDRAW_MOTION_DELTA -> "motion_delta"
-            else -> "none"
         }
     }
 
