@@ -30977,8 +30977,9 @@ internal class TrafficOverlayStateBuilder(
         val query_start_ns = debug_detail_start_ns()
         val query = frame.cache.spatial_index.query(frame.viewport, screen_projector.traffic_query_padding_px(frame.viewport) + extra_padding_px)
         debug_state_symbol_query_ns += debug_detail_elapsed_ns(query_start_ns)
-        val result = ArrayList<TrafficAircraftOverlayState>(VISIBLE_AIRCRAFT_INITIAL_CAPACITY)
-        val seen_keys = HashSet<String>()
+        val state_capacity = dense_symbol_state_initial_capacity(query.size)
+        val result = ArrayList<TrafficAircraftOverlayState>(state_capacity)
+        val seen_keys = HashSet<String>(state_capacity)
         var accepted_count = 0
         val filter_start_ns = debug_detail_start_ns()
         for (entry in query) {
@@ -31006,6 +31007,13 @@ internal class TrafficOverlayStateBuilder(
             debug_state_symbol_accepted_count = accepted_count
         }
         return result
+    }
+
+    private fun dense_symbol_state_initial_capacity(query_count: Int): Int {
+        return query_count.coerceIn(
+            VISIBLE_AIRCRAFT_INITIAL_CAPACITY,
+            DENSE_SYMBOL_STATE_INITIAL_CAPACITY_LIMIT
+        )
     }
 
     private fun add_missing_priority_symbol_states(
@@ -31484,6 +31492,7 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_SYMBOL_SELECTED_RING_DP = 17f
         const val DENSE_SYMBOL_MAX_TYPE_SCALE = 1.18f
         const val DENSE_SYMBOL_RENDER_CULL_EXTRA_DP = 24f
+        const val DENSE_SYMBOL_STATE_INITIAL_CAPACITY_LIMIT = 8192
         const val DENSE_SYMBOL_CACHE_INTERACTION_SETTLE_MS = 420L
         const val DENSE_SYMBOL_CACHE_INTERACTION_STALE_MS = 12_000L
         const val DENSE_SYMBOL_CACHE_IDLE_STALE_MS = 12_000L
