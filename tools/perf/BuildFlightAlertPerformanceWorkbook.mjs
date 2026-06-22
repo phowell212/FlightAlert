@@ -732,12 +732,16 @@ function shortChartRunLabel(row) {
   const runId = String(row.runId || "");
   const run = runId.match(/(?:^|-)r(\d+)(?:valid)?(?:$|-)/i)?.[1];
   const suffix = run ? ` r${run}` : "";
-  const hash = runId.match(/-([0-9a-f]{7,40})(?:-|$)/i)?.[1]?.slice(0, 7);
+  const hash = runCommitHash(runId);
   const version = hash ? `${shortVersionLabel(row)} ${hash}` : shortVersionLabel(row);
   const rejected = /rectreuse|refparentfast|rejected/i.test(runId) ? " rejected" : "";
   const restored = /restored/i.test(runId) ? " restored" : "";
   const city = row.city ? ` ${row.city}` : "";
   return safeText(`${version}${rejected}${restored}${suffix}${city}`, 52);
+}
+
+function runCommitHash(runId) {
+  return String(runId || "").match(/-([0-9a-f]{7,40})(?:-|$)/i)?.[1]?.slice(0, 7) || "";
 }
 
 function workbookTestVersionLabel(row) {
@@ -746,7 +750,10 @@ function workbookTestVersionLabel(row) {
   if (id.includes("optbaseline")) return "optimizer-master-exhausted-baseline-20260621";
   if (id.includes("onehugefile") || id.includes("onehuge")) return "checkpoint-one-huge-file-20260621-fair-master";
   if (id.includes("refparentfast")) return "rejected-reference-fallback-20260622";
-  if (id.includes("current")) return "backup/current-before-refplanlazy-restore-20260622";
+  const hash = runCommitHash(id);
+  if (id.includes("current") && hash) return `current-${hash}`;
+  if (hash) return `unlabeled-${hash}`;
+  if (id.includes("current")) return "current-unlabeled";
   return "unlabeled-comparable-version";
 }
 
