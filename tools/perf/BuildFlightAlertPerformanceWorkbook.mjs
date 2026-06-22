@@ -425,11 +425,14 @@ function hasAircraftDrawEvidence(evidence) {
 
 function aircraftEvidenceLabel(evidence) {
   if (!evidence) return "";
+  const directDrawn = evidence.hasDirectDrawnMetric
+    ? `drawn=${evidence.maxDirectDrawn || 0}`
+    : "drawn=n/a";
   return [
     `symbols=${evidence.maxSymbols || 0}`,
     `dots=${evidence.maxDots || 0}`,
     `direct=${evidence.maxDirect || 0}`,
-    `drawn=${evidence.maxDirectDrawn || 0}`,
+    directDrawn,
   ].join(" ");
 }
 
@@ -443,12 +446,21 @@ function buildAircraftEvidenceByRun(auditRows) {
       maxDots: 0,
       maxDirect: 0,
       maxDirectDrawn: 0,
+      hasDirectDrawnMetric: false,
       hasAircraftDrawEvidence: false,
     };
     current.maxSymbols = Math.max(current.maxSymbols, finiteNumber(row.symbols) || 0);
     current.maxDots = Math.max(current.maxDots, finiteNumber(row.dots) || 0);
     current.maxDirect = Math.max(current.maxDirect, finiteNumber(row.direct) || 0);
-    current.maxDirectDrawn = Math.max(current.maxDirectDrawn, finiteNumber(row.directDrawn) || 0);
+    const rawDirectDrawn = row.directDrawn;
+    const hasDirectDrawnMetric = rawDirectDrawn !== undefined &&
+      rawDirectDrawn !== null &&
+      String(rawDirectDrawn).trim() !== "";
+    const directDrawn = hasDirectDrawnMetric ? finiteNumber(rawDirectDrawn) : null;
+    if (Number.isFinite(directDrawn)) {
+      current.maxDirectDrawn = Math.max(current.maxDirectDrawn, directDrawn);
+      current.hasDirectDrawnMetric = true;
+    }
     current.hasAircraftDrawEvidence = current.maxSymbols > 0 || current.maxDots > 0 || current.maxDirect > 0 || current.maxDirectDrawn > 0;
     byRun.set(runId, current);
   }
