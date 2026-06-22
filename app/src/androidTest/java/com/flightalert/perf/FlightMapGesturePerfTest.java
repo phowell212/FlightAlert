@@ -40,7 +40,7 @@ public class FlightMapGesturePerfTest {
     private static final String PERF_BAND_NOT_APPLICABLE = "not_applicable";
     private static final long TRAFFIC_LOAD_WAIT_MS = 6000L;
     private static final long SANITY_TRAFFIC_LOAD_WAIT_MS = 3500L;
-    private static final long BENCHMARK_PAN_ZOOM_WORKLOAD_MS = 30000L;
+    private static final long BENCHMARK_PAN_ZOOM_WORKLOAD_MS = 60000L;
     private static final int SATELLITE_FAST_ZOOM_OUT_STEPS = 4;
     private static final double COUNTRY_CONTINUITY_CONTINENT_ZOOM = 4.25;
     private static final double COUNTRY_CONTINUITY_COUNTRY_ZOOM = 5.4;
@@ -324,7 +324,7 @@ public class FlightMapGesturePerfTest {
         UiObject2 app = startAppAtMajorTraffic(city, 5.88, "SATELLITE", skipChrome, skipTraffic);
         sleep(TRAFFIC_LOAD_WAIT_MS);
         setPerfPhaseMetadata(
-                "benchmarkPanZoom30s",
+                "benchmarkPanZoom60s",
                 "launch_zoom=5.88; map_source=SATELLITE; target_motion_ms=" + BENCHMARK_PAN_ZOOM_WORKLOAD_MS + "; timetable_target=" + city.name,
                 "repeatable workload-to-workload benchmark with bounded human-like pan plus overlapping zoom-in/out gestures across country and regional bands"
         );
@@ -334,19 +334,19 @@ public class FlightMapGesturePerfTest {
         int cycle = 0;
         while (SystemClock.uptimeMillis() < deadline) {
             cycle++;
-            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", "country", "human_like_pan cycle=" + cycle);
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom60s", "country", "human_like_pan cycle=" + cycle);
             briefHumanPanOverTraffic(app, "country");
             sleep(90);
 
-            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", "country", "human_like_overlap direction=zoom_in cycle=" + cycle);
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom60s", "country", "human_like_overlap direction=zoom_in cycle=" + cycle);
             humanLikeOverlappedPinch(app, "country", true);
             sleep(120);
 
-            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_pan cycle=" + cycle);
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom60s", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_pan cycle=" + cycle);
             briefHumanPanOverTraffic(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND);
             sleep(90);
 
-            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_overlap direction=zoom_out cycle=" + cycle);
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom60s", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_overlap direction=zoom_out cycle=" + cycle);
             humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, false);
             sleep(140);
 
@@ -354,7 +354,7 @@ public class FlightMapGesturePerfTest {
                 requireFlightAlertForeground();
             }
         }
-        markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", "country", "phase_capture_artifacts cycles=" + cycle);
+        markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom60s", "country", "phase_capture_artifacts cycles=" + cycle);
         sleep(700);
         requireFlightAlertForeground();
         capturePerfArtifacts("satelliteBenchmarkPanZoomWorkloadPerf");

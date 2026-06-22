@@ -24,6 +24,15 @@ const PALETTE = {
   line: "#C9D3DF",
 };
 
+const CHART_EXCLUSION_PATTERNS = [
+  ["dirty/unaccepted run", /dirty|unaccepted|uncommitted/i],
+  ["skip/layer isolation", /skiptraffic|skipchrome|skipcontrols|skiptopstatus|skiptrafficpanel|layeriso|maponly/i],
+  ["trace/correlation diagnostic", /perfetto|atrace|framecorr|tracehook/i],
+  ["diagnostic instrumentation", /diagnostic|diag|manualmatrix|densesymseen|sourcediag|symbolmiss|directcount|directsubphase|directicon|refpfcounters|refpfcpu|refpfphase|refpfkind|refpfqueuedgen|breakdown/i],
+  ["video/visual-evidence run", /(?:^|[\\/_-])(?:video|roadmotion|motionstrip)(?:[\\/_-]|$)/i],
+  ["sample-only run", /directionsample|sample\b/i],
+];
+
 const DETAIL_KEYS = [
   "frames",
   "detailBlock",
@@ -271,6 +280,234 @@ function maybeNumber(value) {
   return text;
 }
 
+function normalizeBoolean(value) {
+  if (value === true || value === false) return value;
+  if (value == null || value === "") return null;
+  const text = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(text)) return true;
+  if (["false", "0", "no", "off"].includes(text)) return false;
+  return null;
+}
+
+function isTrueValue(value) {
+  return normalizeBoolean(value) === true;
+}
+
+function isFalseValue(value) {
+  return normalizeBoolean(value) === false;
+}
+
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function rounded(value, digits = 2) {
+  const number = finiteNumber(value);
+  if (number == null) return "";
+  const factor = 10 ** digits;
+  return Math.round(number * factor) / factor;
+}
+
+function percentileValue(values, percentile) {
+  if (!values.length) return "";
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil((percentile / 100) * sorted.length) - 1));
+  return sorted[index];
+}
+
+function meanValue(values) {
+  if (!values.length) return "";
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function presentIntervalsMs(presentSeconds) {
+  if (presentSeconds.length < 2) return [];
+  const sorted = [...new Set(presentSeconds)].sort((a, b) => a - b);
+  const intervals = [];
+  for (let index = 1; index < sorted.length; index++) {
+    const delta = (sorted[index] - sorted[index - 1]) * 1000.0;
+    if (delta > 0.0 && delta < 200.0) intervals.push(delta);
+  }
+  return intervals;
+}
+
+function canonicalTestName(testName) {
+  return String(testName || "")
+    .replace(/^flightalert-perf-/, "")
+    .replace(/-framestats\.txt$/i, "")
+    .trim();
+}
+
+function chartWorkloadLevel(row) {
+  const test = canonicalTestName(row.testName);
+  if (/^satellitePanZoomSanityPerf$/i.test(test)) return "Satellite Pan/Zoom Sanity";
+  if (/^satelliteBenchmarkPanZoomWorkloadPerf$/i.test(test)) return "Satellite Benchmark Pan/Zoom";
+  if (/^panAcrossZoomLevels$/i.test(test)) return "Pan Across Zoom Levels";
+  if (/^countryScaleZoomContinuitySatellite(?:Perf)?(?:-continent)?$/i.test(test)) return "Satellite Country/Continent Continuity";
+  if (/^countryScaleZoomContinuityStreet(?:Perf)?(?:-continent)?$/i.test(test)) return "Street Country/Continent Continuity";
+  if (/^wideScaleZoomContinuitySatellite(?:Perf)?$/i.test(test)) return "Satellite Wide-Scale Continuity";
+  if (/^wideScaleZoomContinuityStreet(?:Perf)?$/i.test(test)) return "Street Wide-Scale Continuity";
+  if (/^closeScaleZoomContinuitySatellite(?:Perf)?$/i.test(test)) return "Satellite Close-Scale Continuity";
+  return "";
+}
+
+function workbookTestLane(row) {
+  const test = canonicalTestName(row.testName);
+  if (/^satelliteBenchmarkPanZoomWorkloadPerf$/i.test(test)) return "Standard 60s Satellite Multi-Level Benchmark";
+  return "";
+}
+
+function parseTargetMotionMs(value) {
+  const match = String(value || "").match(/target_motion_ms=(\d+)/i);
+  return match ? maybeNumber(match[1]) : "";
+}
+
+function benchmarkRegion(row) {
+  const city = String(row.city || row.expectedCity || "").toLowerCase();
+  if (/london|amsterdam|frankfurt|paris|madrid/.test(city)) return "Europe";
+  if (/dallas|fort worth|atlanta|phoenix|las vegas|chicago|new york|los angeles/.test(city)) return "United States";
+  return "";
+}
+
+function chartDiagnosticReason(row) {
+  const text = [
+    row.runId,
+    row.artifactDir,
+    row.testName,
+    row.summaryFile,
+  ].filter(Boolean).join(" ");
+  for (const [reason, pattern] of CHART_EXCLUSION_PATTERNS) {
+    if (pattern.test(text)) return reason;
+  }
+  return "";
+}
+
+function fullVisibilityExclusionReason(row) {
+  const flags = [
+    ["skip_chrome", row.skipChrome],
+    ["skip_top_status", row.skipTopStatus],
+    ["skip_controls", row.skipControls],
+    ["skip_traffic_panel", row.skipTrafficPanel],
+    ["skip_traffic", row.skipTraffic],
+  ];
+  const enabledSkips = flags.filter(([, value]) => isTrueValue(value)).map(([name]) => name);
+  if (enabledSkips.length) return `disabled layer(s): ${enabledSkips.join(", ")}`;
+  const unknown = flags.filter(([, value]) => !isFalseValue(value)).map(([name]) => name);
+  if (unknown.length) return `full visibility not explicit: ${unknown.join(", ")}`;
+  return "";
+}
+
+function chartExclusionReason(row, workloadLevel) {
+  const reasons = [];
+  if (!workloadLevel) reasons.push("not a holistic benchmark workload");
+  if (!isTrueValue(row.routeFocusPassed)) reasons.push("route proof failed or missing");
+  const visibilityReason = fullVisibilityExclusionReason(row);
+  if (visibilityReason) reasons.push(visibilityReason);
+  if (isTrueValue(row.recordVideo) || (finiteNumber(row.videosCount) || 0) > 0) reasons.push("video capture run");
+  const diagnosticReason = chartDiagnosticReason(row);
+  if (diagnosticReason) reasons.push(diagnosticReason);
+  for (const [label, value] of [
+    ["Produced FPS", row.producedFps],
+    ["Present Mean FPS", row.presentMeanFps],
+    ["P95 ms", row.p95Ms],
+    ["Android Jank %", row.androidJankPct],
+  ]) {
+    if (finiteNumber(value) == null) reasons.push(`missing ${label}`);
+  }
+  return Array.from(new Set(reasons)).join("; ");
+}
+
+function withChartEligibility(row) {
+  const workloadLevel = chartWorkloadLevel(row);
+  const exclusionReason = chartExclusionReason(row, workloadLevel);
+  const lane = workbookTestLane(row);
+  const workbookReasons = [];
+  if (exclusionReason) workbookReasons.push(exclusionReason);
+  if (!lane) workbookReasons.push("not a standardized workbook-test lane");
+  const maxRunSeconds = finiteNumber(row.maxRunSeconds);
+  if (maxRunSeconds != null && maxRunSeconds < 60) workbookReasons.push(`run budget below 60s (${maxRunSeconds}s)`);
+  const workloadMs = finiteNumber(row.workloadTargetMs);
+  if (lane && (workloadMs == null || workloadMs < 55000)) {
+    workbookReasons.push(workloadMs == null ? "missing 60s workload target" : `workload target below 55s (${workloadMs}ms)`);
+  }
+  return {
+    ...row,
+    chartWorkloadLevel: workloadLevel,
+    chartEligible: exclusionReason ? "No" : "Yes",
+    chartExclusionReason: exclusionReason,
+    workbookTestLane: lane,
+    benchmarkRegion: benchmarkRegion(row),
+    workbookTestEligible: workbookReasons.length ? "No" : "Yes",
+    workbookTestExclusionReason: Array.from(new Set(workbookReasons)).join("; "),
+  };
+}
+
+function compareRunPerformance(a, b) {
+  const producedDelta = (finiteNumber(chartProducedFps(b)) || -Infinity) - (finiteNumber(chartProducedFps(a)) || -Infinity);
+  if (producedDelta) return producedDelta;
+  const presentDelta = (finiteNumber(b.presentMeanFps) || -Infinity) - (finiteNumber(a.presentMeanFps) || -Infinity);
+  if (presentDelta) return presentDelta;
+  const p95Delta = (finiteNumber(chartP95Ms(a)) || Infinity) - (finiteNumber(chartP95Ms(b)) || Infinity);
+  if (p95Delta) return p95Delta;
+  const jankDelta = (finiteNumber(a.androidJankPct) || Infinity) - (finiteNumber(b.androidJankPct) || Infinity);
+  if (jankDelta) return jankDelta;
+  const presentP95Delta = (finiteNumber(a.presentP95Ms) || Infinity) - (finiteNumber(b.presentP95Ms) || Infinity);
+  if (presentP95Delta) return presentP95Delta;
+  return new Date(b.runDate) - new Date(a.runDate);
+}
+
+function comparableSeriesKey(row, includeCity = true) {
+  return [
+    row.workbookTestLane || "",
+    includeCity ? (row.city || "") : (row.benchmarkRegion || ""),
+    row.mapSource || "",
+    row.roads || "",
+    row.borders || "",
+  ].join(" | ");
+}
+
+function chartProducedFps(row) {
+  return finiteNumber(row.androidProducedFps) ?? row.producedFps ?? "";
+}
+
+function chartP95Ms(row) {
+  return finiteNumber(row.androidP95Ms) ?? row.p95Ms ?? "";
+}
+
+function shortChartRunLabel(row) {
+  const run = String(row.runId || "").replace(/^flightalert-perf-/, "");
+  const city = row.city ? ` ${row.city}` : "";
+  return safeText(`${run}${city}`, 52);
+}
+
+function workbookTestVersionLabel(row) {
+  const id = String(row.runId || "").toLowerCase();
+  if (id.includes("optbaseline")) return "optimizer-master-exhausted-baseline-20260621";
+  if (id.includes("onehugefile")) return "checkpoint-one-huge-file-20260621-fair-master";
+  if (id.includes("current")) return "backup/current-before-refplanlazy-restore-20260622";
+  return "unlabeled-comparable-version";
+}
+
+function finiteMetricValues(rows, selector) {
+  return rows.map(selector).map(finiteNumber).filter((value) => value != null);
+}
+
+function averageMetric(rows, selector) {
+  const values = finiteMetricValues(rows, selector);
+  return values.length ? rounded(values.reduce((sum, value) => sum + value, 0) / values.length, 2) : "";
+}
+
+function bestHighMetric(rows, selector) {
+  const values = finiteMetricValues(rows, selector);
+  return values.length ? Math.max(...values) : "";
+}
+
+function bestLowMetric(rows, selector) {
+  const values = finiteMetricValues(rows, selector);
+  return values.length ? Math.min(...values) : "";
+}
+
 async function exists(filePath) {
   try {
     await fs.access(filePath);
@@ -338,6 +575,103 @@ function parsePerfTokens(text) {
     parsed[match[2]] = maybeNumber(value);
   }
   return parsed;
+}
+
+function parseAndroidGfxInfo(text) {
+  const value = (pattern) => {
+    const match = text.match(pattern);
+    return match ? maybeNumber(match[1]) : "";
+  };
+  const uptimeMs = value(/^Uptime:\s*(\d+)/m);
+  const statsSinceNs = value(/^Stats since:\s*(\d+)ns/m);
+  const frames = value(/^Total frames rendered:\s*(\d+)/m);
+  const uptimeNumber = finiteNumber(uptimeMs);
+  const statsSinceNumber = finiteNumber(statsSinceNs);
+  const frameNumber = finiteNumber(frames);
+  const sampleSeconds = uptimeNumber != null && statsSinceNumber != null
+    ? Math.max(0, (uptimeNumber - statsSinceNumber / 1000000.0) / 1000.0)
+    : "";
+  const produced = finiteNumber(sampleSeconds) != null && Number(sampleSeconds) > 0 && frameNumber != null
+    ? frameNumber / Number(sampleSeconds)
+    : "";
+  return {
+    androidFrames: frames,
+    androidSampleSeconds: Number.isFinite(Number(sampleSeconds)) ? Number(sampleSeconds.toFixed(3)) : "",
+    androidProducedFps: Number.isFinite(Number(produced)) ? Number(produced.toFixed(1)) : "",
+    androidP50Ms: value(/^50th percentile:\s*([0-9.]+)ms/m),
+    androidP90Ms: value(/^90th percentile:\s*([0-9.]+)ms/m),
+    androidP95Ms: value(/^95th percentile:\s*([0-9.]+)ms/m),
+    androidP99Ms: value(/^99th percentile:\s*([0-9.]+)ms/m),
+  };
+}
+
+function parseFrameTimelineMetrics(text, targetHz = 120) {
+  const lines = text.split(/\r?\n/);
+  let headerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (lines[index].startsWith("Flags,FrameTimelineVsyncId,")) {
+      headerIndex = index;
+      break;
+    }
+  }
+  if (headerIndex < 0) return {};
+
+  const headers = lines[headerIndex].split(",").filter(Boolean);
+  const intendedIndex = headers.indexOf("IntendedVsync");
+  const completedIndex = headers.indexOf("FrameCompleted");
+  const presentIndex = headers.indexOf("DisplayPresentTime");
+  if (intendedIndex < 0 || completedIndex < 0) return {};
+
+  const durations = [];
+  const intendedSeconds = [];
+  const presentSeconds = [];
+  for (let index = headerIndex + 1; index < lines.length; index++) {
+    const line = lines[index].trim();
+    if (!line || !/^[-\d]/.test(line)) continue;
+    const parts = line.split(",");
+    if (parts.length <= Math.max(intendedIndex, completedIndex)) continue;
+    const intended = Number(parts[intendedIndex]);
+    const completed = Number(parts[completedIndex]);
+    if (!Number.isFinite(intended) || !Number.isFinite(completed) || intended <= 0 || completed <= intended) continue;
+    const durationMs = (completed - intended) / 1000000.0;
+    if (durationMs <= 0.0 || durationMs > 5000.0) continue;
+    durations.push(durationMs);
+    intendedSeconds.push(intended / 1000000000.0);
+    if (presentIndex >= 0 && parts.length > presentIndex) {
+      const present = Number(parts[presentIndex]);
+      if (Number.isFinite(present) && present > 0) presentSeconds.push(present / 1000000000.0);
+    }
+  }
+  if (!durations.length) return {};
+
+  const targetBudgetMs = 1000.0 / (finiteNumber(targetHz) || 120);
+  const presentIntervals = presentIntervalsMs(presentSeconds);
+  const sampleSeconds = intendedSeconds.length > 1
+    ? intendedSeconds[intendedSeconds.length - 1] - intendedSeconds[0]
+    : "";
+  const producedFps = finiteNumber(sampleSeconds) != null && sampleSeconds > 0
+    ? durations.length / sampleSeconds
+    : "";
+  const presentMean = meanValue(presentIntervals);
+  const overTarget = durations.filter((duration) => duration > targetBudgetMs).length;
+  const presentDrops = presentIntervals.filter((interval) => interval > targetBudgetMs * 1.5).length;
+
+  return {
+    frames: durations.length,
+    rawTimelineFrames: durations.length,
+    presentIntervals: presentIntervals.length,
+    sampleSeconds: rounded(sampleSeconds, 3),
+    producedFps: rounded(producedFps, 1),
+    presentMeanFps: finiteNumber(presentMean) != null && presentMean > 0 ? rounded(1000.0 / presentMean, 1) : "",
+    p50Ms: rounded(percentileValue(durations, 50), 2),
+    p95Ms: rounded(percentileValue(durations, 95), 2),
+    p99Ms: rounded(percentileValue(durations, 99), 2),
+    presentP50Ms: rounded(percentileValue(presentIntervals, 50), 2),
+    presentP95Ms: rounded(percentileValue(presentIntervals, 95), 2),
+    presentP99Ms: rounded(percentileValue(presentIntervals, 99), 2),
+    presentDrop120Pct: presentIntervals.length ? rounded((presentDrops * 100.0) / presentIntervals.length, 2) : "",
+    latencyMiss120Pct: durations.length ? rounded((overTarget * 100.0) / durations.length, 2) : "",
+  };
 }
 
 function compactPerfTokens(parsed, keys) {
@@ -553,9 +887,12 @@ async function collectPerformanceRows() {
     const routeProof = files.find((file) => /route-proof\.txt$/i.test(file));
     const target = files.find((file) => /target\.txt$/i.test(file));
     const logcat = files.find((file) => /logcat\.txt$/i.test(file));
+    const frameStats = files.find((file) => /-framestats\.txt$/i.test(file));
     const stat = summary ? await fs.stat(summary) : await fs.stat(dir).catch(() => ({ mtime: "" }));
     const route = routeProof && await exists(routeProof) ? parseKeyValueFile(await fs.readFile(routeProof, "utf8")) : {};
     const targetKv = target && await exists(target) ? parseKeyValueFile(await fs.readFile(target, "utf8")) : {};
+    const frameStatsText = frameStats && await exists(frameStats) ? await fs.readFile(frameStats, "utf8") : "";
+    const androidGfx = frameStatsText ? parseAndroidGfxInfo(frameStatsText) : {};
     if (summary && await exists(summary)) {
       const csv = await fs.readFile(summary, "utf8");
       const lines = csv.trim().split(/\r?\n/).filter(Boolean);
@@ -564,6 +901,10 @@ async function collectPerformanceRows() {
         const values = parseCsvLine(lines[1]);
         const row = {};
         headers.forEach((header, index) => { row[header] = maybeNumber(values[index]); });
+        const frameTimeline = frameStatsText ? parseFrameTimelineMetrics(frameStatsText, finiteNumber(row.TargetHz) || 120) : {};
+        const timelineMetric = (key, fallback) => (
+          frameTimeline[key] !== undefined && frameTimeline[key] !== "" ? frameTimeline[key] : fallback
+        );
         runRows.push({
           runDate: stat.mtime || "",
           runId,
@@ -576,26 +917,47 @@ async function collectPerformanceRows() {
           borders: route.map_borders_argument || "",
           mapDetailTiming: targetKv.map_detail_timing || "",
           trafficDetailTiming: runId.includes("trafficdetail") || runId.includes("detail") ? "true" : "",
+          skipChrome: route.skip_chrome || targetKv.skip_chrome || "",
+          skipTopStatus: route.skip_top_status || targetKv.skip_top_status || "",
+          skipControls: route.skip_controls || targetKv.skip_controls || "",
+          skipTrafficPanel: route.skip_traffic_panel || targetKv.skip_traffic_panel || "",
+          skipTraffic: route.skip_traffic || targetKv.skip_traffic || "",
+          recordVideo: route.record_video || targetKv.record_video || "",
+          videosCount: maybeNumber(route.videos_count),
+          screenshotsCount: maybeNumber(route.screenshots_count),
+          maxRunSeconds: maybeNumber(route.max_run_seconds),
+          scaleBands: targetKv.scale_bands || "",
+          phaseName: targetKv.phase_name || "",
+          phaseZoomPlan: targetKv.phase_zoom_plan || "",
+          phaseGesturePlan: targetKv.phase_gesture_plan || "",
+          workloadTargetMs: parseTargetMotionMs(targetKv.phase_zoom_plan),
           routeFocusPassed: route.route_focus_passed || "",
           acceptedEvidence: route.accepted_optimizer_evidence || "",
           acceptedReason: route.accepted_optimizer_evidence_reason || "",
           samples: maybeNumber(route.route_focus_samples),
           maxDistanceKm: maybeNumber(route.route_focus_max_distance_km),
-          frames: row.Frames,
-          rawTimelineFrames: row.RawTimelineFrames,
+          frames: timelineMetric("frames", row.Frames),
+          rawTimelineFrames: timelineMetric("rawTimelineFrames", row.RawTimelineFrames),
           histogramFrames: row.HistogramFrames,
-          presentIntervals: row.PresentIntervals,
-          sampleSeconds: row.SampleSeconds,
-          producedFps: row.ProducedFps,
-          presentMeanFps: row.PresentMeanFps,
-          p50Ms: row.P50Ms,
-          p95Ms: row.P95Ms,
-          p99Ms: row.P99Ms,
-          presentP50Ms: row.PresentP50Ms,
-          presentP95Ms: row.PresentP95Ms,
-          presentP99Ms: row.PresentP99Ms,
-          presentDrop120Pct: row.PresentDrop120Pct,
-          latencyMiss120Pct: row.LatencyMiss120Pct,
+          presentIntervals: timelineMetric("presentIntervals", row.PresentIntervals),
+          sampleSeconds: timelineMetric("sampleSeconds", row.SampleSeconds),
+          producedFps: timelineMetric("producedFps", row.ProducedFps),
+          presentMeanFps: timelineMetric("presentMeanFps", row.PresentMeanFps),
+          p50Ms: timelineMetric("p50Ms", row.P50Ms),
+          p95Ms: timelineMetric("p95Ms", row.P95Ms),
+          p99Ms: timelineMetric("p99Ms", row.P99Ms),
+          androidFrames: androidGfx.androidFrames || "",
+          androidSampleSeconds: androidGfx.androidSampleSeconds || "",
+          androidProducedFps: androidGfx.androidProducedFps || "",
+          androidP50Ms: androidGfx.androidP50Ms || "",
+          androidP90Ms: androidGfx.androidP90Ms || "",
+          androidP95Ms: androidGfx.androidP95Ms || "",
+          androidP99Ms: androidGfx.androidP99Ms || "",
+          presentP50Ms: timelineMetric("presentP50Ms", row.PresentP50Ms),
+          presentP95Ms: timelineMetric("presentP95Ms", row.PresentP95Ms),
+          presentP99Ms: timelineMetric("presentP99Ms", row.PresentP99Ms),
+          presentDrop120Pct: timelineMetric("presentDrop120Pct", row.PresentDrop120Pct),
+          latencyMiss120Pct: timelineMetric("latencyMiss120Pct", row.LatencyMiss120Pct),
           androidJankPct: row.AndroidJank,
           summaryFile: path.relative(ROOT, summary).replace(/\\/g, "/"),
         });
@@ -941,21 +1303,37 @@ function setWidths(sheet, widths) {
 }
 
 function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelationRows, ledgerRows) {
-  const latest = runRows[runRows.length - 1] || {};
+  const enrichedRunRows = runRows.map(withChartEligibility);
+  const eligibleChartRows = enrichedRunRows.filter((row) => row.chartEligible === "Yes");
+  const workbookTestRows = enrichedRunRows.filter((row) => row.workbookTestEligible === "Yes");
+  const latest = enrichedRunRows[enrichedRunRows.length - 1] || {};
+  const latestEligible = workbookTestRows[workbookTestRows.length - 1] || {};
+  const bestEligible = workbookTestRows.slice().sort(compareRunPerformance)[0] || {};
+  const activeChartKey = latestEligible.runId ? comparableSeriesKey(latestEligible, true) : "";
+  const activeChartRows = activeChartKey
+    ? workbookTestRows.filter((row) => comparableSeriesKey(row, true) === activeChartKey)
+    : workbookTestRows;
   const dashboardRows = [
     ["Flight Alert Performance Workbook"],
     [],
     ["Metric", "Value", "Notes"],
     ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
+    ["Chart-eligible full runs", eligibleChartRows.length, "Route proof passed, full UI/traffic visibility explicit, no skip/video/diagnostic run, holistic workload"],
+    ["Workbook-test comparable runs", workbookTestRows.length, "Standardized benchmark lane used for charts and checkpoint decisions"],
     ["Detailed audit rows", auditRows.length, "Parsed Debug draw perf current/maxFrameDetail rows with phase-level timing columns"],
     ["Trace audit rows", traceAuditRows.length, "Parsed FrameTimeline/Perfetto summaries where present"],
     ["Frame correlation rows", frameCorrelationRows.rows.length, "One row per matched frame-tokened Perfetto frame"],
     ["Optimization ledger rows", ledgerRows.length, "Moved from AGENTS.md; full notes are split across text columns"],
     ["Latest run", latest.runId || "", latest.artifactDir || ""],
-    ["Latest produced FPS", latest.producedFps || "", "From summary-120hz.csv"],
+    ["Latest full produced FPS", chartProducedFps(latest) || "", "From Android full-window gfxinfo when available, otherwise FrameTimeline"],
+    ["Latest FrameTimeline produced FPS", latest.producedFps || "", "From summary-120hz.csv latest FrameTimeline rows"],
     ["Latest present mean FPS", latest.presentMeanFps || "", "From FrameTimeline present intervals"],
-    ["Latest p95 ms", latest.p95Ms || "", "Frame timing p95"],
+    ["Latest full P95 ms", chartP95Ms(latest) || "", "From Android full-window gfxinfo when available, otherwise FrameTimeline"],
+    ["Latest FrameTimeline P95 ms", latest.p95Ms || "", "Latest FrameTimeline p95"],
     ["Latest Android jank %", latest.androidJankPct || "", "Parsed AndroidJank percentage"],
+    ["Latest workbook-test run", latestEligible.runId || "", latestEligible.artifactDir || ""],
+    ["Best workbook-test run", bestEligible.runId || "", bestEligible.artifactDir || ""],
+    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; dirty/nonmatching series stay out of Chart Data"],
   ];
 
   const runHeaders = [
@@ -970,6 +1348,27 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Borders",
     "Map Detail Timing",
     "Traffic Detail Timing",
+    "Skip Chrome",
+    "Skip Top Status",
+    "Skip Controls",
+    "Skip Traffic Panel",
+    "Skip Traffic",
+    "Record Video",
+    "Videos",
+    "Screenshots",
+    "Max Run Seconds",
+    "Workload Target ms",
+    "Scale Bands",
+    "Phase Name",
+    "Phase Zoom Plan",
+    "Phase Gesture Plan",
+    "Chart Eligible",
+    "Chart Workload Level",
+    "Chart Exclusion Reason",
+    "Workbook Test Eligible",
+    "Workbook Test Lane",
+    "Benchmark Region",
+    "Workbook Test Exclusion Reason",
     "Route Proof",
     "Accepted Evidence",
     "Accepted Reason",
@@ -982,9 +1381,16 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Sample Seconds",
     "Produced FPS",
     "Present Mean FPS",
-    "P50 ms",
-    "P95 ms",
-    "P99 ms",
+    "FrameTimeline P50 ms",
+    "FrameTimeline P95 ms",
+    "FrameTimeline P99 ms",
+    "Android Full Frames",
+    "Android Full Sample Seconds",
+    "Android Full Produced FPS",
+    "Android Full P50 ms",
+    "Android Full P90 ms",
+    "Android Full P95 ms",
+    "Android Full P99 ms",
     "Present P50 ms",
     "Present P95 ms",
     "Present P99 ms",
@@ -993,7 +1399,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Android Jank %",
     "Summary File",
   ];
-  const runData = [runHeaders, ...runRows.map((row) => [
+  const runData = [runHeaders, ...enrichedRunRows.map((row) => [
     row.runDate,
     row.runId,
     row.artifactDir,
@@ -1005,6 +1411,27 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.borders,
     row.mapDetailTiming,
     row.trafficDetailTiming,
+    row.skipChrome,
+    row.skipTopStatus,
+    row.skipControls,
+    row.skipTrafficPanel,
+    row.skipTraffic,
+    row.recordVideo,
+    row.videosCount,
+    row.screenshotsCount,
+    row.maxRunSeconds,
+    row.workloadTargetMs,
+    row.scaleBands,
+    row.phaseName,
+    row.phaseZoomPlan,
+    row.phaseGesturePlan,
+    row.chartEligible,
+    row.chartWorkloadLevel,
+    row.chartExclusionReason,
+    row.workbookTestEligible,
+    row.workbookTestLane,
+    row.benchmarkRegion,
+    row.workbookTestExclusionReason,
     row.routeFocusPassed,
     row.acceptedEvidence,
     safeText(row.acceptedReason, 1000),
@@ -1020,6 +1447,13 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.p50Ms,
     row.p95Ms,
     row.p99Ms,
+    row.androidFrames,
+    row.androidSampleSeconds,
+    row.androidProducedFps,
+    row.androidP50Ms,
+    row.androidP90Ms,
+    row.androidP95Ms,
+    row.androidP99Ms,
     row.presentP50Ms,
     row.presentP95Ms,
     row.presentP99Ms,
@@ -1223,24 +1657,218 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.note3,
   ])];
 
-  const recent = runRows.slice(-40);
+  const workbookTestHeaders = [
+    "Run Date",
+    "Run",
+    "Workbook Test Lane",
+    "Benchmark Region",
+    "City",
+    "Map Source",
+    "Roads",
+    "Borders",
+    "Max Run Seconds",
+    "Workload Target ms",
+    "Frame Sample Seconds",
+    "Scale Bands",
+    "Full Produced FPS",
+    "FrameTimeline Produced FPS",
+    "Present Mean FPS",
+    "FrameTimeline P50 ms",
+    "FrameTimeline P95 ms",
+    "FrameTimeline P99 ms",
+    "Full P50 ms",
+    "Full P95 ms",
+    "Full P99 ms",
+    "Present P50 ms",
+    "Present P95 ms",
+    "Present P99 ms",
+    "Present Drop 120 %",
+    "Latency Miss 120 %",
+    "Android Jank %",
+    "Route Max Km",
+    "Run ID",
+    "Artifact Dir",
+  ];
+  const workbookTestData = [workbookTestHeaders, ...workbookTestRows.map((row) => [
+    row.runDate,
+    shortChartRunLabel(row),
+    row.workbookTestLane,
+    row.benchmarkRegion,
+    row.city,
+    row.mapSource,
+    row.roads,
+    row.borders,
+    row.maxRunSeconds,
+    row.workloadTargetMs,
+    row.sampleSeconds,
+    row.scaleBands,
+    chartProducedFps(row),
+    row.producedFps,
+    row.presentMeanFps,
+    row.p50Ms,
+    row.p95Ms,
+    row.p99Ms,
+    row.androidP50Ms,
+    chartP95Ms(row),
+    row.androidP99Ms,
+    row.presentP50Ms,
+    row.presentP95Ms,
+    row.presentP99Ms,
+    row.presentDrop120Pct,
+    row.latencyMiss120Pct,
+    row.androidJankPct,
+    row.maxDistanceKm,
+    row.runId,
+    row.artifactDir,
+  ])];
+
+  const bestGroups = new Map();
+  for (const row of workbookTestRows) {
+    const key = comparableSeriesKey(row, true);
+    const current = bestGroups.get(key);
+    if (!current || compareRunPerformance(row, current) < 0) bestGroups.set(key, row);
+  }
+  const bestRows = Array.from(bestGroups.values()).sort((a, b) => {
+    const byLane = String(a.workbookTestLane).localeCompare(String(b.workbookTestLane));
+    if (byLane) return byLane;
+    const byRegion = String(a.benchmarkRegion).localeCompare(String(b.benchmarkRegion));
+    if (byRegion) return byRegion;
+    const byCity = String(a.city).localeCompare(String(b.city));
+    if (byCity) return byCity;
+    return compareRunPerformance(a, b);
+  });
+  const bestByWorkloadRows = [
+    ["Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Present P95 ms", "Android Jank %", "Max Run Seconds", "Workload Target ms", "Frame Sample Seconds", "Full Sample Seconds", "Route Max Km", "Run ID", "Artifact Dir"],
+    ...bestRows.map((row) => [
+      row.workbookTestLane,
+      row.benchmarkRegion,
+      row.city,
+      row.mapSource,
+      row.roads,
+      row.borders,
+      chartProducedFps(row),
+      row.presentMeanFps,
+      chartP95Ms(row),
+      row.presentP95Ms,
+      row.androidJankPct,
+      row.maxRunSeconds,
+      row.workloadTargetMs,
+      row.sampleSeconds,
+      row.androidSampleSeconds,
+      row.maxDistanceKm,
+      row.runId,
+      row.artifactDir,
+    ]),
+  ];
+
+  const versionSummaryGroups = new Map();
+  for (const row of workbookTestRows) {
+    const version = workbookTestVersionLabel(row);
+    const key = [version, comparableSeriesKey(row, true)].join(" | ");
+    if (!versionSummaryGroups.has(key)) {
+      versionSummaryGroups.set(key, {
+        version,
+        workbookTestLane: row.workbookTestLane,
+        benchmarkRegion: row.benchmarkRegion,
+        city: row.city,
+        mapSource: row.mapSource,
+        roads: row.roads,
+        borders: row.borders,
+        rows: [],
+      });
+    }
+    versionSummaryGroups.get(key).rows.push(row);
+  }
+  const versionSummary = Array.from(versionSummaryGroups.values()).sort((a, b) => {
+    const byLane = String(a.workbookTestLane).localeCompare(String(b.workbookTestLane));
+    if (byLane) return byLane;
+    const byRegion = String(a.benchmarkRegion).localeCompare(String(b.benchmarkRegion));
+    if (byRegion) return byRegion;
+    const byCity = String(a.city).localeCompare(String(b.city));
+    if (byCity) return byCity;
+    const producedDelta = (averageMetric(b.rows, chartProducedFps) || -Infinity) - (averageMetric(a.rows, chartProducedFps) || -Infinity);
+    if (producedDelta) return producedDelta;
+    const presentDelta = (averageMetric(b.rows, (row) => row.presentMeanFps) || -Infinity) - (averageMetric(a.rows, (row) => row.presentMeanFps) || -Infinity);
+    if (presentDelta) return presentDelta;
+    return String(a.version).localeCompare(String(b.version));
+  });
+  const workbookTestSummaryRows = [
+    ["Version", "Workbook Test Lane", "Benchmark Region", "City", "Map Source", "Roads", "Borders", "Comparable Runs", "Avg Full Produced FPS", "Best Full Produced FPS", "Avg FrameTimeline Produced FPS", "Avg Present Mean FPS", "Avg Full P95 ms", "Best Full P95 ms", "Avg Present P95 ms", "Avg Android Jank %", "Avg Route Max Km", "Run IDs"],
+    ...versionSummary.map((group) => [
+      group.version,
+      group.workbookTestLane,
+      group.benchmarkRegion,
+      group.city,
+      group.mapSource,
+      group.roads,
+      group.borders,
+      group.rows.length,
+      averageMetric(group.rows, chartProducedFps),
+      bestHighMetric(group.rows, chartProducedFps),
+      averageMetric(group.rows, (row) => row.producedFps),
+      averageMetric(group.rows, (row) => row.presentMeanFps),
+      averageMetric(group.rows, chartP95Ms),
+      bestLowMetric(group.rows, chartP95Ms),
+      averageMetric(group.rows, (row) => row.presentP95Ms),
+      averageMetric(group.rows, (row) => row.androidJankPct),
+      averageMetric(group.rows, (row) => row.maxDistanceKm),
+      group.rows.map((row) => row.runId).join("\n"),
+    ]),
+  ];
+
+  const workbookExclusionRows = [
+    ["Run Date", "Run ID", "Test", "City", "Map Source", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
+    ...enrichedRunRows
+      .filter((row) => row.workbookTestEligible !== "Yes")
+      .map((row) => [
+        row.runDate,
+        row.runId,
+        row.testName,
+        row.city,
+        row.mapSource,
+        row.routeFocusPassed,
+        row.maxRunSeconds,
+        row.workloadTargetMs,
+        row.skipTraffic,
+        row.recordVideo,
+        row.workbookTestLane,
+        row.workbookTestExclusionReason,
+        row.artifactDir,
+      ]),
+  ];
+
+  const recent = activeChartRows.slice(-40);
   const chartRows = [
-    ["Run", "Produced FPS", "Present Mean FPS", "P95 ms", "Android Jank %"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
     ...recent.map((row) => [
-      String(row.runId || "").slice(-38),
-      row.producedFps || "",
+      shortChartRunLabel(row),
+      chartProducedFps(row),
       row.presentMeanFps || "",
-      row.p95Ms || "",
+      chartP95Ms(row),
       row.androidJankPct || "",
+      row.workbookTestLane || "",
+      row.benchmarkRegion || "",
+      row.city || "",
+      row.mapSource || "",
+      row.roads || "",
+      row.borders || "",
+      row.maxRunSeconds || "",
+      row.workloadTargetMs || "",
+      row.sampleSeconds || "",
+      row.androidSampleSeconds || "",
+      row.presentP95Ms || "",
+      row.maxDistanceKm || "",
+      row.runId || "",
+      row.artifactDir || "",
     ]),
   ];
   const now = new Date().toISOString();
   const checkRows = [
     ["When", "Category", "Status", "Evidence / Command", "Notes"],
-    [now, "Android Studio warning audit", "clean", "android-studio-mcp-call --file-problems FlightAlertRewritten.kt --warnings --timeout 120000", "Returned no warnings after scoped cleanup"],
-    [now, "Gradle compile", "passed", ".\\gradlew.bat compileDebugKotlin", "Build successful"],
-    [now, "Gradle assemble", "passed", ".\\gradlew.bat assembleDebug", "Build successful"],
-    [now, "Android Studio build_project", "reported/recovered", "android-studio-mcp-call --build-project --timeout 180000", "Use first-class wrapper command; if Kotlin incremental cache corruption appears, trust Gradle and retry IDE rebuild once"],
+    [now, "Android Studio warning audit", "clean", "android-studio-mcp-call --file-problems app/src/androidTest/java/com/flightalert/perf/FlightMapGesturePerfTest.java --warnings --timeout 150000", "Returned no warnings/errors for the touched Android test harness file"],
+    [now, "Gradle androidTest compile", "passed", ".\\gradlew.bat compileDebugAndroidTestJavaWithJavac", "Main and compare-worktree benchmark harness compiles succeeded before physical-device runs"],
+    [now, "Android Studio build_project", "passed", "android-studio-mcp-call --build-project --timeout 180000", "Build succeeded with buildDiagnostics.failureClass=none"],
+    [now, "Workbook formula scan", "passed", "BuildFlightAlertPerformanceWorkbook.mjs", "Workbook rebuild reported formulaErrorMatches=[]"],
     [now, "Workbook policy", "active", "docs/flightalert-performance-metrics.xlsx", "Detailed audits and optimization ledger live here; AGENTS keeps rules and pointer"],
   ];
   const noteRows = [
@@ -1249,7 +1877,11 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Detailed Audits sheet", `Rows are parsed from Debug draw perf logcat lines as current and maxFrameDetail rows where present. The sheet stores detailed phase/timing/counter columns, not only simplified run summaries. Raw detail snippets are capped at ${AUDIT_RAW_SNIPPET_MAX_CHARS} characters because all structured timing/counter values are stored in their own columns.`],
     ["Trace Audits sheet", "Rows are parsed from frametimeline-summary.json, exclusive-traffic-summary.json, renderthread-frame-summary.json, and frame-correlation-summary.json artifacts produced from Perfetto Trace Processor SQL. Use these for AppDeadlineMissed, buffer/display composition, direct-symbol gates, exclusive-traffic gates, RenderThread/postAndWait/GPU-wait diagnostics, and frame-correlation stop/go summaries."],
     ["Frame Correlations sheet", "Rows are parsed from frame-correlation-frames.csv artifacts. This sheet stores the detailed per-frame matched trace/log metrics used for correlation decisions, not only simplified summaries."],
-    ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, route proof, and accepted-evidence fields together."],
+    ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, route proof, accepted-evidence, and eligibility fields together."],
+    ["Workbook Tests sheet", "This is the apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be full visible UI/traffic runs, route-proofed, non-video, non-diagnostic, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
+    ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
+    ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty, diagnostic, hidden-aircraft, route-failed, video, too-short, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
+    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, and borders. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
     ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
     ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
   ];
@@ -1264,15 +1896,16 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         freeze: "A3",
         merges: ["A1:F1"],
         titleCells: ["A1"],
-        numberFormats: [["B8:B11", "0.0"]],
+        numberFormats: [["B10:B16", "0.0"]],
       },
       {
         name: "Runs",
         rows: runData,
-        widths: [20, 42, 54, 34, 22, 22, 14, 10, 10, 16, 18, 12, 16, 60, 12, 16, 10, 18, 16, 16, 14, 14, 18, 12, 12, 12, 16, 16, 16, 18, 18, 16, 58],
+        widths: [20, 42, 54, 34, 22, 22, 14, 10, 10, 16, 18, 12, 16, 12, 18, 12, 14, 10, 12, 16, 18, 18, 18, 50, 34, 44, 22, 58, 12, 16, 60, 12, 16, 10, 18, 16, 16, 14, 14, 18, 12, 12, 12, 16, 16, 16, 18, 18, 16, 58],
         freeze: "C2",
         table: "PerformanceRuns",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["O2:AF1048576", "0.0"]],
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["Q2:T1048576", "0.0"], ["AE2:AV1048576", "0.0"]],
+        wrapCols: [23, 27, 30],
       },
       {
         name: "Detailed Audits",
@@ -1305,11 +1938,48 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         wrapCols: [8, 9, 10, 11, 12],
       },
       {
+        name: "Workbook Tests",
+        rows: workbookTestData,
+        widths: [20, 52, 44, 18, 22, 14, 10, 10, 16, 18, 18, 38, 18, 24, 24, 18, 18, 18, 14, 14, 14, 16, 16, 16, 18, 18, 16, 16, 42, 58],
+        freeze: "B2",
+        table: "WorkbookTests",
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["I2:AB1048576", "0.0"]],
+        wrapCols: [2, 3, 11, 28, 29],
+      },
+      {
+        name: "Workbook Test Summary",
+        rows: workbookTestSummaryRows,
+        widths: [46, 44, 18, 22, 14, 10, 10, 16, 20, 20, 28, 24, 18, 18, 18, 18, 18, 78],
+        freeze: "B2",
+        table: "WorkbookTestSummary",
+        numberFormats: [["H2:Q1048576", "0.0"]],
+        wrapCols: [1, 2, 18],
+      },
+      {
+        name: "Best By Workload",
+        rows: bestByWorkloadRows,
+        widths: [44, 18, 22, 14, 10, 10, 18, 28, 14, 16, 16, 16, 18, 24, 18, 16, 42, 58],
+        freeze: "A2",
+        table: "BestByWorkload",
+        numberFormats: [["G2:P1048576", "0.0"]],
+        wrapCols: [1, 16, 17],
+      },
+      {
+        name: "Workbook Test Exclusions",
+        rows: workbookExclusionRows,
+        widths: [20, 42, 34, 22, 14, 12, 16, 18, 12, 14, 44, 78, 58],
+        freeze: "B2",
+        table: "WorkbookTestExclusions",
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["G2:H1048576", "0.0"]],
+        wrapCols: [10, 11, 12],
+      },
+      {
         name: "Chart Data",
         rows: chartRows,
-        widths: [44, 16, 20, 14, 18, 4, 22, 22, 22, 22, 22, 22, 22, 22],
+        widths: [52, 18, 28, 14, 18, 44, 18, 22, 14, 10, 10, 16, 18, 24, 18, 16, 16, 42, 58],
         freeze: "A2",
         charts: true,
+        numberFormats: [["B2:E1048576", "0.0"], ["L2:Q1048576", "0.0"]],
       },
       {
         name: "Iteration Checks",
@@ -1404,7 +2074,7 @@ for spec in model["sheets"]:
         last_row = len(rows)
         sheet_name = spec["name"]
         fps = workbook.add_chart({"type": "line"})
-        fps.set_title({"name": "Recent Runs: Produced vs Present FPS"})
+        fps.set_title({"name": "Workbook Tests: Full Produced vs Present FPS"})
         fps.set_y_axis({"name": "FPS"})
         for col in ("B", "C"):
             fps.add_series({
@@ -1415,7 +2085,7 @@ for spec in model["sheets"]:
         ws.insert_chart("G2", fps, {"x_scale": 1.45, "y_scale": 1.25})
 
         timing = workbook.add_chart({"type": "line"})
-        timing.set_title({"name": "Recent Runs: P95 Frame Time And Jank"})
+        timing.set_title({"name": "Workbook Tests: Full P95 Frame Time And Jank"})
         timing.set_y_axis({"name": "ms / %"})
         for col in ("D", "E"):
             timing.add_series({

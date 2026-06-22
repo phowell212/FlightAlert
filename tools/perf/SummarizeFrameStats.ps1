@@ -29,6 +29,46 @@ function Read-AndroidSummaryValue {
     return $match.Line.Trim()
 }
 
+function Read-AndroidNumericValue {
+    param(
+        [string[]]$Lines,
+        [string]$Pattern
+    )
+    $match = $Lines | Select-String -Pattern $Pattern | Select-Object -First 1
+    if (-not $match) { return [double]::NaN }
+    $text = [string]$match.Matches[0].Groups[1].Value
+    $number = 0.0
+    if ([double]::TryParse($text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
+        return $number
+    }
+    return [double]::NaN
+}
+
+function Read-AndroidFullWindowSummary {
+    param([string[]]$Lines)
+
+    $uptimeMs = Read-AndroidNumericValue -Lines $Lines -Pattern "^Uptime:\s*(\d+)"
+    $statsSinceNs = Read-AndroidNumericValue -Lines $Lines -Pattern "^Stats since:\s*(\d+)ns"
+    $frames = Read-AndroidNumericValue -Lines $Lines -Pattern "^Total frames rendered:\s*(\d+)"
+    $sampleSeconds = [double]::NaN
+    if (-not [double]::IsNaN($uptimeMs) -and -not [double]::IsNaN($statsSinceNs)) {
+        $sampleSeconds = [Math]::Max(0.0, ($uptimeMs - ($statsSinceNs / 1000000.0)) / 1000.0)
+    }
+    $producedFps = [double]::NaN
+    if (-not [double]::IsNaN($sampleSeconds) -and $sampleSeconds -gt 0.0 -and -not [double]::IsNaN($frames)) {
+        $producedFps = $frames / $sampleSeconds
+    }
+    return [pscustomobject]@{
+        Frames = $frames
+        SampleSeconds = $sampleSeconds
+        ProducedFps = $producedFps
+        P50Ms = Read-AndroidNumericValue -Lines $Lines -Pattern "^50th percentile:\s*([0-9.]+)ms"
+        P90Ms = Read-AndroidNumericValue -Lines $Lines -Pattern "^90th percentile:\s*([0-9.]+)ms"
+        P95Ms = Read-AndroidNumericValue -Lines $Lines -Pattern "^95th percentile:\s*([0-9.]+)ms"
+        P99Ms = Read-AndroidNumericValue -Lines $Lines -Pattern "^99th percentile:\s*([0-9.]+)ms"
+    }
+}
+
 function Read-FrameTimelineDurations {
     param([string]$StatsPath)
 
@@ -130,6 +170,7 @@ function New-FrameStatsSummary {
     )
 
     $data = Read-FrameTimelineDurations -StatsPath $StatsPath
+    $androidFull = Read-AndroidFullWindowSummary -Lines $data.Lines
     $histogramDurations = Read-HistogramDurations -Lines $data.Lines
     $timelineDurations = $data.DurationsMs
     $durations = if ($timelineDurations.Count -gt 0) { $timelineDurations } else { $histogramDurations }
@@ -165,11 +206,14 @@ function New-FrameStatsSummary {
         Frames = $count
         RawTimelineFrames = $timelineDurations.Count
         HistogramFrames = $histogramDurations.Count
+        AndroidFullFrames = if (-not [double]::IsNaN($androidFull.Frames)) { [int]$androidFull.Frames } else { [double]::NaN }
         PresentIntervals = $presentCount
         TargetHz = [Math]::Round($TargetHz, 1)
         TargetBudgetMs = [Math]::Round($budgetMs, 2)
         SampleSeconds = [Math]::Round($sampleSeconds, 3)
+        AndroidFullSampleSeconds = if (-not [double]::IsNaN($androidFull.SampleSeconds)) { [Math]::Round($androidFull.SampleSeconds, 3) } else { [double]::NaN }
         ProducedFps = [Math]::Round($producedFps, 1)
+        AndroidFullProducedFps = if (-not [double]::IsNaN($androidFull.ProducedFps)) { [Math]::Round($androidFull.ProducedFps, 1) } else { [double]::NaN }
         MeanMs = [Math]::Round($mean, 2)
         MeanEquivalentFps = if ($mean -gt 0.0) { [Math]::Round(1000.0 / $mean, 1) } else { [double]::NaN }
         OverTarget = $overTarget
@@ -182,6 +226,10 @@ function New-FrameStatsSummary {
         P90Ms = [Math]::Round($p90, 2)
         P95Ms = [Math]::Round($p95, 2)
         P99Ms = [Math]::Round($p99, 2)
+        AndroidFullP50Ms = if (-not [double]::IsNaN($androidFull.P50Ms)) { [Math]::Round($androidFull.P50Ms, 2) } else { [double]::NaN }
+        AndroidFullP90Ms = if (-not [double]::IsNaN($androidFull.P90Ms)) { [Math]::Round($androidFull.P90Ms, 2) } else { [double]::NaN }
+        AndroidFullP95Ms = if (-not [double]::IsNaN($androidFull.P95Ms)) { [Math]::Round($androidFull.P95Ms, 2) } else { [double]::NaN }
+        AndroidFullP99Ms = if (-not [double]::IsNaN($androidFull.P99Ms)) { [Math]::Round($androidFull.P99Ms, 2) } else { [double]::NaN }
         PresentP50Ms = [Math]::Round($presentP50, 2)
         PresentMeanMs = [Math]::Round($presentMean, 2)
         PresentMeanFps = if ($presentMean -gt 0.0) { [Math]::Round(1000.0 / $presentMean, 1) } else { [double]::NaN }
@@ -206,5 +254,5 @@ if ($Csv) {
     $summaries | ConvertTo-Csv -NoTypeInformation
 } else {
     $summaries |
-        Format-Table File, Frames, ProducedFps, PresentMeanFps, PresentP50Ms, PresentP95Ms, PresentP99Ms, MeanMs, P50Ms, P95Ms, P95EquivalentFps -AutoSize
+        Format-Table File, AndroidFullFrames, AndroidFullProducedFps, PresentMeanFps, AndroidFullP95Ms, PresentP95Ms, AndroidJank, ProducedFps, P95Ms -AutoSize
 }
