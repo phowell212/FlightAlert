@@ -210,7 +210,7 @@ Use `tools/perf/BuildFlightAlertPerformanceWorkbook.mjs` to rebuild the workbook
 
 Keep this AGENTS file focused on rules and workflow. Do not paste long optimization-history entries here after June 22, 2026 unless the workbook is unavailable and the note is needed to prevent evidence loss; if that happens, migrate the note back into the workbook at the next opportunity.
 
-Historical optimization notes that were temporarily parked here during workbook lock periods have been migrated into the workbook `Optimization Ledger`. The verified preview workbook at `%TEMP%\flightalert-performance-preview.xlsx` may be the current ledger source while Excel has `docs/flightalert-performance-metrics.xlsx` locked; rebuild the canonical workbook when it is writable.
+Historical optimization notes that were temporarily parked here during workbook lock periods have been migrated into the workbook `Optimization Ledger`. Keep exactly one durable performance notebook: `docs/flightalert-performance-metrics.xlsx`. A temporary preview at `%TEMP%\flightalert-performance-preview.xlsx` is only a disposable staging artifact when Excel blocks direct writes; copy the verified preview back over the canonical workbook as soon as the file is writable, then delete or ignore the preview. Do not let the preview become a second source of truth.
 
 ## 17. Security / Privacy
 
