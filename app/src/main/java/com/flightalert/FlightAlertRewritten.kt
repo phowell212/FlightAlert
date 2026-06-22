@@ -21879,13 +21879,6 @@ internal class SatelliteMapTileRenderer(
                 visible++
                 if (covers_center) center_visible++
                 val key = "${overlay.cache_key}/$tile_zoom/$tx/$ty"
-                val has_parent_fallback = parent_fallback_allowed &&
-                    reference_parent_fallback_available(
-                        z = tile_zoom,
-                        x = tx,
-                        y = ty,
-                        overlay = overlay
-                    )
                 val bitmap = reference_tile_bitmap(key)
                 if (bitmap != null) {
                     loaded++
@@ -21893,11 +21886,17 @@ internal class SatelliteMapTileRenderer(
                     if (reference_tile_load_alpha(key, now_ms) >= 0.999f) {
                         ready++
                         if (covers_center) center_ready++
-                    } else if (has_parent_fallback) {
-                        fallback_ready++
-                        if (covers_center) center_fallback_ready++
+                        continue
                     }
-                } else if (has_parent_fallback) {
+                }
+                val has_parent_fallback = parent_fallback_allowed &&
+                    reference_parent_fallback_available(
+                        z = tile_zoom,
+                        x = tx,
+                        y = ty,
+                        overlay = overlay
+                    )
+                if (has_parent_fallback) {
                     fallback_ready++
                     if (covers_center) center_fallback_ready++
                 }
@@ -22629,7 +22628,19 @@ internal class SatelliteMapTileRenderer(
         y: Int,
         overlay: ReferenceTileOverlay
     ): Boolean {
-        return reference_parent_tile_fallback(z, x, y, overlay) != null
+        val min_parent_zoom = reference_parent_min_zoom(overlay)
+        if (z <= min_parent_zoom) return false
+        val max_depth = (z - min_parent_zoom).coerceAtMost(reference_parent_fallback_depth(overlay))
+        if (max_depth <= 0) return false
+        for (depth in 1..max_depth) {
+            val parent_z = z - depth
+            val scale = 1 shl depth
+            val parent_x = x / scale
+            val parent_y = y / scale
+            val parent_key = "${overlay.cache_key}/$parent_z/$parent_x/$parent_y"
+            if (reference_tile_bitmap(parent_key) != null) return true
+        }
+        return false
     }
 
     private fun reference_parent_tile_fallback(
