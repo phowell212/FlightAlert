@@ -566,6 +566,11 @@ function detailTimingLabel(value) {
   return "Unknown";
 }
 
+function dexoptSummary(text) {
+  const match = String(text || "").match(/Dexopt state:.*?arm64:\s*\[status=([^\]]+)\]\s*\[reason=([^\]]+)\]/s);
+  return match ? `${match[1]}/${match[2]}` : "";
+}
+
 function shortVersionLabel(row) {
   const version = workbookTestVersionLabel(row);
   if (version.includes("one-huge-file")) return "one-huge-file";
@@ -1068,6 +1073,8 @@ async function collectPerformanceRows() {
         const timelineMetric = (key, fallback) => (
           frameTimeline[key] !== undefined && frameTimeline[key] !== "" ? frameTimeline[key] : fallback
         );
+        const inRunPackageCompileEvidence = route.in_run_package_compile_evidence || route.package_compile_evidence || "";
+        const postRunPackageCompileEvidence = route.post_run_package_compile_evidence || "";
         runRows.push({
           runDate: stat.mtime || "",
           runId,
@@ -1098,8 +1105,9 @@ async function collectPerformanceRows() {
           testApkBytes: maybeNumber(route.test_apk_bytes),
           testApkLastWriteUtc: route.test_apk_last_write_utc || "",
           devicePackagePaths: route.device_package_paths || "",
-          inRunPackageCompileEvidence: route.in_run_package_compile_evidence || route.package_compile_evidence || "",
-          postRunPackageCompileEvidence: route.post_run_package_compile_evidence || "",
+          inRunPackageCompileEvidence,
+          postRunPackageCompileEvidence,
+          packageDexoptState: dexoptSummary(inRunPackageCompileEvidence) || dexoptSummary(postRunPackageCompileEvidence) || dexoptSummary(route.art_compile_package_evidence),
           batteryLevel: maybeNumber(route.battery_level),
           batteryTempC: maybeNumber(route.battery_temp_c),
           batteryStatus: route.battery_status || "",
@@ -1540,7 +1548,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Latest workbook-test Android jank %", latestEligible.androidJankPct || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Best single workbook-test run", bestEligible.runId || "", "Single-run marker only; use Best By Workload and Workbook Test Summary for checkpoint decisions"],
     ["Best workbook-test version", bestVersionSummary.version || "", `${bestVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
-    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires explicit clean git stamp and aircraft draw evidence; dirty/nonmatching series stay out of Chart Data"],
+    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires explicit clean git stamp and aircraft draw evidence; dirty/nonmatching series stay out of Chart Data; thermal/ART columns expose environment caveats"],
   ];
 
   const runHeaders = [
@@ -1575,6 +1583,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Device Package Paths",
     "In-Run Package Compile Evidence",
     "Post-Run Package Compile Evidence",
+    "Package Dexopt State",
     "Battery Level",
     "Battery Temp C",
     "Battery Status",
@@ -1675,6 +1684,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     safeText(row.devicePackagePaths, 1200),
     safeText(row.inRunPackageCompileEvidence, 3600),
     safeText(row.postRunPackageCompileEvidence, 2200),
+    row.packageDexoptState,
     row.batteryLevel,
     row.batteryTempC,
     row.batteryStatus,
@@ -1956,6 +1966,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     "Git Branch",
     "Git Commit",
     "Aircraft Draw Evidence",
+    "Battery Temp C",
+    "Thermal Status",
+    "Package Dexopt State",
+    "ART Compile Mode",
     "Full Produced FPS",
     "FrameTimeline Produced FPS",
     "Present Mean FPS",
@@ -1993,6 +2007,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     row.gitBranch,
     row.gitCommit,
     row.aircraftDrawEvidence,
+    row.batteryTempC,
+    row.thermalStatus,
+    row.packageDexoptState,
+    row.artCompileMode,
     chartProducedFps(row),
     row.producedFps,
     row.presentMeanFps,
@@ -2098,7 +2116,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
 
   const recent = activeChartRows.slice(-40);
   const chartRows = [
-    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Git Branch", "Git Commit", "Aircraft Draw Evidence", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Git Branch", "Git Commit", "Aircraft Draw Evidence", "Battery Temp C", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
     ...recent.map((row) => [
       shortChartRunLabel(row),
       chartProducedFps(row),
@@ -2116,6 +2134,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       row.gitBranch || "",
       row.gitCommit || "",
       row.aircraftDrawEvidence || "",
+      row.batteryTempC || "",
+      row.thermalStatus || "",
+      row.packageDexoptState || "",
+      row.artCompileMode || "",
       row.maxRunSeconds || "",
       row.workloadTargetMs || "",
       row.sampleSeconds || "",
@@ -2145,7 +2167,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Workbook Tests sheet", "This is the apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be explicit clean-git runs, full visible UI/traffic runs with aircraft draw evidence, route-proofed, non-video, non-diagnostic, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
     ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders/detail-timing state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
     ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty or missing-git-stamp, diagnostic, hidden-aircraft/no-aircraft-evidence, route-failed, video, too-short, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
-    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Chart rows require git_worktree_dirty=false recorded at run start and aircraft draw evidence in Debug draw perf. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
+    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Chart rows require git_worktree_dirty=false recorded at run start and aircraft draw evidence in Debug draw perf. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. Battery, thermal, and ART/dexopt columns expose environment caveats beside the FPS/p95 rows. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
     ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
     ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
   ];
