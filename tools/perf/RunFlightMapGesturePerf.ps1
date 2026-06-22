@@ -157,6 +157,121 @@ function Get-GitWorktreeEvidence {
     return [pscustomobject]$evidence
 }
 
+function Join-BenchmarkEvidenceSnippet {
+    param(
+        [string[]]$Lines,
+        [int]$MaxLines = 30,
+        [int]$MaxChars = 1800
+    )
+    $snippet = @($Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First $MaxLines | ForEach-Object {
+        ($_ -replace "`r|`n", " ").Trim()
+    }) -join " | "
+    if ($snippet.Length -gt $MaxChars) {
+        return $snippet.Substring(0, $MaxChars) + "...truncated"
+    }
+    return $snippet
+}
+
+function Get-LocalApkEvidence {
+    param([string]$Path)
+    $evidence = [ordered]@{
+        Exists = $false
+        Bytes = ""
+        LastWriteUtc = ""
+        Sha256 = ""
+        Error = ""
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            $evidence.Error = "missing"
+            return [pscustomobject]$evidence
+        }
+        $file = Get-Item -LiteralPath $Path
+        $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256
+        $evidence.Exists = $true
+        $evidence.Bytes = $file.Length
+        $evidence.LastWriteUtc = $file.LastWriteTimeUtc.ToString("o")
+        $evidence.Sha256 = $hash.Hash.ToLowerInvariant()
+    } catch {
+        $evidence.Error = $_.Exception.Message
+    }
+    return [pscustomobject]$evidence
+}
+
+function Get-BenchmarkDeviceEvidence {
+    param(
+        [string]$RepoRoot,
+        [string]$PackageName
+    )
+    $debugApk = Get-LocalApkEvidence -Path (Join-Path $RepoRoot "app\build\outputs\apk\debug\app-debug.apk")
+    $testApk = Get-LocalApkEvidence -Path (Join-Path $RepoRoot "app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk")
+    $evidence = [ordered]@{
+        DebugApkExists = $debugApk.Exists
+        DebugApkBytes = $debugApk.Bytes
+        DebugApkLastWriteUtc = $debugApk.LastWriteUtc
+        DebugApkSha256 = $debugApk.Sha256
+        DebugApkError = $debugApk.Error
+        TestApkExists = $testApk.Exists
+        TestApkBytes = $testApk.Bytes
+        TestApkLastWriteUtc = $testApk.LastWriteUtc
+        TestApkSha256 = $testApk.Sha256
+        TestApkError = $testApk.Error
+        PackagePaths = ""
+        PackageCompileEvidence = ""
+        BatteryLevel = ""
+        BatteryTempC = ""
+        BatteryStatus = ""
+        BatteryPlugged = ""
+        ThermalStatus = ""
+        ThermalEvidence = ""
+        DisplayRefreshEvidence = ""
+        Error = ""
+    }
+    try {
+        $packagePaths = @(Invoke-Adb shell pm path $PackageName 2>$null)
+        $evidence.PackagePaths = Join-BenchmarkEvidenceSnippet -Lines $packagePaths -MaxLines 8 -MaxChars 1200
+    } catch {
+        $evidence.Error = "pm path failed: $($_.Exception.Message)"
+    }
+    try {
+        $packageDump = @(Invoke-Adb shell dumpsys package $PackageName 2>$null)
+        $compileLines = @($packageDump | Where-Object { $_ -match "(?i)dexopt|compiler|compile|profile|speed|verify|oat|odex" })
+        $evidence.PackageCompileEvidence = Join-BenchmarkEvidenceSnippet -Lines $compileLines -MaxLines 40 -MaxChars 2200
+    } catch {
+        $evidence.PackageCompileEvidence = "unavailable: $($_.Exception.Message)"
+    }
+    try {
+        $battery = @(Invoke-Adb shell dumpsys battery 2>$null)
+        foreach ($line in $battery) {
+            if ($line -match "^\s*level:\s*(\d+)") { $evidence.BatteryLevel = $Matches[1] }
+            if ($line -match "^\s*temperature:\s*(\d+)") { $evidence.BatteryTempC = ("{0:N1}" -f ([double]$Matches[1] / 10.0)) }
+            if ($line -match "^\s*status:\s*(\d+)") { $evidence.BatteryStatus = $Matches[1] }
+            if ($line -match "^\s*plugged:\s*(\d+)") { $evidence.BatteryPlugged = $Matches[1] }
+        }
+    } catch {
+        $evidence.BatteryStatus = "unavailable: $($_.Exception.Message)"
+    }
+    try {
+        $thermal = @(Invoke-Adb shell dumpsys thermalservice 2>$null)
+        foreach ($line in $thermal) {
+            if ($line -match "(?i)thermal\s+status:\s*([A-Za-z0-9_ -]+)") {
+                $evidence.ThermalStatus = $Matches[1].Trim()
+                break
+            }
+        }
+        $evidence.ThermalEvidence = Join-BenchmarkEvidenceSnippet -Lines $thermal -MaxLines 20 -MaxChars 1800
+    } catch {
+        $evidence.ThermalEvidence = "unavailable: $($_.Exception.Message)"
+    }
+    try {
+        $display = @(Invoke-Adb shell dumpsys display 2>$null | Where-Object { $_ -match "(?i)refresh|fps|mode|DisplayDeviceInfo" })
+        $evidence.DisplayRefreshEvidence = Join-BenchmarkEvidenceSnippet -Lines $display -MaxLines 35 -MaxChars 2200
+    } catch {
+        $evidence.DisplayRefreshEvidence = "unavailable: $($_.Exception.Message)"
+    }
+    return [pscustomobject]$evidence
+}
+
 function Assert-InlandCityArgument {
     if ([string]::IsNullOrWhiteSpace($City)) { return }
     $target = Get-LandSafeTarget -Name $City
@@ -737,6 +852,7 @@ $screenshots = @($pulledPaths | Where-Object { $_ -like "*.png" })
 $videos = @(Get-ChildItem -Path $outDir -Filter "*.mp4" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $targetArtifacts = @($pulledPaths | Where-Object { $_ -like "*-target.txt" })
 $routeFocusEvidence = Test-RouteFocusEvidence -LogcatPath $logcatPath -TargetArtifacts $targetArtifacts
+$deviceEvidence = Get-BenchmarkDeviceEvidence -RepoRoot $repoRoot -PackageName $packageName
 $contactSheetPath = ""
 $roadMotionStripPath = ""
 $roadMotionStripRequired = $RecordVideo -and $MapRoads -eq "On" -and $TestName.ToLowerInvariant().Contains("satellite")
@@ -767,6 +883,26 @@ $routeProof += "git_worktree_dirty=$($gitEvidence.WorktreeDirty)"
 $routeProof += "git_status_count=$($gitEvidence.StatusCount)"
 $routeProof += "git_status_short=$($gitEvidence.StatusShort)"
 $routeProof += "git_error=$($gitEvidence.Error)"
+$routeProof += "debug_apk_exists=$($deviceEvidence.DebugApkExists)"
+$routeProof += "debug_apk_bytes=$($deviceEvidence.DebugApkBytes)"
+$routeProof += "debug_apk_last_write_utc=$($deviceEvidence.DebugApkLastWriteUtc)"
+$routeProof += "debug_apk_sha256=$($deviceEvidence.DebugApkSha256)"
+$routeProof += "debug_apk_error=$($deviceEvidence.DebugApkError)"
+$routeProof += "test_apk_exists=$($deviceEvidence.TestApkExists)"
+$routeProof += "test_apk_bytes=$($deviceEvidence.TestApkBytes)"
+$routeProof += "test_apk_last_write_utc=$($deviceEvidence.TestApkLastWriteUtc)"
+$routeProof += "test_apk_sha256=$($deviceEvidence.TestApkSha256)"
+$routeProof += "test_apk_error=$($deviceEvidence.TestApkError)"
+$routeProof += "device_package_paths=$($deviceEvidence.PackagePaths)"
+$routeProof += "package_compile_evidence=$($deviceEvidence.PackageCompileEvidence)"
+$routeProof += "battery_level=$($deviceEvidence.BatteryLevel)"
+$routeProof += "battery_temp_c=$($deviceEvidence.BatteryTempC)"
+$routeProof += "battery_status=$($deviceEvidence.BatteryStatus)"
+$routeProof += "battery_plugged=$($deviceEvidence.BatteryPlugged)"
+$routeProof += "thermal_status=$($deviceEvidence.ThermalStatus)"
+$routeProof += "thermal_evidence=$($deviceEvidence.ThermalEvidence)"
+$routeProof += "display_refresh_evidence=$($deviceEvidence.DisplayRefreshEvidence)"
+$routeProof += "device_evidence_error=$($deviceEvidence.Error)"
 $routeProof += "city_argument=$City"
 $routeProof += "map_roads_argument=$MapRoads"
 $routeProof += "map_borders_argument=$MapBorders"
