@@ -532,10 +532,20 @@ function detailTimingLabel(value) {
   return "Unknown";
 }
 
+function shortVersionLabel(row) {
+  const version = workbookTestVersionLabel(row);
+  if (version.includes("one-huge-file")) return "one-huge-file";
+  if (version.includes("optimizer-master-exhausted")) return "optbaseline";
+  if (version.includes("current-before-refplanlazy")) return "current";
+  return safeText(version, 24);
+}
+
 function shortChartRunLabel(row) {
-  const run = String(row.runId || "").replace(/^flightalert-perf-/, "");
+  const runId = String(row.runId || "");
+  const run = runId.match(/(?:^|-)r(\d+)(?:$|-)/i)?.[1];
+  const suffix = run ? ` r${run}` : "";
   const city = row.city ? ` ${row.city}` : "";
-  return safeText(`${run}${city}`, 52);
+  return safeText(`${shortVersionLabel(row)}${suffix}${city}`, 52);
 }
 
 function workbookTestVersionLabel(row) {
