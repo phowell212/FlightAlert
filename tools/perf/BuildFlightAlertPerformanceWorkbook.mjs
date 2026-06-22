@@ -18,6 +18,9 @@ const PREVIEW_DIR = path.join(
   process.env.TEMP || path.join(ROOT, "build", "tmp"),
   "flightalert-performance-workbook-preview"
 );
+const CONTROLLED_THERMAL_STATUS = 0;
+const CONTROLLED_PACKAGE_DEXOPT_STATE = "verify/install-speg";
+const CONTROLLED_ART_COMPILE_MODE = "InstallDefault";
 
 const PALETTE = {
   navy: "#1F4E79",
@@ -482,9 +485,7 @@ function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
   if (row.harnessExecutionMode && !/^gradleconnected$/i.test(String(row.harnessExecutionMode))) {
     reasons.push(`nonstandard harness execution: ${row.harnessExecutionMode}`);
   }
-  if (row.artCompileMode && !/^installdefault$/i.test(String(row.artCompileMode))) {
-    reasons.push(`nondefault ART compile mode: ${row.artCompileMode}`);
-  }
+  reasons.push(...comparisonEnvironmentControlReasons(row));
   if (isTrueValue(row.trafficDetailTiming) || isTrueValue(row.mapDetailTiming)) reasons.push("detail-timing diagnostic run");
   if (isTrueValue(row.recordVideo) || (finiteNumber(row.videosCount) || 0) > 0) reasons.push("video capture run");
   const diagnosticReason = chartDiagnosticReason(row);
@@ -498,6 +499,31 @@ function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
     if (finiteNumber(value) == null) reasons.push(`missing ${label}`);
   }
   return Array.from(new Set(reasons)).join("; ");
+}
+
+function comparisonEnvironmentControlReasons(row) {
+  const reasons = [];
+  const thermalStatus = finiteNumber(row.thermalStatus);
+  if (thermalStatus == null) {
+    reasons.push("missing thermal status control");
+  } else if (thermalStatus !== CONTROLLED_THERMAL_STATUS) {
+    reasons.push(`thermal status ${row.thermalStatus} != ${CONTROLLED_THERMAL_STATUS}`);
+  }
+
+  const packageDexoptState = String(row.packageDexoptState || "").trim();
+  if (!packageDexoptState) {
+    reasons.push("missing package dexopt state");
+  } else if (packageDexoptState.toLowerCase() !== CONTROLLED_PACKAGE_DEXOPT_STATE) {
+    reasons.push(`package dexopt state ${packageDexoptState} != ${CONTROLLED_PACKAGE_DEXOPT_STATE}`);
+  }
+
+  const artCompileMode = String(row.artCompileMode || "").trim();
+  if (!artCompileMode) {
+    reasons.push("missing ART compile mode");
+  } else if (artCompileMode.toLowerCase() !== CONTROLLED_ART_COMPILE_MODE.toLowerCase()) {
+    reasons.push(`ART compile mode ${artCompileMode} != ${CONTROLLED_ART_COMPILE_MODE}`);
+  }
+  return reasons;
 }
 
 function withChartEligibility(row, aircraftEvidence = null) {
@@ -1528,8 +1554,8 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     [],
     ["Metric", "Value", "Notes"],
     ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
-    ["Chart-eligible full runs", eligibleChartRows.length, "Route proof passed, full UI/traffic visibility explicit, no skip/video/diagnostic run, holistic workload"],
-    ["Workbook-test comparable runs", workbookTestRows.length, "Standardized benchmark lane used for charts and checkpoint decisions"],
+    ["Chart-eligible full runs", eligibleChartRows.length, "Route proof passed, full UI/traffic visibility explicit, no skip/video/diagnostic run, holistic workload, thermal 0, known baseline dexopt/ART"],
+    ["Workbook-test comparable runs", workbookTestRows.length, "Controlled standardized benchmark lane used for charts and checkpoint decisions"],
     ["Detailed audit rows", auditRows.length, "Parsed Debug draw perf current/maxFrameDetail rows with phase-level timing columns"],
     ["Trace audit rows", traceAuditRows.length, "Parsed FrameTimeline/Perfetto summaries where present"],
     ["Frame correlation rows", frameCorrelationRows.rows.length, "One row per matched frame-tokened Perfetto frame"],
@@ -1548,7 +1574,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Latest workbook-test Android jank %", latestEligible.androidJankPct || "", "Chart-eligible comparable run used for checkpoint decisions"],
     ["Best single workbook-test run", bestEligible.runId || "", "Single-run marker only; use Best By Workload and Workbook Test Summary for checkpoint decisions"],
     ["Best workbook-test version", bestVersionSummary.version || "", `${bestVersionSummary.rows?.length || 0} comparable run(s); avg full FPS ${averageMetric(bestVersionSummary.rows || [], chartProducedFps) || ""}; avg present FPS ${averageMetric(bestVersionSummary.rows || [], (row) => row.presentMeanFps) || ""}`],
-    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires explicit clean git stamp and aircraft draw evidence; dirty/nonmatching series stay out of Chart Data; thermal/ART columns expose environment caveats"],
+    ["User-facing chart scope", activeChartKey || "", "Latest comparable workbook-test series; requires clean git, aircraft draw evidence, thermal 0, known baseline package dexopt, and InstallDefault ART; dirty/nonmatching/uncontrolled series stay out of Chart Data"],
   ];
 
   const runHeaders = [
@@ -2090,7 +2116,7 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   ];
 
   const workbookExclusionRows = [
-    ["Run Date", "Run ID", "Test", "City", "Map Source", "Git Metadata", "Git Worktree Dirty", "Git Status Count", "Aircraft Draw Evidence", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
+    ["Run Date", "Run ID", "Test", "City", "Map Source", "Git Metadata", "Git Worktree Dirty", "Git Status Count", "Battery Temp C", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Aircraft Draw Evidence", "Route Proof", "Max Run Seconds", "Workload Target ms", "Skip Traffic", "Record Video", "Workbook Test Lane", "Reason", "Artifact Dir"],
     ...enrichedRunRows
       .filter((row) => row.workbookTestEligible !== "Yes")
       .map((row) => [
@@ -2102,6 +2128,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
         row.gitMetadataAvailable,
         row.gitWorktreeDirty,
         row.gitStatusCount,
+        row.batteryTempC,
+        row.thermalStatus,
+        row.packageDexoptState,
+        row.artCompileMode,
         row.aircraftDrawEvidence,
         row.routeFocusPassed,
         row.maxRunSeconds,
@@ -2115,37 +2145,24 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
   ];
 
   const recent = activeChartRows.slice(-40);
+  const chartNote = recent.length < 2
+    ? "Controlled chart needs at least two comparable rows. Rerun suspected versions under thermal 0, verify/install-speg package dexopt, and InstallDefault ART before selecting a best iteration."
+    : "";
   const chartRows = [
-    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Lane", "Region", "City", "Map Source", "Roads", "Borders", "Traffic Detail Timing", "Map Detail Timing", "Git Branch", "Git Commit", "Aircraft Draw Evidence", "Battery Temp C", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Max Run Seconds", "Workload Target ms", "FrameTimeline Sample Seconds", "Full Sample Seconds", "Present P95 ms", "Route Max Km", "Run ID", "Artifact Dir"],
+    ["Run", "Full Produced FPS", "FrameTimeline Present Mean FPS", "Full P95 ms", "Android Jank %", "Thermal Status", "Package Dexopt State", "ART Compile Mode", "Aircraft Draw Evidence", "Run ID", "Artifact Dir", "Chart Status"],
     ...recent.map((row) => [
       shortChartRunLabel(row),
       chartProducedFps(row),
       row.presentMeanFps || "",
       chartP95Ms(row),
       row.androidJankPct || "",
-      row.workbookTestLane || "",
-      row.benchmarkRegion || "",
-      row.city || "",
-      row.mapSource || "",
-      row.roads || "",
-      row.borders || "",
-      detailTimingLabel(row.trafficDetailTiming),
-      detailTimingLabel(row.mapDetailTiming),
-      row.gitBranch || "",
-      row.gitCommit || "",
-      row.aircraftDrawEvidence || "",
-      row.batteryTempC || "",
       row.thermalStatus || "",
       row.packageDexoptState || "",
       row.artCompileMode || "",
-      row.maxRunSeconds || "",
-      row.workloadTargetMs || "",
-      row.sampleSeconds || "",
-      row.androidSampleSeconds || "",
-      row.presentP95Ms || "",
-      row.maxDistanceKm || "",
+      row.aircraftDrawEvidence || "",
       row.runId || "",
       row.artifactDir || "",
+      chartNote,
     ]),
   ];
   const now = new Date().toISOString();
@@ -2164,10 +2181,10 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
     ["Trace Audits sheet", "Rows are parsed from frametimeline-summary.json, exclusive-traffic-summary.json, renderthread-frame-summary.json, and frame-correlation-summary.json artifacts produced from Perfetto Trace Processor SQL. Use these for AppDeadlineMissed, buffer/display composition, direct-symbol gates, exclusive-traffic gates, RenderThread/postAndWait/GPU-wait diagnostics, and frame-correlation stop/go summaries."],
     ["Frame Correlations sheet", "Rows are parsed from frame-correlation-frames.csv artifacts. This sheet stores the detailed per-frame matched trace/log metrics used for correlation decisions, not only simplified summaries."],
     ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, APK hash, package compile evidence, battery/thermal/display evidence, route proof, accepted-evidence, and eligibility fields together."],
-    ["Workbook Tests sheet", "This is the apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be explicit clean-git runs, full visible UI/traffic runs with aircraft draw evidence, route-proofed, non-video, non-diagnostic, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
+    ["Workbook Tests sheet", "This is the controlled apples-to-apples benchmark lane for user-facing charts and checkpoint decisions. Rows must be explicit clean-git runs, full visible UI/traffic runs with aircraft draw evidence, route-proofed, non-video, non-diagnostic, thermal status 0, known baseline package dexopt state, InstallDefault ART mode, and roughly minute-budget standardized workloads in timetable-selected US/EU dense traffic regions."],
     ["Workbook Test Summary sheet", "This sheet groups comparable Workbook Tests rows by version label and lane/city/map/roads/borders/detail-timing state, then stores average and best metrics for checkpoint selection. Use it with Chart Data when deciding whether the active baseline is consistently getting better or worse."],
-    ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty or missing-git-stamp, diagnostic, hidden-aircraft/no-aircraft-evidence, route-failed, video, too-short, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
-    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Chart rows require git_worktree_dirty=false recorded at run start and aircraft draw evidence in Debug draw perf. Raw recent runs and nonmatching cities/series stay out of the user-facing chart. Battery, thermal, and ART/dexopt columns expose environment caveats beside the FPS/p95 rows. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
+    ["Workbook Test Exclusions sheet", "Retroactive artifact cleanup lives here. Dirty or missing-git-stamp, diagnostic, hidden-aircraft/no-aircraft-evidence, route-failed, video, too-short, uncontrolled thermal/dexopt/ART state, and workload-specific runs are retained for auditability but excluded from the user-facing chart and best-version selection."],
+    ["Chart Data sheet", "Charts use only the active comparable Workbook Tests series matching the latest workbook-test lane, city, map mode, roads, borders, and detail-timing flags. Chart rows require git_worktree_dirty=false recorded at run start, aircraft draw evidence in Debug draw perf, thermal status 0, known baseline package dexopt state, and InstallDefault ART mode. Raw recent runs, nonmatching cities/series, and uncontrolled environment rows stay out of the user-facing chart. A consistently worsening chart in this lane is a failure unless the run is explicitly an experiment and excluded from checkpoint selection."],
     ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
     ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
   ];
@@ -2253,19 +2270,20 @@ function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelation
       {
         name: "Workbook Test Exclusions",
         rows: workbookExclusionRows,
-        widths: [20, 42, 34, 22, 14, 12, 16, 18, 12, 14, 44, 78, 58],
+        widths: [20, 42, 34, 22, 14, 12, 16, 18, 18, 14, 18, 18, 24, 12, 14, 18, 16, 14, 44, 78, 58],
         freeze: "B2",
         table: "WorkbookTestExclusions",
-        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["G2:H1048576", "0.0"]],
-        wrapCols: [10, 11, 12],
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["H2:J1048576", "0.0"], ["O2:P1048576", "0.0"]],
+        wrapCols: [13, 19, 20, 21],
       },
       {
         name: "Chart Data",
         rows: chartRows,
-        widths: [52, 18, 28, 14, 18, 44, 18, 22, 14, 10, 10, 18, 18, 16, 18, 24, 18, 16, 16, 42, 58],
+        widths: [52, 18, 28, 14, 18, 14, 18, 18, 32, 42, 58, 72],
         freeze: "A2",
-        charts: true,
-        numberFormats: [["B2:E1048576", "0.0"], ["N2:S1048576", "0.0"]],
+        charts: recent.length >= 2,
+        numberFormats: [["B2:E1048576", "0.0"], ["F2:F1048576", "0.0"]],
+        wrapCols: [12],
       },
       {
         name: "Iteration Checks",
@@ -2367,8 +2385,9 @@ for spec in model["sheets"]:
                 "name": "='%s'!$%s$1" % (sheet_name, col),
                 "categories": "='%s'!$A$2:$A$%d" % (sheet_name, last_row),
                 "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
+                "marker": {"type": "circle", "size": 5},
             })
-        ws.insert_chart("G2", fps, {"x_scale": 1.45, "y_scale": 1.25})
+        ws.insert_chart("M2", fps, {"x_scale": 1.45, "y_scale": 1.25})
 
         timing = workbook.add_chart({"type": "line"})
         timing.set_title({"name": "Workbook Tests: Full P95 Frame Time And Jank"})
@@ -2378,8 +2397,9 @@ for spec in model["sheets"]:
                 "name": "='%s'!$%s$1" % (sheet_name, col),
                 "categories": "='%s'!$A$2:$A$%d" % (sheet_name, last_row),
                 "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
+                "marker": {"type": "circle", "size": 5},
             })
-        ws.insert_chart("G20", timing, {"x_scale": 1.45, "y_scale": 1.25})
+        ws.insert_chart("M20", timing, {"x_scale": 1.45, "y_scale": 1.25})
 
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
 workbook.close()
