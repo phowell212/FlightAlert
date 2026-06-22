@@ -22,6 +22,7 @@ param(
     [switch]$SkipTraffic,
     [switch]$TrafficDetailTiming,
     [switch]$MapDetailTiming,
+    [switch]$FrameMetricsProbe,
     [ValidateSet("GradleConnected", "SplitInstall")]
     [string]$HarnessExecutionMode = "GradleConnected",
     [ValidateSet("InstallDefault", "Verify", "Speed")]
@@ -121,6 +122,12 @@ if ($ControlledPreflightTimeoutSeconds -lt 30 -or $ControlledPreflightTimeoutSec
 }
 if ($HarnessExecutionMode -eq "SplitInstall" -and $BenchmarkRole -ne "Diagnostic" -and -not $RequireControlledPreflight) {
     throw "SplitInstall workbook runs require -RequireControlledPreflight. Otherwise pass -BenchmarkRole Diagnostic so they stay out of Chart Data."
+}
+if ($FrameMetricsProbe -and -not $TrafficDetailTiming) {
+    throw "FrameMetricsProbe requires -TrafficDetailTiming so frame metrics can be joined to aircraft/direct-symbol samples."
+}
+if ($FrameMetricsProbe -and $BenchmarkRole -ne "Diagnostic") {
+    throw "FrameMetricsProbe is diagnostic-only. Pass -BenchmarkRole Diagnostic so it stays out of Workbook Tests."
 }
 
 function Invoke-Adb {
@@ -1152,7 +1159,7 @@ try {
     $artCompilePath = Join-Path $outDir "$OutputName-art-compile.txt"
     $controlledDexoptNormalizationPath = Join-Path $outDir "$OutputName-controlled-dexopt-normalization.txt"
     $instrumentationArgs = [ordered]@{
-        class = "$testClass#$TestName"
+        'class' = "$testClass#$TestName"
     }
     if (-not [string]::IsNullOrWhiteSpace($Device)) {
         $env:ANDROID_SERIAL = $Device
@@ -1188,6 +1195,9 @@ try {
     }
     if ($MapDetailTiming) {
         $instrumentationArgs.mapDetailTiming = "true"
+    }
+    if ($FrameMetricsProbe) {
+        $instrumentationArgs.frameMetricsProbe = "true"
     }
     if ($RecordVideo) {
         $videoEvidenceHoldSeconds = [Math]::Min($VideoTimeLimitSeconds, [Math]::Max(6, $MaxRunSeconds - 45))
@@ -1406,6 +1416,9 @@ $routeProof += "skip_top_status=$SkipTopStatus"
 $routeProof += "skip_controls=$SkipControls"
 $routeProof += "skip_traffic_panel=$SkipTrafficPanel"
 $routeProof += "skip_traffic=$SkipTraffic"
+$routeProof += "traffic_detail_timing=$TrafficDetailTiming"
+$routeProof += "map_detail_timing=$MapDetailTiming"
+$routeProof += "frame_metrics_probe=$FrameMetricsProbe"
 $routeProof += "record_video=$RecordVideo"
 $routeProof += "max_run_seconds=$MaxRunSeconds"
 $routeProof += "video_time_limit_seconds=$VideoTimeLimitSeconds"

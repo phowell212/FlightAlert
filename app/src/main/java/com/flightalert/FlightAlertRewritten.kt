@@ -60,11 +60,14 @@ import android.os.SystemClock
 import android.os.Trace
 import android.text.InputType
 import android.util.Log
+import android.view.Choreographer
+import android.view.FrameMetrics
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.Window
 import android.view.WindowInsets
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -172,6 +175,8 @@ private const val DEBUG_TRACE_DIRECT_SYMBOLS = "FlightAlert.directSymbols"
 private const val DEBUG_TRACE_DENSE_DOT_STATE = "FlightAlert.denseDotState"
 private const val DEBUG_TRACE_DENSE_SYMBOL_STATE = "FlightAlert.denseSymbolState"
 private const val DEBUG_TRACE_REFERENCE_DRAW = "FlightAlert.refDraw"
+private const val DEBUG_FRAME_METRICS_PROBE_RING_SIZE = 256
+private const val DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL = 60
 
 private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float {
     val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
@@ -4480,6 +4485,7 @@ class MainActivity : ComponentActivity() {
         val skip_traffic_panel = intent.optional_boolean_extra(EXTRA_PERF_SKIP_TRAFFIC_PANEL) == true
         val traffic_detail_timing = intent.optional_boolean_extra(EXTRA_PERF_TRAFFIC_DETAIL_TIMING) == true
         val map_detail_timing = intent.optional_boolean_extra(EXTRA_PERF_MAP_DETAIL_TIMING) == true
+        val frame_metrics_probe = intent.optional_boolean_extra(EXTRA_PERF_FRAME_METRICS_PROBE) == true
         flight_map_view?.apply_debug_perf_viewport(
             lat = lat,
             lon = lon,
@@ -4501,6 +4507,7 @@ class MainActivity : ComponentActivity() {
             perf_skip_controls = skip_controls,
             perf_skip_traffic_panel = skip_traffic_panel,
             perf_traffic_detail_timing = traffic_detail_timing,
+            perf_frame_metrics_probe = frame_metrics_probe,
             perf_map_detail_timing = map_detail_timing
         )
     }
@@ -4557,6 +4564,7 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PERF_SKIP_CONTROLS = "com.flightalert.PERF_SKIP_CONTROLS"
         const val EXTRA_PERF_SKIP_TRAFFIC_PANEL = "com.flightalert.PERF_SKIP_TRAFFIC_PANEL"
         const val EXTRA_PERF_TRAFFIC_DETAIL_TIMING = "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING"
+        const val EXTRA_PERF_FRAME_METRICS_PROBE = "com.flightalert.PERF_FRAME_METRICS_PROBE"
         const val EXTRA_PERF_MAP_DETAIL_TIMING = "com.flightalert.PERF_MAP_DETAIL_TIMING"
         const val DEFAULT_PERF_ZOOM = FlightAlertSettings.PerfLaunch.DEFAULT_ZOOM
     }
@@ -8898,6 +8906,54 @@ class FlightMapView(
     private var debug_perf_skip_controls = false
     private var debug_perf_skip_traffic_panel = false
     private var debug_perf_traffic_detail_timing = false
+    private var debug_perf_frame_metrics_probe = false
+    private var debug_frame_metrics_listener_registered_window: Window? = null
+    private var debug_frame_metrics_frame_callback_registered = false
+    private var debug_frame_metrics_latest_choreographer_vsync_ns = 0L
+    private val debug_frame_metrics_frame_callback = Choreographer.FrameCallback { frame_time_ns ->
+        debug_frame_metrics_frame_callback_registered = false
+        if (debug_perf_frame_metrics_probe) {
+            debug_frame_metrics_latest_choreographer_vsync_ns = frame_time_ns
+            debug_schedule_frame_metrics_choreographer_callback()
+        }
+    }
+    private val debug_frame_metrics_listener = Window.OnFrameMetricsAvailableListener { _, frame_metrics, drop_count_since_last_invocation ->
+        debug_record_frame_metrics_probe_frame(frame_metrics, drop_count_since_last_invocation)
+    }
+    private val debug_frame_metrics_vsync_ns = LongArray(DEBUG_FRAME_METRICS_PROBE_RING_SIZE)
+    private val debug_frame_metrics_draw_seq = LongArray(DEBUG_FRAME_METRICS_PROBE_RING_SIZE)
+    private val debug_frame_metrics_direct_symbols_ns = LongArray(DEBUG_FRAME_METRICS_PROBE_RING_SIZE)
+    private val debug_frame_metrics_direct_icon_ns = LongArray(DEBUG_FRAME_METRICS_PROBE_RING_SIZE)
+    private val debug_frame_metrics_direct_drawn = IntArray(DEBUG_FRAME_METRICS_PROBE_RING_SIZE)
+    private val debug_frame_metrics_sample_direct_symbols_ns = LongArray(DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL)
+    private val debug_frame_metrics_sample_direct_icon_ns = LongArray(DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL)
+    private val debug_frame_metrics_sample_command_ns = LongArray(DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL)
+    private val debug_frame_metrics_sample_gpu_ns = LongArray(DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL)
+    private var debug_frame_metrics_sample_count = 0
+    private var debug_frame_metrics_log_pending = false
+    private val debug_frame_metrics_log_runnable = Runnable {
+        debug_frame_metrics_log_pending = false
+        debug_log_frame_metrics_probe_if_ready()
+    }
+    private var debug_frame_metrics_write_index = 0
+    private var debug_current_frame_metrics_vsync_ns = 0L
+    private var debug_frame_metrics_callbacks = 0
+    private var debug_frame_metrics_joined = 0
+    private var debug_frame_metrics_missed = 0
+    private var debug_frame_metrics_dropped = 0
+    private var debug_frame_metrics_sum_draw_ns = 0L
+    private var debug_frame_metrics_sum_sync_ns = 0L
+    private var debug_frame_metrics_sum_command_ns = 0L
+    private var debug_frame_metrics_sum_swap_ns = 0L
+    private var debug_frame_metrics_sum_gpu_ns = 0L
+    private var debug_frame_metrics_sum_total_ns = 0L
+    private var debug_frame_metrics_sum_direct_symbols_ns = 0L
+    private var debug_frame_metrics_sum_direct_icon_ns = 0L
+    private var debug_frame_metrics_sum_direct_drawn = 0L
+    private var debug_frame_metrics_max_total_ns = 0L
+    private var debug_frame_metrics_max_command_ns = 0L
+    private var debug_frame_metrics_max_gpu_ns = 0L
+    private var debug_frame_metrics_max_direct_symbols_ns = 0L
     private var debug_perf_focus_open_map = false
     private var debug_perf_focus_applied = false
     private var debug_perf_focus_x_fraction: Double? = null
@@ -9024,12 +9080,14 @@ class FlightMapView(
     fun start() {
         start_location_updates()
         removeCallbacks(ticker)
+        update_debug_frame_metrics_probe_listener()
         postOnAnimation(ticker)
     }
 
     // MainActivity calls this from onPause; stop listeners that only matter while the map is visible.
     fun stop() {
         removeCallbacks(ticker)
+        remove_debug_frame_metrics_probe_listener()
         persist_zoom_preference_if_dirty()
         if (location_permission_granted) {
             try {
@@ -9038,6 +9096,42 @@ class FlightMapView(
                 location_permission_granted = false
             }
         }
+    }
+
+    private fun update_debug_frame_metrics_probe_listener() {
+        if (!debug_perf_frame_metrics_probe) {
+            remove_debug_frame_metrics_probe_listener()
+            return
+        }
+        val window = (context as? Activity)?.window ?: return
+        if (debug_frame_metrics_listener_registered_window === window) return
+        remove_debug_frame_metrics_probe_listener()
+        window.addOnFrameMetricsAvailableListener(debug_frame_metrics_listener, Handler(Looper.getMainLooper()))
+        debug_frame_metrics_listener_registered_window = window
+        debug_schedule_frame_metrics_choreographer_callback()
+    }
+
+    private fun debug_schedule_frame_metrics_choreographer_callback() {
+        if (!debug_perf_frame_metrics_probe || debug_frame_metrics_frame_callback_registered) return
+        Choreographer.getInstance().postFrameCallback(debug_frame_metrics_frame_callback)
+        debug_frame_metrics_frame_callback_registered = true
+    }
+
+    private fun remove_debug_frame_metrics_probe_listener() {
+        if (debug_frame_metrics_frame_callback_registered) {
+            Choreographer.getInstance().removeFrameCallback(debug_frame_metrics_frame_callback)
+            debug_frame_metrics_frame_callback_registered = false
+        }
+        removeCallbacks(debug_frame_metrics_log_runnable)
+        debug_frame_metrics_log_pending = false
+        debug_frame_metrics_latest_choreographer_vsync_ns = 0L
+        val window = debug_frame_metrics_listener_registered_window ?: return
+        try {
+            window.removeOnFrameMetricsAvailableListener(debug_frame_metrics_listener)
+        } catch (_: IllegalArgumentException) {
+            // The listener may already be gone after Activity/window recreation.
+        }
+        debug_frame_metrics_listener_registered_window = null
     }
 
     private fun should_redraw_from_ticker(now_elapsed_ms: Long): Boolean {
@@ -9210,6 +9304,7 @@ class FlightMapView(
         perf_skip_controls: Boolean = false,
         perf_skip_traffic_panel: Boolean = false,
         perf_traffic_detail_timing: Boolean = false,
+        perf_frame_metrics_probe: Boolean = false,
         perf_map_detail_timing: Boolean = false
     ) {
         if (!lat.isFinite() || !lon.isFinite() || !target_zoom.isFinite()) return
@@ -9259,7 +9354,10 @@ class FlightMapView(
         debug_perf_skip_controls = perf_skip_controls
         debug_perf_skip_traffic_panel = perf_skip_traffic_panel
         debug_perf_traffic_detail_timing = perf_traffic_detail_timing
+        debug_perf_frame_metrics_probe = perf_frame_metrics_probe
         map_tile_renderer.debug_collect_detail_timing = perf_map_detail_timing
+        reset_debug_frame_metrics_probe()
+        update_debug_frame_metrics_probe_listener()
         debug_perf_focus_open_map = perf_focus_open_map
         debug_perf_focus_applied = false
         debug_perf_focus_x_fraction = perf_focus_x_fraction?.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0)
@@ -9280,7 +9378,8 @@ class FlightMapView(
                 "skipTraffic=$debug_perf_skip_traffic skipChrome=$debug_perf_skip_chrome " +
                 "skipTopStatus=$debug_perf_skip_top_status skipControls=$debug_perf_skip_controls " +
                 "skipTrafficPanel=$debug_perf_skip_traffic_panel " +
-                "trafficDetailTiming=$debug_perf_traffic_detail_timing mapDetailTiming=$perf_map_detail_timing"
+                "trafficDetailTiming=$debug_perf_traffic_detail_timing frameMetricsProbe=$debug_perf_frame_metrics_probe " +
+                "mapDetailTiming=$perf_map_detail_timing"
         )
         mark_traffic_cache_dirty()
         map_status = "Loading map"
@@ -9518,6 +9617,341 @@ class FlightMapView(
         debug_ticker_interaction_only_same_camera_traffic_ns = 0L
     }
 
+    private fun debug_frame_metrics_probe_frame_time_ns(): Long {
+        if (!debug_perf_frame_metrics_probe) return 0L
+        return debug_frame_metrics_latest_choreographer_vsync_ns
+    }
+
+    private fun debug_record_frame_metrics_direct_sample() {
+        if (!debug_perf_frame_metrics_probe || !debug_perf_traffic_detail_timing) return
+        val vsync_ns = debug_current_frame_metrics_vsync_ns
+        if (vsync_ns <= 0L) return
+        val index = debug_frame_metrics_write_index
+        debug_frame_metrics_write_index = (debug_frame_metrics_write_index + 1) % DEBUG_FRAME_METRICS_PROBE_RING_SIZE
+        debug_frame_metrics_vsync_ns[index] = vsync_ns
+        debug_frame_metrics_draw_seq[index] = debug_draw_sequence
+        debug_frame_metrics_direct_symbols_ns[index] = traffic_overlay_renderer.debug_frame_metrics_direct_symbols_ns
+        debug_frame_metrics_direct_icon_ns[index] = traffic_overlay_renderer.debug_frame_metrics_direct_icon_ns
+        debug_frame_metrics_direct_drawn[index] = traffic_overlay_renderer.debug_frame_metrics_direct_drawn_count
+    }
+
+    private fun debug_record_frame_metrics_probe_frame(frame_metrics: FrameMetrics, drop_count_since_last_invocation: Int) {
+        if (!debug_perf_frame_metrics_probe) return
+        if (debug_frame_metrics_log_pending) return
+        debug_frame_metrics_callbacks++
+        debug_frame_metrics_dropped += drop_count_since_last_invocation.coerceAtLeast(0)
+        val vsync_ns = frame_metrics.getMetric(FrameMetrics.VSYNC_TIMESTAMP)
+        val index = debug_find_frame_metrics_sample_slot(vsync_ns)
+        if (index < 0) {
+            debug_frame_metrics_missed++
+            return
+        }
+        val direct_symbols_ns = debug_frame_metrics_direct_symbols_ns[index]
+        val direct_icon_ns = debug_frame_metrics_direct_icon_ns[index]
+        val direct_drawn = debug_frame_metrics_direct_drawn[index]
+        debug_frame_metrics_vsync_ns[index] = 0L
+        debug_frame_metrics_joined++
+        val draw_ns = debug_non_negative_frame_metric(frame_metrics, FrameMetrics.DRAW_DURATION)
+        val sync_ns = debug_non_negative_frame_metric(frame_metrics, FrameMetrics.SYNC_DURATION)
+        val command_ns = debug_non_negative_frame_metric(frame_metrics, FrameMetrics.COMMAND_ISSUE_DURATION)
+        val swap_ns = debug_non_negative_frame_metric(frame_metrics, FrameMetrics.SWAP_BUFFERS_DURATION)
+        val gpu_ns = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            debug_non_negative_frame_metric(frame_metrics, FrameMetrics.GPU_DURATION)
+        } else {
+            0L
+        }
+        val total_ns = debug_non_negative_frame_metric(frame_metrics, FrameMetrics.TOTAL_DURATION)
+        debug_frame_metrics_sum_draw_ns += draw_ns
+        debug_frame_metrics_sum_sync_ns += sync_ns
+        debug_frame_metrics_sum_command_ns += command_ns
+        debug_frame_metrics_sum_swap_ns += swap_ns
+        debug_frame_metrics_sum_gpu_ns += gpu_ns
+        debug_frame_metrics_sum_total_ns += total_ns
+        debug_frame_metrics_sum_direct_symbols_ns += direct_symbols_ns
+        debug_frame_metrics_sum_direct_icon_ns += direct_icon_ns
+        debug_frame_metrics_sum_direct_drawn += direct_drawn.toLong()
+        debug_frame_metrics_max_total_ns = max(debug_frame_metrics_max_total_ns, total_ns)
+        debug_frame_metrics_max_command_ns = max(debug_frame_metrics_max_command_ns, command_ns)
+        debug_frame_metrics_max_gpu_ns = max(debug_frame_metrics_max_gpu_ns, gpu_ns)
+        debug_frame_metrics_max_direct_symbols_ns = max(debug_frame_metrics_max_direct_symbols_ns, direct_symbols_ns)
+        debug_record_frame_metrics_correlation_sample(
+            direct_symbols_ns = direct_symbols_ns,
+            direct_icon_ns = direct_icon_ns,
+            command_ns = command_ns,
+            gpu_ns = gpu_ns
+        )
+        debug_schedule_frame_metrics_probe_log_if_ready()
+    }
+
+    private fun debug_find_frame_metrics_sample_slot(vsync_ns: Long): Int {
+        if (vsync_ns <= 0L) return -1
+        for (index in debug_frame_metrics_vsync_ns.indices) {
+            if (debug_frame_metrics_vsync_ns[index] == vsync_ns) return index
+        }
+        return -1
+    }
+
+    private fun debug_non_negative_frame_metric(frame_metrics: FrameMetrics, metric: Int): Long {
+        return frame_metrics.getMetric(metric).coerceAtLeast(0L)
+    }
+
+    private fun debug_schedule_frame_metrics_probe_log_if_ready() {
+        if (debug_frame_metrics_joined < DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL || debug_frame_metrics_log_pending) {
+            return
+        }
+        debug_frame_metrics_log_pending = true
+        post(debug_frame_metrics_log_runnable)
+    }
+
+    private fun debug_record_frame_metrics_correlation_sample(
+        direct_symbols_ns: Long,
+        direct_icon_ns: Long,
+        command_ns: Long,
+        gpu_ns: Long
+    ) {
+        val index = debug_frame_metrics_sample_count
+        if (index >= DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL) return
+        debug_frame_metrics_sample_direct_symbols_ns[index] = direct_symbols_ns
+        debug_frame_metrics_sample_direct_icon_ns[index] = direct_icon_ns
+        debug_frame_metrics_sample_command_ns[index] = command_ns
+        debug_frame_metrics_sample_gpu_ns[index] = gpu_ns
+        debug_frame_metrics_sample_count = index + 1
+    }
+
+    private fun debug_log_frame_metrics_probe_if_ready() {
+        val frames = debug_frame_metrics_joined
+        if (frames < DEBUG_FRAME_METRICS_PROBE_LOG_INTERVAL) return
+        val sample_count = debug_frame_metrics_sample_count
+        val fm_direct_cmd_r = debug_frame_metrics_pearson(
+            debug_frame_metrics_sample_direct_symbols_ns,
+            debug_frame_metrics_sample_command_ns,
+            sample_count
+        )
+        val fm_direct_gpu_r = debug_frame_metrics_pearson(
+            debug_frame_metrics_sample_direct_symbols_ns,
+            debug_frame_metrics_sample_gpu_ns,
+            sample_count
+        )
+        val fm_icon_cmd_r = debug_frame_metrics_pearson(
+            debug_frame_metrics_sample_direct_icon_ns,
+            debug_frame_metrics_sample_command_ns,
+            sample_count
+        )
+        val fm_icon_gpu_r = debug_frame_metrics_pearson(
+            debug_frame_metrics_sample_direct_icon_ns,
+            debug_frame_metrics_sample_gpu_ns,
+            sample_count
+        )
+        val fm_direct_cmd_rho = debug_frame_metrics_spearman(
+            debug_frame_metrics_sample_direct_symbols_ns,
+            debug_frame_metrics_sample_command_ns,
+            sample_count
+        )
+        val fm_direct_gpu_rho = debug_frame_metrics_spearman(
+            debug_frame_metrics_sample_direct_symbols_ns,
+            debug_frame_metrics_sample_gpu_ns,
+            sample_count
+        )
+        val fm_icon_cmd_rho = debug_frame_metrics_spearman(
+            debug_frame_metrics_sample_direct_icon_ns,
+            debug_frame_metrics_sample_command_ns,
+            sample_count
+        )
+        val fm_icon_gpu_rho = debug_frame_metrics_spearman(
+            debug_frame_metrics_sample_direct_icon_ns,
+            debug_frame_metrics_sample_gpu_ns,
+            sample_count
+        )
+        val fm_cmd_slow_direct_lift_ns = debug_frame_metrics_slow_quartile_lift(
+            debug_frame_metrics_sample_command_ns,
+            debug_frame_metrics_sample_direct_symbols_ns,
+            sample_count
+        )
+        val fm_gpu_slow_direct_lift_ns = debug_frame_metrics_slow_quartile_lift(
+            debug_frame_metrics_sample_gpu_ns,
+            debug_frame_metrics_sample_direct_symbols_ns,
+            sample_count
+        )
+        val fm_cmd_slow_icon_lift_ns = debug_frame_metrics_slow_quartile_lift(
+            debug_frame_metrics_sample_command_ns,
+            debug_frame_metrics_sample_direct_icon_ns,
+            sample_count
+        )
+        val fm_gpu_slow_icon_lift_ns = debug_frame_metrics_slow_quartile_lift(
+            debug_frame_metrics_sample_gpu_ns,
+            debug_frame_metrics_sample_direct_icon_ns,
+            sample_count
+        )
+        Log.d(
+            TAG,
+            "Debug draw perf detailBlock=frameMetrics frames=$frames " +
+                "fmCallbacks=$debug_frame_metrics_callbacks fmJoined=$debug_frame_metrics_joined " +
+                "fmMissed=$debug_frame_metrics_missed fmDropped=$debug_frame_metrics_dropped " +
+                "fmDraw=${debug_frame_metrics_sum_draw_ns.ms(frames)} " +
+                "fmSync=${debug_frame_metrics_sum_sync_ns.ms(frames)} " +
+                "fmCommandIssue=${debug_frame_metrics_sum_command_ns.ms(frames)} " +
+                "fmSwapBuffers=${debug_frame_metrics_sum_swap_ns.ms(frames)} " +
+                "fmGpu=${debug_frame_metrics_sum_gpu_ns.ms(frames)} " +
+                "fmTotal=${debug_frame_metrics_sum_total_ns.ms(frames)} " +
+                "fmMaxTotal=${debug_frame_metrics_max_total_ns.ms()} " +
+                "fmMaxCommandIssue=${debug_frame_metrics_max_command_ns.ms()} " +
+                "fmMaxGpu=${debug_frame_metrics_max_gpu_ns.ms()} " +
+                "fmDirectSymbols=${debug_frame_metrics_sum_direct_symbols_ns.ms(frames)} " +
+                "fmDirectIcon=${debug_frame_metrics_sum_direct_icon_ns.ms(frames)} " +
+                "fmDirectDrawn=${debug_frame_metrics_sum_direct_drawn / frames} " +
+                "fmMaxDirectSymbols=${debug_frame_metrics_max_direct_symbols_ns.ms()} " +
+                "fmSamples=$sample_count " +
+                "fmDirectCmdR=${fm_direct_cmd_r.fm_decimal()} " +
+                "fmDirectGpuR=${fm_direct_gpu_r.fm_decimal()} " +
+                "fmIconCmdR=${fm_icon_cmd_r.fm_decimal()} " +
+                "fmIconGpuR=${fm_icon_gpu_r.fm_decimal()} " +
+                "fmDirectCmdRho=${fm_direct_cmd_rho.fm_decimal()} " +
+                "fmDirectGpuRho=${fm_direct_gpu_rho.fm_decimal()} " +
+                "fmIconCmdRho=${fm_icon_cmd_rho.fm_decimal()} " +
+                "fmIconGpuRho=${fm_icon_gpu_rho.fm_decimal()} " +
+                "fmCmdSlowDirectLift=${fm_cmd_slow_direct_lift_ns.ms()} " +
+                "fmGpuSlowDirectLift=${fm_gpu_slow_direct_lift_ns.ms()} " +
+                "fmCmdSlowIconLift=${fm_cmd_slow_icon_lift_ns.ms()} " +
+                "fmGpuSlowIconLift=${fm_gpu_slow_icon_lift_ns.ms()}"
+        )
+        reset_debug_frame_metrics_probe_counters()
+    }
+
+    private fun debug_frame_metrics_pearson(x_values: LongArray, y_values: LongArray, count: Int): Double {
+        if (count < 2) return 0.0
+        var sum_x = 0.0
+        var sum_y = 0.0
+        var sum_xx = 0.0
+        var sum_yy = 0.0
+        var sum_xy = 0.0
+        for (index in 0 until count) {
+            val x = x_values[index].toDouble()
+            val y = y_values[index].toDouble()
+            sum_x += x
+            sum_y += y
+            sum_xx += x * x
+            sum_yy += y * y
+            sum_xy += x * y
+        }
+        val n = count.toDouble()
+        val denom = sqrt((n * sum_xx - sum_x * sum_x) * (n * sum_yy - sum_y * sum_y))
+        if (denom <= 0.0 || !denom.isFinite()) return 0.0
+        return ((n * sum_xy - sum_x * sum_y) / denom).coerceIn(-1.0, 1.0)
+    }
+
+    private fun debug_frame_metrics_spearman(x_values: LongArray, y_values: LongArray, count: Int): Double {
+        if (count < 2) return 0.0
+        var sum_x = 0.0
+        var sum_y = 0.0
+        var sum_xx = 0.0
+        var sum_yy = 0.0
+        var sum_xy = 0.0
+        for (index in 0 until count) {
+            val x_rank = debug_frame_metrics_rank(x_values, count, x_values[index])
+            val y_rank = debug_frame_metrics_rank(y_values, count, y_values[index])
+            sum_x += x_rank
+            sum_y += y_rank
+            sum_xx += x_rank * x_rank
+            sum_yy += y_rank * y_rank
+            sum_xy += x_rank * y_rank
+        }
+        val n = count.toDouble()
+        val denom = sqrt((n * sum_xx - sum_x * sum_x) * (n * sum_yy - sum_y * sum_y))
+        if (denom <= 0.0 || !denom.isFinite()) return 0.0
+        return ((n * sum_xy - sum_x * sum_y) / denom).coerceIn(-1.0, 1.0)
+    }
+
+    private fun debug_frame_metrics_rank(values: LongArray, count: Int, value: Long): Double {
+        var less = 0
+        var equal = 0
+        for (index in 0 until count) {
+            val current = values[index]
+            if (current < value) {
+                less++
+            } else if (current == value) {
+                equal++
+            }
+        }
+        return less + (equal + 1) / 2.0
+    }
+
+    private fun debug_frame_metrics_slow_quartile_lift(
+        slow_values: LongArray,
+        measured_values: LongArray,
+        count: Int
+    ): Long {
+        if (count < 4) return 0L
+        val slow_count = (count / 4).coerceAtLeast(1)
+        var slow_sum = 0L
+        var actual_slow_count = 0
+        var rest_sum = 0L
+        var rest_count = 0
+        for (index in 0 until count) {
+            val rank = debug_frame_metrics_descending_rank(slow_values, count, slow_values[index])
+            if (rank <= slow_count) {
+                slow_sum += measured_values[index]
+                actual_slow_count++
+            } else {
+                rest_sum += measured_values[index]
+                rest_count++
+            }
+        }
+        if (actual_slow_count <= 0 || rest_count <= 0) return 0L
+        return (slow_sum / actual_slow_count - rest_sum / rest_count).coerceAtLeast(0L)
+    }
+
+    private fun debug_frame_metrics_descending_rank(values: LongArray, count: Int, value: Long): Int {
+        var greater = 0
+        for (index in 0 until count) {
+            if (values[index] > value) greater++
+        }
+        return greater + 1
+    }
+
+    private fun Double.fm_decimal(): String {
+        return String.format(Locale.US, "%.3f", this)
+    }
+
+    private fun reset_debug_frame_metrics_probe() {
+        debug_frame_metrics_vsync_ns.fill(0L)
+        debug_frame_metrics_draw_seq.fill(0L)
+        debug_frame_metrics_direct_symbols_ns.fill(0L)
+        debug_frame_metrics_direct_icon_ns.fill(0L)
+        debug_frame_metrics_direct_drawn.fill(0)
+        debug_frame_metrics_sample_direct_symbols_ns.fill(0L)
+        debug_frame_metrics_sample_direct_icon_ns.fill(0L)
+        debug_frame_metrics_sample_command_ns.fill(0L)
+        debug_frame_metrics_sample_gpu_ns.fill(0L)
+        debug_frame_metrics_sample_count = 0
+        removeCallbacks(debug_frame_metrics_log_runnable)
+        debug_frame_metrics_log_pending = false
+        debug_frame_metrics_write_index = 0
+        debug_current_frame_metrics_vsync_ns = 0L
+        reset_debug_frame_metrics_probe_counters()
+    }
+
+    private fun reset_debug_frame_metrics_probe_counters() {
+        debug_frame_metrics_callbacks = 0
+        debug_frame_metrics_joined = 0
+        debug_frame_metrics_missed = 0
+        debug_frame_metrics_dropped = 0
+        debug_frame_metrics_sum_draw_ns = 0L
+        debug_frame_metrics_sum_sync_ns = 0L
+        debug_frame_metrics_sum_command_ns = 0L
+        debug_frame_metrics_sum_swap_ns = 0L
+        debug_frame_metrics_sum_gpu_ns = 0L
+        debug_frame_metrics_sum_total_ns = 0L
+        debug_frame_metrics_sum_direct_symbols_ns = 0L
+        debug_frame_metrics_sum_direct_icon_ns = 0L
+        debug_frame_metrics_sum_direct_drawn = 0L
+        debug_frame_metrics_max_total_ns = 0L
+        debug_frame_metrics_max_command_ns = 0L
+        debug_frame_metrics_max_gpu_ns = 0L
+        debug_frame_metrics_max_direct_symbols_ns = 0L
+        debug_frame_metrics_sample_count = 0
+        debug_frame_metrics_log_pending = false
+    }
+
     private fun Long.ms(divisor: Int = 1): String {
         val value = if (divisor <= 1) this / 1_000_000.0 else this / divisor / 1_000_000.0
         return "%.2fms".format(Locale.US, value)
@@ -9562,9 +9996,12 @@ class FlightMapView(
         }
         val debug_draw_trace_start_elapsed_ms = if (debug_perf_viewport_active) SystemClock.elapsedRealtime() else 0L
         val debug_draw_trace_start_ns = if (debug_perf_viewport_active) SystemClock.elapsedRealtimeNanos() else 0L
+        val debug_current_vsync_ns = debug_frame_metrics_probe_frame_time_ns()
+        debug_current_frame_metrics_vsync_ns = debug_current_vsync_ns
 
-        debug_trace_frame(debug_perf_viewport_active, debug_draw_seq) {
-            canvas.withTranslation(safe_inset_left, safe_inset_top) {
+        try {
+            debug_trace_frame(debug_perf_viewport_active, debug_draw_seq) {
+                canvas.withTranslation(safe_inset_left, safe_inset_top) {
                 clipRect(0f, 0f, w, h)
                 paint.color = map_empty_color
                 drawRect(0f, 0f, w, h, paint)
@@ -9682,6 +10119,11 @@ class FlightMapView(
                         location = location
                     )
                 }
+                }
+            }
+        } finally {
+            if (debug_current_frame_metrics_vsync_ns == debug_current_vsync_ns) {
+                debug_current_frame_metrics_vsync_ns = 0L
             }
         }
     }
@@ -10806,6 +11248,7 @@ class FlightMapView(
                 style = TrafficOverlayStyle(visual_theme)
             )
         }
+        debug_record_frame_metrics_direct_sample()
         last_traffic_draw_elapsed_ms = SystemClock.elapsedRealtime()
         aircraft_details_prefetch_planner.schedule(
             state = state,
@@ -24027,6 +24470,12 @@ class TrafficOverlayRenderer(
         private set
     var debug_last_detail_timing_summary: String = ""
         private set
+    var debug_frame_metrics_direct_symbols_ns = 0L
+        private set
+    var debug_frame_metrics_direct_icon_ns = 0L
+        private set
+    var debug_frame_metrics_direct_drawn_count = 0
+        private set
     private var debug_detail_dot_batch_ns = 0L
     private var debug_detail_dot_cache_clear_ns = 0L
     private var debug_detail_dot_cache_record_ns = 0L
@@ -24411,8 +24860,10 @@ class TrafficOverlayRenderer(
     private fun reset_debug_detail_timing() {
         if (!debug_collect_detail_timing) {
             debug_last_detail_timing_summary = ""
+            clear_debug_frame_metrics_sample()
             return
         }
+        clear_debug_frame_metrics_sample()
         debug_detail_dot_batch_ns = 0L
         debug_detail_dot_cache_clear_ns = 0L
         debug_detail_dot_cache_record_ns = 0L
@@ -24493,6 +24944,9 @@ class TrafficOverlayRenderer(
 
     private fun finish_debug_detail_timing() {
         if (!debug_collect_detail_timing) return
+        debug_frame_metrics_direct_symbols_ns = debug_detail_direct_symbol_ns
+        debug_frame_metrics_direct_icon_ns = debug_detail_direct_icon_ns
+        debug_frame_metrics_direct_drawn_count = debug_detail_direct_drawn_count
         val direct_icon_sample_phased_ns =
             debug_detail_direct_icon_sample_prep_ns +
                 debug_detail_direct_icon_sample_shadow_ns +
@@ -24566,6 +25020,12 @@ class TrafficOverlayRenderer(
                 "symbolMaskMiss=$debug_detail_symbol_mask_miss_count " +
                 "symbolMaskGenPixels=$debug_detail_symbol_mask_generated_pixels " +
                 "labels=${debug_detail_label_ns.ms_debug()} labelsDrawn=$debug_detail_labels_drawn"
+    }
+
+    private fun clear_debug_frame_metrics_sample() {
+        debug_frame_metrics_direct_symbols_ns = 0L
+        debug_frame_metrics_direct_icon_ns = 0L
+        debug_frame_metrics_direct_drawn_count = 0
     }
 
     private fun debug_detail_start_ns(): Long {

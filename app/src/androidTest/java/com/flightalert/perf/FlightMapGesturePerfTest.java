@@ -97,6 +97,7 @@ public class FlightMapGesturePerfTest {
     private boolean currentPerfSkipTraffic = false;
     private boolean currentPerfTrafficDetailTiming = false;
     private boolean currentPerfMapDetailTiming = false;
+    private boolean currentPerfFrameMetricsProbe = false;
     private String currentPerfPhaseName = PERF_BAND_NOT_APPLICABLE;
     private String currentPerfPhaseZoomPlan = "";
     private String currentPerfPhaseGesturePlan = "";
@@ -808,11 +809,16 @@ public class FlightMapGesturePerfTest {
         currentPerfSkipTrafficPanel = instrumentationBooleanArgument("skipTrafficPanel");
         boolean trafficDetailTiming = instrumentationBooleanArgument("trafficDetailTiming");
         boolean mapDetailTiming = instrumentationBooleanArgument("mapDetailTiming");
+        boolean frameMetricsProbe = instrumentationBooleanArgument("frameMetricsProbe");
         Boolean mapRoads = instrumentationOptionalBooleanArgument("mapRoads");
         Boolean mapBorders = instrumentationOptionalBooleanArgument("mapBorders");
         requireCompleteMapReferenceArguments(mapRoads, mapBorders);
+        if (frameMetricsProbe && !trafficDetailTiming) {
+            throw new IllegalArgumentException("frameMetricsProbe requires trafficDetailTiming so aircraft/direct-symbol samples can be joined.");
+        }
         currentPerfTrafficDetailTiming = trafficDetailTiming;
         currentPerfMapDetailTiming = mapDetailTiming;
+        currentPerfFrameMetricsProbe = frameMetricsProbe;
         currentPerfTargetOptimizerSafe = isOptimizerSafeTrafficCity(city);
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context context = instrumentation.getTargetContext();
@@ -859,6 +865,9 @@ public class FlightMapGesturePerfTest {
         if (mapDetailTiming) {
             intent.putExtra("com.flightalert.PERF_MAP_DETAIL_TIMING", true);
         }
+        if (frameMetricsProbe) {
+            intent.putExtra("com.flightalert.PERF_FRAME_METRICS_PROBE", true);
+        }
         if (mapSource != null) {
             intent.putExtra("com.flightalert.PERF_MAP_SOURCE", mapSource);
         }
@@ -866,7 +875,7 @@ public class FlightMapGesturePerfTest {
         sleep(250);
         acceptFlightAlertPermissionsIfPresent();
         if (!waitForFlightAlertForeground(8000L)) {
-            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, trafficDetailTiming, mapDetailTiming, focusOpenMap);
+            launchFlightAlertWithShell(city, zoom, mapSource, skipChrome, skipTraffic, trafficDetailTiming, mapDetailTiming, frameMetricsProbe, focusOpenMap);
             sleep(250);
             acceptFlightAlertPermissionsIfPresent();
             assertTrue("Refusing to run gestures outside Flight Alert. Foreground was:\n" + foregroundDiagnostic(), waitForFlightAlertForeground(8000L));
@@ -907,7 +916,7 @@ public class FlightMapGesturePerfTest {
         runShell("appops set " + PACKAGE_NAME + " ACCESS_COARSE_LOCATION allow >/dev/null 2>&1 || true");
     }
 
-    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean trafficDetailTiming, boolean mapDetailTiming, boolean focusOpenMap) throws Exception {
+    private void launchFlightAlertWithShell(MajorTrafficCity city, double zoom, String mapSource, boolean skipChrome, boolean skipTraffic, boolean trafficDetailTiming, boolean mapDetailTiming, boolean frameMetricsProbe, boolean focusOpenMap) throws Exception {
         StringBuilder command = new StringBuilder("am start -n ")
                 .append(PACKAGE_NAME).append("/.MainActivity")
                 .append(" --es com.flightalert.PERF_LAT ").append(city.lat)
@@ -947,6 +956,9 @@ public class FlightMapGesturePerfTest {
         }
         if (mapDetailTiming) {
             command.append(" --ez com.flightalert.PERF_MAP_DETAIL_TIMING true");
+        }
+        if (frameMetricsProbe) {
+            command.append(" --ez com.flightalert.PERF_FRAME_METRICS_PROBE true");
         }
         if (mapSource != null) {
             command.append(" --es com.flightalert.PERF_MAP_SOURCE ").append(mapSource);
@@ -1375,6 +1387,7 @@ public class FlightMapGesturePerfTest {
         builder.append("skip_traffic=").append(currentPerfSkipTraffic).append('\n');
         builder.append("traffic_detail_timing=").append(currentPerfTrafficDetailTiming).append('\n');
         builder.append("map_detail_timing=").append(currentPerfMapDetailTiming).append('\n');
+        builder.append("frame_metrics_probe=").append(currentPerfFrameMetricsProbe).append('\n');
         builder.append("gesture_focus=").append(centeredPerfGestureFocus ? "screen-center" : "open-map").append('\n');
         builder.append("app_focus_open_map=").append(currentPerfFocusOpenMap).append('\n');
         builder.append("debug_focus_x_fraction=").append(Float.isNaN(currentPerfFocusXFraction) ? "unavailable" : currentPerfFocusXFraction).append('\n');
