@@ -1,3 +1,19 @@
+@file:Suppress(
+    "CanBeVal",
+    "FunctionName",
+    "KotlinConstantConditions",
+    "LocalVariableName",
+    "ObsoleteSdkInt",
+    "PackageName",
+    "PrivatePropertyName",
+    "PropertyName",
+    "RedundantQualifierName",
+    "SameParameterValue",
+    "UNUSED_PARAMETER",
+    "UseKtxExtensionFunction",
+    "unused"
+)
+
 package com.flightalert
 
 // Flight Alert intentionally keeps its Kotlin implementation in one file.
@@ -36,10 +52,12 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Debug
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.os.Trace
 import android.text.InputType
 import android.util.Log
 import android.view.InputDevice
@@ -60,6 +78,7 @@ import androidx.core.graphics.createBitmap
 import androidx.core.graphics.get
 import androidx.core.graphics.withRotation
 import androidx.core.graphics.withClip
+import androidx.core.graphics.withSave
 import androidx.core.graphics.withTranslation
 import androidx.core.net.toUri
 import com.flightalert.FlightAlertSettings.AircraftFeedMode
@@ -144,6 +163,15 @@ private const val DEBUG_TICKER_REDRAW_FIRST_DRAW = 4
 private const val DEBUG_TICKER_REDRAW_MAX_INTERVAL = 5
 private const val DEBUG_TICKER_REDRAW_ALWAYS_ZOOM = 6
 private const val DEBUG_TICKER_REDRAW_MOTION_DELTA = 7
+private const val DEBUG_TRACE_MAP_DRAW = "FlightAlert.map"
+private const val DEBUG_TRACE_TRAFFIC_OVERLAY = "FlightAlert.traffic"
+private const val DEBUG_TRACE_TRAFFIC_STATE = "FlightAlert.trafficState"
+private const val DEBUG_TRACE_AIRCRAFT_DRAW = "FlightAlert.aircraft"
+private const val DEBUG_TRACE_SYMBOL_CACHE = "FlightAlert.symbolCache"
+private const val DEBUG_TRACE_DIRECT_SYMBOLS = "FlightAlert.directSymbols"
+private const val DEBUG_TRACE_DENSE_DOT_STATE = "FlightAlert.denseDotState"
+private const val DEBUG_TRACE_DENSE_SYMBOL_STATE = "FlightAlert.denseSymbolState"
+private const val DEBUG_TRACE_REFERENCE_DRAW = "FlightAlert.refDraw"
 
 private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float {
     val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
@@ -505,6 +533,37 @@ private fun traffic_motion_elapsed_seconds(item: TrafficAircraftOverlayState, no
 
 private fun debug_elapsed_ns(enabled: Boolean, start_ns: Long): Long {
     return if (enabled && start_ns > 0L) SystemClock.elapsedRealtimeNanos() - start_ns else 0L
+}
+
+private inline fun debug_trace_section(enabled: Boolean, section: String, block: () -> Unit) {
+    if (!enabled) {
+        block()
+        return
+    }
+    Trace.beginSection(section)
+    try {
+        block()
+    } finally {
+        Trace.endSection()
+    }
+}
+
+private inline fun debug_trace_frame(enabled: Boolean, sequence: Long, block: () -> Unit) {
+    if (!enabled) {
+        block()
+        return
+    }
+    debug_trace_section(true, "FlightAlert.frame.$sequence", block)
+}
+
+private inline fun <T> debug_trace_result(enabled: Boolean, section: String, block: () -> T): T {
+    if (!enabled) return block()
+    Trace.beginSection(section)
+    return try {
+        block()
+    } finally {
+        Trace.endSection()
+    }
 }
 
 private fun is_inside_viewport(x: Float, y: Float, viewport: Viewport, padding: Float): Boolean {
@@ -3645,7 +3704,7 @@ data class TrackPoint(
 
 
 // Direct Airplanes.Live globe inventory source backed by lightweight binCraft HTTP.
-class GlobeBinCraftAircraftSource(private val user_agent: String) {
+class GlobeBinCraftAircraftSource(user_agent: String) {
     var on_snapshot_updated: (() -> Unit)? = null
 
     private val handler = Handler(Looper.getMainLooper())
@@ -4533,7 +4592,7 @@ class AircraftAlertService : Service(), LocationListener {
     // Android starts the service here; set up providers, channels, and the first poll.
     override fun onCreate() {
         super.onCreate()
-        location_manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        location_manager = getSystemService(LOCATION_SERVICE) as LocationManager
         prefs = FlightAlertSettings.prefs(this)
         prefs.registerOnSharedPreferenceChangeListener(preference_listener)
         ensure_channels()
@@ -4772,7 +4831,7 @@ class AircraftAlertService : Service(), LocationListener {
 
     // The persistent notification is tied directly to the non-empty extreme-priority list.
     private fun update_priority_notification(priority_aircraft: List<AlertAircraft>) {
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         // Defensive filtering keeps the notification contract tied to classifier output, even if a caller passes nearby queue contacts.
         val extreme_priority_aircraft = PriorityNotificationPresenter.extreme_priority_aircraft(priority_aircraft)
         if (!AlertAircraftClassifier.should_show_persistent_priority_notification(
@@ -4906,7 +4965,7 @@ class AircraftAlertService : Service(), LocationListener {
     }
 
     private fun ensure_channels() {
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(
             NotificationChannel(PRIORITY_CHANNEL_ID, "Extreme priority aircraft", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Persistent list of priority-tracked aircraft inside the selected alert range"
@@ -4916,7 +4975,7 @@ class AircraftAlertService : Service(), LocationListener {
 
     // Clean old notification IDs before using the new extreme-priority foreground notification.
     private fun clear_legacy_notifications() {
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (manager.activeNotifications.any { it.id == ONGOING_NOTIFICATION_ID }) {
             take_over_legacy_foreground_notification()
         }
@@ -5028,7 +5087,7 @@ class AircraftAlertService : Service(), LocationListener {
             for (seconds_ahead in 1..ALERT_ENTRY_LOOKAHEAD_SECONDS) {
                 val state = item.projected_alert_state(own_lat, own_lon, now_epoch_sec + seconds_ahead)
                 val altitude_m = state.altitude_meters ?: continue
-                val vertical_separation_m = kotlin.math.abs(altitude_m - own_altitude_m)
+                val vertical_separation_m = abs(altitude_m - own_altitude_m)
                 if (state.distance_meters <= alert_distance_m && vertical_separation_m <= alert_altitude_m) {
                     val delay_ms = ((seconds_ahead * 1000L) - ALERT_ENTRY_POLL_LEAD_MS)
                         .coerceAtLeast(STALE_CONTACT_RETRY_MS)
@@ -6398,7 +6457,7 @@ class AircraftDetailsPanelRenderer(
         val target = rows.size / 2
         return rows.indices
             .filter { index -> index > 0 && rows[index].section }
-            .minByOrNull { index -> kotlin.math.abs(index - target) }
+            .minByOrNull { index -> abs(index - target) }
             ?: ((rows.size + 1) / 2)
     }
 
@@ -7256,7 +7315,7 @@ internal class AircraftDetailsRowsBuilder(
 class AircraftDetailsSession(
     private val coordinator: AircraftDetailsCoordinator,
     private val warm_requester: AircraftDetailsWarmRequester,
-    private val feed_mode: () -> FlightAlertSettings.AircraftFeedMode,
+    private val feed_mode: () -> AircraftFeedMode,
     private val selected_aircraft: () -> Aircraft?,
     private val select_aircraft: (Aircraft) -> Unit,
     private val has_selected_flight_path: () -> Boolean,
@@ -7385,9 +7444,9 @@ class AircraftDetailsSession(
         aircraft_photo_gallery = emptyList()
         aircraft_photo_gallery_loading = true
         aircraft_photo_gallery_status = when (feed_mode()) {
-            FlightAlertSettings.AircraftFeedMode.WEB -> "Loading exact photos from direct aircraft-photo sources"
-            FlightAlertSettings.AircraftFeedMode.API -> "Loading exterior photos from API sources"
-            FlightAlertSettings.AircraftFeedMode.HYBRID -> "Loading exact photos, then labeled representatives"
+            AircraftFeedMode.WEB -> "Loading exact photos from direct aircraft-photo sources"
+            AircraftFeedMode.API -> "Loading exterior photos from API sources"
+            AircraftFeedMode.HYBRID -> "Loading exact photos, then labeled representatives"
         }
         request_redraw()
         coordinator.request_photo_gallery(
@@ -7858,7 +7917,7 @@ class AircraftOriginLookupController(
     private val request_redraw: () -> Unit,
     private val is_selected_key: (String) -> Boolean,
     private val selected_segments: () -> List<TraceSegment>?,
-    private val aircraft_feed_mode: () -> FlightAlertSettings.AircraftFeedMode,
+    private val aircraft_feed_mode: () -> AircraftFeedMode,
     private val aircraft_details: () -> AircraftDetails?,
     private val current_flight_route_details: (AircraftDetails, Aircraft) -> AircraftDetails?
 ) {
@@ -7925,7 +7984,7 @@ class AircraftOriginLookupController(
     // Hybrid mode can enrich route origin from the selected trace only when no provider route origin exists.
     fun request_trace_origin_airport_if_needed(aircraft: Aircraft) {
         val key = aircraft.icao24.lowercase(Locale.US)
-        if (aircraft_feed_mode() != FlightAlertSettings.AircraftFeedMode.HYBRID) return
+        if (aircraft_feed_mode() != AircraftFeedMode.HYBRID) return
         if (!is_selected_key(key)) return
         if (trace_origin_airport != null && trace_origin_aircraft_id == aircraft.icao24) return
         if (trace_origin_aircraft_id == aircraft.icao24 && trace_origin_loading) return
@@ -8082,7 +8141,7 @@ internal class AircraftTraceDetailsPresenter(
     private val is_flight_path_loading: (Aircraft) -> Boolean,
     private val trace_origin_airport_for: (Aircraft) -> AirportDetails?,
     private val trace_origin_loading_for: (Aircraft) -> Boolean,
-    private val aircraft_feed_mode: () -> FlightAlertSettings.AircraftFeedMode,
+    private val aircraft_feed_mode: () -> AircraftFeedMode,
     private val log_route_diagnostic: (String) -> Unit
 ) {
     fun current_flight_route_details(details: AircraftDetails?, aircraft: Aircraft): AircraftDetails? {
@@ -8110,7 +8169,7 @@ internal class AircraftTraceDetailsPresenter(
 
     fun current_flight_route_loading(aircraft: Aircraft, details_loading: Boolean): Boolean {
         val trace_origin_pending = trace_origin_loading_for(aircraft) &&
-            aircraft_feed_mode() == FlightAlertSettings.AircraftFeedMode.HYBRID
+            aircraft_feed_mode() == AircraftFeedMode.HYBRID
         return details_loading || is_flight_path_loading(aircraft) || trace_origin_pending
     }
 
@@ -8855,6 +8914,14 @@ class FlightMapView(
     private var debug_draw_perf_chrome_ns = 0L
     private var debug_draw_perf_max_ns = 0L
     private var debug_draw_perf_max_detail_summary = ""
+    private var debug_draw_sequence = 0L
+    private var debug_draw_perf_first_seq = 0L
+    private var debug_draw_perf_last_seq = 0L
+    private var debug_draw_perf_last_start_elapsed_ms = 0L
+    private var debug_draw_perf_last_start_ns = 0L
+    private var debug_draw_perf_last_end_ns = 0L
+    private var debug_draw_perf_last_interval_ms = 0L
+    private var debug_previous_draw_start_elapsed_ms = 0L
     private var debug_last_traffic_symbol_count = 0
     private var debug_last_traffic_dot_count = 0
     private var debug_last_traffic_state_build_summary = ""
@@ -9299,9 +9366,28 @@ class FlightMapView(
         path_ns: Long,
         traffic_ns: Long,
         chrome_ns: Long,
+        draw_seq: Long,
+        draw_start_elapsed_ms: Long,
+        draw_start_ns: Long,
+        draw_end_ns: Long,
         location: Location?
     ) {
+        if (debug_draw_perf_frames == 0) {
+            debug_draw_perf_first_seq = draw_seq
+        }
         debug_draw_perf_frames++
+        debug_draw_perf_last_seq = draw_seq
+        debug_draw_perf_last_start_elapsed_ms = draw_start_elapsed_ms
+        debug_draw_perf_last_start_ns = draw_start_ns
+        debug_draw_perf_last_end_ns = draw_end_ns
+        debug_draw_perf_last_interval_ms = if (debug_previous_draw_start_elapsed_ms > 0L && draw_start_elapsed_ms > 0L) {
+            draw_start_elapsed_ms - debug_previous_draw_start_elapsed_ms
+        } else {
+            0L
+        }
+        if (draw_start_elapsed_ms > 0L) {
+            debug_previous_draw_start_elapsed_ms = draw_start_elapsed_ms
+        }
         debug_draw_perf_total_ns += total_ns
         debug_draw_perf_map_ns += map_ns
         debug_draw_perf_layer_request_ns += layer_request_ns
@@ -9336,6 +9422,7 @@ class FlightMapView(
         location: Location?
     ) {
         val frames = debug_draw_perf_frames.coerceAtLeast(1)
+        val traffic_detail_summary = traffic_overlay_renderer.debug_last_detail_timing_summary
         Log.d(
             TAG,
             "Debug draw perf frames=$frames " +
@@ -9344,16 +9431,26 @@ class FlightMapView(
                 "layerDraw=${debug_draw_perf_layer_draw_ns.ms(frames)} path=${debug_draw_perf_path_ns.ms(frames)} " +
                 "traffic=${debug_draw_perf_traffic_ns.ms(frames)} chrome=${debug_draw_perf_chrome_ns.ms(frames)} " +
                 "last=${total_ns.ms()} lastMap=${map_ns.ms()} lastLayerReq=${layer_request_ns.ms()} " +
-                "lastLayerDraw=${layer_draw_ns.ms()} lastPath=${path_ns.ms()} lastTraffic=${traffic_ns.ms()} lastChrome=${chrome_ns.ms()} " +
-                "symbols=$debug_last_traffic_symbol_count dots=$debug_last_traffic_dot_count " +
+                "lastLayerDraw=${layer_draw_ns.ms()} lastPath=${path_ns.ms()} lastTraffic=${traffic_ns.ms()} lastChrome=${chrome_ns.ms()}" +
+                " drawSeqFirst=$debug_draw_perf_first_seq drawSeq=$debug_draw_perf_last_seq " +
+                "drawStartMs=$debug_draw_perf_last_start_elapsed_ms drawStartNs=$debug_draw_perf_last_start_ns " +
+                "drawEndNs=$debug_draw_perf_last_end_ns drawIntervalMs=$debug_draw_perf_last_interval_ms drawPasses=$frames " +
+                "sameCameraLast=${if (debug_current_draw_same_camera_traffic) 1 else 0} " +
+                debug_perf_camera_summary(location) +
+                " symbols=$debug_last_traffic_symbol_count dots=$debug_last_traffic_dot_count " +
                 debug_last_traffic_state_build_summary +
                 debug_ticker_summary() +
                 map_tile_renderer.debug_last_tile_summary +
                 traffic_overlay_renderer.debug_last_symbol_cache_summary +
-                traffic_overlay_renderer.debug_last_detail_timing_summary +
-                debug_perf_camera_summary(location) +
                 " maxFrameDetail=${debug_draw_perf_max_detail_summary}"
         )
+        if (traffic_detail_summary.isNotBlank()) {
+            Log.d(
+                TAG,
+                "Debug draw perf detailBlock=traffic frames=$frames" +
+                    traffic_detail_summary
+            )
+        }
     }
 
     private fun debug_current_draw_detail_summary(): String {
@@ -9400,6 +9497,12 @@ class FlightMapView(
         debug_draw_perf_chrome_ns = 0L
         debug_draw_perf_max_ns = 0L
         debug_draw_perf_max_detail_summary = ""
+        debug_draw_perf_first_seq = 0L
+        debug_draw_perf_last_seq = 0L
+        debug_draw_perf_last_start_elapsed_ms = 0L
+        debug_draw_perf_last_start_ns = 0L
+        debug_draw_perf_last_end_ns = 0L
+        debug_draw_perf_last_interval_ms = 0L
         debug_ticker_posts = 0
         debug_ticker_interaction_only_posts = 0
         debug_ticker_interaction_motion_posts = 0
@@ -9451,115 +9554,134 @@ class FlightMapView(
         val h = content_height()
         val location = latest_location
         val modal_open = details_session.details_open || settings_open || priority_tracker_open || filters_open || selected_restricted_airspace != null
+        val debug_draw_seq = if (debug_perf_viewport_active) {
+            debug_draw_sequence = if (debug_draw_sequence == Long.MAX_VALUE) 1L else debug_draw_sequence + 1L
+            debug_draw_sequence
+        } else {
+            0L
+        }
+        val debug_draw_trace_start_elapsed_ms = if (debug_perf_viewport_active) SystemClock.elapsedRealtime() else 0L
+        val debug_draw_trace_start_ns = if (debug_perf_viewport_active) SystemClock.elapsedRealtimeNanos() else 0L
 
-        canvas.withTranslation(safe_inset_left, safe_inset_top) {
-            clipRect(0f, 0f, w, h)
-            paint.color = map_empty_color
-            drawRect(0f, 0f, w, h, paint)
-            var debug_draw_start_ns = 0L
-            var debug_map_ns = 0L
-            var debug_layer_request_ns = 0L
-            var debug_layer_draw_ns = 0L
-            var debug_path_ns = 0L
-            var debug_traffic_ns = 0L
+        debug_trace_frame(debug_perf_viewport_active, debug_draw_seq) {
+            canvas.withTranslation(safe_inset_left, safe_inset_top) {
+                clipRect(0f, 0f, w, h)
+                paint.color = map_empty_color
+                drawRect(0f, 0f, w, h, paint)
+                var debug_draw_start_ns = 0L
+                var debug_map_ns = 0L
+                var debug_layer_request_ns = 0L
+                var debug_layer_draw_ns = 0L
+                var debug_path_ns = 0L
+                var debug_traffic_ns = 0L
 
-            if (location == null) {
-                draw_no_location_state(this, w, h)
-            } else {
-                val viewport = viewport_for(location, w, h)
-                if (debug_perf_viewport_active) {
-                    debug_note_draw_start(viewport, SystemClock.elapsedRealtime())
-                    debug_draw_start_ns = SystemClock.elapsedRealtimeNanos()
-                    var section_start_ns = debug_draw_start_ns
-                    if (!debug_perf_skip_map) {
+                if (location == null) {
+                    draw_no_location_state(this, w, h)
+                } else {
+                    val viewport = viewport_for(location, w, h)
+                    if (debug_perf_viewport_active) {
+                        debug_note_draw_start(viewport, SystemClock.elapsedRealtime())
+                        debug_draw_start_ns = SystemClock.elapsedRealtimeNanos()
+                        var section_start_ns = debug_draw_start_ns
+                        if (!debug_perf_skip_map) {
+                            debug_trace_section(debug_perf_viewport_active, DEBUG_TRACE_MAP_DRAW) {
+                                draw_map_tiles(this, viewport)
+                            }
+                        }
+                        debug_map_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
+                        section_start_ns = SystemClock.elapsedRealtimeNanos()
+                        request_aviation_layers_if_needed(viewport)
+                        debug_layer_request_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
+                        section_start_ns = SystemClock.elapsedRealtimeNanos()
+                        draw_aviation_layers(this, viewport)
+                        debug_layer_draw_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
+                        section_start_ns = SystemClock.elapsedRealtimeNanos()
+                        draw_priority_range_circle(this, viewport, location)
+                        draw_selected_flight_path(this, viewport)
+                        debug_path_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
+                        section_start_ns = SystemClock.elapsedRealtimeNanos()
+                        if (!debug_perf_skip_traffic) {
+                            debug_trace_section(debug_perf_viewport_active, DEBUG_TRACE_TRAFFIC_OVERLAY) {
+                                draw_traffic_overlay(this, viewport)
+                            }
+                        }
+                        debug_traffic_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
+                        if (!debug_perf_skip_traffic) {
+                            draw_ownship_overlay(this, viewport, location)
+                        }
+                    } else {
                         draw_map_tiles(this, viewport)
-                    }
-                    debug_map_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
-                    section_start_ns = SystemClock.elapsedRealtimeNanos()
-                    request_aviation_layers_if_needed(viewport)
-                    debug_layer_request_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
-                    section_start_ns = SystemClock.elapsedRealtimeNanos()
-                    draw_aviation_layers(this, viewport)
-                    debug_layer_draw_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
-                    section_start_ns = SystemClock.elapsedRealtimeNanos()
-                    draw_priority_range_circle(this, viewport, location)
-                    draw_selected_flight_path(this, viewport)
-                    debug_path_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
-                    section_start_ns = SystemClock.elapsedRealtimeNanos()
-                    if (!debug_perf_skip_traffic) {
+                        request_aviation_layers_if_needed(viewport)
+                        draw_aviation_layers(this, viewport)
+                        draw_priority_range_circle(this, viewport, location)
+                        draw_selected_flight_path(this, viewport)
                         draw_traffic_overlay(this, viewport)
-                    }
-                    debug_traffic_ns = SystemClock.elapsedRealtimeNanos() - section_start_ns
-                    if (!debug_perf_skip_traffic) {
                         draw_ownship_overlay(this, viewport, location)
                     }
-                } else {
-                    draw_map_tiles(this, viewport)
-                    request_aviation_layers_if_needed(viewport)
-                    draw_aviation_layers(this, viewport)
-                    draw_priority_range_circle(this, viewport, location)
-                    draw_selected_flight_path(this, viewport)
-                    draw_traffic_overlay(this, viewport)
-                    draw_ownship_overlay(this, viewport, location)
                 }
-            }
 
-            val chrome_start_ns = if (debug_perf_viewport_active) SystemClock.elapsedRealtimeNanos() else 0L
-            if (debug_perf_viewport_active && debug_perf_skip_chrome) {
-                // Debug perf mask only; normal app launches never suppress visible chrome.
-            } else if (!modal_open) {
-                if (!debug_perf_skips_top_status()) {
-                    draw_top_status(this, w, h)
-                }
-                if (!debug_perf_skips_controls()) {
-                    // Draw the always-available map controls after the map layers.
-                    draw_recenter_button(this, w, h)
-                    location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
-                    draw_settings_button(this, w, h)
-                    draw_filters_button(this, w, h)
-                }
-                if (!debug_perf_skips_traffic_panel()) {
-                    draw_traffic_panel(this, w, h)
-                }
-            } else {
-                draw_modal_backdrop(this, w, h)
-            }
-            selected_restricted_airspace?.let {
-                draw_restricted_airspace_details_panel(this, w, h, it)
-            }
-            if (details_session.details_open) {
-                // Draw only the open overlay branch so the visible panel matches the current state object.
-                draw_aircraft_details_panel(this, w, h)
-            }
-            if (settings_open) {
-                if (map_labels_open) {
-                    draw_map_labels_panel(this, w, h)
-                } else if (aviation_layers_open) {
-                    draw_aviation_layers_panel(this, w, h)
-                } else if (impact_methodology_open) {
-                    draw_impact_methodology_panel(this, w, h)
+                val chrome_start_ns = if (debug_perf_viewport_active) SystemClock.elapsedRealtimeNanos() else 0L
+                if (debug_perf_viewport_active && debug_perf_skip_chrome) {
+                    // Debug perf mask only; normal app launches never suppress visible chrome.
+                } else if (!modal_open) {
+                    if (!debug_perf_skips_top_status()) {
+                        draw_top_status(this, w, h)
+                    }
+                    if (!debug_perf_skips_controls()) {
+                        // Draw the always-available map controls after the map layers.
+                        draw_recenter_button(this, w, h)
+                        location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
+                        draw_settings_button(this, w, h)
+                        draw_filters_button(this, w, h)
+                    }
+                    if (!debug_perf_skips_traffic_panel()) {
+                        draw_traffic_panel(this, w, h)
+                    }
                 } else {
-                    draw_settings_panel(this, w, h)
+                    draw_modal_backdrop(this, w, h)
                 }
-            }
-            if (priority_tracker_open) {
-                draw_priority_tracker_panel(this, w, h)
-            }
-            if (filters_open) {
-                draw_filters_panel(this, w, h)
-            }
-            if (debug_perf_viewport_active && debug_draw_start_ns > 0L) {
-                val chrome_ns = SystemClock.elapsedRealtimeNanos() - chrome_start_ns
-                debug_record_draw_perf(
-                    total_ns = SystemClock.elapsedRealtimeNanos() - debug_draw_start_ns,
-                    map_ns = debug_map_ns,
-                    layer_request_ns = debug_layer_request_ns,
-                    layer_draw_ns = debug_layer_draw_ns,
-                    path_ns = debug_path_ns,
-                    traffic_ns = debug_traffic_ns,
-                    chrome_ns = chrome_ns,
-                    location = location
-                )
+                selected_restricted_airspace?.let {
+                    draw_restricted_airspace_details_panel(this, w, h, it)
+                }
+                if (details_session.details_open) {
+                    // Draw only the open overlay branch so the visible panel matches the current state object.
+                    draw_aircraft_details_panel(this, w, h)
+                }
+                if (settings_open) {
+                    if (map_labels_open) {
+                        draw_map_labels_panel(this, w, h)
+                    } else if (aviation_layers_open) {
+                        draw_aviation_layers_panel(this, w, h)
+                    } else if (impact_methodology_open) {
+                        draw_impact_methodology_panel(this, w, h)
+                    } else {
+                        draw_settings_panel(this, w, h)
+                    }
+                }
+                if (priority_tracker_open) {
+                    draw_priority_tracker_panel(this, w, h)
+                }
+                if (filters_open) {
+                    draw_filters_panel(this, w, h)
+                }
+                if (debug_perf_viewport_active && debug_draw_start_ns > 0L) {
+                    val debug_draw_end_ns = SystemClock.elapsedRealtimeNanos()
+                    val chrome_ns = debug_draw_end_ns - chrome_start_ns
+                    debug_record_draw_perf(
+                        total_ns = debug_draw_end_ns - debug_draw_start_ns,
+                        map_ns = debug_map_ns,
+                        layer_request_ns = debug_layer_request_ns,
+                        layer_draw_ns = debug_layer_draw_ns,
+                        path_ns = debug_path_ns,
+                        traffic_ns = debug_traffic_ns,
+                        chrome_ns = chrome_ns,
+                        draw_seq = debug_draw_seq,
+                        draw_start_elapsed_ms = debug_draw_trace_start_elapsed_ms,
+                        draw_start_ns = debug_draw_trace_start_ns,
+                        draw_end_ns = debug_draw_end_ns,
+                        location = location
+                    )
+                }
             }
         }
     }
@@ -9931,7 +10053,7 @@ class FlightMapView(
         if (event.pointerCount < 2) return 0f
         val dx = event.getX(1) - event.getX(0)
         val dy = event.getY(1) - event.getY(0)
-        return kotlin.math.sqrt(dx * dx + dy * dy)
+        return sqrt(dx * dx + dy * dy)
     }
 
     private fun pointer_focus_x(event: MotionEvent): Float {
@@ -10664,7 +10786,9 @@ class FlightMapView(
         } else {
             0L
         }
-        val state = traffic_overlay_state(viewport)
+        val state = debug_trace_result(collect_traffic_detail_timing, DEBUG_TRACE_TRAFFIC_STATE) {
+            traffic_overlay_state(viewport)
+        }
         debug_last_traffic_state_build_summary = if (state_start_ns > 0L) {
             "stateBuild=${(SystemClock.elapsedRealtimeNanos() - state_start_ns).ms()} " +
                 traffic_overlay_state_builder.debug_last_detail_timing_summary + " "
@@ -10675,11 +10799,13 @@ class FlightMapView(
             debug_last_traffic_symbol_count = state.aircraft.size
             debug_last_traffic_dot_count = state.dot_batch?.visible_count ?: state.aircraft.size
         }
-        traffic_overlay_renderer.draw_aircraft(
-            canvas = canvas,
-            state = state,
-            style = TrafficOverlayStyle(visual_theme)
-        )
+        debug_trace_section(collect_traffic_detail_timing, DEBUG_TRACE_AIRCRAFT_DRAW) {
+            traffic_overlay_renderer.draw_aircraft(
+                canvas = canvas,
+                state = state,
+                style = TrafficOverlayStyle(visual_theme)
+            )
+        }
         last_traffic_draw_elapsed_ms = SystemClock.elapsedRealtime()
         aircraft_details_prefetch_planner.schedule(
             state = state,
@@ -11822,12 +11948,12 @@ class FlightMapView(
         prefs.edit { putString(FlightAlertSettings.KEY_UNITS, units.name) }
     }
 
-    private fun next_visual_theme(): FlightAlertSettings.VisualTheme {
-        val themes = FlightAlertSettings.VisualTheme.entries
+    private fun next_visual_theme(): VisualTheme {
+        val themes = VisualTheme.entries
         return themes[(visual_theme.ordinal + 1) % themes.size]
     }
 
-    private fun set_visual_theme(next: FlightAlertSettings.VisualTheme) {
+    private fun set_visual_theme(next: VisualTheme) {
         visual_theme = next
         mark_traffic_cache_dirty()
         prefs.edit { putString(FlightAlertSettings.KEY_VISUAL_THEME, visual_theme.name) }
@@ -11872,7 +11998,7 @@ class FlightMapView(
     }
 
     // Changing feed mode resets live source state so stale source snapshots do not carry across modes.
-    private fun set_aircraft_feed_mode(mode: FlightAlertSettings.AircraftFeedMode) {
+    private fun set_aircraft_feed_mode(mode: AircraftFeedMode) {
         if (aircraft_feed_mode == mode) return
         aircraft_feed_mode = mode
         mark_traffic_cache_dirty()
@@ -11883,9 +12009,9 @@ class FlightMapView(
         }
         globe_bin_craft_aircraft_source?.set_enabled(globe_bin_craft_source_enabled)
         aircraft_status = when (aircraft_feed_mode) {
-            FlightAlertSettings.AircraftFeedMode.WEB -> "binCraft feed enabled; waiting for validated snapshot"
-            FlightAlertSettings.AircraftFeedMode.API -> "API feed enabled"
-            FlightAlertSettings.AircraftFeedMode.HYBRID -> "Hybrid feed enabled; loading API plus binCraft supplement"
+            AircraftFeedMode.WEB -> "binCraft feed enabled; waiting for validated snapshot"
+            AircraftFeedMode.API -> "API feed enabled"
+            AircraftFeedMode.HYBRID -> "Hybrid feed enabled; loading API plus binCraft supplement"
         }
         request_visible_aircraft_if_needed(force = true)
         invalidate()
@@ -13178,7 +13304,7 @@ object AircraftImpactPresenter {
 
     private fun age(aircraft: Aircraft): String {
         val contact = aircraft.last_contact_sec ?: aircraft.position_time_sec ?: return "Age unavailable"
-        val age = kotlin.math.max(0.0, System.currentTimeMillis() / 1000.0 - contact)
+        val age = max(0.0, System.currentTimeMillis() / 1000.0 - contact)
         return "${age.toLong()}s old"
     }
 
@@ -14974,14 +15100,14 @@ class FlightMapPanelRenderer(
         val progress = (elapsed.toFloat() / fill.duration_ms.coerceAtLeast(1L)).coerceIn(0f, 1f)
         val eased = progress * progress * (3f - 2f * progress)
         val max_radius = max_distance_to_corner(fill.press_x, fill.press_y, rect)
-        val save = canvas.save()
-        long_press_fill_clip.reset()
-        long_press_fill_clip.addRoundRect(rect, chrome.control_radius(), chrome.control_radius(), Path.Direction.CW)
-        canvas.clipPath(long_press_fill_clip)
-        paint.style = Paint.Style.FILL
-        paint.color = with_alpha(style.visual_theme.colors.accent_green, 92)
-        canvas.drawCircle(fill.press_x, fill.press_y, max_radius * eased, paint)
-        canvas.restoreToCount(save)
+        canvas.withSave {
+            long_press_fill_clip.reset()
+            long_press_fill_clip.addRoundRect(rect, chrome.control_radius(), chrome.control_radius(), Path.Direction.CW)
+            clipPath(long_press_fill_clip)
+            paint.style = Paint.Style.FILL
+            paint.color = with_alpha(style.visual_theme.colors.accent_green, 92)
+            drawCircle(fill.press_x, fill.press_y, max_radius * eased, paint)
+        }
 
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.isFakeBoldText = true
@@ -15005,7 +15131,7 @@ class FlightMapPanelRenderer(
                 if (squared > max_squared) max_squared = squared
             }
         }
-        return kotlin.math.sqrt(max_squared)
+        return sqrt(max_squared)
     }
 
     private fun draw_panel_title(canvas: Canvas, rect: RectF, title: String, style: FlightMapPanelStyle) {
@@ -15108,7 +15234,7 @@ class TrafficPanelRenderer(
     fun draw_panel(canvas: Canvas, rect: RectF, wide: Boolean, style: TrafficPanelStyle, state: TrafficPanelState) {
         chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel, style.visual_theme.style.info_panel_alpha)
 
-        var y = rect.top + if (wide) dp(32) else dp(27)
+        val y = rect.top + if (wide) dp(32) else dp(27)
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(13)
@@ -16682,7 +16808,7 @@ object PriorityRangeAdjuster {
 
     private fun grid_aligned_value(current: Double, step: Double): Double {
         val nearest = round(current / step) * step
-        return if (kotlin.math.abs(current - nearest) < GRID_EPSILON) nearest else current
+        return if (abs(current - nearest) < GRID_EPSILON) nearest else current
     }
 
     private fun feet_to_meters(feet: Double): Double = feet / FEET_PER_METER
@@ -17363,7 +17489,7 @@ class AviationLayerRenderer(
     ): Boolean {
         val layer_canvas = settled_cache_canvas_for(viewport) ?: return false
         val bitmap = settled_cache_bitmap ?: return false
-        layer_canvas.drawColor(android.graphics.Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        layer_canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
         draw_layers_direct(
             canvas = layer_canvas,
             viewport = viewport,
@@ -17559,9 +17685,9 @@ class AviationLayerRenderer(
                 val x = world.x.toFloat()
                 val y = world.y.toFloat()
                 if (point_index == 0) world_path.moveTo(x, y) else world_path.lineTo(x, y)
-                min_x = kotlin.math.min(min_x, x)
+                min_x = min(min_x, x)
                 max_x = max(max_x, x)
-                min_y = kotlin.math.min(min_y, y)
+                min_y = min(min_y, y)
                 max_y = max(max_y, y)
                 point_index++
             }
@@ -17792,12 +17918,11 @@ class AviationLayerRenderer(
         try {
             while (base_left + shift_x <= extended_right && guard++ < MAX_WRAPPED_RING_COPIES) {
                 if (base_right + shift_x >= extended_left) {
-                    canvas.save()
-                    canvas.translate(screen_offset_x + shift_x, screen_offset_y)
-                    canvas.scale(scale, scale)
-                    if (fill_paint != null) canvas.drawPath(ring.path, fill_paint)
-                    canvas.drawPath(ring.path, outline_paint)
-                    canvas.restore()
+                    canvas.withTranslation(screen_offset_x + shift_x, screen_offset_y) {
+                        scale(scale, scale)
+                        if (fill_paint != null) drawPath(ring.path, fill_paint)
+                        drawPath(ring.path, outline_paint)
+                    }
                 }
                 shift_x += world_span
             }
@@ -18171,8 +18296,8 @@ class FlightMapChromeRenderer(
         selected: Boolean,
         style: FlightMapChromeStyle
     ) {
-        val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
+        val colors = style.visual_theme.colors
         val previous_align = text_paint.textAlign
         val color = if (selected) colors.accent_green else colors.button_stroke
         paint.style = Paint.Style.FILL
@@ -18231,7 +18356,6 @@ class FlightMapChromeRenderer(
         stroke_width_dp: Float? = null,
         style: FlightMapChromeStyle
     ) {
-        val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
         val radius = control_radius(style)
         val stroke_width_px = host.dp(stroke_width_dp ?: theme_style.control_stroke_dp)
@@ -19971,6 +20095,35 @@ private data class ReferenceOverlayDrawPlan(
     val coverage: ReferenceTileCoverage
 )
 
+private data class ReferencePrefetchGridPlan(
+    val epoch: Long,
+    val overlay: ReferenceTileOverlay,
+    val cache_key: String,
+    val user_agent: String,
+    val tile_zoom: Int,
+    val first_tile_x: Int,
+    val first_tile_y: Int,
+    val last_tile_x: Int,
+    val last_tile_y: Int,
+    val max_tile: Int,
+    val request_priority: Int,
+    val request_stale_generation_tolerance: Long,
+    val request_generation: Long
+)
+
+private data class ReferencePrefetchDrainStats(
+    var batch_count: Long = 0L,
+    var plan_count: Long = 0L,
+    var tile_count: Long = 0L,
+    var memory_hit_count: Long = 0L,
+    var miss_count: Long = 0L,
+    var submitted_count: Long = 0L,
+    var queued_count: Long = 0L,
+    var memory_recheck_count: Long = 0L,
+    var stale_count: Long = 0L,
+    var superseded_count: Long = 0L
+)
+
 // Satellite renderer restored behind the Satellite toggle, with continuous LOD blending.
 // The satellite base path is intentionally kept independent of optional labels.
 // Labels/reference tiles are drawn afterward in their own cache so they cannot disturb base imagery.
@@ -19997,13 +20150,12 @@ internal class SatelliteMapTileRenderer(
         SATELLITE_TILE_NETWORK_THREADS,
         SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
-        PriorityBlockingQueue(),
-        { runnable ->
-            Thread(runnable, "flightalert-satellite-tiles-${satellite_tile_worker_id.incrementAndGet()}").apply {
-                isDaemon = true
-            }
+        PriorityBlockingQueue()
+    ) { runnable ->
+        Thread(runnable, "flightalert-satellite-tiles-${satellite_tile_worker_id.incrementAndGet()}").apply {
+            isDaemon = true
         }
-    ).apply {
+    }.apply {
         allowCoreThreadTimeOut(true)
     }
     private val tile_disk_worker_id = AtomicInteger()
@@ -20012,16 +20164,15 @@ internal class SatelliteMapTileRenderer(
         1,
         SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(),
-        { runnable ->
-            Thread({
-                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-                runnable.run()
-            }, "flightalert-satellite-tile-disk-${tile_disk_worker_id.incrementAndGet()}").apply {
-                isDaemon = true
-            }
+        LinkedBlockingQueue()
+    ) { runnable ->
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            runnable.run()
+        }, "flightalert-satellite-tile-disk-${tile_disk_worker_id.incrementAndGet()}").apply {
+            isDaemon = true
         }
-    ).apply {
+    }.apply {
         allowCoreThreadTimeOut(true)
     }
     private val reference_tile_cache = LinkedHashMap<String, Bitmap>(MAX_REFERENCE_MEMORY_TILES, 0.75f, true)
@@ -20034,6 +20185,10 @@ internal class SatelliteMapTileRenderer(
     private var current_reference_tile_request_generation = 0L
     private val reference_selected_tile_zooms = mutableMapOf<ReferenceTileOverlay, Int>()
     private val reference_motion_coverage_alpha_floor = mutableMapOf<ReferenceTileOverlay, Float>()
+    private val reference_lod_prefetch_lock = Any()
+    private var reference_lod_prefetch_latest_plans: List<ReferencePrefetchGridPlan> = emptyList()
+    private var reference_lod_prefetch_scheduled = false
+    private var reference_lod_prefetch_epoch = 0L
     private val reference_tile_worker_id = AtomicInteger()
     private val reference_tile_task_sequence = AtomicLong()
     // Label/reference overlays deliberately run on their own small, prioritized worker pool so
@@ -20043,13 +20198,12 @@ internal class SatelliteMapTileRenderer(
         REFERENCE_TILE_NETWORK_THREADS,
         SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
-        PriorityBlockingQueue(),
-        { runnable ->
-            Thread(runnable, "flightalert-satellite-labels-${reference_tile_worker_id.incrementAndGet()}").apply {
-                isDaemon = true
-            }
+        PriorityBlockingQueue()
+    ) { runnable ->
+        Thread(runnable, "flightalert-satellite-labels-${reference_tile_worker_id.incrementAndGet()}").apply {
+            isDaemon = true
         }
-    ).apply {
+    }.apply {
         allowCoreThreadTimeOut(true)
     }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
@@ -20084,6 +20238,7 @@ internal class SatelliteMapTileRenderer(
 
     var debug_last_tile_summary: String = ""
         private set
+    @Volatile
     var debug_collect_detail_timing = false
     private var debug_detail_interim_ns = 0L
     private var debug_detail_lower_ns = 0L
@@ -20099,6 +20254,64 @@ internal class SatelliteMapTileRenderer(
     private var debug_detail_reference_protection_ns = 0L
     private var debug_detail_reference_overlay_count = 0
     private var debug_detail_reference_prefetch_call_count = 0
+    private var debug_detail_reference_prefetch_cpu_ns = 0L
+    private var debug_detail_reference_prefetch_wait_ns = 0L
+    private var debug_detail_reference_prefetch_cpu_missing_count = 0
+    private var debug_detail_reference_prefetch_range_ns = 0L
+    private var debug_detail_reference_prefetch_enum_ns = 0L
+    private var debug_detail_reference_prefetch_memory_lookup_ns = 0L
+    private var debug_detail_reference_prefetch_url_ns = 0L
+    private var debug_detail_reference_prefetch_submit_ns = 0L
+    private var debug_detail_reference_prefetch_tile_count = 0
+    private var debug_detail_reference_prefetch_memory_hit_count = 0
+    private var debug_detail_reference_prefetch_miss_count = 0
+    private var debug_detail_reference_prefetch_submitted_count = 0
+    private var debug_detail_reference_prefetch_queued_count = 0
+    private var debug_detail_reference_prefetch_queued_same_generation_count = 0
+    private var debug_detail_reference_prefetch_queued_recent_generation_count = 0
+    private var debug_detail_reference_prefetch_lod_call_count = 0
+    private var debug_detail_reference_prefetch_pan_call_count = 0
+    private var debug_detail_reference_prefetch_lod_tile_count = 0
+    private var debug_detail_reference_prefetch_pan_tile_count = 0
+    private var debug_detail_reference_prefetch_lod_submitted_count = 0
+    private var debug_detail_reference_prefetch_pan_submitted_count = 0
+    private var debug_detail_reference_prefetch_lod_queued_count = 0
+    private var debug_detail_reference_prefetch_pan_queued_count = 0
+    private var debug_detail_reference_prefetch_lod_max_grid_count = 0
+    private var debug_detail_reference_prefetch_pan_max_grid_count = 0
+    private var debug_detail_reference_prefetch_memory_recheck_count = 0
+    private var debug_detail_reference_prefetch_denied_count = 0
+    private var debug_detail_reference_prefetch_max_grid_count = 0
+    private val debug_reference_lod_prefetch_async_offered_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_coalesced_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_batch_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_plan_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_tile_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_memory_hit_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_miss_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_submitted_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_queued_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_memory_recheck_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_stale_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_superseded_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_denied_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_ns = AtomicLong()
+    private val debug_reference_lod_prefetch_async_max_ns = AtomicLong()
+    private var debug_detail_reference_lod_prefetch_async_offered_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_coalesced_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_batch_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_plan_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_tile_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_memory_hit_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_miss_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_submitted_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_queued_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_memory_recheck_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_stale_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_superseded_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_denied_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_ns = 0L
+    private var debug_detail_reference_lod_prefetch_async_max_ns = 0L
     private var debug_detail_reference_protected_count = 0
     private var debug_detail_reference_previous_protected_count = 0
     private var debug_detail_reference_history_start_count = 0
@@ -20188,7 +20401,7 @@ internal class SatelliteMapTileRenderer(
                 draw_unavailable_if_missing = false,
                 allow_parent_fallback = false,
                 allow_child_fallback = true,
-                retain_as_interim = upper_lod_alpha > MIN_LAYER_ALPHA,
+                retain_as_interim = true,
                 loaded_interim_tiles = loaded_interim_tiles,
                 request_generation = request_generation
             )
@@ -20288,6 +20501,64 @@ internal class SatelliteMapTileRenderer(
         debug_detail_reference_protection_ns = 0L
         debug_detail_reference_overlay_count = 0
         debug_detail_reference_prefetch_call_count = 0
+        debug_detail_reference_prefetch_cpu_ns = 0L
+        debug_detail_reference_prefetch_wait_ns = 0L
+        debug_detail_reference_prefetch_cpu_missing_count = 0
+        debug_detail_reference_prefetch_range_ns = 0L
+        debug_detail_reference_prefetch_enum_ns = 0L
+        debug_detail_reference_prefetch_memory_lookup_ns = 0L
+        debug_detail_reference_prefetch_url_ns = 0L
+        debug_detail_reference_prefetch_submit_ns = 0L
+        debug_detail_reference_prefetch_tile_count = 0
+        debug_detail_reference_prefetch_memory_hit_count = 0
+        debug_detail_reference_prefetch_miss_count = 0
+        debug_detail_reference_prefetch_submitted_count = 0
+        debug_detail_reference_prefetch_queued_count = 0
+        debug_detail_reference_prefetch_queued_same_generation_count = 0
+        debug_detail_reference_prefetch_queued_recent_generation_count = 0
+        debug_detail_reference_prefetch_lod_call_count = 0
+        debug_detail_reference_prefetch_pan_call_count = 0
+        debug_detail_reference_prefetch_lod_tile_count = 0
+        debug_detail_reference_prefetch_pan_tile_count = 0
+        debug_detail_reference_prefetch_lod_submitted_count = 0
+        debug_detail_reference_prefetch_pan_submitted_count = 0
+        debug_detail_reference_prefetch_lod_queued_count = 0
+        debug_detail_reference_prefetch_pan_queued_count = 0
+        debug_detail_reference_prefetch_lod_max_grid_count = 0
+        debug_detail_reference_prefetch_pan_max_grid_count = 0
+        debug_detail_reference_prefetch_memory_recheck_count = 0
+        debug_detail_reference_prefetch_denied_count = 0
+        debug_detail_reference_prefetch_max_grid_count = 0
+        debug_detail_reference_lod_prefetch_async_offered_count =
+            debug_reference_lod_prefetch_async_offered_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_coalesced_count =
+            debug_reference_lod_prefetch_async_coalesced_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_batch_count =
+            debug_reference_lod_prefetch_async_batch_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_plan_count =
+            debug_reference_lod_prefetch_async_plan_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_tile_count =
+            debug_reference_lod_prefetch_async_tile_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_memory_hit_count =
+            debug_reference_lod_prefetch_async_memory_hit_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_miss_count =
+            debug_reference_lod_prefetch_async_miss_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_submitted_count =
+            debug_reference_lod_prefetch_async_submitted_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_queued_count =
+            debug_reference_lod_prefetch_async_queued_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_memory_recheck_count =
+            debug_reference_lod_prefetch_async_memory_recheck_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_stale_count =
+            debug_reference_lod_prefetch_async_stale_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_superseded_count =
+            debug_reference_lod_prefetch_async_superseded_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_denied_count =
+            debug_reference_lod_prefetch_async_denied_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_ns =
+            debug_reference_lod_prefetch_async_ns.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_max_ns =
+            debug_reference_lod_prefetch_async_max_ns.getAndSet(0L)
         debug_detail_reference_protected_count = 0
         debug_detail_reference_previous_protected_count = 0
         debug_detail_reference_history_start_count = 0
@@ -20323,6 +20594,49 @@ internal class SatelliteMapTileRenderer(
             "refGen=${debug_detail_reference_generation_ns.ms_debug()} refProtect=${debug_detail_reference_protection_ns.ms_debug()} " +
             "refOther=${reference_other_ns.ms_debug()} refOvl=$debug_detail_reference_overlay_count " +
             "refPf=$debug_detail_reference_prefetch_call_count refProt=$debug_detail_reference_protected_count " +
+            "refPfCpu=${debug_detail_reference_prefetch_cpu_ns.ms_debug()} " +
+            "refPfWait=${debug_detail_reference_prefetch_wait_ns.ms_debug()} " +
+            "refPfCpuMiss=$debug_detail_reference_prefetch_cpu_missing_count " +
+            "refPfRange=${debug_detail_reference_prefetch_range_ns.ms_debug()} " +
+            "refPfEnum=${debug_detail_reference_prefetch_enum_ns.ms_debug()} " +
+            "refPfMemLookup=${debug_detail_reference_prefetch_memory_lookup_ns.ms_debug()} " +
+            "refPfUrl=${debug_detail_reference_prefetch_url_ns.ms_debug()} " +
+            "refPfSubmitNs=${debug_detail_reference_prefetch_submit_ns.ms_debug()} " +
+            "refPfTiles=$debug_detail_reference_prefetch_tile_count " +
+            "refPfMem=$debug_detail_reference_prefetch_memory_hit_count " +
+            "refPfMiss=$debug_detail_reference_prefetch_miss_count " +
+            "refPfSubmit=$debug_detail_reference_prefetch_submitted_count " +
+            "refPfQueued=$debug_detail_reference_prefetch_queued_count " +
+            "refPfQSame=$debug_detail_reference_prefetch_queued_same_generation_count " +
+            "refPfQRecent=$debug_detail_reference_prefetch_queued_recent_generation_count " +
+            "refPfLod=$debug_detail_reference_prefetch_lod_call_count " +
+            "refPfPan=$debug_detail_reference_prefetch_pan_call_count " +
+            "refPfLodTiles=$debug_detail_reference_prefetch_lod_tile_count " +
+            "refPfPanTiles=$debug_detail_reference_prefetch_pan_tile_count " +
+            "refPfLodSub=$debug_detail_reference_prefetch_lod_submitted_count " +
+            "refPfPanSub=$debug_detail_reference_prefetch_pan_submitted_count " +
+            "refPfLodQ=$debug_detail_reference_prefetch_lod_queued_count " +
+            "refPfPanQ=$debug_detail_reference_prefetch_pan_queued_count " +
+            "refPfLodMaxGrid=$debug_detail_reference_prefetch_lod_max_grid_count " +
+            "refPfPanMaxGrid=$debug_detail_reference_prefetch_pan_max_grid_count " +
+            "refPfMem2=$debug_detail_reference_prefetch_memory_recheck_count " +
+            "refPfDeny=$debug_detail_reference_prefetch_denied_count " +
+            "refPfMaxGrid=$debug_detail_reference_prefetch_max_grid_count " +
+            "refPfAsyncOffer=$debug_detail_reference_lod_prefetch_async_offered_count " +
+            "refPfAsyncCoalesce=$debug_detail_reference_lod_prefetch_async_coalesced_count " +
+            "refPfAsyncBatch=$debug_detail_reference_lod_prefetch_async_batch_count " +
+            "refPfAsyncPlan=$debug_detail_reference_lod_prefetch_async_plan_count " +
+            "refPfAsyncTiles=$debug_detail_reference_lod_prefetch_async_tile_count " +
+            "refPfAsyncMem=$debug_detail_reference_lod_prefetch_async_memory_hit_count " +
+            "refPfAsyncMiss=$debug_detail_reference_lod_prefetch_async_miss_count " +
+            "refPfAsyncSubmit=$debug_detail_reference_lod_prefetch_async_submitted_count " +
+            "refPfAsyncQueued=$debug_detail_reference_lod_prefetch_async_queued_count " +
+            "refPfAsyncMem2=$debug_detail_reference_lod_prefetch_async_memory_recheck_count " +
+            "refPfAsyncStale=$debug_detail_reference_lod_prefetch_async_stale_count " +
+            "refPfAsyncSuper=$debug_detail_reference_lod_prefetch_async_superseded_count " +
+            "refPfAsyncDeny=$debug_detail_reference_lod_prefetch_async_denied_count " +
+            "refPfAsyncNs=${debug_detail_reference_lod_prefetch_async_ns.ms_debug()} " +
+            "refPfAsyncMaxNs=${debug_detail_reference_lod_prefetch_async_max_ns.ms_debug()} " +
             "refPrev=$debug_detail_reference_previous_protected_count " +
             "refHistStart=$debug_detail_reference_history_start_count refHist=$debug_detail_reference_history_count " +
             "refStale=$debug_detail_reference_history_stale_removed_count " +
@@ -20350,6 +20664,10 @@ internal class SatelliteMapTileRenderer(
             requested_reference_tile_redraws.clear()
             current_reference_tile_request_generations.clear()
             current_reference_tile_request_generation = 0L
+        }
+        synchronized(reference_lod_prefetch_lock) {
+            reference_lod_prefetch_latest_plans = emptyList()
+            reference_lod_prefetch_epoch++
         }
         reference_selected_tile_zooms.clear()
         reference_motion_coverage_alpha_floor.clear()
@@ -20573,6 +20891,7 @@ internal class SatelliteMapTileRenderer(
         var fallback_drawn = 0
         var fading = false
         val debug_parts = ArrayList<String>(overlays.size)
+        val deferred_lod_prefetch_plans = ArrayList<ReferencePrefetchGridPlan>(overlays.size)
 
         for (overlay in overlays) {
             val plan_detail_start_ns = detail_timing_start_ns()
@@ -20621,20 +20940,22 @@ internal class SatelliteMapTileRenderer(
             var overlay_requested = 0
             var overlay_fallback_drawn = 0
             val draw_detail_start_ns = detail_timing_start_ns()
-            val draw_stats = draw_reference_overlay_grid(
-                canvas = canvas,
-                viewport = viewport,
-                state = state,
-                overlay = overlay,
-                tile_zoom = plan.draw_tile_zoom,
-                now_ms = now_ms,
-                layer_alpha = draw_alpha,
-                allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
-                allow_parent_requests = requests_allowed_for_zoom,
-                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
-                request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
-                request_generation = request_generation
-            )
+            val draw_stats = debug_trace_result(debug_collect_detail_timing, DEBUG_TRACE_REFERENCE_DRAW) {
+                draw_reference_overlay_grid(
+                    canvas = canvas,
+                    viewport = viewport,
+                    state = state,
+                    overlay = overlay,
+                    tile_zoom = plan.draw_tile_zoom,
+                    now_ms = now_ms,
+                    layer_alpha = draw_alpha,
+                    allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                    allow_parent_requests = requests_allowed_for_zoom,
+                    request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
+                    request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
+                    request_generation = request_generation
+                )
+            }
             debug_detail_reference_draw_ns += detail_timing_elapsed_ns(draw_detail_start_ns)
             overlay_visible += draw_stats.visible
             overlay_loaded += draw_stats.loaded
@@ -20643,47 +20964,45 @@ internal class SatelliteMapTileRenderer(
             fading = fading || draw_stats.fading
 
             val prefetch_detail_start_ns = detail_timing_start_ns()
-            for (prefetch_tile_zoom in plan.prefetch_tile_zooms) {
-                debug_detail_reference_prefetch_call_count++
-                request_reference_overlay_prefetch_grid(
+            if (debug_collect_detail_timing) {
+                val prefetch_cpu_start_ns = Debug.threadCpuTimeNanos()
+                try {
+                    Trace.beginSection(REFERENCE_PREFETCH_TRACE_SECTION)
+                    request_reference_overlay_prefetches(
+                        viewport = viewport,
+                        state = state,
+                        overlay = overlay,
+                        plan = plan,
+                        allow_exact_requests = allow_exact_requests,
+                        requests_allowed_for_zoom = requests_allowed_for_zoom,
+                        request_generation = request_generation,
+                        deferred_lod_prefetch_plans = deferred_lod_prefetch_plans
+                    )
+                } finally {
+                    Trace.endSection()
+                    val prefetch_wall_ns = detail_timing_elapsed_ns(prefetch_detail_start_ns)
+                    val prefetch_cpu_end_ns = Debug.threadCpuTimeNanos()
+                    debug_detail_reference_prefetch_ns += prefetch_wall_ns
+                    if (prefetch_cpu_start_ns in 0L..prefetch_cpu_end_ns) {
+                        val prefetch_cpu_ns = prefetch_cpu_end_ns - prefetch_cpu_start_ns
+                        debug_detail_reference_prefetch_cpu_ns += prefetch_cpu_ns
+                        debug_detail_reference_prefetch_wait_ns += (prefetch_wall_ns - prefetch_cpu_ns).coerceAtLeast(0L)
+                    } else {
+                        debug_detail_reference_prefetch_cpu_missing_count++
+                    }
+                }
+            } else {
+                request_reference_overlay_prefetches(
                     viewport = viewport,
                     state = state,
                     overlay = overlay,
-                    tile_zoom = prefetch_tile_zoom,
-                    allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
-                    tile_buffer = reference_overlay_prefetch_tile_buffer(
-                        draw_tile_zoom = plan.draw_tile_zoom,
-                        prefetch_tile_zoom = prefetch_tile_zoom,
-                        viewport_zoom = viewport.zoom
-                    ),
-                    request_priority_base = reference_prefetch_request_priority_base(
-                        draw_tile_zoom = plan.draw_tile_zoom,
-                        prefetch_tile_zoom = prefetch_tile_zoom,
-                        viewport_zoom = viewport.zoom
-                    ),
-                    request_stale_generation_tolerance = REFERENCE_TILE_PREFETCH_STALE_GENERATIONS,
-                    request_generation = request_generation
+                    plan = plan,
+                    allow_exact_requests = allow_exact_requests,
+                    requests_allowed_for_zoom = requests_allowed_for_zoom,
+                    request_generation = request_generation,
+                    deferred_lod_prefetch_plans = deferred_lod_prefetch_plans
                 )
             }
-            val pan_prefetch_buffer = reference_overlay_pan_prefetch_tile_buffer(
-                overlay = overlay,
-                viewport_zoom = viewport.zoom
-            )
-            if (pan_prefetch_buffer > 0) {
-                debug_detail_reference_prefetch_call_count++
-                request_reference_overlay_prefetch_grid(
-                    viewport = viewport,
-                    state = state,
-                    overlay = overlay,
-                    tile_zoom = plan.draw_tile_zoom,
-                    allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
-                    tile_buffer = pan_prefetch_buffer,
-                    request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_PAN_PREFETCH,
-                    request_stale_generation_tolerance = REFERENCE_TILE_PAN_PREFETCH_STALE_GENERATIONS,
-                    request_generation = request_generation
-                )
-            }
-            debug_detail_reference_prefetch_ns += detail_timing_elapsed_ns(prefetch_detail_start_ns)
             val bookkeeping_detail_start_ns = detail_timing_start_ns()
             visible += overlay_visible
             loaded += overlay_loaded
@@ -20699,6 +21018,7 @@ internal class SatelliteMapTileRenderer(
                 " rawCoverageAlpha=${raw_coverage_alpha.alpha_debug()}"
             debug_detail_reference_bookkeeping_ns += detail_timing_elapsed_ns(bookkeeping_detail_start_ns)
         }
+        offer_reference_lod_prefetch_batch(deferred_lod_prefetch_plans)
 
         return TileLayerDrawStats(
             visible = visible,
@@ -20708,6 +21028,308 @@ internal class SatelliteMapTileRenderer(
             fading = fading,
             debug_summary = debug_parts.joinToString(separator = "")
         )
+    }
+
+    private fun request_reference_overlay_prefetches(
+        viewport: Viewport,
+        state: MapTileRenderState,
+        overlay: ReferenceTileOverlay,
+        plan: ReferenceOverlayDrawPlan,
+        allow_exact_requests: Boolean,
+        requests_allowed_for_zoom: Boolean,
+        request_generation: Long,
+        deferred_lod_prefetch_plans: MutableList<ReferencePrefetchGridPlan>?
+    ) {
+        for (prefetch_tile_zoom in plan.prefetch_tile_zooms) {
+            debug_detail_reference_prefetch_call_count++
+            debug_detail_reference_prefetch_lod_call_count++
+            val prefetch_plan = build_reference_prefetch_grid_plan(
+                viewport = viewport,
+                state = state,
+                overlay = overlay,
+                tile_zoom = prefetch_tile_zoom,
+                prefetch_kind = REFERENCE_PREFETCH_KIND_LOD,
+                allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                tile_buffer = reference_overlay_prefetch_tile_buffer(
+                    draw_tile_zoom = plan.draw_tile_zoom,
+                    prefetch_tile_zoom = prefetch_tile_zoom,
+                    viewport_zoom = viewport.zoom
+                ),
+                request_priority_base = reference_prefetch_request_priority_base(
+                    draw_tile_zoom = plan.draw_tile_zoom,
+                    prefetch_tile_zoom = prefetch_tile_zoom,
+                    viewport_zoom = viewport.zoom
+                ),
+                request_stale_generation_tolerance = REFERENCE_TILE_PREFETCH_STALE_GENERATIONS,
+                request_generation = request_generation
+            )
+            if (prefetch_plan != null) {
+                deferred_lod_prefetch_plans?.add(prefetch_plan)
+            }
+        }
+        val pan_prefetch_buffer = reference_overlay_pan_prefetch_tile_buffer(
+            overlay = overlay,
+            viewport_zoom = viewport.zoom
+        )
+        if (pan_prefetch_buffer > 0) {
+            debug_detail_reference_prefetch_call_count++
+            debug_detail_reference_prefetch_pan_call_count++
+            request_reference_overlay_prefetch_grid(
+                viewport = viewport,
+                state = state,
+                overlay = overlay,
+                tile_zoom = plan.draw_tile_zoom,
+                prefetch_kind = REFERENCE_PREFETCH_KIND_PAN,
+                allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                tile_buffer = pan_prefetch_buffer,
+                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_PAN_PREFETCH,
+                request_stale_generation_tolerance = REFERENCE_TILE_PAN_PREFETCH_STALE_GENERATIONS,
+                request_generation = request_generation
+            )
+        }
+    }
+
+    private fun build_reference_prefetch_grid_plan(
+        viewport: Viewport,
+        state: MapTileRenderState,
+        overlay: ReferenceTileOverlay,
+        tile_zoom: Int,
+        @Suppress("UNUSED_PARAMETER") prefetch_kind: Int,
+        allow_exact_requests: Boolean,
+        tile_buffer: Int,
+        request_priority_base: Int,
+        request_stale_generation_tolerance: Long,
+        request_generation: Long
+    ): ReferencePrefetchGridPlan? {
+        if (!allow_exact_requests) {
+            if (debug_collect_detail_timing) {
+                debug_detail_reference_prefetch_denied_count++
+                debug_reference_lod_prefetch_async_denied_count.incrementAndGet()
+            }
+            return null
+        }
+        val collect_detail = debug_collect_detail_timing
+        val range_detail_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
+        val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
+        val tile_world_scale = 1.0 / tile_to_viewport_scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt() - tile_buffer
+        val first_tile_y = floor(top_world * tile_world_scale / TILE_SIZE).toInt() - tile_buffer
+        val last_tile_x = floor((left_world + viewport.width) * tile_world_scale / TILE_SIZE).toInt() + tile_buffer
+        val last_tile_y = floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt() + tile_buffer
+        val max_tile = 1 shl tile_zoom
+        val request_priority = reference_tile_request_priority(
+            overlay = overlay,
+            base_priority = request_priority_base
+        )
+        if (collect_detail) {
+            debug_detail_reference_prefetch_range_ns += detail_timing_elapsed_ns(range_detail_start_ns)
+        }
+        return ReferencePrefetchGridPlan(
+            epoch = 0L,
+            overlay = overlay,
+            cache_key = overlay.cache_key,
+            user_agent = state.user_agent,
+            tile_zoom = tile_zoom,
+            first_tile_x = first_tile_x,
+            first_tile_y = first_tile_y,
+            last_tile_x = last_tile_x,
+            last_tile_y = last_tile_y,
+            max_tile = max_tile,
+            request_priority = request_priority,
+            request_stale_generation_tolerance = request_stale_generation_tolerance,
+            request_generation = request_generation
+        )
+    }
+
+    private fun offer_reference_lod_prefetch_batch(plans: List<ReferencePrefetchGridPlan>) {
+        if (plans.isEmpty()) return
+        val should_schedule = synchronized(reference_lod_prefetch_lock) {
+            val epoch = reference_lod_prefetch_epoch + 1L
+            reference_lod_prefetch_epoch = epoch
+            if (debug_collect_detail_timing) {
+                debug_reference_lod_prefetch_async_offered_count.addAndGet(plans.size.toLong())
+                if (reference_lod_prefetch_latest_plans.isNotEmpty()) {
+                    debug_reference_lod_prefetch_async_coalesced_count.addAndGet(
+                        reference_lod_prefetch_latest_plans.size.toLong()
+                    )
+                }
+            }
+            reference_lod_prefetch_latest_plans = plans.map { it.copy(epoch = epoch) }
+            if (reference_lod_prefetch_scheduled) {
+                false
+            } else {
+                reference_lod_prefetch_scheduled = true
+                true
+            }
+        }
+        if (should_schedule) {
+            enqueue_reference_lod_prefetch_drain()
+        }
+    }
+
+    private fun enqueue_reference_lod_prefetch_drain() {
+        val task_generation = synchronized(requested_reference_tiles) {
+            current_reference_tile_request_generation
+        }
+        reference_tile_executor.execute(
+            ReferenceTileRequestTask(
+                generation = task_generation,
+                priority = REFERENCE_TILE_REQUEST_PRIORITY_ZOOM_OUT_PREFETCH,
+                sequence = reference_tile_task_sequence.incrementAndGet(),
+                action = { drain_reference_lod_prefetch_batches() }
+            )
+        )
+    }
+
+    private fun drain_reference_lod_prefetch_batches() {
+        while (true) {
+            val plans = synchronized(reference_lod_prefetch_lock) {
+                reference_lod_prefetch_latest_plans.also {
+                    reference_lod_prefetch_latest_plans = emptyList()
+                }
+            }
+            if (plans.isNotEmpty()) {
+                drain_reference_lod_prefetch_batch(plans)
+            }
+            val has_more = synchronized(reference_lod_prefetch_lock) {
+                if (reference_lod_prefetch_latest_plans.isEmpty()) {
+                    reference_lod_prefetch_scheduled = false
+                    false
+                } else {
+                    true
+                }
+            }
+            if (!has_more) return
+        }
+    }
+
+    private fun drain_reference_lod_prefetch_batch(plans: List<ReferencePrefetchGridPlan>) {
+        val collect_detail = debug_collect_detail_timing
+        val batch_start_ns = if (collect_detail) SystemClock.elapsedRealtimeNanos() else 0L
+        val stats = if (collect_detail) {
+            ReferencePrefetchDrainStats(
+                batch_count = 1L,
+                plan_count = plans.size.toLong()
+            )
+        } else {
+            null
+        }
+        for (plan in plans) {
+            if (!reference_lod_prefetch_epoch_current(plan.epoch)) {
+                stats?.let { it.superseded_count++ }
+                break
+            }
+            if (!reference_request_generation_recent(
+                    generation = plan.request_generation,
+                    max_generation_age = plan.request_stale_generation_tolerance
+                )
+            ) {
+                stats?.let { it.stale_count++ }
+                continue
+            }
+            if (!request_reference_lod_prefetch_grid_from_plan(plan, stats)) break
+        }
+        if (collect_detail && stats != null) {
+            val elapsed_ns = (SystemClock.elapsedRealtimeNanos() - batch_start_ns).coerceAtLeast(0L)
+            publish_reference_lod_prefetch_async_stats(stats, elapsed_ns)
+        }
+    }
+
+    private fun request_reference_lod_prefetch_grid_from_plan(
+        plan: ReferencePrefetchGridPlan,
+        stats: ReferencePrefetchDrainStats?
+    ): Boolean {
+        for (ty in plan.first_tile_y..plan.last_tile_y) {
+            if (ty !in 0 until plan.max_tile) continue
+            if (!reference_lod_prefetch_epoch_current(plan.epoch)) {
+                stats?.let { it.superseded_count++ }
+                return false
+            }
+            if (!reference_request_generation_recent(
+                    generation = plan.request_generation,
+                    max_generation_age = plan.request_stale_generation_tolerance
+                )
+            ) {
+                stats?.let { it.stale_count++ }
+                return true
+            }
+            for (tx_raw in plan.first_tile_x..plan.last_tile_x) {
+                stats?.let { it.tile_count++ }
+                val tx = ((tx_raw % plan.max_tile) + plan.max_tile) % plan.max_tile
+                val key = "${plan.cache_key}/${plan.tile_zoom}/$tx/$ty"
+                if (reference_tile_bitmap(key) != null) {
+                    stats?.let { it.memory_hit_count++ }
+                    continue
+                }
+                stats?.let { it.miss_count++ }
+                val admission = request_reference_tile(
+                    z = plan.tile_zoom,
+                    x = tx,
+                    y = ty,
+                    key = key,
+                    cache_key = plan.cache_key,
+                    url = plan.overlay.tile_url(plan.tile_zoom, tx, ty),
+                    user_agent = plan.user_agent,
+                    request_generation = plan.request_generation,
+                    request_priority = plan.request_priority,
+                    request_stale_generation_tolerance = plan.request_stale_generation_tolerance,
+                    redraw_when_loaded = false
+                )
+                if (stats != null) {
+                    when (admission) {
+                        REFERENCE_TILE_REQUEST_ADMITTED ->
+                            stats.submitted_count++
+                        REFERENCE_TILE_REQUEST_QUEUED,
+                        REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION,
+                        REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION ->
+                            stats.queued_count++
+                        REFERENCE_TILE_REQUEST_MEMORY_HIT ->
+                            stats.memory_recheck_count++
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private fun publish_reference_lod_prefetch_async_stats(
+        stats: ReferencePrefetchDrainStats,
+        elapsed_ns: Long
+    ) {
+        debug_reference_lod_prefetch_async_batch_count.addAndGet(stats.batch_count)
+        debug_reference_lod_prefetch_async_plan_count.addAndGet(stats.plan_count)
+        debug_reference_lod_prefetch_async_tile_count.addAndGet(stats.tile_count)
+        debug_reference_lod_prefetch_async_memory_hit_count.addAndGet(stats.memory_hit_count)
+        debug_reference_lod_prefetch_async_miss_count.addAndGet(stats.miss_count)
+        debug_reference_lod_prefetch_async_submitted_count.addAndGet(stats.submitted_count)
+        debug_reference_lod_prefetch_async_queued_count.addAndGet(stats.queued_count)
+        debug_reference_lod_prefetch_async_memory_recheck_count.addAndGet(stats.memory_recheck_count)
+        debug_reference_lod_prefetch_async_stale_count.addAndGet(stats.stale_count)
+        debug_reference_lod_prefetch_async_superseded_count.addAndGet(stats.superseded_count)
+        debug_reference_lod_prefetch_async_ns.addAndGet(elapsed_ns)
+        update_reference_lod_prefetch_async_max_ns(elapsed_ns)
+    }
+
+    private fun reference_lod_prefetch_epoch_current(epoch: Long): Boolean {
+        return synchronized(reference_lod_prefetch_lock) {
+            epoch == reference_lod_prefetch_epoch
+        }
+    }
+
+    private fun reference_request_generation_recent(generation: Long, max_generation_age: Long): Boolean {
+        return synchronized(requested_reference_tiles) {
+            current_reference_tile_request_generation - generation <= max_generation_age
+        }
+    }
+
+    private fun update_reference_lod_prefetch_async_max_ns(elapsed_ns: Long) {
+        while (true) {
+            val current = debug_reference_lod_prefetch_async_max_ns.get()
+            if (elapsed_ns <= current) return
+            if (debug_reference_lod_prefetch_async_max_ns.compareAndSet(current, elapsed_ns)) return
+        }
     }
 
     private fun reference_overlay_draw_plan(
@@ -20758,18 +21380,61 @@ internal class SatelliteMapTileRenderer(
             }
         }
 
-        val coverages = drawable_candidates.associateWith { tile_zoom ->
-            reference_tile_coverage(
+        val coverage_cache = HashMap<Int, ReferenceTileCoverage>(drawable_candidates.size)
+        fun coverage_for(tile_zoom: Int): ReferenceTileCoverage {
+            return coverage_cache.getOrPut(tile_zoom) {
+                reference_tile_coverage(
+                    overlay = overlay,
+                    viewport = viewport,
+                    tile_zoom = tile_zoom,
+                    now_ms = now_ms
+                )
+            }
+        }
+
+        fun finish_plan(draw_tile_zoom: Int, draw_coverage: ReferenceTileCoverage): ReferenceOverlayDrawPlan {
+            if (draw_tile_zoom != target_tile_zoom) {
+                protect_reference_tile_grid(
+                    overlay = overlay,
+                    viewport = viewport,
+                    tile_zoom = target_tile_zoom
+                )
+            }
+            reference_selected_tile_zooms[overlay] = draw_tile_zoom
+
+            val prefetch_tile_zooms = reference_overlay_prefetch_tile_zooms(
                 overlay = overlay,
-                viewport = viewport,
-                tile_zoom = tile_zoom,
-                now_ms = now_ms
+                drawable_candidates = drawable_candidates,
+                draw_tile_zoom = draw_tile_zoom,
+                target_tile_zoom = target_tile_zoom,
+                viewport_zoom = viewport.zoom,
+                coverage = draw_coverage
+            )
+            return ReferenceOverlayDrawPlan(
+                draw_tile_zoom = draw_tile_zoom,
+                prefetch_tile_zooms = prefetch_tile_zooms,
+                coverage = draw_coverage
             )
         }
-        val previous_coverage = previous?.takeIf { it in drawable_candidates }?.let { zoom ->
-            coverages[zoom]?.let { coverage -> zoom to coverage }
+
+        val target_coverage = coverage_for(target_tile_zoom)
+        val target_commit_ready = reference_lod_switch_commit_ready(overlay, target_coverage)
+        if (target_commit_ready) {
+            return finish_plan(target_tile_zoom, target_coverage)
         }
-        val target_coverage = coverages[target_tile_zoom]
+
+        val target_visual_holdable = previous == target_tile_zoom &&
+            reference_close_pan_target_lod_holdable(
+                viewport_zoom = viewport.zoom,
+                coverage = target_coverage
+            )
+        if (target_visual_holdable) {
+            return finish_plan(target_tile_zoom, target_coverage)
+        }
+
+        val previous_coverage = previous?.takeIf { it in drawable_candidates }?.let { zoom ->
+            zoom to if (zoom == target_tile_zoom) target_coverage else coverage_for(zoom)
+        }
         val retained_previous = previous_coverage?.takeIf { (_, coverage) ->
             reference_selected_lod_holdable(
                 overlay = overlay,
@@ -20777,54 +21442,31 @@ internal class SatelliteMapTileRenderer(
                 coverage = coverage
             )
         }
-        val target_commit_ready = target_coverage?.let { coverage ->
-            reference_lod_switch_commit_ready(overlay, coverage)
-        } == true
-        val target_visual_holdable = previous == target_tile_zoom &&
-            target_coverage?.let { coverage ->
-                reference_close_pan_target_lod_holdable(
-                    viewport_zoom = viewport.zoom,
-                    coverage = coverage
-                )
-            } == true
-        val selectable_coverages = coverages.entries.filter { (zoom, _) ->
-            zoom != previous || retained_previous != null || zoom == target_tile_zoom
+        if (retained_previous != null) {
+            return finish_plan(retained_previous.first, retained_previous.second)
         }
+
+        val selectable_coverages = drawable_candidates.mapNotNull { zoom ->
+            if (zoom != previous || zoom == target_tile_zoom) {
+                java.util.AbstractMap.SimpleImmutableEntry(
+                    zoom,
+                    if (zoom == target_tile_zoom) target_coverage else coverage_for(zoom)
+                )
+            } else {
+                null
+            }
+        }
+        val coverage_comparator = reference_lod_coverage_comparator(overlay, previous)
         val best_committed = selectable_coverages
             .filter { (_, coverage) -> reference_lod_switch_commit_ready(overlay, coverage) }
-            .maxWithOrNull(reference_lod_coverage_comparator(overlay, previous))
-        val best_ready = selectable_coverages.maxWithOrNull(reference_lod_coverage_comparator(overlay, previous))
-        val draw_tile_zoom = when {
-            target_coverage != null && target_commit_ready -> target_tile_zoom
-            target_visual_holdable -> target_tile_zoom
-            retained_previous != null -> retained_previous.first
-            best_committed != null -> best_committed.key
-            best_ready != null -> best_ready.key
-            else -> target_tile_zoom
+            .maxWithOrNull(coverage_comparator)
+        val best_ready = selectable_coverages.maxWithOrNull(coverage_comparator)
+        val selected = best_committed ?: best_ready
+        return if (selected != null) {
+            finish_plan(selected.key, selected.value)
+        } else {
+            finish_plan(target_tile_zoom, target_coverage)
         }
-        if (draw_tile_zoom != target_tile_zoom) {
-            protect_reference_tile_grid(
-                overlay = overlay,
-                viewport = viewport,
-                tile_zoom = target_tile_zoom
-            )
-        }
-        reference_selected_tile_zooms[overlay] = draw_tile_zoom
-
-        val draw_coverage = coverages[draw_tile_zoom] ?: ReferenceTileCoverage(0, 0, 0, 0)
-        val prefetch_tile_zooms = reference_overlay_prefetch_tile_zooms(
-            overlay = overlay,
-            drawable_candidates = drawable_candidates,
-            draw_tile_zoom = draw_tile_zoom,
-            target_tile_zoom = target_tile_zoom,
-            viewport_zoom = viewport.zoom,
-            coverage = draw_coverage
-        )
-        return ReferenceOverlayDrawPlan(
-            draw_tile_zoom = draw_tile_zoom,
-            prefetch_tile_zooms = prefetch_tile_zooms,
-            coverage = draw_coverage
-        )
     }
 
     private fun reference_overlay_candidate_zooms(
@@ -21301,13 +21943,19 @@ internal class SatelliteMapTileRenderer(
         state: MapTileRenderState,
         overlay: ReferenceTileOverlay,
         tile_zoom: Int,
+        prefetch_kind: Int,
         allow_exact_requests: Boolean,
         tile_buffer: Int,
         request_priority_base: Int,
         request_stale_generation_tolerance: Long,
         request_generation: Long
     ) {
-        if (!allow_exact_requests) return
+        if (!allow_exact_requests) {
+            if (debug_collect_detail_timing) debug_detail_reference_prefetch_denied_count++
+            return
+        }
+        val collect_detail = debug_collect_detail_timing
+        val range_detail_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
         val left_world = viewport.center_x - viewport.width / 2.0
@@ -21321,27 +21969,125 @@ internal class SatelliteMapTileRenderer(
             overlay = overlay,
             base_priority = request_priority_base
         )
+        if (collect_detail) {
+            debug_detail_reference_prefetch_range_ns += detail_timing_elapsed_ns(range_detail_start_ns)
+        }
 
+        var grid_tile_count = 0
+        val grid_detail_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
+        var grid_memory_lookup_ns = 0L
+        var grid_url_ns = 0L
+        var grid_submit_ns = 0L
         for (ty in first_tile_y..last_tile_y) {
             if (ty !in 0 until max_tile) continue
             for (tx_raw in first_tile_x..last_tile_x) {
+                if (collect_detail) {
+                    debug_detail_reference_prefetch_tile_count++
+                    grid_tile_count++
+                    if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
+                        debug_detail_reference_prefetch_pan_tile_count++
+                    } else {
+                        debug_detail_reference_prefetch_lod_tile_count++
+                    }
+                }
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${overlay.cache_key}/$tile_zoom/$tx/$ty"
-                if (reference_tile_bitmap(key) != null) continue
-                request_reference_tile(
+                val memory_bitmap = if (collect_detail) {
+                    val memory_lookup_start_ns = detail_timing_start_ns()
+                    reference_tile_bitmap(key).also {
+                        grid_memory_lookup_ns += detail_timing_elapsed_ns(memory_lookup_start_ns)
+                    }
+                } else {
+                    reference_tile_bitmap(key)
+                }
+                if (memory_bitmap != null) {
+                    if (collect_detail) debug_detail_reference_prefetch_memory_hit_count++
+                    continue
+                }
+                if (collect_detail) debug_detail_reference_prefetch_miss_count++
+                val url_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
+                val url = overlay.tile_url(tile_zoom, tx, ty)
+                if (collect_detail) {
+                    grid_url_ns += detail_timing_elapsed_ns(url_start_ns)
+                }
+                val submit_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
+                val admission = request_reference_tile(
                     z = tile_zoom,
                     x = tx,
                     y = ty,
                     key = key,
                     cache_key = overlay.cache_key,
-                    url = overlay.tile_url(tile_zoom, tx, ty),
+                    url = url,
                     user_agent = state.user_agent,
                     request_generation = request_generation,
                     request_priority = request_priority,
                     request_stale_generation_tolerance = request_stale_generation_tolerance,
                     redraw_when_loaded = false
                 )
+                if (collect_detail) {
+                    grid_submit_ns += detail_timing_elapsed_ns(submit_start_ns)
+                }
+                if (collect_detail) {
+                    when (admission) {
+                        REFERENCE_TILE_REQUEST_ADMITTED -> {
+                            debug_detail_reference_prefetch_submitted_count++
+                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
+                                debug_detail_reference_prefetch_pan_submitted_count++
+                            } else {
+                                debug_detail_reference_prefetch_lod_submitted_count++
+                            }
+                        }
+                        REFERENCE_TILE_REQUEST_QUEUED -> {
+                            debug_detail_reference_prefetch_queued_count++
+                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
+                                debug_detail_reference_prefetch_pan_queued_count++
+                            } else {
+                                debug_detail_reference_prefetch_lod_queued_count++
+                            }
+                        }
+                        REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION -> {
+                            debug_detail_reference_prefetch_queued_count++
+                            debug_detail_reference_prefetch_queued_same_generation_count++
+                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
+                                debug_detail_reference_prefetch_pan_queued_count++
+                            } else {
+                                debug_detail_reference_prefetch_lod_queued_count++
+                            }
+                        }
+                        REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION -> {
+                            debug_detail_reference_prefetch_queued_count++
+                            debug_detail_reference_prefetch_queued_recent_generation_count++
+                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
+                                debug_detail_reference_prefetch_pan_queued_count++
+                            } else {
+                                debug_detail_reference_prefetch_lod_queued_count++
+                            }
+                        }
+                        REFERENCE_TILE_REQUEST_MEMORY_HIT -> debug_detail_reference_prefetch_memory_recheck_count++
+                    }
+                }
             }
+        }
+        if (collect_detail) {
+            val grid_total_ns = detail_timing_elapsed_ns(grid_detail_start_ns)
+            debug_detail_reference_prefetch_memory_lookup_ns += grid_memory_lookup_ns
+            debug_detail_reference_prefetch_url_ns += grid_url_ns
+            debug_detail_reference_prefetch_submit_ns += grid_submit_ns
+            debug_detail_reference_prefetch_enum_ns +=
+                (grid_total_ns - grid_memory_lookup_ns - grid_url_ns - grid_submit_ns).coerceAtLeast(0L)
+        }
+        if (collect_detail && grid_tile_count > debug_detail_reference_prefetch_max_grid_count) {
+            debug_detail_reference_prefetch_max_grid_count = grid_tile_count
+        }
+        if (collect_detail && prefetch_kind == REFERENCE_PREFETCH_KIND_PAN &&
+            grid_tile_count > debug_detail_reference_prefetch_pan_max_grid_count
+        ) {
+            debug_detail_reference_prefetch_pan_max_grid_count = grid_tile_count
+        }
+        if (collect_detail && prefetch_kind == REFERENCE_PREFETCH_KIND_LOD &&
+            grid_tile_count > debug_detail_reference_prefetch_lod_max_grid_count
+        ) {
+            debug_detail_reference_prefetch_lod_max_grid_count = grid_tile_count
         }
     }
 
@@ -21620,9 +22366,9 @@ internal class SatelliteMapTileRenderer(
         request_priority: Int,
         request_stale_generation_tolerance: Long,
         redraw_when_loaded: Boolean
-    ) {
+    ): Int {
         mark_current_reference_tile_request(key, request_generation)
-        if (reference_tile_bitmap(key) != null) return
+        if (reference_tile_bitmap(key) != null) return REFERENCE_TILE_REQUEST_MEMORY_HIT
         var task_generation = request_generation
         synchronized(requested_reference_tiles) {
             if (redraw_when_loaded) requested_reference_tile_redraws += key
@@ -21631,7 +22377,11 @@ internal class SatelliteMapTileRenderer(
                 queued_generation != null &&
                 request_generation - queued_generation <= REFERENCE_TILE_REQUEUE_GENERATIONS
             ) {
-                return
+                return if (queued_generation == request_generation) {
+                    REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION
+                } else {
+                    REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION
+                }
             }
             requested_reference_tiles[key] = request_generation
             task_generation = request_generation
@@ -21719,6 +22469,7 @@ internal class SatelliteMapTileRenderer(
                 }
             }
         }))
+        return REFERENCE_TILE_REQUEST_ADMITTED
     }
 
     private fun begin_reference_tile_request_generation(): Long {
@@ -21761,7 +22512,10 @@ internal class SatelliteMapTileRenderer(
 
     private fun mark_current_reference_tile_request(key: String, generation: Long) {
         synchronized(requested_reference_tiles) {
-            current_reference_tile_request_generations[key] = generation
+            val previous_generation = current_reference_tile_request_generations[key]
+            if (previous_generation == null || generation >= previous_generation) {
+                current_reference_tile_request_generations[key] = generation
+            }
         }
     }
 
@@ -22557,6 +23311,14 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TILE_REQUEST_PRIORITY_PAN_PREFETCH = 1
         const val REFERENCE_TILE_REQUEST_PRIORITY_PARENT = 2
         const val REFERENCE_TILE_REQUEST_PRIORITY_PREFETCH = 3
+        const val REFERENCE_TILE_REQUEST_MEMORY_HIT = 0
+        const val REFERENCE_TILE_REQUEST_QUEUED = 1
+        const val REFERENCE_TILE_REQUEST_ADMITTED = 2
+        const val REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION = 3
+        const val REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION = 4
+        const val REFERENCE_PREFETCH_KIND_LOD = 0
+        const val REFERENCE_PREFETCH_KIND_PAN = 1
+        const val REFERENCE_PREFETCH_TRACE_SECTION = "FlightAlert.refPrefetch"
         const val REFERENCE_BOUNDARIES_REQUEST_PRIORITY_OFFSET = 0
         const val REFERENCE_TRANSPORTATION_REQUEST_PRIORITY_OFFSET = 0
         const val REFERENCE_BOUNDARY_PARENT_REQUEST_DEPTH = 4
@@ -22656,13 +23418,12 @@ internal class StreetMapTileRenderer(
         TILE_NETWORK_THREADS,
         TILE_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
-        PriorityBlockingQueue(),
-        { runnable ->
-            Thread(runnable, "flightalert-street-tile-${worker_id.incrementAndGet()}").apply {
-                isDaemon = true
-            }
+        PriorityBlockingQueue()
+    ) { runnable ->
+        Thread(runnable, "flightalert-street-tile-${worker_id.incrementAndGet()}").apply {
+            isDaemon = true
         }
-    ).apply {
+    }.apply {
         allowCoreThreadTimeOut(true)
     }
     private val tile_disk_executor = ThreadPoolExecutor(
@@ -22670,16 +23431,15 @@ internal class StreetMapTileRenderer(
         1,
         TILE_WORKER_KEEP_ALIVE_MS,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(),
-        { runnable ->
-            Thread({
-                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-                runnable.run()
-            }, "flightalert-street-tile-disk-${disk_worker_id.incrementAndGet()}").apply {
-                isDaemon = true
-            }
+        LinkedBlockingQueue()
+    ) { runnable ->
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            runnable.run()
+        }, "flightalert-street-tile-disk-${disk_worker_id.incrementAndGet()}").apply {
+            isDaemon = true
         }
-    ).apply {
+    }.apply {
         allowCoreThreadTimeOut(true)
     }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
@@ -23272,12 +24032,64 @@ class TrafficOverlayRenderer(
     private var debug_detail_dot_cache_record_ns = 0L
     private var debug_detail_cache_attempt_ns = 0L
     private var debug_detail_direct_symbol_ns = 0L
+    private var debug_detail_direct_call_count = 0
+    private var debug_detail_direct_partial_call_count = 0
+    private var debug_detail_direct_input_count = 0
+    private var debug_detail_direct_excluded_count = 0
+    private var debug_detail_direct_offscreen_count = 0
+    private var debug_detail_direct_drawn_count = 0
+    private var debug_detail_direct_cull_ns = 0L
+    private var debug_detail_direct_icon_ns = 0L
+    private var debug_detail_direct_symbol_foreground_ns = 0L
+    private var debug_detail_direct_rotor_foreground_ns = 0L
+    private var debug_detail_direct_dot_icon_ns = 0L
+    private var debug_detail_direct_symbol_icon_count = 0
+    private var debug_detail_direct_rotor_icon_count = 0
+    private var debug_detail_direct_surface_icon_count = 0
+    private var debug_detail_direct_dot_icon_count = 0
+    private var debug_detail_direct_icon_sample_frame_index = 0
+    private var debug_detail_direct_icon_sample_phase = 0
+    private var debug_detail_direct_icon_sample_index = 0
+    private var debug_detail_direct_icon_sample_total_ns = 0L
+    private var debug_detail_direct_icon_sample_prep_ns = 0L
+    private var debug_detail_direct_icon_sample_shadow_ns = 0L
+    private var debug_detail_direct_icon_sample_selection_ns = 0L
+    private var debug_detail_direct_icon_sample_matrix_ns = 0L
+    private var debug_detail_direct_icon_sample_fill_ns = 0L
+    private var debug_detail_direct_icon_sample_stroke_ns = 0L
+    private var debug_detail_direct_icon_sample_rotor_ns = 0L
+    private var debug_detail_direct_icon_sample_count = 0
+    private var debug_detail_direct_icon_sample_non_rotor_count = 0
+    private var debug_detail_direct_icon_sample_shadow_count = 0
+    private var debug_detail_direct_icon_sample_selection_count = 0
+    private var debug_detail_direct_icon_sample_matrix_count = 0
+    private var debug_detail_direct_icon_sample_fill_count = 0
+    private var debug_detail_direct_icon_sample_stroke_count = 0
+    private var debug_detail_direct_icon_sample_rotor_count = 0
+    private var debug_detail_direct_icon_sample_zero_alpha_count = 0
+    private var debug_detail_direct_icon_sample_fill_alpha_zero_count = 0
+    private var debug_detail_direct_icon_sample_stroke_alpha_zero_count = 0
+    private var debug_detail_direct_icon_sample_empty_fill_mask_count = 0
+    private var debug_detail_direct_icon_sample_empty_stroke_mask_count = 0
+    private var debug_detail_direct_icon_sample_mask_pixels = 0L
     private var debug_detail_symbol_style_ns = 0L
     private var debug_detail_symbol_shadow_ns = 0L
     private var debug_detail_symbol_mask_ns = 0L
+    private var debug_detail_symbol_mask_acquire_ns = 0L
+    private var debug_detail_symbol_mask_create_ns = 0L
+    private var debug_detail_symbol_mask_canvas_ns = 0L
+    private var debug_detail_symbol_mask_raster_ns = 0L
+    private var debug_detail_symbol_mask_prepare_ns = 0L
     private var debug_detail_symbol_mask_setup_ns = 0L
     private var debug_detail_symbol_mask_fill_ns = 0L
     private var debug_detail_symbol_mask_stroke_ns = 0L
+    private var debug_detail_symbol_mask_composite_ns = 0L
+    private var debug_detail_symbol_mask_draw_count = 0
+    private var debug_detail_symbol_mask_miss_count = 0
+    private var debug_detail_symbol_mask_pixels = 0L
+    private var debug_detail_symbol_mask_generated_pixels = 0L
+    private var debug_detail_mask_phase_frame_index = 0
+    private var debug_detail_mask_phase_sample = false
     private var debug_detail_label_ns = 0L
     private var debug_detail_labels_drawn = 0
     private var rotorcraft_animation_frame_requested = false
@@ -23337,19 +24149,21 @@ class TrafficOverlayRenderer(
             return
         }
         val direct_start_ns = debug_detail_start_ns()
-        draw_aircraft_symbols(
-            canvas = canvas,
-            aircraft = state.aircraft,
-            selected_aircraft_id = state.selected_aircraft_id,
-            viewport = state.viewport,
-            style = style,
-            marker_blend = marker_blend,
-            label_avoid_state = state,
-            draw_internal_dot = true,
-            transform_scale = state.aircraft_transform_scale,
-            translation_x = state.aircraft_translation_x,
-            translation_y = state.aircraft_translation_y
-        )
+        debug_trace_section(debug_collect_detail_timing, DEBUG_TRACE_DIRECT_SYMBOLS) {
+            draw_aircraft_symbols(
+                canvas = canvas,
+                aircraft = state.aircraft,
+                selected_aircraft_id = state.selected_aircraft_id,
+                viewport = state.viewport,
+                style = style,
+                marker_blend = marker_blend,
+                label_avoid_state = state,
+                draw_internal_dot = true,
+                transform_scale = state.aircraft_transform_scale,
+                translation_x = state.aircraft_translation_x,
+                translation_y = state.aircraft_translation_y
+            )
+        }
         debug_detail_direct_symbol_ns += debug_detail_elapsed_ns(direct_start_ns)
         finish_debug_detail_timing()
     }
@@ -23378,17 +24192,40 @@ class TrafficOverlayRenderer(
         var drawn_count = 0
         val scale = transform_scale.coerceAtLeast(0.001f)
         val now_ms = SystemClock.elapsedRealtime()
+        val has_selected_aircraft = normalized_selected_id != null
+        val draw_any_labels = draw_labels && label_count > 0
+        val max_cull_icon_scale = max(aircraft_dot_scale(viewport.zoom), aircraft_icon_scale(viewport.zoom))
+        val collect_detail = debug_collect_detail_timing
+        if (collect_detail) {
+            debug_detail_direct_call_count++
+            if (exclude_centers_in != null) debug_detail_direct_partial_call_count++
+            debug_detail_direct_input_count += aircraft.size
+        }
         for (item in aircraft) {
-            val selected = item.appearance_key == normalized_selected_id
+            val cull_start_ns = debug_detail_start_ns()
+            val selected = has_selected_aircraft && item.appearance_key == normalized_selected_id
             val elapsed_sec = traffic_motion_elapsed_seconds(item, now_ms)
             val x = (item.screen_point.x + item.screen_velocity_x_px_per_sec * elapsed_sec) * scale + translation_x
             val y = (item.screen_point.y + item.screen_velocity_y_px_per_sec * elapsed_sec) * scale + translation_y
-            if (exclude_centers_in?.contains(x, y) == true &&
+            if (exclude_centers_in != null &&
+                exclude_centers_in.contains(x, y) &&
                 (exclude_aircraft_keys == null || exclude_aircraft_keys.contains(item.appearance_key))
             ) {
+                if (collect_detail) {
+                    debug_detail_direct_excluded_count++
+                    debug_detail_direct_cull_ns += debug_detail_elapsed_ns(cull_start_ns)
+                }
                 continue
             }
-            if (!is_on_screen(x, y, viewport, aircraft_cull_padding(item, viewport.zoom, selected))) continue
+            if (!is_on_screen(x, y, viewport, aircraft_cull_padding(item, max_cull_icon_scale, selected))) {
+                if (collect_detail) {
+                    debug_detail_direct_offscreen_count++
+                    debug_detail_direct_cull_ns += debug_detail_elapsed_ns(cull_start_ns)
+                }
+                continue
+            }
+            if (collect_detail) debug_detail_direct_cull_ns += debug_detail_elapsed_ns(cull_start_ns)
+            val icon_start_ns = debug_detail_start_ns()
             draw_aircraft_icon(
                 canvas = canvas,
                 x = x,
@@ -23399,13 +24236,15 @@ class TrafficOverlayRenderer(
                 draw_internal_dot = draw_internal_dot,
                 now_ms = now_ms
             )
-            if (draw_labels && drawn_count < label_count) {
+            if (collect_detail) debug_detail_direct_icon_ns += debug_detail_elapsed_ns(icon_start_ns)
+            if (draw_any_labels && drawn_count < label_count) {
                 val label_start_ns = debug_detail_start_ns()
                 draw_aircraft_label(canvas, x, y, item, label_avoid_state, style)
                 debug_detail_label_ns += debug_detail_elapsed_ns(label_start_ns)
                 if (debug_collect_detail_timing) debug_detail_labels_drawn++
             }
             drawn_count++
+            if (collect_detail) debug_detail_direct_drawn_count++
         }
         return drawn_count
     }
@@ -23427,18 +24266,20 @@ class TrafficOverlayRenderer(
         val cached_coverage = if (!draw_internal_dot && label_aircraft_count(marker_blend, viewport.zoom) == 0) {
             debug_symbol_cache_miss_reason = "none"
             debug_symbol_cache_miss_detail = ""
-            draw_symbol_overlay_pan_cache(
-                canvas = canvas,
-                aircraft = aircraft,
-                selected_aircraft_id = selected_aircraft_id,
-                viewport = viewport,
-                style = style,
-                marker_blend = marker_blend,
-                label_avoid_state = label_avoid_state,
-                transform_scale = transform_scale,
-                translation_x = translation_x,
-                translation_y = translation_y
-            )
+            debug_trace_result(debug_collect_detail_timing, DEBUG_TRACE_SYMBOL_CACHE) {
+                draw_symbol_overlay_pan_cache(
+                    canvas = canvas,
+                    aircraft = aircraft,
+                    selected_aircraft_id = selected_aircraft_id,
+                    viewport = viewport,
+                    style = style,
+                    marker_blend = marker_blend,
+                    label_avoid_state = label_avoid_state,
+                    transform_scale = transform_scale,
+                    translation_x = translation_x,
+                    translation_y = translation_y
+                )
+            }
         } else {
             debug_symbol_cache_miss_reason = "labels_or_internal_dot"
             debug_symbol_cache_miss_detail = ""
@@ -23447,19 +24288,21 @@ class TrafficOverlayRenderer(
         debug_detail_cache_attempt_ns += debug_detail_elapsed_ns(cache_start_ns)
         if (cached_coverage == null) {
             val direct_start_ns = debug_detail_start_ns()
-            val direct_count = draw_aircraft_symbols(
-                canvas = canvas,
-                aircraft = aircraft,
-                selected_aircraft_id = selected_aircraft_id,
-                viewport = viewport,
-                style = style,
-                marker_blend = marker_blend,
-                label_avoid_state = label_avoid_state,
-                draw_internal_dot = draw_internal_dot,
-                transform_scale = transform_scale,
-                translation_x = translation_x,
-                translation_y = translation_y
-            )
+            val direct_count = debug_trace_result(debug_collect_detail_timing, DEBUG_TRACE_DIRECT_SYMBOLS) {
+                draw_aircraft_symbols(
+                    canvas = canvas,
+                    aircraft = aircraft,
+                    selected_aircraft_id = selected_aircraft_id,
+                    viewport = viewport,
+                    style = style,
+                    marker_blend = marker_blend,
+                    label_avoid_state = label_avoid_state,
+                    draw_internal_dot = draw_internal_dot,
+                    transform_scale = transform_scale,
+                    translation_x = translation_x,
+                    translation_y = translation_y
+                )
+            }
             debug_detail_direct_symbol_ns += debug_detail_elapsed_ns(direct_start_ns)
             val miss_detail = debug_symbol_cache_miss_detail
             val record_detail = symbol_overlay_debug_recording_summary(aircraft.size)
@@ -23480,22 +24323,24 @@ class TrafficOverlayRenderer(
                 return
             }
             val direct_start_ns = debug_detail_start_ns()
-            val direct_count = draw_aircraft_symbols(
-                canvas = canvas,
-                aircraft = aircraft,
-                selected_aircraft_id = selected_aircraft_id,
-                viewport = viewport,
-                style = style,
-                marker_blend = marker_blend,
-                label_avoid_state = label_avoid_state,
-                draw_internal_dot = false,
-                transform_scale = transform_scale,
-                translation_x = translation_x,
-                translation_y = translation_y,
-                draw_labels = false,
-                exclude_centers_in = cached_coverage,
-                exclude_aircraft_keys = symbol_overlay_cached_aircraft_keys
-            )
+            val direct_count = debug_trace_result(debug_collect_detail_timing, DEBUG_TRACE_DIRECT_SYMBOLS) {
+                draw_aircraft_symbols(
+                    canvas = canvas,
+                    aircraft = aircraft,
+                    selected_aircraft_id = selected_aircraft_id,
+                    viewport = viewport,
+                    style = style,
+                    marker_blend = marker_blend,
+                    label_avoid_state = label_avoid_state,
+                    draw_internal_dot = false,
+                    transform_scale = transform_scale,
+                    translation_x = translation_x,
+                    translation_y = translation_y,
+                    draw_labels = false,
+                    exclude_centers_in = cached_coverage,
+                    exclude_aircraft_keys = symbol_overlay_cached_aircraft_keys
+                )
+            }
             debug_detail_direct_symbol_ns += debug_detail_elapsed_ns(direct_start_ns)
             val record_detail = symbol_overlay_debug_recording_summary(aircraft.size)
             val record_suffix = if (record_detail.isNotEmpty()) " $record_detail" else ""
@@ -23573,30 +24418,153 @@ class TrafficOverlayRenderer(
         debug_detail_dot_cache_record_ns = 0L
         debug_detail_cache_attempt_ns = 0L
         debug_detail_direct_symbol_ns = 0L
+        debug_detail_direct_call_count = 0
+        debug_detail_direct_partial_call_count = 0
+        debug_detail_direct_input_count = 0
+        debug_detail_direct_excluded_count = 0
+        debug_detail_direct_offscreen_count = 0
+        debug_detail_direct_drawn_count = 0
+        debug_detail_direct_cull_ns = 0L
+        debug_detail_direct_icon_ns = 0L
+        debug_detail_direct_symbol_foreground_ns = 0L
+        debug_detail_direct_rotor_foreground_ns = 0L
+        debug_detail_direct_dot_icon_ns = 0L
+        debug_detail_direct_symbol_icon_count = 0
+        debug_detail_direct_rotor_icon_count = 0
+        debug_detail_direct_surface_icon_count = 0
+        debug_detail_direct_dot_icon_count = 0
+        debug_detail_direct_icon_sample_phase =
+            debug_detail_direct_icon_sample_frame_index % DIRECT_ICON_DETAIL_SAMPLE_PERIOD
+        debug_detail_direct_icon_sample_frame_index =
+            if (debug_detail_direct_icon_sample_frame_index == Int.MAX_VALUE) {
+                0
+            } else {
+                debug_detail_direct_icon_sample_frame_index + 1
+            }
+        debug_detail_direct_icon_sample_index = 0
+        debug_detail_direct_icon_sample_total_ns = 0L
+        debug_detail_direct_icon_sample_prep_ns = 0L
+        debug_detail_direct_icon_sample_shadow_ns = 0L
+        debug_detail_direct_icon_sample_selection_ns = 0L
+        debug_detail_direct_icon_sample_matrix_ns = 0L
+        debug_detail_direct_icon_sample_fill_ns = 0L
+        debug_detail_direct_icon_sample_stroke_ns = 0L
+        debug_detail_direct_icon_sample_rotor_ns = 0L
+        debug_detail_direct_icon_sample_count = 0
+        debug_detail_direct_icon_sample_non_rotor_count = 0
+        debug_detail_direct_icon_sample_shadow_count = 0
+        debug_detail_direct_icon_sample_selection_count = 0
+        debug_detail_direct_icon_sample_matrix_count = 0
+        debug_detail_direct_icon_sample_fill_count = 0
+        debug_detail_direct_icon_sample_stroke_count = 0
+        debug_detail_direct_icon_sample_rotor_count = 0
+        debug_detail_direct_icon_sample_zero_alpha_count = 0
+        debug_detail_direct_icon_sample_fill_alpha_zero_count = 0
+        debug_detail_direct_icon_sample_stroke_alpha_zero_count = 0
+        debug_detail_direct_icon_sample_empty_fill_mask_count = 0
+        debug_detail_direct_icon_sample_empty_stroke_mask_count = 0
+        debug_detail_direct_icon_sample_mask_pixels = 0L
         debug_detail_symbol_style_ns = 0L
         debug_detail_symbol_shadow_ns = 0L
         debug_detail_symbol_mask_ns = 0L
+        debug_detail_symbol_mask_acquire_ns = 0L
+        debug_detail_symbol_mask_create_ns = 0L
+        debug_detail_symbol_mask_canvas_ns = 0L
+        debug_detail_symbol_mask_raster_ns = 0L
+        debug_detail_symbol_mask_prepare_ns = 0L
         debug_detail_symbol_mask_setup_ns = 0L
         debug_detail_symbol_mask_fill_ns = 0L
         debug_detail_symbol_mask_stroke_ns = 0L
+        debug_detail_symbol_mask_composite_ns = 0L
+        debug_detail_symbol_mask_draw_count = 0
+        debug_detail_symbol_mask_miss_count = 0
+        debug_detail_symbol_mask_pixels = 0L
+        debug_detail_symbol_mask_generated_pixels = 0L
+        debug_detail_mask_phase_sample =
+            debug_detail_mask_phase_frame_index % SYMBOL_MASK_DETAIL_SAMPLE_PERIOD == 0
+        debug_detail_mask_phase_frame_index = if (debug_detail_mask_phase_frame_index == Int.MAX_VALUE) {
+            0
+        } else {
+            debug_detail_mask_phase_frame_index + 1
+        }
         debug_detail_label_ns = 0L
         debug_detail_labels_drawn = 0
     }
 
     private fun finish_debug_detail_timing() {
         if (!debug_collect_detail_timing) return
+        val direct_icon_sample_phased_ns =
+            debug_detail_direct_icon_sample_prep_ns +
+                debug_detail_direct_icon_sample_shadow_ns +
+                debug_detail_direct_icon_sample_selection_ns +
+                debug_detail_direct_icon_sample_matrix_ns +
+                debug_detail_direct_icon_sample_fill_ns +
+                debug_detail_direct_icon_sample_stroke_ns +
+                debug_detail_direct_icon_sample_rotor_ns
+        val direct_icon_sample_other_ns =
+            (debug_detail_direct_icon_sample_total_ns - direct_icon_sample_phased_ns).coerceAtLeast(0L)
         debug_last_detail_timing_summary =
             " trafficDetail dotBatch=${debug_detail_dot_batch_ns.ms_debug()} " +
                 "dotCacheClear=${debug_detail_dot_cache_clear_ns.ms_debug()} " +
                 "dotCacheRecord=${debug_detail_dot_cache_record_ns.ms_debug()} " +
                 "cacheAttempt=${debug_detail_cache_attempt_ns.ms_debug()} " +
                 "directSymbols=${debug_detail_direct_symbol_ns.ms_debug()} " +
+                "directCalls=$debug_detail_direct_call_count " +
+                "directPartial=$debug_detail_direct_partial_call_count " +
+                "directInput=$debug_detail_direct_input_count " +
+                "directExcluded=$debug_detail_direct_excluded_count " +
+                "directOffscreen=$debug_detail_direct_offscreen_count " +
+                "directDrawn=$debug_detail_direct_drawn_count " +
+                "directCull=${debug_detail_direct_cull_ns.ms_debug()} " +
+                "directIcon=${debug_detail_direct_icon_ns.ms_debug()} " +
+                "directSymbolFg=${debug_detail_direct_symbol_foreground_ns.ms_debug()} " +
+                "directRotorFg=${debug_detail_direct_rotor_foreground_ns.ms_debug()} " +
+                "directDotIcon=${debug_detail_direct_dot_icon_ns.ms_debug()} " +
+                "directSymbolCount=$debug_detail_direct_symbol_icon_count " +
+                "directRotorCount=$debug_detail_direct_rotor_icon_count " +
+                "directSurfaceCount=$debug_detail_direct_surface_icon_count " +
+                "directDotCount=$debug_detail_direct_dot_icon_count " +
+                "directIconSampPhase=$debug_detail_direct_icon_sample_phase " +
+                "directIconSamp=$debug_detail_direct_icon_sample_count " +
+                "directIconSampNonRotor=$debug_detail_direct_icon_sample_non_rotor_count " +
+                "directIconSampTotal=${debug_detail_direct_icon_sample_total_ns.ms_debug()} " +
+                "directIconSampPrep=${debug_detail_direct_icon_sample_prep_ns.ms_debug()} " +
+                "directIconSampShadow=${debug_detail_direct_icon_sample_shadow_ns.ms_debug()} " +
+                "directIconSampSelection=${debug_detail_direct_icon_sample_selection_ns.ms_debug()} " +
+                "directIconSampMatrix=${debug_detail_direct_icon_sample_matrix_ns.ms_debug()} " +
+                "directIconSampFill=${debug_detail_direct_icon_sample_fill_ns.ms_debug()} " +
+                "directIconSampStroke=${debug_detail_direct_icon_sample_stroke_ns.ms_debug()} " +
+                "directIconSampRotor=${debug_detail_direct_icon_sample_rotor_ns.ms_debug()} " +
+                "directIconSampOther=${direct_icon_sample_other_ns.ms_debug()} " +
+                "directIconSampShadowCount=$debug_detail_direct_icon_sample_shadow_count " +
+                "directIconSampSelectionCount=$debug_detail_direct_icon_sample_selection_count " +
+                "directIconSampMatrixCount=$debug_detail_direct_icon_sample_matrix_count " +
+                "directIconSampFillCount=$debug_detail_direct_icon_sample_fill_count " +
+                "directIconSampStrokeCount=$debug_detail_direct_icon_sample_stroke_count " +
+                "directIconSampRotorCount=$debug_detail_direct_icon_sample_rotor_count " +
+                "directIconSampZeroAlpha=$debug_detail_direct_icon_sample_zero_alpha_count " +
+                "directIconSampFillAlphaZero=$debug_detail_direct_icon_sample_fill_alpha_zero_count " +
+                "directIconSampStrokeAlphaZero=$debug_detail_direct_icon_sample_stroke_alpha_zero_count " +
+                "directIconSampEmptyFill=$debug_detail_direct_icon_sample_empty_fill_mask_count " +
+                "directIconSampEmptyStroke=$debug_detail_direct_icon_sample_empty_stroke_mask_count " +
+                "directIconSampMaskPixels=$debug_detail_direct_icon_sample_mask_pixels " +
                 "symbolStyle=${debug_detail_symbol_style_ns.ms_debug()} " +
                 "symbolShadow=${debug_detail_symbol_shadow_ns.ms_debug()} " +
+                "maskSample=${if (debug_detail_mask_phase_sample) 1 else 0} " +
                 "symbolMask=${debug_detail_symbol_mask_ns.ms_debug()} " +
+                "symbolMaskAcquire=${debug_detail_symbol_mask_acquire_ns.ms_debug()} " +
+                "symbolMaskCreate=${debug_detail_symbol_mask_create_ns.ms_debug()} " +
+                "symbolMaskCanvas=${debug_detail_symbol_mask_canvas_ns.ms_debug()} " +
+                "symbolMaskRaster=${debug_detail_symbol_mask_raster_ns.ms_debug()} " +
+                "symbolMaskPrepare=${debug_detail_symbol_mask_prepare_ns.ms_debug()} " +
                 "symbolMaskSetup=${debug_detail_symbol_mask_setup_ns.ms_debug()} " +
                 "symbolMaskFill=${debug_detail_symbol_mask_fill_ns.ms_debug()} " +
                 "symbolMaskStroke=${debug_detail_symbol_mask_stroke_ns.ms_debug()} " +
+                "symbolMaskComposite=${debug_detail_symbol_mask_composite_ns.ms_debug()} " +
+                "symbolMaskDraws=$debug_detail_symbol_mask_draw_count " +
+                "symbolMaskPixels=$debug_detail_symbol_mask_pixels " +
+                "symbolMaskMiss=$debug_detail_symbol_mask_miss_count " +
+                "symbolMaskGenPixels=$debug_detail_symbol_mask_generated_pixels " +
                 "labels=${debug_detail_label_ns.ms_debug()} labelsDrawn=$debug_detail_labels_drawn"
     }
 
@@ -23606,6 +24574,36 @@ class TrafficOverlayRenderer(
 
     private fun debug_detail_elapsed_ns(start_ns: Long): Long {
         return debug_elapsed_ns(debug_collect_detail_timing, start_ns)
+    }
+
+    private fun debug_detail_sample_start_ns(sample: Boolean): Long {
+        return if (sample) SystemClock.elapsedRealtimeNanos() else 0L
+    }
+
+    private fun debug_detail_sample_elapsed_ns(start_ns: Long): Long {
+        return debug_elapsed_ns(start_ns > 0L, start_ns)
+    }
+
+    private fun debug_detail_direct_icon_sample_enabled(): Boolean {
+        if (!debug_collect_detail_timing) return false
+        val sample =
+            debug_detail_direct_icon_sample_index % DIRECT_ICON_DETAIL_SAMPLE_PERIOD ==
+                debug_detail_direct_icon_sample_phase
+        debug_detail_direct_icon_sample_index++
+        if (sample) debug_detail_direct_icon_sample_count++
+        return sample
+    }
+
+    private fun debug_detail_mask_phase_start_ns(): Long {
+        return if (debug_collect_detail_timing && debug_detail_mask_phase_sample) {
+            SystemClock.elapsedRealtimeNanos()
+        } else {
+            0L
+        }
+    }
+
+    private fun debug_detail_mask_phase_elapsed_ns(start_ns: Long): Long {
+        return debug_elapsed_ns(debug_collect_detail_timing && debug_detail_mask_phase_sample, start_ns)
     }
 
     private fun Long.ms_debug(): String {
@@ -23823,11 +24821,22 @@ class TrafficOverlayRenderer(
             false
         }
         if (!can_draw_cached_overlay) {
-            debug_symbol_cache_miss_reason = when {
+            val miss_reason = when {
                 dropped_sparse_recording -> "sparse_recording"
                 interaction_active -> debug_symbol_cache_miss_reason
                 symbol_overlay_saw_interaction -> "inactive_after_interaction"
                 else -> "inactive"
+            }
+            debug_symbol_cache_miss_reason = miss_reason
+            if (debug_collect_detail_timing && miss_reason == "inactive_after_interaction") {
+                debug_symbol_cache_miss_detail = symbol_overlay_inactive_miss_detail(
+                    current_key = key,
+                    key_matches = key_matches,
+                    visual_key_matches = visual_key_matches,
+                    center_matches = center_matches,
+                    dimensions_match = dimensions_match,
+                    cache_intersects_viewport = cache_intersects_viewport
+                )
             }
             return null
         }
@@ -24031,6 +25040,32 @@ class TrafficOverlayRenderer(
             "sig=${cached_key.aircraft_signature == current_key.aircraft_signature} " +
             "app=${cached_key.appearance_bucket == current_key.appearance_bucket} " +
             "theme=${cached_key.theme_key == current_key.theme_key}"
+    }
+
+    private fun symbol_overlay_inactive_miss_detail(
+        current_key: AircraftSymbolOverlayCacheKey,
+        key_matches: Boolean,
+        visual_key_matches: Boolean,
+        center_matches: Boolean,
+        dimensions_match: Boolean,
+        cache_intersects_viewport: Boolean
+    ): String {
+        val cached_key = symbol_overlay_key
+        val recording_age_ms = if (symbol_overlay_recording_elapsed_ms > 0L) {
+            (SystemClock.elapsedRealtime() - symbol_overlay_recording_elapsed_ms).coerceAtLeast(0L)
+        } else {
+            -1L
+        }
+        return "inactive key=$key_matches visual=$visual_key_matches " +
+            "intersects=$cache_intersects_viewport center=$center_matches dims=$dimensions_match " +
+            "sig=${cached_key?.aircraft_signature == current_key.aircraft_signature} " +
+            "app=${cached_key?.appearance_bucket == current_key.appearance_bucket} " +
+            "theme=${cached_key?.theme_key == current_key.theme_key} " +
+            "cached=${symbol_overlay_width}x$symbol_overlay_height " +
+            "recCached=$symbol_overlay_recorded_aircraft_count " +
+            "recKeys=${symbol_overlay_cached_aircraft_keys.size} " +
+            "recAgeMs=$recording_age_ms " +
+            "sawInteraction=$symbol_overlay_saw_interaction"
     }
 
     private fun draw_cached_symbol_overlay_bitmap(canvas: Canvas, overlay_bitmap: Bitmap) {
@@ -24346,7 +25381,6 @@ class TrafficOverlayRenderer(
             return
         }
         val old_cap = paint.strokeCap
-        val transform_scale = batch.transform_scale.coerceAtLeast(0.001f)
         val motion_elapsed_sec = if (batch.animate_motion && batch.built_elapsed_ms > 0L) {
             ((SystemClock.elapsedRealtime() - batch.built_elapsed_ms) / 1000f).coerceIn(0f, MAX_BATCH_MOTION_SECONDS)
         } else {
@@ -25010,6 +26044,8 @@ class TrafficOverlayRenderer(
         draw_internal_dot: Boolean,
         now_ms: Long
     ) {
+        val sample_icon = debug_detail_direct_icon_sample_enabled()
+        val sample_total_start_ns = debug_detail_sample_start_ns(sample_icon)
         val appear = current_aircraft_appearance_progress_at(item, now_ms)
         val enter_scale = 0.18f + 0.82f * appear
         val alpha = (appear * 255).toInt().coerceIn(0, 255)
@@ -25019,12 +26055,29 @@ class TrafficOverlayRenderer(
         val icon_scale = frame_style.base_icon_scale * type_scale * enter_scale *
             if (symbol == AircraftSymbol.ROTORCRAFT) ROTORCRAFT_ICON_SCALE_MULTIPLIER else 1f
         val colors = frame_style.colors
+        val collect_detail = debug_collect_detail_timing
+        if (sample_icon) {
+            debug_detail_direct_icon_sample_prep_ns += debug_detail_sample_elapsed_ns(sample_total_start_ns)
+        }
         if (draw_internal_dot && frame_style.blend >= AIRCRAFT_FAST_DOT_BLEND) {
+            val dot_start_ns = debug_detail_start_ns()
             draw_aircraft_dot(canvas, x, y, icon_scale, appear, item.color, selected, colors.accent_green, colors.scrim)
+            if (collect_detail) {
+                debug_detail_direct_dot_icon_ns += debug_detail_elapsed_ns(dot_start_ns)
+                debug_detail_direct_dot_icon_count++
+            }
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_total_ns +=
+                    debug_detail_sample_elapsed_ns(sample_total_start_ns)
+            }
             return
+        }
+        if (sample_icon && (alpha <= 4 || symbol_alpha <= 4)) {
+            debug_detail_direct_icon_sample_zero_alpha_count++
         }
         if (alpha > 4 && symbol_alpha > 4) {
             val shadow_start_ns = debug_detail_start_ns()
+            val sample_shadow_start_ns = debug_detail_sample_start_ns(sample_icon)
             val shadow_alpha = (74 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 74)
             paint.style = Paint.Style.FILL
             paint.color = with_alpha(colors.scrim, shadow_alpha)
@@ -25047,7 +26100,13 @@ class TrafficOverlayRenderer(
                 )
             }
             debug_detail_symbol_shadow_ns += debug_detail_elapsed_ns(shadow_start_ns)
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_shadow_ns +=
+                    debug_detail_sample_elapsed_ns(sample_shadow_start_ns)
+                debug_detail_direct_icon_sample_shadow_count++
+            }
             if (selected) {
+                val sample_selection_start_ns = debug_detail_sample_start_ns(sample_icon)
                 draw_aircraft_selection_ring(
                     canvas = canvas,
                     x = x,
@@ -25057,12 +26116,19 @@ class TrafficOverlayRenderer(
                     viewport_zoom = frame_style.viewport_zoom,
                     style = frame_style.style
                 )
+                if (sample_icon) {
+                    debug_detail_direct_icon_sample_selection_ns +=
+                        debug_detail_sample_elapsed_ns(sample_selection_start_ns)
+                    debug_detail_direct_icon_sample_selection_count++
+                }
             }
 
-            val mask_start_ns = debug_detail_start_ns()
+            val mask_start_ns = debug_detail_mask_phase_start_ns()
             val fill_color = with_alpha(item.color, symbol_alpha)
             val stroke_color = with_alpha(colors.scrim, (235 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 235))
             if (symbol == AircraftSymbol.ROTORCRAFT) {
+                val foreground_start_ns = debug_detail_start_ns()
+                val sample_rotor_start_ns = debug_detail_sample_start_ns(sample_icon)
                 draw_rotorcraft_icon(
                     canvas = canvas,
                     x = x,
@@ -25074,7 +26140,17 @@ class TrafficOverlayRenderer(
                     fill = fill_color,
                     stroke = stroke_color
                 )
+                if (sample_icon) {
+                    debug_detail_direct_icon_sample_rotor_ns +=
+                        debug_detail_sample_elapsed_ns(sample_rotor_start_ns)
+                    debug_detail_direct_icon_sample_rotor_count++
+                }
+                if (collect_detail) {
+                    debug_detail_direct_rotor_foreground_ns += debug_detail_elapsed_ns(foreground_start_ns)
+                    debug_detail_direct_rotor_icon_count++
+                }
             } else {
+                val foreground_start_ns = debug_detail_start_ns()
                 draw_cached_aircraft_symbol(
                     canvas = canvas,
                     x = x,
@@ -25085,13 +26161,23 @@ class TrafficOverlayRenderer(
                     mask_resolution_scale = frame_style.mask_resolution_scale,
                     mask = frame_style.mask_for(symbol),
                     fill = fill_color,
-                    stroke = stroke_color
+                    stroke = stroke_color,
+                    sample_icon = sample_icon
                 )
+                if (collect_detail) {
+                    debug_detail_direct_symbol_foreground_ns += debug_detail_elapsed_ns(foreground_start_ns)
+                    debug_detail_direct_symbol_icon_count++
+                    if (symbol == AircraftSymbol.SURFACE) debug_detail_direct_surface_icon_count++
+                }
             }
-            debug_detail_symbol_mask_ns += debug_detail_elapsed_ns(mask_start_ns)
+            debug_detail_symbol_mask_ns += debug_detail_mask_phase_elapsed_ns(mask_start_ns)
         }
         paint.alpha = 255
         stroke_paint.alpha = 255
+        if (sample_icon) {
+            debug_detail_direct_icon_sample_total_ns +=
+                debug_detail_sample_elapsed_ns(sample_total_start_ns)
+        }
     }
 
     private fun aircraft_icon_frame_style(
@@ -25106,6 +26192,7 @@ class TrafficOverlayRenderer(
         val symbol_visibility = AircraftMarkerMorph.symbol_visibility(blend)
         val mask_resolution_scale = aircraft_symbol_mask_resolution_scale(base_icon_scale)
         val mask_size_px = aircraft_symbol_mask_size_px(mask_resolution_scale)
+        val mask_acquire_start_ns = debug_detail_mask_phase_start_ns()
         java.util.Arrays.fill(frame_symbol_masks, null)
         for (symbol in aircraft_symbol_values) {
             frame_symbol_masks[symbol.ordinal] = aircraft_symbol_mask(
@@ -25115,6 +26202,7 @@ class TrafficOverlayRenderer(
                 mask_resolution_scale = mask_resolution_scale
             )
         }
+        debug_detail_symbol_mask_acquire_ns += debug_detail_mask_phase_elapsed_ns(mask_acquire_start_ns)
         return AircraftIconFrameStyle(
             style = style,
             colors = style.visual_theme.colors,
@@ -25183,10 +26271,28 @@ class TrafficOverlayRenderer(
         mask_resolution_scale: Float,
         mask: AircraftSymbolMask,
         fill: Int,
-        stroke: Int
+        stroke: Int,
+        sample_icon: Boolean = false
     ) {
         if (debug_collect_detail_timing) {
-            val setup_start_ns = SystemClock.elapsedRealtimeNanos()
+            debug_detail_symbol_mask_draw_count++
+            debug_detail_symbol_mask_pixels += mask.fill.width.toLong() * mask.fill.height.toLong() * 2L
+        }
+        if (sample_icon) {
+            debug_detail_direct_icon_sample_non_rotor_count++
+            debug_detail_direct_icon_sample_mask_pixels += mask.fill.width.toLong() * mask.fill.height.toLong() * 2L
+            if (Color.alpha(fill) == 0) debug_detail_direct_icon_sample_fill_alpha_zero_count++
+            if (Color.alpha(stroke) == 0) debug_detail_direct_icon_sample_stroke_alpha_zero_count++
+            if (mask.fill.width <= 0 || mask.fill.height <= 0) {
+                debug_detail_direct_icon_sample_empty_fill_mask_count++
+            }
+            if (mask.stroke.width <= 0 || mask.stroke.height <= 0) {
+                debug_detail_direct_icon_sample_empty_stroke_mask_count++
+            }
+        }
+        if (debug_collect_detail_timing && debug_detail_mask_phase_sample) {
+            val setup_start_ns = debug_detail_mask_phase_start_ns()
+            val sample_matrix_start_ns = debug_detail_sample_start_ns(sample_icon)
             val draw_scale = icon_scale / mask_resolution_scale.coerceAtLeast(0.001f)
             symbol_draw_matrix.reset()
             symbol_draw_matrix.postTranslate(-mask.fill.width / 2f, -mask.fill.height / 2f)
@@ -25195,18 +26301,38 @@ class TrafficOverlayRenderer(
                 symbol_draw_matrix.postRotate(track_deg.toFloat())
             }
             symbol_draw_matrix.postTranslate(x, y)
-            debug_detail_symbol_mask_setup_ns += SystemClock.elapsedRealtimeNanos() - setup_start_ns
+            debug_detail_symbol_mask_setup_ns += debug_detail_mask_phase_elapsed_ns(setup_start_ns)
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_matrix_ns +=
+                    debug_detail_sample_elapsed_ns(sample_matrix_start_ns)
+                debug_detail_direct_icon_sample_matrix_count++
+            }
 
             symbol_mask_paint.color = fill
-            val fill_start_ns = SystemClock.elapsedRealtimeNanos()
+            val composite_start_ns = debug_detail_mask_phase_start_ns()
+            val fill_start_ns = debug_detail_mask_phase_start_ns()
+            val sample_fill_start_ns = debug_detail_sample_start_ns(sample_icon)
             canvas.drawBitmap(mask.fill, symbol_draw_matrix, symbol_mask_paint)
-            debug_detail_symbol_mask_fill_ns += SystemClock.elapsedRealtimeNanos() - fill_start_ns
+            debug_detail_symbol_mask_fill_ns += debug_detail_mask_phase_elapsed_ns(fill_start_ns)
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_fill_ns +=
+                    debug_detail_sample_elapsed_ns(sample_fill_start_ns)
+                debug_detail_direct_icon_sample_fill_count++
+            }
 
             symbol_mask_paint.color = stroke
-            val stroke_start_ns = SystemClock.elapsedRealtimeNanos()
+            val stroke_start_ns = debug_detail_mask_phase_start_ns()
+            val sample_stroke_start_ns = debug_detail_sample_start_ns(sample_icon)
             canvas.drawBitmap(mask.stroke, symbol_draw_matrix, symbol_mask_paint)
-            debug_detail_symbol_mask_stroke_ns += SystemClock.elapsedRealtimeNanos() - stroke_start_ns
+            debug_detail_symbol_mask_stroke_ns += debug_detail_mask_phase_elapsed_ns(stroke_start_ns)
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_stroke_ns +=
+                    debug_detail_sample_elapsed_ns(sample_stroke_start_ns)
+                debug_detail_direct_icon_sample_stroke_count++
+            }
+            debug_detail_symbol_mask_composite_ns += debug_detail_mask_phase_elapsed_ns(composite_start_ns)
         } else {
+            val sample_matrix_start_ns = debug_detail_sample_start_ns(sample_icon)
             val draw_scale = icon_scale / mask_resolution_scale.coerceAtLeast(0.001f)
             symbol_draw_matrix.reset()
             symbol_draw_matrix.postTranslate(-mask.fill.width / 2f, -mask.fill.height / 2f)
@@ -25215,10 +26341,27 @@ class TrafficOverlayRenderer(
                 symbol_draw_matrix.postRotate(track_deg.toFloat())
             }
             symbol_draw_matrix.postTranslate(x, y)
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_matrix_ns +=
+                    debug_detail_sample_elapsed_ns(sample_matrix_start_ns)
+                debug_detail_direct_icon_sample_matrix_count++
+            }
             symbol_mask_paint.color = fill
+            val sample_fill_start_ns = debug_detail_sample_start_ns(sample_icon)
             canvas.drawBitmap(mask.fill, symbol_draw_matrix, symbol_mask_paint)
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_fill_ns +=
+                    debug_detail_sample_elapsed_ns(sample_fill_start_ns)
+                debug_detail_direct_icon_sample_fill_count++
+            }
             symbol_mask_paint.color = stroke
+            val sample_stroke_start_ns = debug_detail_sample_start_ns(sample_icon)
             canvas.drawBitmap(mask.stroke, symbol_draw_matrix, symbol_mask_paint)
+            if (sample_icon) {
+                debug_detail_direct_icon_sample_stroke_ns +=
+                    debug_detail_sample_elapsed_ns(sample_stroke_start_ns)
+                debug_detail_direct_icon_sample_stroke_count++
+            }
         }
         symbol_mask_paint.alpha = 255
     }
@@ -25237,39 +26380,37 @@ class TrafficOverlayRenderer(
         val body = smooth_step(0f, 0.62f, shape_progress)
         val tail = smooth_step(0.34f, 1f, shape_progress)
         val previous_paint_style = paint.style
-        canvas.save()
-        canvas.translate(
+        canvas.withTranslation(
             x + frame_style.shadow_offset_x_px * icon_scale * 0.42f,
             y + frame_style.shadow_offset_y_px * icon_scale * 0.42f
-        )
-        if (track_deg != null) canvas.rotate(track_deg.toFloat())
-        canvas.scale(icon_scale, icon_scale)
+        ) {
+            if (track_deg != null) rotate(track_deg.toFloat())
+            scale(icon_scale, icon_scale)
 
-        val nose_y = -chrome.dp(4.5f + 9.5f * body)
-        val shoulder_y = -chrome.dp(3.4f + 5.3f * body)
-        val cabin_mid_y = chrome.dp(1.2f + 4.4f * body)
-        val cabin_back_y = chrome.dp(4.2f + 5f * body)
-        val cabin_half_width = chrome.dp(3.4f + 4.4f * body)
-        val cabin_back_half_width = chrome.dp(2.1f + 2.1f * body)
-        val boom_half_width = chrome.dp(0.85f + 0.75f * tail)
-        val boom_end_y = chrome.dp(6f + 18f * tail)
-        val tail_fin_half_width = chrome.dp(2.1f + 3.1f * tail)
-        val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
-        path.reset()
-        path.moveTo(0f, nose_y)
-        path.cubicTo(cabin_half_width, shoulder_y, cabin_half_width, cabin_mid_y, cabin_back_half_width, cabin_back_y)
-        path.lineTo(boom_half_width, boom_end_y)
-        path.lineTo(tail_fin_half_width, tail_fin_y)
-        path.lineTo(-tail_fin_half_width, tail_fin_y)
-        path.lineTo(-boom_half_width, boom_end_y)
-        path.lineTo(-cabin_back_half_width, cabin_back_y)
-        path.cubicTo(-cabin_half_width, cabin_mid_y, -cabin_half_width, shoulder_y, 0f, nose_y)
-        path.close()
-        paint.style = Paint.Style.FILL
-        paint.color = with_alpha(frame_style.colors.scrim, (alpha * 0.8f).round_to_int().coerceIn(0, 64))
-        canvas.drawPath(path, paint)
-
-        canvas.restore()
+            val nose_y = -chrome.dp(4.5f + 9.5f * body)
+            val shoulder_y = -chrome.dp(3.4f + 5.3f * body)
+            val cabin_mid_y = chrome.dp(1.2f + 4.4f * body)
+            val cabin_back_y = chrome.dp(4.2f + 5f * body)
+            val cabin_half_width = chrome.dp(3.4f + 4.4f * body)
+            val cabin_back_half_width = chrome.dp(2.1f + 2.1f * body)
+            val boom_half_width = chrome.dp(0.85f + 0.75f * tail)
+            val boom_end_y = chrome.dp(6f + 18f * tail)
+            val tail_fin_half_width = chrome.dp(2.1f + 3.1f * tail)
+            val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
+            path.reset()
+            path.moveTo(0f, nose_y)
+            path.cubicTo(cabin_half_width, shoulder_y, cabin_half_width, cabin_mid_y, cabin_back_half_width, cabin_back_y)
+            path.lineTo(boom_half_width, boom_end_y)
+            path.lineTo(tail_fin_half_width, tail_fin_y)
+            path.lineTo(-tail_fin_half_width, tail_fin_y)
+            path.lineTo(-boom_half_width, boom_end_y)
+            path.lineTo(-cabin_back_half_width, cabin_back_y)
+            path.cubicTo(-cabin_half_width, cabin_mid_y, -cabin_half_width, shoulder_y, 0f, nose_y)
+            path.close()
+            paint.style = Paint.Style.FILL
+            paint.color = with_alpha(frame_style.colors.scrim, (alpha * 0.8f).round_to_int().coerceIn(0, 64))
+            drawPath(path, paint)
+        }
         paint.style = previous_paint_style
     }
 
@@ -25293,70 +26434,68 @@ class TrafficOverlayRenderer(
         val previous_stroke_join = stroke_paint.strokeJoin
         val previous_paint_style = paint.style
         val previous_stroke_style = stroke_paint.style
-        canvas.save()
-        canvas.translate(x, y)
-        if (track_deg != null) canvas.rotate(track_deg.toFloat())
-        canvas.scale(icon_scale, icon_scale)
+        canvas.withTranslation(x, y) {
+            if (track_deg != null) rotate(track_deg.toFloat())
+            scale(icon_scale, icon_scale)
 
-        path.reset()
-        val nose_y = -chrome.dp(5f + 10f * body)
-        val shoulder_y = -chrome.dp(3.8f + 5.8f * body)
-        val cabin_mid_y = chrome.dp(1.4f + 4.8f * body)
-        val cabin_back_y = chrome.dp(4.4f + 5.2f * body)
-        val cabin_half_width = chrome.dp(2.9f + 4f * body)
-        val cabin_back_half_width = chrome.dp(1.8f + 1.9f * body)
-        val boom_half_width = chrome.dp(0.55f + 0.65f * tail)
-        val boom_end_y = chrome.dp(6f + 18f * tail)
-        val tail_fin_half_width = chrome.dp(1.8f + 2.9f * tail)
-        val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
-        path.moveTo(0f, nose_y)
-        path.cubicTo(cabin_half_width, shoulder_y, cabin_half_width, cabin_mid_y, cabin_back_half_width, cabin_back_y)
-        path.lineTo(boom_half_width, boom_end_y)
-        path.lineTo(tail_fin_half_width, tail_fin_y)
-        path.lineTo(-tail_fin_half_width, tail_fin_y)
-        path.lineTo(-boom_half_width, boom_end_y)
-        path.lineTo(-cabin_back_half_width, cabin_back_y)
-        path.cubicTo(-cabin_half_width, cabin_mid_y, -cabin_half_width, shoulder_y, 0f, nose_y)
-        path.close()
+            path.reset()
+            val nose_y = -chrome.dp(5f + 10f * body)
+            val shoulder_y = -chrome.dp(3.8f + 5.8f * body)
+            val cabin_mid_y = chrome.dp(1.4f + 4.8f * body)
+            val cabin_back_y = chrome.dp(4.4f + 5.2f * body)
+            val cabin_half_width = chrome.dp(2.9f + 4f * body)
+            val cabin_back_half_width = chrome.dp(1.8f + 1.9f * body)
+            val boom_half_width = chrome.dp(0.55f + 0.65f * tail)
+            val boom_end_y = chrome.dp(6f + 18f * tail)
+            val tail_fin_half_width = chrome.dp(1.8f + 2.9f * tail)
+            val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
+            path.moveTo(0f, nose_y)
+            path.cubicTo(cabin_half_width, shoulder_y, cabin_half_width, cabin_mid_y, cabin_back_half_width, cabin_back_y)
+            path.lineTo(boom_half_width, boom_end_y)
+            path.lineTo(tail_fin_half_width, tail_fin_y)
+            path.lineTo(-tail_fin_half_width, tail_fin_y)
+            path.lineTo(-boom_half_width, boom_end_y)
+            path.lineTo(-cabin_back_half_width, cabin_back_y)
+            path.cubicTo(-cabin_half_width, cabin_mid_y, -cabin_half_width, shoulder_y, 0f, nose_y)
+            path.close()
 
-        paint.style = Paint.Style.FILL
-        paint.color = fill
-        canvas.drawPath(path, paint)
-        stroke_paint.style = Paint.Style.STROKE
-        stroke_paint.strokeJoin = Paint.Join.ROUND
-        stroke_paint.color = stroke
-        stroke_paint.strokeWidth = chrome.dp(1.2f)
-        canvas.drawPath(path, stroke_paint)
+            paint.style = Paint.Style.FILL
+            paint.color = fill
+            drawPath(path, paint)
+            stroke_paint.style = Paint.Style.STROKE
+            stroke_paint.strokeJoin = Paint.Join.ROUND
+            stroke_paint.color = stroke
+            stroke_paint.strokeWidth = chrome.dp(1.2f)
+            drawPath(path, stroke_paint)
 
-        val blade_visibility = smooth_step(0.32f, 0.82f, shape_progress)
-        val blade_alpha = (Color.alpha(stroke) * blade_visibility * 0.72f).round_to_int().coerceIn(0, 255)
-        if (blade_alpha > 4 && (rotor > 0f || tail_rotor > 0f)) {
-            val phase = ((now_ms % ROTORCRAFT_BLADE_CYCLE_MS).toFloat() / ROTORCRAFT_BLADE_CYCLE_MS) * 360f
-            stroke_paint.strokeCap = Paint.Cap.ROUND
-            stroke_paint.color = with_alpha(stroke, blade_alpha)
-            stroke_paint.strokeWidth = chrome.dp(1.55f + 0.3f * rotor)
-            val mast_y = -chrome.dp(1.8f * body)
-            val main_half_length = chrome.dp(5f + 22f * rotor)
-            val main_gap = chrome.dp(2.8f + 1.6f * body)
-            draw_rotorcraft_blade_pair(canvas, 0f, mast_y, main_half_length, main_gap, phase, stroke_paint)
-            if (tail_rotor > 0f) {
-                val tail_rotor_y = chrome.dp(7.8f + 19.2f * tail)
-                val tail_blade = chrome.dp(2.3f + 4.2f * tail_rotor)
-                stroke_paint.strokeWidth = chrome.dp(1.25f)
-                draw_rotorcraft_blade_pair(canvas, 0f, tail_rotor_y, tail_blade, chrome.dp(0.8f), (phase * 5f + 24f) % 360f, stroke_paint)
+            val blade_visibility = smooth_step(0.32f, 0.82f, shape_progress)
+            val blade_alpha = (Color.alpha(stroke) * blade_visibility * 0.72f).round_to_int().coerceIn(0, 255)
+            if (blade_alpha > 4 && (rotor > 0f || tail_rotor > 0f)) {
+                val phase = ((now_ms % ROTORCRAFT_BLADE_CYCLE_MS).toFloat() / ROTORCRAFT_BLADE_CYCLE_MS) * 360f
+                stroke_paint.strokeCap = Paint.Cap.ROUND
+                stroke_paint.color = with_alpha(stroke, blade_alpha)
+                stroke_paint.strokeWidth = chrome.dp(1.55f + 0.3f * rotor)
+                val mast_y = -chrome.dp(1.8f * body)
+                val main_half_length = chrome.dp(5f + 22f * rotor)
+                val main_gap = chrome.dp(2.8f + 1.6f * body)
+                draw_rotorcraft_blade_pair(this, 0f, mast_y, main_half_length, main_gap, phase, stroke_paint)
+                if (tail_rotor > 0f) {
+                    val tail_rotor_y = chrome.dp(7.8f + 19.2f * tail)
+                    val tail_blade = chrome.dp(2.3f + 4.2f * tail_rotor)
+                    stroke_paint.strokeWidth = chrome.dp(1.25f)
+                    draw_rotorcraft_blade_pair(this, 0f, tail_rotor_y, tail_blade, chrome.dp(0.8f), (phase * 5f + 24f) % 360f, stroke_paint)
+                }
+                request_rotorcraft_animation_frame_once()
             }
-            request_rotorcraft_animation_frame_once()
+
+            val mast_y = -chrome.dp(1.8f * body)
+            val hub_radius = chrome.dp(1.2f + 1.3f * body)
+            paint.color = fill
+            drawCircle(0f, mast_y, hub_radius, paint)
+            stroke_paint.color = stroke
+            stroke_paint.strokeWidth = chrome.dp(1.2f)
+            drawCircle(0f, mast_y, hub_radius, stroke_paint)
         }
-
-        val mast_y = -chrome.dp(1.8f * body)
-        val hub_radius = chrome.dp(1.2f + 1.3f * body)
-        paint.color = fill
-        canvas.drawCircle(0f, mast_y, hub_radius, paint)
-        stroke_paint.color = stroke
-        stroke_paint.strokeWidth = chrome.dp(1.2f)
-        canvas.drawCircle(0f, mast_y, hub_radius, stroke_paint)
-
-        canvas.restore()
         paint.style = previous_paint_style
         stroke_paint.style = previous_stroke_style
         stroke_paint.strokeCap = previous_stroke_cap
@@ -25401,9 +26540,16 @@ class TrafficOverlayRenderer(
     ): AircraftSymbolMask {
         val key = AircraftSymbolMaskKey(symbol, progress_bucket, size_px)
         symbol_mask_cache[key]?.let { return it }
+        if (debug_collect_detail_timing) {
+            debug_detail_symbol_mask_miss_count++
+            debug_detail_symbol_mask_generated_pixels += size_px.toLong() * size_px.toLong() * 2L
+        }
+        val create_start_ns = debug_detail_mask_phase_start_ns()
         val progress = progress_bucket / SYMBOL_MASK_PROGRESS_STEPS.toFloat()
         val fill = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
         val stroke = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
+        debug_detail_symbol_mask_create_ns += debug_detail_mask_phase_elapsed_ns(create_start_ns)
+        val canvas_start_ns = debug_detail_mask_phase_start_ns()
         val fill_canvas = Canvas(fill)
         val stroke_canvas = Canvas(stroke)
         val center = size_px / 2f
@@ -25427,14 +26573,19 @@ class TrafficOverlayRenderer(
             strokeWidth = mask_dp(1.2f)
             color = Color.TRANSPARENT
         }
+        debug_detail_symbol_mask_canvas_ns += debug_detail_mask_phase_elapsed_ns(canvas_start_ns)
+        val raster_start_ns = debug_detail_mask_phase_start_ns()
         fill_canvas.withTranslation(center, center) {
             AircraftSymbolRenderer.draw(this, symbol, progress, fill_paint, transparent_stroke_paint, mask_dp)
         }
         stroke_canvas.withTranslation(center, center) {
             AircraftSymbolRenderer.draw(this, symbol, progress, transparent_fill_paint, stroke_paint, mask_dp)
         }
+        debug_detail_symbol_mask_raster_ns += debug_detail_mask_phase_elapsed_ns(raster_start_ns)
+        val prepare_start_ns = debug_detail_mask_phase_start_ns()
         fill.prepareToDraw()
         stroke.prepareToDraw()
+        debug_detail_symbol_mask_prepare_ns += debug_detail_mask_phase_elapsed_ns(prepare_start_ns)
         val mask = AircraftSymbolMask(fill, stroke)
         symbol_mask_cache[key] = mask
         return mask
@@ -25837,6 +26988,10 @@ class TrafficOverlayRenderer(
     }
 
     private fun aircraft_cull_padding(item: TrafficAircraftOverlayState, zoom: Double, selected: Boolean): Float {
+        return aircraft_cull_padding(item, max(aircraft_dot_scale(zoom), aircraft_icon_scale(zoom)), selected)
+    }
+
+    private fun aircraft_cull_padding(item: TrafficAircraftOverlayState, max_icon_scale: Float, selected: Boolean): Float {
         val symbol = item.symbol
         val type_scale = item.symbol_scale
         val shape_radius_dp = when (symbol) {
@@ -25848,7 +27003,6 @@ class TrafficOverlayRenderer(
             AircraftSymbol.GENERAL_AVIATION -> 25f
         }
         val selected_ring_dp = if (selected) 17f else 0f
-        val max_icon_scale = max(aircraft_dot_scale(zoom), aircraft_icon_scale(zoom))
         return chrome.dp((shape_radius_dp + selected_ring_dp) * type_scale * max_icon_scale + AIRCRAFT_CULL_EXTRA_DP)
     }
 
@@ -26485,6 +27639,8 @@ class TrafficOverlayRenderer(
         const val SYMBOL_MASK_SIZE_DP = 72f
         const val SYMBOL_MASK_PROGRESS_STEPS = 96
         const val SYMBOL_MASK_CACHE_MAX_ENTRIES = 640
+        const val DIRECT_ICON_DETAIL_SAMPLE_PERIOD = 16
+        const val SYMBOL_MASK_DETAIL_SAMPLE_PERIOD = 5
         const val SYMBOL_OVERLAY_CACHE_PADDING_DP = 220f
         const val SYMBOL_OVERLAY_TILE_SIZE_PX = 256
         const val SYMBOL_OVERLAY_WIDE_COVERAGE_MAX_ZOOM = 6.0
@@ -28410,7 +29566,7 @@ class AircraftTrafficFeed(
         center_lat: Double,
         center_lon: Double,
         zoom: Double,
-        feed_mode: FlightAlertSettings.AircraftFeedMode
+        feed_mode: AircraftFeedMode
     ) {
         globe_bin_craft_aircraft_source
             ?.takeIf { feed_mode.uses_globe }
@@ -28424,12 +29580,12 @@ class AircraftTrafficFeed(
         own_lat: Double,
         own_lon: Double,
         exact_search: String?,
-        feed_mode: FlightAlertSettings.AircraftFeedMode,
+        feed_mode: AircraftFeedMode,
         on_intermediate_result: (FeedResult) -> Unit
     ): FeedResult? {
         val globe_source = globe_bin_craft_aircraft_source?.takeIf { feed_mode.uses_globe }
         return when (feed_mode) {
-            FlightAlertSettings.AircraftFeedMode.WEB -> {
+            AircraftFeedMode.WEB -> {
                 globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
                     ?: FeedResult(
                         status = FeedStatus.UNAVAILABLE,
@@ -28437,10 +29593,10 @@ class AircraftTrafficFeed(
                         partial_coverage = true
                     )
             }
-            FlightAlertSettings.AircraftFeedMode.API -> {
+            AircraftFeedMode.API -> {
                 aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
             }
-            FlightAlertSettings.AircraftFeedMode.HYBRID -> {
+            AircraftFeedMode.HYBRID -> {
                 // Hybrid keeps binCraft as the wide-area inventory, then spends API queries on the safety bubble.
                 val targeted_api_bounds = safety_api_bounds ?: feed_bounds
                 val first_globe_result = globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
@@ -29039,11 +30195,21 @@ internal class TrafficOverlayStateBuilder(
     private var debug_state_dot_batch_ns = 0L
     private var debug_state_symbol_overlay_ns = 0L
     private var debug_state_symbol_shift_ns = 0L
+    private var debug_state_symbol_shift_reason_ns = 0L
+    private var debug_state_symbol_source_detail_ns = 0L
+    private var debug_state_symbol_source_detail_frame_index = 0
+    private var debug_state_symbol_source_detail_sample = false
+    private var debug_state_symbol_shift_transform_ns = 0L
+    private var debug_state_symbol_shift_coverage_ns = 0L
+    private var debug_state_symbol_shift_visible_ns = 0L
     private var debug_state_symbol_query_ns = 0L
     private var debug_state_symbol_filter_ns = 0L
     private var debug_state_symbol_fallback_ns = 0L
     private var debug_state_symbol_grid_ns = 0L
     private var debug_state_symbol_cache_ns = 0L
+    private var debug_state_symbol_query_count = 0
+    private var debug_state_symbol_seen_tracking = 0
+    private var debug_state_symbol_accepted_count = 0
     private var debug_state_aircraft_pick_ns = 0L
     private var debug_state_symbol_mode = "none"
     private var debug_state_symbol_build_reason = "none"
@@ -29053,7 +30219,9 @@ internal class TrafficOverlayStateBuilder(
         reset_debug_detail_timing()
         val interaction_active = dense_dot_symbol_interacting(frame.interaction, now_elapsed_ms())
         val dot_start_ns = debug_detail_start_ns()
-        val dot_batch = dense_aircraft_dot_batch(frame)
+        val dot_batch = debug_trace_result(debug_collect_detail_timing, DEBUG_TRACE_DENSE_DOT_STATE) {
+            dense_aircraft_dot_batch(frame)
+        }
         debug_state_dot_batch_ns += debug_detail_elapsed_ns(dot_start_ns)
         val include_symbols = dot_batch == null || should_include_aircraft_symbols_with_dot_batch(frame, dot_batch)
         val adjusted_dot_batch = if (dot_batch != null && include_symbols && dot_batch.animate_motion) {
@@ -29063,7 +30231,9 @@ internal class TrafficOverlayStateBuilder(
         }
         val symbol_start_ns = debug_detail_start_ns()
         val dense_symbol_overlay = if (include_symbols && dot_batch != null) {
-            dense_dot_symbol_overlay(frame)
+            debug_trace_result(debug_collect_detail_timing, DEBUG_TRACE_DENSE_SYMBOL_STATE) {
+                dense_dot_symbol_overlay(frame)
+            }
         } else {
             null
         }
@@ -29428,16 +30598,17 @@ internal class TrafficOverlayStateBuilder(
         val idle_reuse = can_reuse_dense_symbol_cache_while_idle(source_changed, zoom_changed)
         if (!interaction_reuse && !idle_reuse) {
             if (debug_collect_detail_timing) {
-                debug_dense_symbol_build_reason(
-                    debug_dense_symbol_reuse_reason(
-                        prefix = "reuse_off",
-                        frame = frame,
-                        source_changed = source_changed,
-                        zoom_changed = zoom_changed,
-                        interaction_reuse = interaction_reuse,
-                        idle_reuse = idle_reuse
-                    )
+                val reason_start_ns = debug_detail_start_ns()
+                val reason = debug_dense_symbol_reuse_reason(
+                    prefix = "reuse_off",
+                    frame = frame,
+                    source_changed = source_changed,
+                    zoom_changed = zoom_changed,
+                    interaction_reuse = interaction_reuse,
+                    idle_reuse = idle_reuse
                 )
+                debug_state_symbol_shift_reason_ns += debug_detail_elapsed_ns(reason_start_ns)
+                debug_dense_symbol_build_reason(reason)
             }
             return null
         }
@@ -29461,9 +30632,11 @@ internal class TrafficOverlayStateBuilder(
             debug_dense_symbol_build_reason("source_idle")
             return null
         }
+        val transform_start_ns = debug_detail_start_ns()
         val transform_scale_double = 2.0.pow(zoom_delta)
         val transform_scale = transform_scale_double.toFloat()
         if (transform_scale <= 0f || transform_scale.isNaN() || transform_scale.isInfinite()) {
+            debug_state_symbol_shift_transform_ns += debug_detail_elapsed_ns(transform_start_ns)
             debug_dense_symbol_build_reason("invalid_scale")
             return null
         }
@@ -29479,7 +30652,11 @@ internal class TrafficOverlayStateBuilder(
                 frame.viewport.height / 2.0 -
                 dense_symbol_cache_height * transform_scale_double / 2.0
             ).toFloat()
-        if (!dense_symbol_cache_covers_viewport(frame.viewport, transform_scale, translation_x, translation_y)) {
+        debug_state_symbol_shift_transform_ns += debug_detail_elapsed_ns(transform_start_ns)
+        val coverage_start_ns = debug_detail_start_ns()
+        val covers_viewport = dense_symbol_cache_covers_viewport(frame.viewport, transform_scale, translation_x, translation_y)
+        debug_state_symbol_shift_coverage_ns += debug_detail_elapsed_ns(coverage_start_ns)
+        if (!covers_viewport) {
             if (debug_collect_detail_timing) {
                 debug_dense_symbol_build_reason(
                     "coverage scale=${String.format(Locale.US, "%.2f", transform_scale)} " +
@@ -29489,6 +30666,7 @@ internal class TrafficOverlayStateBuilder(
             }
             return null
         }
+        val visible_start_ns = debug_detail_start_ns()
         val states = if (interaction_reuse && abs(transform_scale - 1f) > DENSE_SYMBOL_VISIBLE_FILTER_SCALE_EPSILON) {
             visible_scaled_dense_symbol_states(
                 states = dense_symbol_cache_states,
@@ -29500,6 +30678,7 @@ internal class TrafficOverlayStateBuilder(
         } else {
             dense_symbol_cache_states
         }
+        debug_state_symbol_shift_visible_ns += debug_detail_elapsed_ns(visible_start_ns)
         return DenseSymbolOverlay(
             states = states,
             transform_scale = transform_scale,
@@ -29525,10 +30704,15 @@ internal class TrafficOverlayStateBuilder(
         val now = now_elapsed_ms()
         val cache_age_ms = now - dense_symbol_cache_built_ms
         val interaction_age_ms = now - frame.interaction.last_map_interaction_ms
-        val source_detail = if (source_changed) {
-            dense_symbol_source_change_detail(frame.cache.aircraft)
-        } else {
-            ""
+        val source_detail = when {
+            !source_changed -> ""
+            debug_state_symbol_source_detail_sample -> {
+                val source_start_ns = debug_detail_start_ns()
+                ("srcSample=1 " + dense_symbol_source_change_detail(frame.cache.aircraft)).also {
+                    debug_state_symbol_source_detail_ns += debug_detail_elapsed_ns(source_start_ns)
+                }
+            }
+            else -> "srcSample=0 "
         }
         return "$prefix source=$source_changed zoom=$zoom_changed " +
             "iReuse=$interaction_reuse idle=$idle_reuse " +
@@ -29540,17 +30724,30 @@ internal class TrafficOverlayStateBuilder(
 
     private fun dense_symbol_source_change_detail(current_aircraft: List<Aircraft>): String {
         val cached_aircraft = dense_symbol_cache_aircraft
-        if (cached_aircraft == null || cached_aircraft.isEmpty()) {
-            return "srcCur=${current_aircraft.size}/0 srcCached=0/0 srcSame=0 srcAdd=0 srcDrop=0 "
+        if (cached_aircraft.isNullOrEmpty()) {
+            return "srcCur=${current_aircraft.size}/0 srcCached=0/0 srcSame=0 srcAdd=0 srcDrop=0 " +
+                "srcBound=0 srcCurS=0 srcCachedS=0 srcCurStep=0 srcCachedStep=0 "
         }
-        val cached_by_key = HashMap<String, Aircraft>(cached_aircraft.size * 2)
-        for (item in cached_aircraft) {
+        val current_count = current_aircraft.size
+        val cached_count = cached_aircraft.size
+        val current_step = dense_symbol_source_detail_step(current_count)
+        val cached_step = dense_symbol_source_detail_step(cached_count)
+        val cached_sample_capacity = dense_symbol_source_detail_sample_count(cached_count, cached_step)
+        val cached_by_key = HashMap<String, Aircraft>(cached_sample_capacity * 2)
+        var cached_sample_count = 0
+        var cached_index = 0
+        while (cached_index < cached_count && cached_sample_count < SYMBOL_SOURCE_DETAIL_MAX_SAMPLE) {
+            val item = cached_aircraft[cached_index]
             val key = item.appearance_key()
             if (!cached_by_key.containsKey(key)) {
                 cached_by_key[key] = item
             }
+            cached_sample_count++
+            cached_index += cached_step
         }
-        val current_keys = HashSet<String>(current_aircraft.size * 2)
+        val current_sample_capacity = dense_symbol_source_detail_sample_count(current_count, current_step)
+        val current_keys = HashSet<String>(current_sample_capacity * 2)
+        var current_sample_count = 0
         var same_count = 0
         var changed_position_count = 0
         var changed_motion_count = 0
@@ -29559,7 +30756,9 @@ internal class TrafficOverlayStateBuilder(
         var same_index_reference_count = 0
         var max_abs_lat_delta_e6 = 0.0
         var max_abs_lon_delta_e6 = 0.0
-        for ((index, item) in current_aircraft.withIndex()) {
+        var current_index = 0
+        while (current_index < current_count && current_sample_count < SYMBOL_SOURCE_DETAIL_MAX_SAMPLE) {
+            val item = current_aircraft[current_index]
             val key = item.appearance_key()
             val cached_item = cached_by_key[key]
             if (current_keys.add(key) && cached_item != null) {
@@ -29567,7 +30766,7 @@ internal class TrafficOverlayStateBuilder(
                 if (cached_item === item) {
                     same_reference_count++
                 }
-                if (index < cached_aircraft.size && cached_aircraft[index] === item) {
+                if (current_index < cached_count && cached_aircraft[current_index] === item) {
                     same_index_reference_count++
                 }
                 val lat_delta_e6 = abs(item.lat - cached_item.lat) * 1_000_000.0
@@ -29590,16 +30789,32 @@ internal class TrafficOverlayStateBuilder(
                     changed_freshness_count++
                 }
             }
+            current_sample_count++
+            current_index += current_step
         }
         val added_count = (current_keys.size - same_count).coerceAtLeast(0)
         val dropped_count = (cached_by_key.size - same_count).coerceAtLeast(0)
-        return "srcCur=${current_aircraft.size}/${current_keys.size} " +
-            "srcCached=${cached_aircraft.size}/${cached_by_key.size} " +
+        val bounded = current_count > current_sample_count || cached_count > cached_sample_count
+        return "srcCur=$current_count/${current_keys.size} " +
+            "srcCached=$cached_count/${cached_by_key.size} " +
             "srcSame=$same_count srcAdd=$added_count srcDrop=$dropped_count " +
             "srcPos=$changed_position_count srcMove=$changed_motion_count srcFresh=$changed_freshness_count " +
             "srcRef=$same_reference_count srcIdxRef=$same_index_reference_count " +
             "srcMaxLatE6=${String.format(Locale.US, "%.1f", max_abs_lat_delta_e6)} " +
-            "srcMaxLonE6=${String.format(Locale.US, "%.1f", max_abs_lon_delta_e6)} "
+            "srcMaxLonE6=${String.format(Locale.US, "%.1f", max_abs_lon_delta_e6)} " +
+            "srcBound=${if (bounded) 1 else 0} " +
+            "srcCurS=$current_sample_count srcCachedS=$cached_sample_count " +
+            "srcCurStep=$current_step srcCachedStep=$cached_step "
+    }
+
+    private fun dense_symbol_source_detail_step(count: Int): Int {
+        if (count <= SYMBOL_SOURCE_DETAIL_MAX_SAMPLE) return 1
+        return ceil(count.toDouble() / SYMBOL_SOURCE_DETAIL_MAX_SAMPLE.toDouble()).toInt().coerceAtLeast(1)
+    }
+
+    private fun dense_symbol_source_detail_sample_count(count: Int, step: Int): Int {
+        if (count <= 0) return 0
+        return ((count - 1) / step + 1).coerceAtMost(SYMBOL_SOURCE_DETAIL_MAX_SAMPLE)
     }
 
     private fun nullable_double_changed(current: Double?, cached: Double?, tolerance: Double): Boolean {
@@ -29764,6 +30979,7 @@ internal class TrafficOverlayStateBuilder(
         debug_state_symbol_query_ns += debug_detail_elapsed_ns(query_start_ns)
         val result = ArrayList<TrafficAircraftOverlayState>(VISIBLE_AIRCRAFT_INITIAL_CAPACITY)
         val seen_keys = HashSet<String>()
+        var accepted_count = 0
         val filter_start_ns = debug_detail_start_ns()
         for (entry in query) {
             val item = entry.aircraft
@@ -29772,7 +30988,10 @@ internal class TrafficOverlayStateBuilder(
             val selected = selected_key != null && screen_projector.aircraft_icao_key(item) == selected_key
             if (!screen_projector.screen_neighborhood_contains(screen.x, screen.y, selected, frame.viewport, extra_padding_px)) continue
             val key = entry.appearance_key
-            if (seen_keys.add(key)) result += traffic_aircraft_overlay_state(item, screen, entry, scale, frame.visual_theme_key)
+            if (seen_keys.add(key)) {
+                result += traffic_aircraft_overlay_state(item, screen, entry, scale, frame.visual_theme_key)
+                accepted_count++
+            }
         }
         debug_state_symbol_filter_ns += debug_detail_elapsed_ns(filter_start_ns)
         val fallback_start_ns = debug_detail_start_ns()
@@ -29781,6 +31000,11 @@ internal class TrafficOverlayStateBuilder(
         }
         add_selected_symbol_state_fallback(result, seen_keys, frame, selected_key, extra_padding_px)
         debug_state_symbol_fallback_ns += debug_detail_elapsed_ns(fallback_start_ns)
+        if (debug_collect_detail_timing) {
+            debug_state_symbol_query_count = query.size
+            debug_state_symbol_seen_tracking = 1
+            debug_state_symbol_accepted_count = accepted_count
+        }
         return result
     }
 
@@ -29889,11 +31113,27 @@ internal class TrafficOverlayStateBuilder(
         debug_state_dot_batch_ns = 0L
         debug_state_symbol_overlay_ns = 0L
         debug_state_symbol_shift_ns = 0L
+        debug_state_symbol_shift_reason_ns = 0L
+        debug_state_symbol_source_detail_ns = 0L
+        debug_state_symbol_source_detail_sample =
+            debug_state_symbol_source_detail_frame_index % SYMBOL_SOURCE_DETAIL_SAMPLE_PERIOD == 0
+        debug_state_symbol_source_detail_frame_index =
+            if (debug_state_symbol_source_detail_frame_index == Int.MAX_VALUE) {
+                0
+            } else {
+                debug_state_symbol_source_detail_frame_index + 1
+            }
+        debug_state_symbol_shift_transform_ns = 0L
+        debug_state_symbol_shift_coverage_ns = 0L
+        debug_state_symbol_shift_visible_ns = 0L
         debug_state_symbol_query_ns = 0L
         debug_state_symbol_filter_ns = 0L
         debug_state_symbol_fallback_ns = 0L
         debug_state_symbol_grid_ns = 0L
         debug_state_symbol_cache_ns = 0L
+        debug_state_symbol_query_count = 0
+        debug_state_symbol_seen_tracking = 0
+        debug_state_symbol_accepted_count = 0
         debug_state_aircraft_pick_ns = 0L
         debug_state_symbol_mode = "none"
         debug_state_symbol_build_reason = "none"
@@ -29907,11 +31147,20 @@ internal class TrafficOverlayStateBuilder(
                 "symMode=$debug_state_symbol_mode " +
                 "symBuild=$debug_state_symbol_build_reason " +
                 "symShift=${debug_state_symbol_shift_ns.ms_debug()} " +
+                "symShiftReason=${debug_state_symbol_shift_reason_ns.ms_debug()} " +
+                "symSourceSample=${if (debug_state_symbol_source_detail_sample) 1 else 0} " +
+                "symSourceDetail=${debug_state_symbol_source_detail_ns.ms_debug()} " +
+                "symShiftTransform=${debug_state_symbol_shift_transform_ns.ms_debug()} " +
+                "symShiftCoverage=${debug_state_symbol_shift_coverage_ns.ms_debug()} " +
+                "symShiftVisible=${debug_state_symbol_shift_visible_ns.ms_debug()} " +
                 "symQuery=${debug_state_symbol_query_ns.ms_debug()} " +
                 "symFilter=${debug_state_symbol_filter_ns.ms_debug()} " +
                 "symFallback=${debug_state_symbol_fallback_ns.ms_debug()} " +
                 "symGrid=${debug_state_symbol_grid_ns.ms_debug()} " +
                 "symCache=${debug_state_symbol_cache_ns.ms_debug()} " +
+                "symQueryCount=$debug_state_symbol_query_count " +
+                "symSeenTrack=$debug_state_symbol_seen_tracking " +
+                "symAccepted=$debug_state_symbol_accepted_count " +
                 "aircraftPick=${debug_state_aircraft_pick_ns.ms_debug()}"
     }
 
@@ -30239,6 +31488,8 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_SYMBOL_CACHE_INTERACTION_STALE_MS = 12_000L
         const val DENSE_SYMBOL_CACHE_IDLE_STALE_MS = 12_000L
         const val DENSE_SYMBOL_CACHE_INTERACTION_ZOOM_STEPS = 3.4
+        const val SYMBOL_SOURCE_DETAIL_SAMPLE_PERIOD = 5
+        const val SYMBOL_SOURCE_DETAIL_MAX_SAMPLE = 512
         const val MAX_ESTIMATION_SECONDS = 10.0 * 60.0
     }
 }
@@ -30515,7 +31766,7 @@ internal class TrafficSelectionHitTester(
         return if (distance_squared <= radius_squared) AircraftHit(aircraft, distance_squared) else null
     }
 
-    private fun Float.sqrt(): Float = kotlin.math.sqrt(this)
+    private fun Float.sqrt(): Float = sqrt(this)
 }
 
 
@@ -30527,7 +31778,7 @@ data class VisibleAircraftRequest(
     val center_lat: Double,
     val center_lon: Double,
     val zoom: Double,
-    val feed_mode: FlightAlertSettings.AircraftFeedMode,
+    val feed_mode: AircraftFeedMode,
     val exact_search: String?
 )
 
@@ -30645,11 +31896,11 @@ class VisibleAircraftFeedController(
         }
     }
 
-    fun publish_startup_globe_snapshot_if_needed(feed_mode: FlightAlertSettings.AircraftFeedMode) {
+    fun publish_startup_globe_snapshot_if_needed(feed_mode: AircraftFeedMode) {
         publish_globe_snapshot_update_if_useful(feed_mode)
     }
 
-    fun publish_globe_snapshot_update_if_useful(feed_mode: FlightAlertSettings.AircraftFeedMode) {
+    fun publish_globe_snapshot_update_if_useful(feed_mode: AircraftFeedMode) {
         val source = globe_source ?: return
         if (!feed_mode.uses_globe) return
         if (!has_location() || !has_usable_viewport()) return

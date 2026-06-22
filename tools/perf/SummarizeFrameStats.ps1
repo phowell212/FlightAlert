@@ -131,7 +131,8 @@ function New-FrameStatsSummary {
 
     $data = Read-FrameTimelineDurations -StatsPath $StatsPath
     $histogramDurations = Read-HistogramDurations -Lines $data.Lines
-    $durations = if ($histogramDurations.Count -gt 0) { $histogramDurations } else { $data.DurationsMs }
+    $timelineDurations = $data.DurationsMs
+    $durations = if ($timelineDurations.Count -gt 0) { $timelineDurations } else { $histogramDurations }
     $budgetMs = 1000.0 / $TargetHz
     $presentationDropMs = $budgetMs * 1.5
     $budget90Ms = 1000.0 / 90.0
@@ -162,7 +163,8 @@ function New-FrameStatsSummary {
     return [pscustomobject]@{
         File = Split-Path -Path $StatsPath -Leaf
         Frames = $count
-        RawTimelineFrames = $data.DurationsMs.Count
+        RawTimelineFrames = $timelineDurations.Count
+        HistogramFrames = $histogramDurations.Count
         PresentIntervals = $presentCount
         TargetHz = [Math]::Round($TargetHz, 1)
         TargetBudgetMs = [Math]::Round($budgetMs, 2)

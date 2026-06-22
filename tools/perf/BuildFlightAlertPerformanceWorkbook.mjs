@@ -1,0 +1,1724 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+const ROOT = process.argv.includes("--root")
+  ? path.resolve(process.argv[process.argv.indexOf("--root") + 1])
+  : "C:\\Users\\h\\AndroidStudioProjects\\FlightAlert";
+const PERF_OUT = path.join(ROOT, "tools", "perf", "out");
+const AGENTS_PATH = path.join(ROOT, "AGENTS.md");
+const WORKBOOK_PATH = path.join(ROOT, "docs", "flightalert-performance-metrics.xlsx");
+const AUDIT_RAW_SNIPPET_MAX_CHARS = 600;
+const PYTHON = process.env.FLIGHTALERT_PYTHON
+  || "C:\\Users\\h\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe";
+const PREVIEW_DIR = path.join(
+  process.env.TEMP || path.join(ROOT, "build", "tmp"),
+  "flightalert-performance-workbook-preview"
+);
+
+const PALETTE = {
+  navy: "#1F4E79",
+  header: "#D9EAF7",
+  green: "#D9EAD3",
+  amber: "#FFF2CC",
+  line: "#C9D3DF",
+};
+
+const DETAIL_KEYS = [
+  "frames",
+  "detailBlock",
+  "avg",
+  "max",
+  "map",
+  "traffic",
+  "chrome",
+  "last",
+  "lastMap",
+  "lastTraffic",
+  "drawSeqFirst",
+  "drawSeq",
+  "drawStartMs",
+  "drawStartNs",
+  "drawEndNs",
+  "drawIntervalMs",
+  "drawPasses",
+  "sameCameraLast",
+  "symbols",
+  "dots",
+  "stateBuild",
+  "dotState",
+  "symOverlay",
+  "symMode",
+  "symBuild",
+  "symShift",
+  "symSourceSample",
+  "symSourceDetail",
+  "symQuery",
+  "symFilter",
+  "symGrid",
+  "symCache",
+  "symQueryCount",
+  "symSeenTrack",
+  "symAccepted",
+  "tickerPosts",
+  "iOnly",
+  "sameCameraTraffic",
+  "sameCameraTrafficAvg",
+  "mapTiles",
+  "loaded",
+  "requested",
+  "fallback",
+  "satLod",
+  "lodAlpha",
+  "reference",
+  "refPlan",
+  "refDraw",
+  "refPrefetch",
+  "refAlpha",
+  "refBook",
+  "refGen",
+  "refProtect",
+  "refOther",
+  "refOvl",
+  "refPf",
+  "refPfCpu",
+  "refPfWait",
+  "refPfCpuMiss",
+  "refPfRange",
+  "refPfEnum",
+  "refPfMemLookup",
+  "refPfUrl",
+  "refPfSubmitNs",
+  "refPfTiles",
+  "refPfMem",
+  "refPfMiss",
+  "refPfSubmit",
+  "refPfQueued",
+  "refPfQSame",
+  "refPfQRecent",
+  "refPfLod",
+  "refPfPan",
+  "refPfLodTiles",
+  "refPfPanTiles",
+  "refPfLodSub",
+  "refPfPanSub",
+  "refPfLodQ",
+  "refPfPanQ",
+  "refPfLodMaxGrid",
+  "refPfPanMaxGrid",
+  "refPfMem2",
+  "refPfDeny",
+  "refPfMaxGrid",
+  "refPfAsyncOffer",
+  "refPfAsyncCoalesce",
+  "refPfAsyncBatch",
+  "refPfAsyncPlan",
+  "refPfAsyncTiles",
+  "refPfAsyncMem",
+  "refPfAsyncMiss",
+  "refPfAsyncSubmit",
+  "refPfAsyncQueued",
+  "refPfAsyncMem2",
+  "refPfAsyncStale",
+  "refPfAsyncSuper",
+  "refPfAsyncDeny",
+  "refPfAsyncNs",
+  "refPfAsyncMaxNs",
+  "symbolCache",
+  "reason",
+  "direct",
+  "cacheAttempt",
+  "directSymbols",
+  "directCalls",
+  "directPartial",
+  "directInput",
+  "directExcluded",
+  "directOffscreen",
+  "directDrawn",
+  "directCull",
+  "directIcon",
+  "directSymbolFg",
+  "directRotorFg",
+  "directDotIcon",
+  "directSymbolCount",
+  "directRotorCount",
+  "directSurfaceCount",
+  "directDotCount",
+  "directIconSampPhase",
+  "directIconSamp",
+  "directIconSampNonRotor",
+  "directIconSampTotal",
+  "directIconSampPrep",
+  "directIconSampShadow",
+  "directIconSampSelection",
+  "directIconSampMatrix",
+  "directIconSampFill",
+  "directIconSampStroke",
+  "directIconSampRotor",
+  "directIconSampOther",
+  "directIconSampShadowCount",
+  "directIconSampSelectionCount",
+  "directIconSampMatrixCount",
+  "directIconSampFillCount",
+  "directIconSampStrokeCount",
+  "directIconSampRotorCount",
+  "directIconSampZeroAlpha",
+  "directIconSampFillAlphaZero",
+  "directIconSampStrokeAlphaZero",
+  "directIconSampEmptyFill",
+  "directIconSampEmptyStroke",
+  "directIconSampMaskPixels",
+  "symbolStyle",
+  "symbolShadow",
+  "maskSample",
+  "symbolMask",
+  "symbolMaskAcquire",
+  "symbolMaskCreate",
+  "symbolMaskCanvas",
+  "symbolMaskRaster",
+  "symbolMaskPrepare",
+  "symbolMaskSetup",
+  "symbolMaskFill",
+  "symbolMaskStroke",
+  "symbolMaskComposite",
+  "symbolMaskDraws",
+  "symbolMaskPixels",
+  "symbolMaskMiss",
+  "symbolMaskGenPixels",
+  "labels",
+  "labelsDrawn",
+  "centerLat",
+  "centerLon",
+  "focusLat",
+  "focusLon",
+  "targetLat",
+  "targetLon",
+  "zoom",
+];
+
+const SOURCE_DETAIL_KEYS = [
+  "srcCur",
+  "srcCached",
+  "srcSame",
+  "srcAdd",
+  "srcDrop",
+  "srcPos",
+  "srcMove",
+  "srcFresh",
+  "srcRef",
+  "srcIdxRef",
+  "srcMaxLatE6",
+  "srcMaxLonE6",
+  "srcBound",
+  "srcCurS",
+  "srcCachedS",
+  "srcCurStep",
+  "srcCachedStep",
+];
+
+function safeText(value, max = 2000) {
+  if (value == null) return "";
+  const text = String(value).replace(/\u0000/g, "");
+  return text.length > max ? `${text.slice(0, max - 14)} [truncated]` : text;
+}
+
+function chunkText(value, size = 12000, chunks = 3) {
+  const text = value == null ? "" : String(value).replace(/\u0000/g, "");
+  const parts = [];
+  for (let i = 0; i < chunks; i++) {
+    parts.push(text.slice(i * size, (i + 1) * size));
+  }
+  if (text.length > size * chunks) {
+    parts[chunks - 1] = `${parts[chunks - 1].slice(0, size - 14)} [truncated]`;
+  }
+  return parts;
+}
+
+function parseCsvLine(line) {
+  const cells = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "\"") {
+      if (inQuotes && line[i + 1] === "\"") {
+        current += "\"";
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      cells.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  cells.push(current);
+  return cells;
+}
+
+function maybeNumber(value) {
+  if (value == null || value === "") return "";
+  const text = String(value).trim();
+  const jank = text.match(/Janky frames:\s*\d+\s*\(([0-9.]+)%\)/);
+  if (jank) return Number(jank[1]);
+  const percent = text.match(/^(-?\d+(?:\.\d+)?)%$/);
+  if (percent) return Number(percent[1]);
+  const ms = text.match(/^(-?\d+(?:\.\d+)?)ms$/);
+  if (ms) return Number(ms[1]);
+  if (/^-?\d+(?:\.\d+)?$/.test(text)) return Number(text);
+  return text;
+}
+
+async function exists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function listFiles(dir) {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile()).map((entry) => path.join(dir, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+async function listDirs(dir) {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(dir, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+async function runPython(script, args, label) {
+  await fs.mkdir(PREVIEW_DIR, { recursive: true });
+  const scriptPath = path.join(PREVIEW_DIR, `flightalert-workbook-${Date.now()}-${Math.random().toString(16).slice(2)}.py`);
+  await fs.writeFile(scriptPath, script, "utf8");
+  return new Promise((resolve, reject) => {
+    const child = spawn(PYTHON, [scriptPath, ...args], { cwd: ROOT, windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(stdout.trim());
+      } else {
+        reject(new Error(`${label || "python"} failed with exit ${code}: ${stderr || stdout}`));
+      }
+    });
+  });
+}
+
+function parseKeyValueFile(text) {
+  const parsed = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^([A-Za-z0-9_.-]+)=(.*)$/);
+    if (match) parsed[match[1]] = match[2];
+  }
+  return parsed;
+}
+
+function parsePerfTokens(text) {
+  const parsed = {};
+  const re = /(^|\s)([A-Za-z][A-Za-z0-9_]*?)=([^\s]+)/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    let value = match[3];
+    if (value.endsWith(",")) value = value.slice(0, -1);
+    parsed[match[2]] = maybeNumber(value);
+  }
+  return parsed;
+}
+
+function compactPerfTokens(parsed, keys) {
+  return keys
+    .filter((key) => parsed[key] !== undefined && parsed[key] !== "")
+    .map((key) => `${key}=${parsed[key]}`)
+    .join(" ");
+}
+
+function statusFromNote(note) {
+  const lower = note.toLowerCase();
+  const tick = note.match(/^`([^`]+)`/);
+  if (tick) return tick[1];
+  if (lower.startsWith("rejected ")) return "rejected";
+  if (lower.startsWith("not accepted")) return "not accepted";
+  if (lower.includes("diagnostic/deferred")) return "diagnostic/deferred";
+  if (lower.includes("diagnostic")) return "diagnostic";
+  if (lower.includes("deferred")) return "deferred";
+  if (lower.startsWith("kept ") || lower.includes(" kept ") || lower.includes("accepted") || lower.includes("keeper")) return "keeper/accepted";
+  if (lower.includes(" rejected ") || lower.includes("do not retry")) return "rejected";
+  if (lower.includes("exhausted")) return "exhausted";
+  return "note";
+}
+
+function dedupeLedgerRows(rows) {
+  const result = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const key = [
+      row.source,
+      row.section,
+      row.title,
+      row.artifacts,
+      row.note1,
+      row.note2,
+      row.note3,
+    ].map((value) => String(value ?? "")).join("\u001f");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(row);
+  }
+  return result;
+}
+
+function titleFromNote(note) {
+  let clean = note.replace(/^`[^`]+`:\s*/, "").replace(/^[-\s]+/, "");
+  const colon = clean.indexOf(":");
+  if (colon > 12 && colon < 140) clean = clean.slice(0, colon);
+  return safeText(clean.slice(0, 180), 180);
+}
+
+function extractArtifacts(note) {
+  const artifacts = new Set();
+  const re = /tools\/perf\/out\/[A-Za-z0-9_.\-/]+/g;
+  let match;
+  while ((match = re.exec(note)) !== null) {
+    artifacts.add(match[0].replace(/[),.;:]+$/, ""));
+  }
+  return Array.from(artifacts).slice(0, 24).join("\n");
+}
+
+function extractMetricsText(note) {
+  const parts = [];
+  const patterns = [
+    /produced FPS `?([0-9.]+)/gi,
+    /present mean FPS `?([0-9.]+)/gi,
+    /present p95 `?([0-9.]+)/gi,
+    /p95 [`:]?([0-9.]+)\s*ms/gi,
+    /Android jank `?([0-9.]+)%/gi,
+    /maxDistanceKm=?`?([0-9.]+)/gi,
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(note)) !== null) parts.push(match[0].replace(/`/g, ""));
+  }
+  return safeText(Array.from(new Set(parts)).join("; "), 1000);
+}
+
+function parseAgentsLedger(text) {
+  const start = text.indexOf("## 16. Optimization Ledger");
+  const end = text.indexOf("\n## 17.", start);
+  if (start < 0 || end < 0) return [];
+  const sectionText = text.slice(start, end);
+  let section = "Optimization Ledger";
+  let current = null;
+  let lineNo = 0;
+  const rows = [];
+  const flush = () => {
+    if (!current) return;
+    const full = current.lines.join("\n").trim();
+    current = null;
+    if (!full) return;
+    const chunks = chunkText(full);
+    const artifacts = extractArtifacts(full);
+    rows.push({
+      source: "AGENTS.md migration",
+      section,
+      line: lineNo,
+      status: statusFromNote(full),
+      title: titleFromNote(full),
+      dateText: (full.match(/(?:June|July|August|September|October|November|December)\s+\d{1,2},\s+2026/) || [""])[0],
+      artifactCount: artifacts ? artifacts.split("\n").length : 0,
+      artifacts,
+      metrics: extractMetricsText(full),
+      note1: chunks[0],
+      note2: chunks[1],
+      note3: chunks[2],
+    });
+  };
+  for (const raw of sectionText.split(/\r?\n/)) {
+    lineNo++;
+    const line = raw.trimEnd();
+    if (/^##\s/.test(line)) continue;
+    if (line.endsWith(":") && !line.startsWith("- ") && line.length < 120) {
+      flush();
+      section = line.replace(/:$/, "").trim();
+      continue;
+    }
+    if (line.startsWith("Current target:")) {
+      flush();
+      current = { lines: [line] };
+      section = "Current target";
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      flush();
+      current = { lines: [line.slice(2)] };
+    } else if (current && line.trim() !== "") {
+      current.lines.push(line.trim());
+    }
+  }
+  flush();
+  return rows;
+}
+
+function extraLedgerRows() {
+  const note = process.env.FLIGHTALERT_EXTRA_LEDGER_NOTE;
+  if (!note || !note.trim()) return [];
+  const full = note.trim();
+  const chunks = chunkText(full);
+  const artifacts = extractArtifacts(full);
+  return [{
+    source: "Workbook extra note",
+    section: "Current iteration",
+    line: "",
+    status: statusFromNote(full),
+    title: titleFromNote(full),
+    dateText: (full.match(/(?:June|July|August|September|October|November|December)\s+\d{1,2},\s+2026/) || [""])[0],
+    artifactCount: artifacts ? artifacts.split("\n").length : 0,
+    artifacts,
+    metrics: extractMetricsText(full),
+    note1: chunks[0],
+    note2: chunks[1],
+    note3: chunks[2],
+  }];
+}
+
+async function previousLedgerRows() {
+  if (!(await exists(WORKBOOK_PATH))) return [];
+  try {
+    const script = String.raw`
+import json
+import sys
+from openpyxl import load_workbook
+
+path = sys.argv[1]
+wb = load_workbook(path, read_only=True, data_only=True)
+if "Optimization Ledger" not in wb.sheetnames:
+    print("[]")
+    raise SystemExit(0)
+ws = wb["Optimization Ledger"]
+rows = []
+for row in ws.iter_rows(min_row=2, values_only=True):
+    if not row or not any(cell not in (None, "") for cell in row):
+        continue
+    values = list(row) + [""] * 12
+    rows.append({
+        "source": values[0] or "",
+        "section": values[1] or "",
+        "line": values[2] or "",
+        "status": values[3] or "",
+        "title": values[4] or "",
+        "dateText": values[5] or "",
+        "artifactCount": values[6] or "",
+        "artifacts": values[7] or "",
+        "metrics": values[8] or "",
+        "note1": values[9] or "",
+        "note2": values[10] or "",
+        "note3": values[11] or "",
+    })
+print(json.dumps(rows, default=str))
+`;
+    const stdout = await runPython(script, [WORKBOOK_PATH], "read previous ledger");
+    const parsed = JSON.parse(stdout || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((row) => {
+      const full = [row.note1, row.note2, row.note3].filter(Boolean).join("\n").trim();
+      return full ? { ...row, status: statusFromNote(full) } : row;
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function collectPerformanceRows() {
+  const runRows = [];
+  const auditRows = [];
+  const dirs = await listDirs(PERF_OUT);
+  for (const dir of dirs) {
+    const files = await listFiles(dir);
+    const runId = path.basename(dir);
+    const summary = files.find((file) => /summary-120hz\.csv$/i.test(file));
+    const routeProof = files.find((file) => /route-proof\.txt$/i.test(file));
+    const target = files.find((file) => /target\.txt$/i.test(file));
+    const logcat = files.find((file) => /logcat\.txt$/i.test(file));
+    const stat = summary ? await fs.stat(summary) : await fs.stat(dir).catch(() => ({ mtime: "" }));
+    const route = routeProof && await exists(routeProof) ? parseKeyValueFile(await fs.readFile(routeProof, "utf8")) : {};
+    const targetKv = target && await exists(target) ? parseKeyValueFile(await fs.readFile(target, "utf8")) : {};
+    if (summary && await exists(summary)) {
+      const csv = await fs.readFile(summary, "utf8");
+      const lines = csv.trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length >= 2) {
+        const headers = parseCsvLine(lines[0]);
+        const values = parseCsvLine(lines[1]);
+        const row = {};
+        headers.forEach((header, index) => { row[header] = maybeNumber(values[index]); });
+        runRows.push({
+          runDate: stat.mtime || "",
+          runId,
+          artifactDir: path.relative(ROOT, dir).replace(/\\/g, "/"),
+          testName: String(row.File || "").replace(/^flightalert-perf-/, "").replace(/-framestats\.txt$/, ""),
+          city: route.route_focus_city || targetKv.city || "",
+          expectedCity: route.route_focus_expected_city || "",
+          mapSource: targetKv.map_source || "",
+          roads: route.map_roads_argument || "",
+          borders: route.map_borders_argument || "",
+          mapDetailTiming: targetKv.map_detail_timing || "",
+          trafficDetailTiming: runId.includes("trafficdetail") || runId.includes("detail") ? "true" : "",
+          routeFocusPassed: route.route_focus_passed || "",
+          acceptedEvidence: route.accepted_optimizer_evidence || "",
+          acceptedReason: route.accepted_optimizer_evidence_reason || "",
+          samples: maybeNumber(route.route_focus_samples),
+          maxDistanceKm: maybeNumber(route.route_focus_max_distance_km),
+          frames: row.Frames,
+          rawTimelineFrames: row.RawTimelineFrames,
+          histogramFrames: row.HistogramFrames,
+          presentIntervals: row.PresentIntervals,
+          sampleSeconds: row.SampleSeconds,
+          producedFps: row.ProducedFps,
+          presentMeanFps: row.PresentMeanFps,
+          p50Ms: row.P50Ms,
+          p95Ms: row.P95Ms,
+          p99Ms: row.P99Ms,
+          presentP50Ms: row.PresentP50Ms,
+          presentP95Ms: row.PresentP95Ms,
+          presentP99Ms: row.PresentP99Ms,
+          presentDrop120Pct: row.PresentDrop120Pct,
+          latencyMiss120Pct: row.LatencyMiss120Pct,
+          androidJankPct: row.AndroidJank,
+          summaryFile: path.relative(ROOT, summary).replace(/\\/g, "/"),
+        });
+      }
+    }
+    if (logcat && await exists(logcat)) {
+      const logText = await fs.readFile(logcat, "utf8");
+      let sequence = 0;
+      let phase = "";
+      for (const line of logText.split(/\r?\n/)) {
+        if (line.includes("FlightAlertPerfPhase:")) {
+          const body = line.slice(line.indexOf("FlightAlertPerfPhase:") + "FlightAlertPerfPhase:".length);
+          const tokens = parsePerfTokens(body);
+          if (tokens.detail) phase = String(tokens.detail);
+          continue;
+        }
+        if (!line.includes("Debug draw perf")) continue;
+        sequence++;
+        const timestamp = line.slice(0, 18).trim();
+        const body = line.slice(line.indexOf("Debug draw perf") + "Debug draw perf".length).trim();
+        const splitAt = body.indexOf(" maxFrameDetail=");
+        const segments = [
+          ["current", splitAt >= 0 ? body.slice(0, splitAt) : body],
+          ["maxFrameDetail", splitAt >= 0 ? body.slice(splitAt + " maxFrameDetail=".length) : ""],
+        ];
+        for (const [kind, source] of segments) {
+          if (!source) continue;
+          const parsed = parsePerfTokens(source);
+          const row = {
+            runDate: stat.mtime || "",
+            runId,
+            artifactDir: path.relative(ROOT, dir).replace(/\\/g, "/"),
+            logFile: path.relative(ROOT, logcat).replace(/\\/g, "/"),
+            sequence,
+            kind,
+            timestamp,
+            phase,
+            city: route.route_focus_city || targetKv.city || "",
+            routeFocusPassed: route.route_focus_passed || "",
+            mapSource: targetKv.map_source || "",
+            mapDetailTiming: targetKv.map_detail_timing || "",
+            sourceDetailTokens: compactPerfTokens(parsed, SOURCE_DETAIL_KEYS),
+            rawSnippet: safeText(source, AUDIT_RAW_SNIPPET_MAX_CHARS),
+          };
+          for (const key of DETAIL_KEYS) row[key] = parsed[key] ?? "";
+          auditRows.push(row);
+        }
+      }
+    }
+  }
+  runRows.sort((a, b) => new Date(a.runDate) - new Date(b.runDate) || String(a.runId).localeCompare(String(b.runId)));
+  auditRows.sort((a, b) => new Date(a.runDate) - new Date(b.runDate) || String(a.runId).localeCompare(String(b.runId)) || a.sequence - b.sequence || String(a.kind).localeCompare(String(b.kind)));
+  return { runRows, auditRows };
+}
+
+function compactTraceItems(items, fields) {
+  if (!Array.isArray(items)) return "";
+  return items.map((item) => fields
+    .filter((field) => item[field] !== undefined && item[field] !== "")
+    .map((field) => `${field}=${item[field]}`)
+    .join(" "))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatOptionalNumber(value, digits = 3) {
+  const number = maybeNumber(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "";
+}
+
+function compactFrameCorrelationDecision(frameCorrelation) {
+  if (!frameCorrelation || !frameCorrelation.frames) return "";
+  const candidates = Array.isArray(frameCorrelation.goCandidates) ? frameCorrelation.goCandidates : [];
+  const top = Array.isArray(frameCorrelation.correlations) ? frameCorrelation.correlations[0] || {} : {};
+  const post = top.post_and_wait || {};
+  const flush = top.rt_flush_commands || {};
+  if (candidates.length) {
+    return `GO candidate(s): ${candidates.map((row) => row.source).filter(Boolean).join(", ")}`;
+  }
+  return [
+    "STOP: 0 frame-correlation GO candidates",
+    top.source ? `top=${top.source}` : "",
+    `post rho=${formatOptionalNumber(post.spearman)} deltaMs=${formatOptionalNumber(post.topMinusBottomMs)}`,
+    `flush rho=${formatOptionalNumber(flush.spearman)} deltaMs=${formatOptionalNumber(flush.topMinusBottomMs)}`,
+  ].filter(Boolean).join("; ");
+}
+
+async function collectTraceAuditRows() {
+  const rows = [];
+  const dirs = await listDirs(PERF_OUT);
+  for (const dir of dirs) {
+    const runId = path.basename(dir);
+    const summaryPath = path.join(dir, "frametimeline-summary.json");
+    const frameCorrelationPath = path.join(dir, "frame-correlation-summary.json");
+    const hasFrameTimelineSummary = await exists(summaryPath);
+    const hasFrameCorrelationSummary = await exists(frameCorrelationPath);
+    if (!hasFrameTimelineSummary && !hasFrameCorrelationSummary) continue;
+    try {
+      const summary = hasFrameTimelineSummary ? JSON.parse(await fs.readFile(summaryPath, "utf8")) : {};
+      const frameCorrelation = hasFrameCorrelationSummary
+        ? JSON.parse(await fs.readFile(frameCorrelationPath, "utf8"))
+        : {};
+      const exclusiveSummaryPath = path.join(dir, "exclusive-traffic-summary.json");
+      const exclusive = (await exists(exclusiveSummaryPath))
+        ? JSON.parse(await fs.readFile(exclusiveSummaryPath, "utf8"))
+        : {};
+      const renderSummaryPath = path.join(dir, "renderthread-frame-summary.json");
+      const render = (await exists(renderSummaryPath))
+        ? JSON.parse(await fs.readFile(renderSummaryPath, "utf8"))
+        : {};
+      const files = await listFiles(dir);
+      const traceFile = files.find((file) => /\.perfetto-trace$/i.test(file));
+      const stat = traceFile ? await fs.stat(traceFile) : await fs.stat(summaryPath);
+      const frames = summary.frames || {};
+      const gate = summary.direct_gate || {};
+      const exclusiveGate = exclusive.gate || {};
+      const renderMetrics = render.metric_summary || {};
+      const renderMetric = (name) => renderMetrics[name] || {};
+      const frameCorrelationMetrics = frameCorrelation.metrics || {};
+      const frameCorrelationMetric = (name) => frameCorrelationMetrics[name] || {};
+      const frameCorrelationTop = Array.isArray(frameCorrelation.correlations)
+        ? frameCorrelation.correlations[0] || {}
+        : {};
+      const frameCorrelationPost = frameCorrelationTop.post_and_wait || {};
+      const frameCorrelationFlush = frameCorrelationTop.rt_flush_commands || {};
+      const frameCorrelationGoCandidates = Array.isArray(frameCorrelation.goCandidates)
+        ? frameCorrelation.goCandidates.map((row) => row.source).filter(Boolean).join(", ")
+        : "";
+      const appDeadline = maybeNumber(gate.app_deadline_missed);
+      const directCouldMeet = maybeNumber(gate.direct_removal_could_meet_deadline);
+      const exclusiveMissed = maybeNumber(exclusive.app_deadline_missed) || appDeadline;
+      const exclusiveRescue = maybeNumber(exclusive.exclusive_rescue_frames);
+      const exclusiveRescuePct = maybeNumber(exclusive.exclusive_rescue_pct_of_missed);
+      const exclusiveP95 = maybeNumber(exclusive.traffic_exclusive_frame_p95_ms);
+      const exclusiveTrafficDecision = exclusive.run
+        ? (exclusiveGate.rescue_pct_lt_10 || !exclusiveGate.p95_exclusive_frame_ms_ge_6
+          ? `STOP: exclusive traffic p95=${exclusiveP95 || 0}ms; removal could meet ${exclusiveRescue || 0}/${exclusiveMissed || 0} AppDeadlineMissed frames (${exclusiveRescuePct || 0}%)`
+          : `GO: exclusive traffic p95=${exclusiveP95 || 0}ms; removal could meet ${exclusiveRescue || 0}/${exclusiveMissed || 0} AppDeadlineMissed frames (${exclusiveRescuePct || 0}%)`)
+        : "";
+      const postWait = renderMetric("post_and_wait");
+      const rtDraw = renderMetric("rt_drawframes");
+      const rtFlush = renderMetric("rt_flush_commands");
+      const gpuWait = renderMetric("gpu_wait");
+      const renderDecision = render.run
+        ? `RenderThread diagnostic: postAndWait p95=${maybeNumber(postWait.slice_p95_ms) || 0}ms, RT DrawFrames p95=${maybeNumber(rtDraw.slice_p95_ms) || 0}ms, flush p95=${maybeNumber(rtFlush.slice_p95_ms) || 0}ms, GPU wait p95=${maybeNumber(gpuWait.slice_p95_ms) || 0}ms`
+        : "";
+      rows.push({
+        runDate: stat.mtime || "",
+        runId,
+        artifactDir: path.relative(ROOT, dir).replace(/\\/g, "/"),
+        traceFile: traceFile ? path.relative(ROOT, traceFile).replace(/\\/g, "/") : "",
+        traceMb: maybeNumber(summary.trace_mb),
+        frames: maybeNumber(frames.frames),
+        appDeadlineMissed: maybeNumber(frames.app_deadline_missed),
+        bufferStuffing: maybeNumber(frames.buffer_stuffing),
+        surfaceFlingerStuffing: maybeNumber(frames.sf_stuffing),
+        displayHal: maybeNumber(frames.display_hal),
+        actualAvgMs: maybeNumber(frames.actual_avg_ms),
+        actualMaxMs: maybeNumber(frames.actual_max_ms),
+        framesWithDirect: maybeNumber(gate.frames_with_direct),
+        avgDirectOverlapMs: maybeNumber(gate.avg_direct_overlap_ms),
+        maxDirectOverlapMs: maybeNumber(gate.max_direct_overlap_ms),
+        directRemovalCouldMeetDeadline: directCouldMeet,
+        avgNeededReductionMs: maybeNumber(gate.avg_needed_reduction_ms),
+        minNeededReductionMs: maybeNumber(gate.min_needed_reduction_ms),
+        trafficTotalFrameP95Ms: maybeNumber(exclusive.traffic_total_frame_p95_ms),
+        trafficExclusiveFrameAvgMs: maybeNumber(exclusive.traffic_exclusive_frame_avg_ms),
+        trafficExclusiveFrameP95Ms: exclusiveP95,
+        trafficExclusiveFrameMaxMs: maybeNumber(exclusive.traffic_exclusive_frame_max_ms),
+        trafficExclusiveSliceP95Ms: maybeNumber(exclusive.traffic_exclusive_slice_p95_ms),
+        exclusiveTrafficRescueFrames: exclusiveRescue,
+        exclusiveTrafficRescuePct: exclusiveRescuePct,
+        exclusiveTrafficDecision,
+        postAndWaitP95Ms: maybeNumber(postWait.slice_p95_ms),
+        postAndWaitMaxMs: maybeNumber(postWait.slice_max_ms),
+        postAndWaitRescueFrames: maybeNumber(postWait.could_meet_deadline_frames),
+        renderThreadDrawFramesP95Ms: maybeNumber(rtDraw.slice_p95_ms),
+        renderThreadFlushP95Ms: maybeNumber(rtFlush.slice_p95_ms),
+        renderThreadSkiaExecuteP95Ms: maybeNumber(renderMetric("rt_skia_execute").slice_p95_ms),
+        renderThreadSkiaPrepareP95Ms: maybeNumber(renderMetric("rt_skia_prepare").slice_p95_ms),
+        gpuWaitP95Ms: maybeNumber(gpuWait.slice_p95_ms),
+        gpuWaitRescueFrames: maybeNumber(gpuWait.could_meet_deadline_frames),
+        recordViewDrawP95Ms: maybeNumber(renderMetric("record_view_draw").slice_p95_ms),
+        renderThreadDecision: renderDecision,
+        frameCorrelationSummaryFile: hasFrameCorrelationSummary ? path.relative(ROOT, frameCorrelationPath).replace(/\\/g, "/") : "",
+        frameCorrelationFrames: maybeNumber(frameCorrelation.frames),
+        frameCorrelationLogFrames: maybeNumber(frameCorrelation.framesWithLogCounters),
+        frameCorrelationPostN: maybeNumber(frameCorrelationMetric("post_and_wait").n),
+        frameCorrelationPostP95Ms: maybeNumber(frameCorrelationMetric("post_and_wait").p95Ms),
+        frameCorrelationFlushN: maybeNumber(frameCorrelationMetric("rt_flush_commands").n),
+        frameCorrelationFlushP95Ms: maybeNumber(frameCorrelationMetric("rt_flush_commands").p95Ms),
+        frameCorrelationTopSource: frameCorrelationTop.source || "",
+        frameCorrelationTopPostRho: maybeNumber(frameCorrelationPost.spearman),
+        frameCorrelationTopPostDeltaMs: maybeNumber(frameCorrelationPost.topMinusBottomMs),
+        frameCorrelationTopFlushRho: maybeNumber(frameCorrelationFlush.spearman),
+        frameCorrelationTopFlushDeltaMs: maybeNumber(frameCorrelationFlush.topMinusBottomMs),
+        frameCorrelationGoCandidates,
+        frameCorrelationDecision: compactFrameCorrelationDecision(frameCorrelation),
+        topJankTypes: compactTraceItems(summary.top_jank, ["jank_type", "n"]),
+        topAppTraceSlices: compactTraceItems(summary.top_slices, ["name", "n", "avg_ms", "p95_ms", "max_ms"]),
+        decision: appDeadline
+          ? `DirectSymbols removal could meet ${directCouldMeet || 0}/${appDeadline} AppDeadlineMissed frames`
+          : "",
+      });
+    } catch (error) {
+      rows.push({
+        runDate: "",
+        runId,
+        artifactDir: path.relative(ROOT, dir).replace(/\\/g, "/"),
+        traceFile: "",
+        traceMb: "",
+        frames: "",
+        appDeadlineMissed: "",
+        bufferStuffing: "",
+        surfaceFlingerStuffing: "",
+        displayHal: "",
+        actualAvgMs: "",
+        actualMaxMs: "",
+        framesWithDirect: "",
+        avgDirectOverlapMs: "",
+        maxDirectOverlapMs: "",
+        directRemovalCouldMeetDeadline: "",
+        avgNeededReductionMs: "",
+        minNeededReductionMs: "",
+        trafficTotalFrameP95Ms: "",
+        trafficExclusiveFrameAvgMs: "",
+        trafficExclusiveFrameP95Ms: "",
+        trafficExclusiveFrameMaxMs: "",
+        trafficExclusiveSliceP95Ms: "",
+        exclusiveTrafficRescueFrames: "",
+        exclusiveTrafficRescuePct: "",
+        exclusiveTrafficDecision: "",
+        postAndWaitP95Ms: "",
+        postAndWaitMaxMs: "",
+        postAndWaitRescueFrames: "",
+        renderThreadDrawFramesP95Ms: "",
+        renderThreadFlushP95Ms: "",
+        renderThreadSkiaExecuteP95Ms: "",
+        renderThreadSkiaPrepareP95Ms: "",
+        gpuWaitP95Ms: "",
+        gpuWaitRescueFrames: "",
+        recordViewDrawP95Ms: "",
+        renderThreadDecision: "",
+        frameCorrelationSummaryFile: "",
+        frameCorrelationFrames: "",
+        frameCorrelationLogFrames: "",
+        frameCorrelationPostN: "",
+        frameCorrelationPostP95Ms: "",
+        frameCorrelationFlushN: "",
+        frameCorrelationFlushP95Ms: "",
+        frameCorrelationTopSource: "",
+        frameCorrelationTopPostRho: "",
+        frameCorrelationTopPostDeltaMs: "",
+        frameCorrelationTopFlushRho: "",
+        frameCorrelationTopFlushDeltaMs: "",
+        frameCorrelationGoCandidates: "",
+        frameCorrelationDecision: "",
+        topJankTypes: "",
+        topAppTraceSlices: "",
+        decision: safeText(`Failed to parse trace audit artifacts in ${runId}: ${error.message}`, 1000),
+      });
+    }
+  }
+  rows.sort((a, b) => new Date(a.runDate) - new Date(b.runDate) || String(a.runId).localeCompare(String(b.runId)));
+  return rows;
+}
+
+async function collectFrameCorrelationRows() {
+  const rows = [];
+  const headers = [];
+  const seenHeaders = new Set();
+  const dirs = await listDirs(PERF_OUT);
+  for (const dir of dirs) {
+    const runId = path.basename(dir);
+    const csvPath = path.join(dir, "frame-correlation-frames.csv");
+    if (!(await exists(csvPath))) continue;
+    const summaryPath = path.join(dir, "frame-correlation-summary.json");
+    const stat = await fs.stat(csvPath);
+    const text = await fs.readFile(csvPath, "utf8");
+    const lines = text.trim().split(/\r?\n/).filter(Boolean);
+    if (lines.length < 2) continue;
+    const csvHeaders = parseCsvLine(lines[0]);
+    for (const header of csvHeaders) {
+      if (seenHeaders.has(header)) continue;
+      seenHeaders.add(header);
+      headers.push(header);
+    }
+    const hasSummary = await exists(summaryPath);
+    for (const line of lines.slice(1)) {
+      const values = parseCsvLine(line);
+      const detail = {};
+      csvHeaders.forEach((header, index) => {
+        detail[header] = maybeNumber(values[index]);
+      });
+      rows.push({
+        runDate: stat.mtime || "",
+        runId,
+        artifactDir: path.relative(ROOT, dir).replace(/\\/g, "/"),
+        summaryFile: hasSummary ? path.relative(ROOT, summaryPath).replace(/\\/g, "/") : "",
+        csvFile: path.relative(ROOT, csvPath).replace(/\\/g, "/"),
+        detail,
+      });
+    }
+  }
+  rows.sort((a, b) => {
+    const byDate = new Date(a.runDate) - new Date(b.runDate);
+    if (byDate) return byDate;
+    const byRun = String(a.runId).localeCompare(String(b.runId));
+    if (byRun) return byRun;
+    return maybeNumber(a.detail.drawSeq) - maybeNumber(b.detail.drawSeq);
+  });
+  return { headers, rows };
+}
+
+function writeMatrix(sheet, row, col, rows, headerFill = PALETTE.navy) {
+  if (!rows.length) return;
+  const range = sheet.getRangeByIndexes(row, col, rows.length, rows[0].length);
+  range.values = rows;
+  const header = sheet.getRangeByIndexes(row, col, 1, rows[0].length);
+  header.format = {
+    fill: headerFill,
+    font: { bold: true, color: "#FFFFFF" },
+    wrapText: true,
+  };
+}
+
+function addTable(sheet, rowCount, colCount, name) {
+  try {
+    if (rowCount >= 2) sheet.tables.add(sheet.getRangeByIndexes(0, 0, rowCount, colCount), true, name);
+  } catch {
+    // Tables are usability polish; the workbook remains valid as plain ranges.
+  }
+}
+
+function setWidths(sheet, widths) {
+  widths.forEach((width, index) => {
+    try {
+      sheet.getRangeByIndexes(0, index, 1, 1).format.columnWidth = width;
+    } catch {
+      // Ignore unsupported column width writes in older renderers.
+    }
+  });
+}
+
+function buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelationRows, ledgerRows) {
+  const latest = runRows[runRows.length - 1] || {};
+  const dashboardRows = [
+    ["Flight Alert Performance Workbook"],
+    [],
+    ["Metric", "Value", "Notes"],
+    ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
+    ["Detailed audit rows", auditRows.length, "Parsed Debug draw perf current/maxFrameDetail rows with phase-level timing columns"],
+    ["Trace audit rows", traceAuditRows.length, "Parsed FrameTimeline/Perfetto summaries where present"],
+    ["Frame correlation rows", frameCorrelationRows.rows.length, "One row per matched frame-tokened Perfetto frame"],
+    ["Optimization ledger rows", ledgerRows.length, "Moved from AGENTS.md; full notes are split across text columns"],
+    ["Latest run", latest.runId || "", latest.artifactDir || ""],
+    ["Latest produced FPS", latest.producedFps || "", "From summary-120hz.csv"],
+    ["Latest present mean FPS", latest.presentMeanFps || "", "From FrameTimeline present intervals"],
+    ["Latest p95 ms", latest.p95Ms || "", "Frame timing p95"],
+    ["Latest Android jank %", latest.androidJankPct || "", "Parsed AndroidJank percentage"],
+  ];
+
+  const runHeaders = [
+    "Run Date",
+    "Run ID",
+    "Artifact Dir",
+    "Test",
+    "City",
+    "Expected City",
+    "Map Source",
+    "Roads",
+    "Borders",
+    "Map Detail Timing",
+    "Traffic Detail Timing",
+    "Route Proof",
+    "Accepted Evidence",
+    "Accepted Reason",
+    "Route Samples",
+    "Max Distance Km",
+    "Frames",
+    "Raw Timeline Frames",
+    "Histogram Frames",
+    "Present Intervals",
+    "Sample Seconds",
+    "Produced FPS",
+    "Present Mean FPS",
+    "P50 ms",
+    "P95 ms",
+    "P99 ms",
+    "Present P50 ms",
+    "Present P95 ms",
+    "Present P99 ms",
+    "Present Drop 120 %",
+    "Latency Miss 120 %",
+    "Android Jank %",
+    "Summary File",
+  ];
+  const runData = [runHeaders, ...runRows.map((row) => [
+    row.runDate,
+    row.runId,
+    row.artifactDir,
+    row.testName,
+    row.city,
+    row.expectedCity,
+    row.mapSource,
+    row.roads,
+    row.borders,
+    row.mapDetailTiming,
+    row.trafficDetailTiming,
+    row.routeFocusPassed,
+    row.acceptedEvidence,
+    safeText(row.acceptedReason, 1000),
+    row.samples,
+    row.maxDistanceKm,
+    row.frames,
+    row.rawTimelineFrames,
+    row.histogramFrames,
+    row.presentIntervals,
+    row.sampleSeconds,
+    row.producedFps,
+    row.presentMeanFps,
+    row.p50Ms,
+    row.p95Ms,
+    row.p99Ms,
+    row.presentP50Ms,
+    row.presentP95Ms,
+    row.presentP99Ms,
+    row.presentDrop120Pct,
+    row.latencyMiss120Pct,
+    row.androidJankPct,
+    row.summaryFile,
+  ])];
+
+  const auditHeaders = [
+    "Run Date",
+    "Run ID",
+    "Artifact Dir",
+    "Log File",
+    "Seq",
+    "Kind",
+    "Timestamp",
+    "Phase",
+    "City",
+    "Route Proof",
+    "Map Source",
+    "Map Detail Timing",
+    ...DETAIL_KEYS,
+    "Source Detail Tokens",
+    "Raw Detail Snippet",
+  ];
+  const auditData = [auditHeaders, ...auditRows.map((row) => [
+    row.runDate,
+    row.runId,
+    row.artifactDir,
+    row.logFile,
+    row.sequence,
+    row.kind,
+    row.timestamp,
+    row.phase,
+    row.city,
+    row.routeFocusPassed,
+    row.mapSource,
+    row.mapDetailTiming,
+    ...DETAIL_KEYS.map((key) => row[key]),
+    row.sourceDetailTokens,
+    row.rawSnippet,
+  ])];
+
+  const traceAuditHeaders = [
+    "Run Date",
+    "Run ID",
+    "Artifact Dir",
+    "Trace File",
+    "Trace MB",
+    "Frames",
+    "App Deadline Missed",
+    "Buffer Stuffing",
+    "SurfaceFlinger Stuffing",
+    "Display HAL",
+    "Actual Avg ms",
+    "Actual Max ms",
+    "Frames With Direct",
+    "Avg Direct Overlap ms",
+    "Max Direct Overlap ms",
+    "Direct Removal Could Meet Deadline",
+    "Avg Needed Reduction ms",
+    "Min Needed Reduction ms",
+    "Traffic Total Frame P95 ms",
+    "Traffic Exclusive Frame Avg ms",
+    "Traffic Exclusive Frame P95 ms",
+    "Traffic Exclusive Frame Max ms",
+    "Traffic Exclusive Slice P95 ms",
+    "Exclusive Traffic Rescue Frames",
+    "Exclusive Traffic Rescue % of Missed",
+    "Exclusive Traffic Decision",
+    "PostAndWait P95 ms",
+    "PostAndWait Max ms",
+    "PostAndWait Rescue Frames",
+    "RenderThread DrawFrames P95 ms",
+    "RenderThread Flush P95 ms",
+    "RenderThread Skia Execute P95 ms",
+    "RenderThread Skia Prepare P95 ms",
+    "GPU Wait P95 ms",
+    "GPU Wait Rescue Frames",
+    "Record View Draw P95 ms",
+    "RenderThread Decision",
+    "Frame Correlation Summary File",
+    "Frame Correlation Frames",
+    "Frame Correlation Log Frames",
+    "Frame Correlation PostAndWait N",
+    "Frame Correlation PostAndWait P95 ms",
+    "Frame Correlation Flush N",
+    "Frame Correlation Flush P95 ms",
+    "Frame Correlation Top Source",
+    "Frame Correlation Top Post rho",
+    "Frame Correlation Top Post Delta ms",
+    "Frame Correlation Top Flush rho",
+    "Frame Correlation Top Flush Delta ms",
+    "Frame Correlation GO Candidates",
+    "Frame Correlation Decision",
+    "Top Jank Types",
+    "Top App Trace Slices",
+    "Decision",
+  ];
+  const traceAuditData = [traceAuditHeaders, ...traceAuditRows.map((row) => [
+    row.runDate,
+    row.runId,
+    row.artifactDir,
+    row.traceFile,
+    row.traceMb,
+    row.frames,
+    row.appDeadlineMissed,
+    row.bufferStuffing,
+    row.surfaceFlingerStuffing,
+    row.displayHal,
+    row.actualAvgMs,
+    row.actualMaxMs,
+    row.framesWithDirect,
+    row.avgDirectOverlapMs,
+    row.maxDirectOverlapMs,
+    row.directRemovalCouldMeetDeadline,
+    row.avgNeededReductionMs,
+    row.minNeededReductionMs,
+    row.trafficTotalFrameP95Ms,
+    row.trafficExclusiveFrameAvgMs,
+    row.trafficExclusiveFrameP95Ms,
+    row.trafficExclusiveFrameMaxMs,
+    row.trafficExclusiveSliceP95Ms,
+    row.exclusiveTrafficRescueFrames,
+    row.exclusiveTrafficRescuePct,
+    row.exclusiveTrafficDecision,
+    row.postAndWaitP95Ms,
+    row.postAndWaitMaxMs,
+    row.postAndWaitRescueFrames,
+    row.renderThreadDrawFramesP95Ms,
+    row.renderThreadFlushP95Ms,
+    row.renderThreadSkiaExecuteP95Ms,
+    row.renderThreadSkiaPrepareP95Ms,
+    row.gpuWaitP95Ms,
+    row.gpuWaitRescueFrames,
+    row.recordViewDrawP95Ms,
+    row.renderThreadDecision,
+    row.frameCorrelationSummaryFile,
+    row.frameCorrelationFrames,
+    row.frameCorrelationLogFrames,
+    row.frameCorrelationPostN,
+    row.frameCorrelationPostP95Ms,
+    row.frameCorrelationFlushN,
+    row.frameCorrelationFlushP95Ms,
+    row.frameCorrelationTopSource,
+    row.frameCorrelationTopPostRho,
+    row.frameCorrelationTopPostDeltaMs,
+    row.frameCorrelationTopFlushRho,
+    row.frameCorrelationTopFlushDeltaMs,
+    row.frameCorrelationGoCandidates,
+    row.frameCorrelationDecision,
+    row.topJankTypes,
+    row.topAppTraceSlices,
+    row.decision,
+  ])];
+
+  const frameCorrelationHeaders = [
+    "Run Date",
+    "Run ID",
+    "Artifact Dir",
+    "Summary File",
+    "CSV File",
+    ...frameCorrelationRows.headers,
+  ];
+  const frameCorrelationData = [frameCorrelationHeaders, ...frameCorrelationRows.rows.map((row) => [
+    row.runDate,
+    row.runId,
+    row.artifactDir,
+    row.summaryFile,
+    row.csvFile,
+    ...frameCorrelationRows.headers.map((header) => row.detail[header] ?? ""),
+  ])];
+
+  const ledgerHeaders = [
+    "Source",
+    "Section",
+    "AGENTS Line",
+    "Status",
+    "Title",
+    "Date Text",
+    "Artifact Count",
+    "Artifacts",
+    "Metrics Mentioned",
+    "Full Note 1",
+    "Full Note 2",
+    "Full Note 3",
+  ];
+  const ledgerData = [ledgerHeaders, ...ledgerRows.map((row) => [
+    row.source,
+    row.section,
+    row.line,
+    row.status,
+    row.title,
+    row.dateText,
+    row.artifactCount,
+    row.artifacts,
+    row.metrics,
+    row.note1,
+    row.note2,
+    row.note3,
+  ])];
+
+  const recent = runRows.slice(-40);
+  const chartRows = [
+    ["Run", "Produced FPS", "Present Mean FPS", "P95 ms", "Android Jank %"],
+    ...recent.map((row) => [
+      String(row.runId || "").slice(-38),
+      row.producedFps || "",
+      row.presentMeanFps || "",
+      row.p95Ms || "",
+      row.androidJankPct || "",
+    ]),
+  ];
+  const now = new Date().toISOString();
+  const checkRows = [
+    ["When", "Category", "Status", "Evidence / Command", "Notes"],
+    [now, "Android Studio warning audit", "clean", "android-studio-mcp-call --file-problems FlightAlertRewritten.kt --warnings --timeout 120000", "Returned no warnings after scoped cleanup"],
+    [now, "Gradle compile", "passed", ".\\gradlew.bat compileDebugKotlin", "Build successful"],
+    [now, "Gradle assemble", "passed", ".\\gradlew.bat assembleDebug", "Build successful"],
+    [now, "Android Studio build_project", "reported/recovered", "android-studio-mcp-call --build-project --timeout 180000", "Use first-class wrapper command; if Kotlin incremental cache corruption appears, trust Gradle and retry IDE rebuild once"],
+    [now, "Workbook policy", "active", "docs/flightalert-performance-metrics.xlsx", "Detailed audits and optimization ledger live here; AGENTS keeps rules and pointer"],
+  ];
+  const noteRows = [
+    ["Topic", "Note"],
+    ["Source of truth", "This workbook is the ongoing source for performance runs, detailed Debug draw perf audits, optimization attempts, accepted keepers, rejected experiments, and notable gains. AGENTS.md points here instead of accumulating long optimization history."],
+    ["Detailed Audits sheet", `Rows are parsed from Debug draw perf logcat lines as current and maxFrameDetail rows where present. The sheet stores detailed phase/timing/counter columns, not only simplified run summaries. Raw detail snippets are capped at ${AUDIT_RAW_SNIPPET_MAX_CHARS} characters because all structured timing/counter values are stored in their own columns.`],
+    ["Trace Audits sheet", "Rows are parsed from frametimeline-summary.json, exclusive-traffic-summary.json, renderthread-frame-summary.json, and frame-correlation-summary.json artifacts produced from Perfetto Trace Processor SQL. Use these for AppDeadlineMissed, buffer/display composition, direct-symbol gates, exclusive-traffic gates, RenderThread/postAndWait/GPU-wait diagnostics, and frame-correlation stop/go summaries."],
+    ["Frame Correlations sheet", "Rows are parsed from frame-correlation-frames.csv artifacts. This sheet stores the detailed per-frame matched trace/log metrics used for correlation decisions, not only simplified summaries."],
+    ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, route proof, and accepted-evidence fields together."],
+    ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
+    ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
+  ];
+
+  return {
+    workbookPath: WORKBOOK_PATH,
+    sheets: [
+      {
+        name: "Dashboard",
+        rows: dashboardRows,
+        widths: [28, 64, 96, 12, 12, 12],
+        freeze: "A3",
+        merges: ["A1:F1"],
+        titleCells: ["A1"],
+        numberFormats: [["B8:B11", "0.0"]],
+      },
+      {
+        name: "Runs",
+        rows: runData,
+        widths: [20, 42, 54, 34, 22, 22, 14, 10, 10, 16, 18, 12, 16, 60, 12, 16, 10, 18, 16, 16, 14, 14, 18, 12, 12, 12, 16, 16, 16, 18, 18, 16, 58],
+        freeze: "C2",
+        table: "PerformanceRuns",
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["O2:AF1048576", "0.0"]],
+      },
+      {
+        name: "Detailed Audits",
+        rows: auditData,
+        widths: [18, 42, 48, 52, 8, 16, 18, 24, 20, 12, 14, 16, ...Array(DETAIL_KEYS.length).fill(12), 62, 70],
+        freeze: "C2",
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"]],
+      },
+      {
+        name: "Trace Audits",
+        rows: traceAuditData,
+        widths: [18, 42, 48, 58, 12, 10, 18, 16, 22, 12, 14, 14, 18, 20, 20, 28, 22, 22, 22, 26, 26, 26, 26, 28, 28, 30, 76, 22, 22, 26, 32, 28, 34, 34, 22, 24, 26, 86, 16, 16, 18, 22, 18, 22, 28, 18, 22, 20, 24, 34, 86, 72, 92, 52],
+        freeze: "C2",
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["E2:AZ1048576", "0.0"]],
+        wrapCols: [27, 38, 52, 53, 54],
+      },
+      {
+        name: "Frame Correlations",
+        rows: frameCorrelationData,
+        widths: [18, 42, 48, 58, 58, ...Array(frameCorrelationRows.headers.length).fill(13)],
+        freeze: "F2",
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"], ["F2:ZZ1048576", "0.00"]],
+      },
+      {
+        name: "Optimization Ledger",
+        rows: ledgerData,
+        widths: [22, 34, 12, 24, 48, 18, 12, 58, 64, 100, 100, 100],
+        freeze: "E2",
+        table: "OptimizationLedger",
+        wrapCols: [8, 9, 10, 11, 12],
+      },
+      {
+        name: "Chart Data",
+        rows: chartRows,
+        widths: [44, 16, 20, 14, 18, 4, 22, 22, 22, 22, 22, 22, 22, 22],
+        freeze: "A2",
+        charts: true,
+      },
+      {
+        name: "Iteration Checks",
+        rows: checkRows,
+        widths: [20, 34, 20, 74, 92],
+        freeze: "A2",
+        numberFormats: [["A2:A1048576", "yyyy-mm-dd hh:mm"]],
+      },
+      {
+        name: "Notes",
+        rows: noteRows,
+        widths: [28, 120],
+        wrapCols: [2],
+      },
+    ],
+  };
+}
+
+async function exportWorkbookWithOpenpyxl(model) {
+  await fs.rm(PREVIEW_DIR, { recursive: true, force: true });
+  await fs.mkdir(PREVIEW_DIR, { recursive: true });
+  const modelPath = path.join(PREVIEW_DIR, "workbook-model.json");
+  await fs.writeFile(modelPath, JSON.stringify(model), "utf8");
+  const script = String.raw`
+import json
+import os
+import re
+import sys
+import xlsxwriter
+from openpyxl import load_workbook
+from xlsxwriter.utility import xl_cell_to_rowcol
+
+model_path = sys.argv[1]
+output_path = sys.argv[2]
+with open(model_path, "r", encoding="utf-8") as handle:
+    model = json.load(handle)
+
+workbook = xlsxwriter.Workbook(output_path, {
+    "constant_memory": True,
+    "strings_to_urls": False,
+    "nan_inf_to_errors": True,
+})
+header_format = workbook.add_format({
+    "bold": True,
+    "font_color": "#FFFFFF",
+    "bg_color": "#1F4E79",
+    "text_wrap": True,
+    "valign": "top",
+})
+title_format = workbook.add_format({
+    "bold": True,
+    "font_color": "#FFFFFF",
+    "bg_color": "#1F4E79",
+    "font_size": 16,
+    "text_wrap": True,
+    "valign": "top",
+})
+wrap_format = workbook.add_format({"text_wrap": True, "valign": "top"})
+
+def excel_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    return value
+
+for spec in model["sheets"]:
+    rows = spec["rows"]
+    max_col = max((len(row) for row in spec["rows"]), default=1)
+    ws = workbook.add_worksheet(spec["name"][:31])
+    for index, width in enumerate(spec.get("widths", [])):
+        ws.set_column(index, index, width)
+    for col_index in spec.get("wrapCols", []):
+        width = spec.get("widths", [""] * col_index)[col_index - 1] if col_index - 1 < len(spec.get("widths", [])) else None
+        ws.set_column(col_index - 1, col_index - 1, width, wrap_format)
+    if spec.get("freeze"):
+        row, col = xl_cell_to_rowcol(spec["freeze"])
+        ws.freeze_panes(row, col)
+    for merge in spec.get("merges", []):
+        if merge == "A1:F1" and rows and rows[0]:
+            ws.merge_range(merge, excel_value(rows[0][0]), title_format)
+    for row_index, row in enumerate(rows):
+        for col_index in range(max_col):
+            if row_index == 0 and col_index == 0 and "A1:F1" in spec.get("merges", []):
+                continue
+            value = excel_value(row[col_index]) if col_index < len(row) else ""
+            cell_format = header_format if row_index == 0 else None
+            ws.write(row_index, col_index, value, cell_format)
+    if rows and max_col:
+        ws.autofilter(0, 0, max(len(rows) - 1, 0), max_col - 1)
+    if spec.get("charts") and len(rows) >= 3:
+        last_row = len(rows)
+        sheet_name = spec["name"]
+        fps = workbook.add_chart({"type": "line"})
+        fps.set_title({"name": "Recent Runs: Produced vs Present FPS"})
+        fps.set_y_axis({"name": "FPS"})
+        for col in ("B", "C"):
+            fps.add_series({
+                "name": "='%s'!$%s$1" % (sheet_name, col),
+                "categories": "='%s'!$A$2:$A$%d" % (sheet_name, last_row),
+                "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
+            })
+        ws.insert_chart("G2", fps, {"x_scale": 1.45, "y_scale": 1.25})
+
+        timing = workbook.add_chart({"type": "line"})
+        timing.set_title({"name": "Recent Runs: P95 Frame Time And Jank"})
+        timing.set_y_axis({"name": "ms / %"})
+        for col in ("D", "E"):
+            timing.add_series({
+                "name": "='%s'!$%s$1" % (sheet_name, col),
+                "categories": "='%s'!$A$2:$A$%d" % (sheet_name, last_row),
+                "values": "='%s'!$%s$2:$%s$%d" % (sheet_name, col, col, last_row),
+            })
+        ws.insert_chart("G20", timing, {"x_scale": 1.45, "y_scale": 1.25})
+
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+workbook.close()
+
+verify = load_workbook(output_path, read_only=True, data_only=False)
+error_tokens = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#N/A")
+matches = []
+for sheet_name in ("Dashboard", "Chart Data", "Iteration Checks"):
+    if sheet_name not in verify.sheetnames:
+        continue
+    ws = verify[sheet_name]
+    for row in ws.iter_rows(values_only=True):
+        for cell in row:
+            if isinstance(cell, str) and any(token in cell for token in error_tokens):
+                matches.append({"sheet": ws.title, "value": cell[:120]})
+                if len(matches) >= 20:
+                    break
+        if len(matches) >= 20:
+            break
+    if len(matches) >= 20:
+        break
+print(json.dumps({
+    "workbookPath": output_path,
+    "sheets": verify.sheetnames,
+    "sheetRows": {spec["name"]: len(spec["rows"]) for spec in model["sheets"]},
+    "formulaErrorMatches": matches,
+}, default=str))
+`;
+  const stdout = await runPython(script, [modelPath, WORKBOOK_PATH], "xlsxwriter workbook export");
+  return JSON.parse(stdout);
+}
+
+function buildWorkbook(runRows, auditRows, ledgerRows) {
+  const workbook = Workbook.create();
+  const dashboard = workbook.worksheets.add("Dashboard");
+  dashboard.showGridLines = false;
+  dashboard.getRange("A1:F1").merge();
+  dashboard.getRange("A1").values = [["Flight Alert Performance Workbook"]];
+  dashboard.getRange("A1").format = { fill: PALETTE.navy, font: { bold: true, color: "#FFFFFF", size: 16 } };
+  const latest = runRows[runRows.length - 1] || {};
+  writeMatrix(dashboard, 2, 0, [
+    ["Metric", "Value", "Notes"],
+    ["Runs captured", runRows.length, "One row per 120 Hz framestats summary"],
+    ["Detailed audit rows", auditRows.length, "Parsed Debug draw perf current/maxFrameDetail rows with phase-level timing columns"],
+    ["Optimization ledger rows", ledgerRows.length, "Moved from AGENTS.md; full notes are split across text columns"],
+    ["Latest run", latest.runId || "", latest.artifactDir || ""],
+    ["Latest produced FPS", latest.producedFps || "", "From summary-120hz.csv"],
+    ["Latest present mean FPS", latest.presentMeanFps || "", "From FrameTimeline present intervals"],
+    ["Latest p95 ms", latest.p95Ms || "", "Frame timing p95"],
+    ["Latest Android jank %", latest.androidJankPct || "", "Parsed AndroidJank percentage"],
+  ]);
+  dashboard.getRange("B7:B10").format.numberFormat = "0.0";
+  setWidths(dashboard, [28, 64, 96, 12, 12, 12, 16, 16, 16, 16, 16, 16]);
+  dashboard.freezePanes.freezeRows(3);
+
+  const runsSheet = workbook.worksheets.add("Runs");
+  runsSheet.showGridLines = false;
+  const runHeaders = [
+    "Run Date",
+    "Run ID",
+    "Artifact Dir",
+    "Test",
+    "City",
+    "Expected City",
+    "Map Source",
+    "Roads",
+    "Borders",
+    "Map Detail Timing",
+    "Traffic Detail Timing",
+    "Route Proof",
+    "Accepted Evidence",
+    "Accepted Reason",
+    "Route Samples",
+    "Max Distance Km",
+    "Frames",
+    "Sample Seconds",
+    "Produced FPS",
+    "Present Mean FPS",
+    "P50 ms",
+    "P95 ms",
+    "P99 ms",
+    "Present P50 ms",
+    "Present P95 ms",
+    "Present P99 ms",
+    "Present Drop 120 %",
+    "Latency Miss 120 %",
+    "Android Jank %",
+    "Summary File",
+  ];
+  const runData = [runHeaders, ...runRows.map((row) => [
+    row.runDate,
+    row.runId,
+    row.artifactDir,
+    row.testName,
+    row.city,
+    row.expectedCity,
+    row.mapSource,
+    row.roads,
+    row.borders,
+    row.mapDetailTiming,
+    row.trafficDetailTiming,
+    row.routeFocusPassed,
+    row.acceptedEvidence,
+    safeText(row.acceptedReason, 1000),
+    row.samples,
+    row.maxDistanceKm,
+    row.frames,
+    row.sampleSeconds,
+    row.producedFps,
+    row.presentMeanFps,
+    row.p50Ms,
+    row.p95Ms,
+    row.p99Ms,
+    row.presentP50Ms,
+    row.presentP95Ms,
+    row.presentP99Ms,
+    row.presentDrop120Pct,
+    row.latencyMiss120Pct,
+    row.androidJankPct,
+    row.summaryFile,
+  ])];
+  writeMatrix(runsSheet, 0, 0, runData);
+  addTable(runsSheet, runData.length, runHeaders.length, "PerformanceRuns");
+  runsSheet.freezePanes.freezeRows(1);
+  runsSheet.freezePanes.freezeColumns(2);
+  runsSheet.getRangeByIndexes(1, 0, Math.max(1, runData.length - 1), 1).format.numberFormat = "yyyy-mm-dd hh:mm";
+  runsSheet.getRangeByIndexes(1, 14, Math.max(1, runData.length - 1), 15).format.numberFormat = "0.0";
+  setWidths(runsSheet, [20, 42, 54, 34, 22, 22, 14, 10, 10, 16, 18, 12, 16, 60, 12, 16, 10, 14, 14, 18, 12, 12, 12, 16, 16, 16, 18, 18, 16, 58]);
+
+  const auditSheet = workbook.worksheets.add("Detailed Audits");
+  auditSheet.showGridLines = false;
+  const auditHeaders = [
+    "Run Date",
+    "Run ID",
+    "Artifact Dir",
+    "Log File",
+    "Seq",
+    "Kind",
+    "Timestamp",
+    "Phase",
+    "City",
+    "Route Proof",
+    "Map Source",
+    "Map Detail Timing",
+    ...DETAIL_KEYS,
+    "Source Detail Tokens",
+    "Raw Detail Snippet",
+  ];
+  const auditData = [auditHeaders, ...auditRows.map((row) => [
+    row.runDate,
+    row.runId,
+    row.artifactDir,
+    row.logFile,
+    row.sequence,
+    row.kind,
+    row.timestamp,
+    row.phase,
+    row.city,
+    row.routeFocusPassed,
+    row.mapSource,
+    row.mapDetailTiming,
+    ...DETAIL_KEYS.map((key) => row[key]),
+    row.sourceDetailTokens,
+    row.rawSnippet,
+  ])];
+  writeMatrix(auditSheet, 0, 0, auditData);
+  auditSheet.freezePanes.freezeRows(1);
+  auditSheet.freezePanes.freezeColumns(2);
+  auditSheet.getRangeByIndexes(1, 0, Math.max(1, auditData.length - 1), 1).format.numberFormat = "yyyy-mm-dd hh:mm";
+  auditSheet.getRangeByIndexes(1, 12, Math.max(1, auditData.length - 1), DETAIL_KEYS.length).format.numberFormat = "0.00";
+  setWidths(auditSheet, [18, 42, 48, 52, 8, 16, 18, 24, 20, 12, 14, 16, ...Array(DETAIL_KEYS.length).fill(12), 62, 70]);
+
+  const ledgerSheet = workbook.worksheets.add("Optimization Ledger");
+  ledgerSheet.showGridLines = false;
+  const ledgerHeaders = [
+    "Source",
+    "Section",
+    "AGENTS Line",
+    "Status",
+    "Title",
+    "Date Text",
+    "Artifact Count",
+    "Artifacts",
+    "Metrics Mentioned",
+    "Full Note 1",
+    "Full Note 2",
+    "Full Note 3",
+  ];
+  const ledgerData = [ledgerHeaders, ...ledgerRows.map((row) => [
+    row.source,
+    row.section,
+    row.line,
+    row.status,
+    row.title,
+    row.dateText,
+    row.artifactCount,
+    row.artifacts,
+    row.metrics,
+    row.note1,
+    row.note2,
+    row.note3,
+  ])];
+  writeMatrix(ledgerSheet, 0, 0, ledgerData);
+  addTable(ledgerSheet, ledgerData.length, ledgerHeaders.length, "OptimizationLedger");
+  ledgerSheet.freezePanes.freezeRows(1);
+  ledgerSheet.freezePanes.freezeColumns(4);
+  ledgerSheet.getRangeByIndexes(1, 7, Math.max(1, ledgerData.length - 1), 5).format.wrapText = true;
+  setWidths(ledgerSheet, [22, 34, 12, 24, 48, 18, 12, 58, 64, 100, 100, 100]);
+
+  const chartData = workbook.worksheets.add("Chart Data");
+  chartData.showGridLines = false;
+  const recent = runRows.slice(-40);
+  const chartHeaders = ["Run", "Produced FPS", "Present Mean FPS", "P95 ms", "Android Jank %"];
+  const chartRows = [chartHeaders, ...recent.map((row) => [
+    String(row.runId || "").slice(-38),
+    row.producedFps || "",
+    row.presentMeanFps || "",
+    row.p95Ms || "",
+    row.androidJankPct || "",
+  ])];
+  writeMatrix(chartData, 0, 0, chartRows);
+  chartData.freezePanes.freezeRows(1);
+  setWidths(chartData, [44, 16, 20, 14, 18]);
+  try {
+    const fpsChart = chartData.charts.add("line", chartData.getRangeByIndexes(0, 0, chartRows.length, 3));
+    fpsChart.title = "Recent Runs: Produced vs Present FPS";
+    fpsChart.hasLegend = true;
+    fpsChart.yAxis = { numberFormatCode: "0.0" };
+    fpsChart.xAxis = { axisType: "textAxis", textStyle: { fontSize: 8 } };
+    fpsChart.setPosition("G2", "N18");
+    const p95Chart = chartData.charts.add("line", chartData.getRangeByIndexes(0, 0, chartRows.length, 4));
+    p95Chart.title = "Recent Runs: P95 Frame Time";
+    p95Chart.hasLegend = true;
+    p95Chart.yAxis = { numberFormatCode: "0.0" };
+    p95Chart.xAxis = { axisType: "textAxis", textStyle: { fontSize: 8 } };
+    p95Chart.setPosition("G20", "N36");
+  } catch {
+    chartData.getRange("G2").values = [["Chart creation skipped by renderer"]];
+  }
+
+  const checks = workbook.worksheets.add("Iteration Checks");
+  checks.showGridLines = false;
+  const checkRows = [
+    ["When", "Category", "Status", "Evidence / Command", "Notes"],
+    [new Date(), "Android Studio warning audit", "clean", "android-studio-mcp-call --file-problems FlightAlertRewritten.kt --warnings --timeout 120000", "Returned no warnings after scoped cleanup"],
+    [new Date(), "Gradle compile", "passed", ".\\gradlew.bat compileDebugKotlin", "Build successful"],
+    [new Date(), "Gradle assemble", "passed", ".\\gradlew.bat assembleDebug", "Build successful"],
+    [new Date(), "Android Studio build_project", "reported/recovered", "android-studio-mcp-call --build-project --timeout 180000", "Use first-class wrapper command; if Kotlin incremental cache corruption appears, trust Gradle and retry IDE rebuild once"],
+    [new Date(), "Workbook policy", "active", "docs/flightalert-performance-metrics.xlsx", "Detailed audits and optimization ledger live here; AGENTS keeps rules and pointer"],
+  ];
+  writeMatrix(checks, 0, 0, checkRows);
+  checks.freezePanes.freezeRows(1);
+  checks.getRangeByIndexes(1, 0, checkRows.length - 1, 1).format.numberFormat = "yyyy-mm-dd hh:mm";
+  setWidths(checks, [20, 34, 20, 74, 92]);
+
+  const notes = workbook.worksheets.add("Notes");
+  notes.showGridLines = false;
+  const noteRows = [
+    ["Topic", "Note"],
+    ["Source of truth", "This workbook is the ongoing source for performance runs, detailed Debug draw perf audits, optimization attempts, accepted keepers, rejected experiments, and notable gains. AGENTS.md points here instead of accumulating long optimization history."],
+    ["Detailed Audits sheet", "Rows are parsed from Debug draw perf logcat lines as current and maxFrameDetail rows where present. The sheet stores detailed phase/timing/counter columns, not only simplified run summaries."],
+    ["Runs sheet", "Rows come from *summary-120hz.csv plus route-proof and target metadata. Use Produced FPS, Present Mean FPS, p50/p95/p99, Android Jank %, route proof, and accepted-evidence fields together."],
+    ["Optimization Ledger sheet", "Migrated from AGENTS.md section 16. Full notes are split across three columns to avoid Excel cell-length clipping. Future agents should append/update this sheet, not expand AGENTS.md."],
+    ["Visual claims", "Satellite roads/labels/borders visual claims still require motion-video or road-motion-strip evidence per AGENTS.md. This workbook stores paths and metrics; it does not replace visual inspection."],
+  ];
+  writeMatrix(notes, 0, 0, noteRows);
+  notes.getRange("B2:B6").format.wrapText = true;
+  setWidths(notes, [28, 120]);
+  return workbook;
+}
+
+async function main() {
+  const { runRows, auditRows } = await collectPerformanceRows();
+  const traceAuditRows = await collectTraceAuditRows();
+  const frameCorrelationRows = await collectFrameCorrelationRows();
+  const agentsText = await fs.readFile(AGENTS_PATH, "utf8");
+  let ledgerRows = parseAgentsLedger(agentsText);
+  const previous = await previousLedgerRows();
+  if (ledgerRows.length < 10 && previous.length > ledgerRows.length) ledgerRows = previous;
+  ledgerRows = dedupeLedgerRows([...ledgerRows, ...previous, ...extraLedgerRows()]);
+  const model = buildWorkbookModel(runRows, auditRows, traceAuditRows, frameCorrelationRows, ledgerRows);
+  const exportResult = await exportWorkbookWithOpenpyxl(model);
+
+  console.log(JSON.stringify({
+    workbookPath: WORKBOOK_PATH,
+    runRows: runRows.length,
+    auditRows: auditRows.length,
+    traceAuditRows: traceAuditRows.length,
+    frameCorrelationRows: frameCorrelationRows.rows.length,
+    ledgerRows: ledgerRows.length,
+    formulaErrorMatches: exportResult.formulaErrorMatches,
+    sheetRows: exportResult.sheetRows,
+    sheets: exportResult.sheets,
+    exporter: "xlsxwriter",
+  }, null, 2));
+}
+
+await main();

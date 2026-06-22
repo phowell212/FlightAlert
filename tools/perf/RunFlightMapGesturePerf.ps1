@@ -335,6 +335,7 @@ function Get-DefaultArtifactName {
         "closeSatellitePanLabels" { return "closeSatellitePanLabels" }
         "closeSatellitePanLabelsPerf" { return "closeSatellitePanLabelsPerf" }
         "satellitePanZoomSanityPerf" { return "satellitePanZoomSanityPerf" }
+        "satelliteBenchmarkPanZoomWorkloadPerf" { return "satelliteBenchmarkPanZoomWorkloadPerf" }
         "streetFastZoomOutTileLoad" { return "streetFastZoomOutTileLoad" }
         "streetFastZoomOutTileLoadPerf" { return "streetFastZoomOutTileLoadPerf" }
         "panAcrossZoomLevels" { return "panAcrossZoomLevels" }

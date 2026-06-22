@@ -31,6 +31,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 @RunWith(AndroidJUnit4.class)
 public class FlightMapGesturePerfTest {
@@ -39,6 +40,7 @@ public class FlightMapGesturePerfTest {
     private static final String PERF_BAND_NOT_APPLICABLE = "not_applicable";
     private static final long TRAFFIC_LOAD_WAIT_MS = 6000L;
     private static final long SANITY_TRAFFIC_LOAD_WAIT_MS = 3500L;
+    private static final long BENCHMARK_PAN_ZOOM_WORKLOAD_MS = 30000L;
     private static final int SATELLITE_FAST_ZOOM_OUT_STEPS = 4;
     private static final double COUNTRY_CONTINUITY_CONTINENT_ZOOM = 4.25;
     private static final double COUNTRY_CONTINUITY_COUNTRY_ZOOM = 5.4;
@@ -121,7 +123,8 @@ public class FlightMapGesturePerfTest {
     @Test
     public void launchOnly() throws Exception {
         MajorTrafficCity city = randomMajorTrafficCity();
-        startAppAtMajorTraffic(city, 5.4);
+        UiObject2 app = startAppAtMajorTraffic(city, 5.4);
+        assertNotNull("Flight Alert root was not found", app);
         sleep(TRAFFIC_LOAD_WAIT_MS);
         requireFlightAlertForeground();
         captureActiveDisplay("flightalert-perf-launchOnly.png");
@@ -311,6 +314,50 @@ public class FlightMapGesturePerfTest {
         sleep(180);
         requireFlightAlertForeground();
         capturePerfArtifacts("satellitePanZoomSanityPerf");
+    }
+
+    @Test
+    public void satelliteBenchmarkPanZoomWorkloadPerf() throws Exception {
+        MajorTrafficCity city = randomInlandTrafficCity();
+        boolean skipChrome = instrumentationBooleanArgument("skipChrome");
+        boolean skipTraffic = instrumentationBooleanArgument("skipTraffic");
+        UiObject2 app = startAppAtMajorTraffic(city, 5.88, "SATELLITE", skipChrome, skipTraffic);
+        sleep(TRAFFIC_LOAD_WAIT_MS);
+        setPerfPhaseMetadata(
+                "benchmarkPanZoom30s",
+                "launch_zoom=5.88; map_source=SATELLITE; target_motion_ms=" + BENCHMARK_PAN_ZOOM_WORKLOAD_MS + "; timetable_target=" + city.name,
+                "repeatable workload-to-workload benchmark with bounded human-like pan plus overlapping zoom-in/out gestures across country and regional bands"
+        );
+        clearPerfCounters();
+
+        long deadline = SystemClock.uptimeMillis() + BENCHMARK_PAN_ZOOM_WORKLOAD_MS;
+        int cycle = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            cycle++;
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", "country", "human_like_pan cycle=" + cycle);
+            briefHumanPanOverTraffic(app, "country");
+            sleep(90);
+
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", "country", "human_like_overlap direction=zoom_in cycle=" + cycle);
+            humanLikeOverlappedPinch(app, "country", true);
+            sleep(120);
+
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_pan cycle=" + cycle);
+            briefHumanPanOverTraffic(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND);
+            sleep(90);
+
+            markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, "human_like_overlap direction=zoom_out cycle=" + cycle);
+            humanLikeOverlappedPinch(app, COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND, false);
+            sleep(140);
+
+            if (cycle % 3 == 0) {
+                requireFlightAlertForeground();
+            }
+        }
+        markPerfPhase("satelliteBenchmarkPanZoomWorkloadPerf", "benchmarkPanZoom30s", "country", "phase_capture_artifacts cycles=" + cycle);
+        sleep(700);
+        requireFlightAlertForeground();
+        capturePerfArtifacts("satelliteBenchmarkPanZoomWorkloadPerf");
     }
 
     private void runCloseSatellitePanLabels(String artifactName, boolean captureScreenshots) throws Exception {
@@ -870,15 +917,15 @@ public class FlightMapGesturePerfTest {
                 .append(" --es com.flightalert.PERF_FOCUS_X_FRACTION ").append(currentPerfFocusXFraction)
                 .append(" --es com.flightalert.PERF_FOCUS_Y_FRACTION ").append(currentPerfFocusYFraction)
                 .append(" --ez com.flightalert.PERF_CLEAR_SELECTION true")
-                .append(" --ez com.flightalert.PERF_FOCUS_OPEN_MAP ").append(focusOpenMap ? "true" : "false");
+                .append(" --ez com.flightalert.PERF_FOCUS_OPEN_MAP ").append(focusOpenMap);
         Boolean mapRoads = instrumentationOptionalBooleanArgument("mapRoads");
         Boolean mapBorders = instrumentationOptionalBooleanArgument("mapBorders");
         requireCompleteMapReferenceArguments(mapRoads, mapBorders);
         if (mapRoads != null) {
-            command.append(" --ez com.flightalert.PERF_MAP_ROADS_ENABLED ").append(mapRoads.booleanValue() ? "true" : "false");
+            command.append(" --ez com.flightalert.PERF_MAP_ROADS_ENABLED ").append(mapRoads);
         }
         if (mapBorders != null) {
-            command.append(" --ez com.flightalert.PERF_MAP_BORDERS_ENABLED ").append(mapBorders.booleanValue() ? "true" : "false");
+            command.append(" --ez com.flightalert.PERF_MAP_BORDERS_ENABLED ").append(mapBorders);
         }
         if (skipChrome) {
             command.append(" --ez com.flightalert.PERF_SKIP_CHROME true");
@@ -907,7 +954,7 @@ public class FlightMapGesturePerfTest {
         runShell(command.toString());
     }
 
-    private UiObject2 flightAlertRoot() throws Exception {
+    private UiObject2 flightAlertRoot() {
         UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
         acceptFlightAlertPermissionsIfPresent();
         assertTrue("Flight Alert package did not appear", device.wait(Until.hasObject(By.pkg(PACKAGE_NAME)), 7000));
@@ -926,7 +973,7 @@ public class FlightMapGesturePerfTest {
         return app;
     }
 
-    private void acceptFlightAlertPermissionsIfPresent() throws Exception {
+    private void acceptFlightAlertPermissionsIfPresent() {
         UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
         for (int attempt = 0; attempt < 4; attempt++) {
             UiObject2 permission = device.findObject(By.pkg("com.google.android.permissioncontroller"));
@@ -1160,13 +1207,13 @@ public class FlightMapGesturePerfTest {
         }
     }
 
-    private void briefHumanPanOverTraffic(UiObject2 app, String scaleBand) throws Exception {
+    private void briefHumanPanOverTraffic(UiObject2 app, String scaleBand) {
         PanEnvelope envelope = panEnvelopeForScaleBand(scaleBand);
         ellipticalPanOverTraffic(app, 24, envelope.widthFraction * 0.55f, envelope.heightFraction * 0.52f, true, envelope.minRadiusDp, envelope.maxRadiusXDp * 0.65f, envelope.maxRadiusYDp * 0.65f);
         sleep(45);
     }
 
-    private void ellipticalPanOverTraffic(UiObject2 app, int steps, float widthFraction, float heightFraction, boolean clockwise, float minRadiusDp, float maxRadiusXDp, float maxRadiusYDp) throws Exception {
+    private void ellipticalPanOverTraffic(UiObject2 app, int steps, float widthFraction, float heightFraction, boolean clockwise, float minRadiusDp, float maxRadiusXDp, float maxRadiusYDp) {
         android.graphics.Rect bounds = safeMapGestureBounds(app.getVisibleBounds());
         float centerX = bounds.centerX();
         float centerY = bounds.centerY();
@@ -1262,7 +1309,7 @@ public class FlightMapGesturePerfTest {
         }
     }
 
-    private void scheduleActiveDisplayCapture(String fileName, long delayMs) throws Exception {
+    private void scheduleActiveDisplayCapture(String fileName, long delayMs) {
         Thread thread = new Thread(() -> {
             SystemClock.sleep(delayMs);
             UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
@@ -1310,6 +1357,7 @@ public class FlightMapGesturePerfTest {
 
     private String currentPerfTargetDescription(String scaleBand) {
         MajorTrafficCity city = currentPerfCity;
+        //noinspection StringBufferReplaceableByString
         StringBuilder builder = new StringBuilder();
         builder.append("city=").append(city == null ? "unknown" : city.name).append('\n');
         builder.append("lat=").append(city == null ? "unknown" : city.lat).append('\n');
@@ -1392,7 +1440,7 @@ public class FlightMapGesturePerfTest {
 
     private void writeTextArtifact(String fileName, String value) throws IOException {
         Context targetContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        IOException durableFailure = null;
+        IOException durableFailure;
         try {
             File file = writeTextFile(new File("/sdcard/Download"), fileName, value);
             System.out.println("Wrote artifact: " + file.getAbsolutePath());
@@ -1408,7 +1456,7 @@ public class FlightMapGesturePerfTest {
             durableFailure.addSuppressed(e);
         }
 
-        IOException appFailure = null;
+        IOException appFailure;
         File externalDirectory = targetContext.getExternalFilesDir(null);
         if (externalDirectory != null) {
             try {
@@ -1426,12 +1474,8 @@ public class FlightMapGesturePerfTest {
             File file = writeTextFile(targetContext.getFilesDir(), fileName, value);
             System.out.println("Wrote artifact: " + file.getAbsolutePath());
         } catch (IOException fallbackFailure) {
-            if (durableFailure != null) {
-                fallbackFailure.addSuppressed(durableFailure);
-            }
-            if (appFailure != null) {
-                fallbackFailure.addSuppressed(appFailure);
-            }
+            fallbackFailure.addSuppressed(durableFailure);
+            fallbackFailure.addSuppressed(appFailure);
             throw fallbackFailure;
         }
     }
@@ -1445,7 +1489,7 @@ public class FlightMapGesturePerfTest {
         }
         File file = new File(directory, fileName);
         try (FileOutputStream output = new FileOutputStream(file)) {
-            output.write(value.getBytes("UTF-8"));
+            output.write(value.getBytes(StandardCharsets.UTF_8));
         }
         return file;
     }
@@ -1490,6 +1534,7 @@ public class FlightMapGesturePerfTest {
         for (MajorTrafficCity city : cities) {
             if (normalizeCityName(city.name).equals(key)) return city;
         }
+        //noinspection IfCanBeSwitch
         if ("dfw".equals(key)) return findCity(cities, "Dallas-Fort Worth");
         if ("atl".equals(key)) return findCity(cities, "Atlanta");
         if ("phx".equals(key)) return findCity(cities, "Phoenix");
@@ -1525,6 +1570,7 @@ public class FlightMapGesturePerfTest {
     private MajorTrafficCity timetableTrafficCity(MajorTrafficCity[] cities) {
         int utcHour = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
                 .get(java.util.Calendar.HOUR_OF_DAY);
+        //noinspection ExtractMethodRecommender
         String[] preferredNames;
         if ((utcHour >= 5 && utcHour < 15) || (utcHour >= 3 && utcHour < 5)) {
             preferredNames = new String[] {"Frankfurt", "Paris", "Madrid", "London", "Amsterdam"};
@@ -1551,6 +1597,7 @@ public class FlightMapGesturePerfTest {
         ParcelFileDescriptor descriptor = InstrumentationRegistry.getInstrumentation()
                 .getUiAutomation()
                 .executeShellCommand(command);
+        //noinspection TryFinallyCanBeTryWithResources
         try (FileInputStream input = new FileInputStream(descriptor.getFileDescriptor());
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
@@ -1558,7 +1605,7 @@ public class FlightMapGesturePerfTest {
             while ((read = input.read(buffer)) != -1) {
                 output.write(buffer, 0, read);
             }
-            return output.toString("UTF-8");
+            return output.toString(StandardCharsets.UTF_8);
         } finally {
             descriptor.close();
         }
@@ -1568,6 +1615,8 @@ public class FlightMapGesturePerfTest {
         SystemClock.sleep(ms);
     }
 
+    //noinspection JUnitTestClassNamingConvention
+    @SuppressWarnings("JUnitTestClassNamingConvention")
     private static final class PanEnvelope {
         final float widthFraction;
         final float heightFraction;
@@ -1584,6 +1633,8 @@ public class FlightMapGesturePerfTest {
         }
     }
 
+    //noinspection JUnitTestClassNamingConvention
+    @SuppressWarnings("JUnitTestClassNamingConvention")
     private static final class MajorTrafficCity {
         final String name;
         final double lat;
