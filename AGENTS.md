@@ -28,6 +28,8 @@ When performance is bad, solve the expensive work directly with profiling, cachi
 
 If a protected visual or feature is a real bottleneck, replace its implementation with one that produces the same accepted pixels, information, timing honesty, and interaction behavior faster.
 
+Protected features that must never be optimized out include live aircraft identity/order/presence, smooth aircraft entry and exit at screen edges, aircraft dots/symbols/outlines/shadows/colors/scales/rotations/selection rings, aircraft morphing, rotorcraft blade animation, satellite and street tile imagery, tile/road/reference-layer fades, map labels and borders, county labels with zoom-tied fade behavior, selected paths, ownship display, controls/chrome, modal/details/photo/loading states, alerts, and source-freshness honesty. Optimize the logic behind these features only when the end user receives the same or better visible behavior.
+
 Optimization bands are diagnostic tools, not tradeoff zones. If a change improves one zoom band, map mode, gesture, or layer state by moving jank, flicker, missing information, or visual inconsistency into another band/state, reject it and keep digging for the root cause. A real optimization reduces or eliminates the underlying expensive work consistently while preserving the accepted user experience everywhere.
 
 ## 3. Real Sources Only
@@ -159,6 +161,8 @@ For optimization work, read all three workbook sheets before editing:
 - `Performance Notes`: dashboard context, workflow rules, Pro/MCP/tooling rules, benchmark-lane rules, rejected-attempt requirements, and the full optimization ledger.
 
 Use `tools/perf/BuildFlightAlertPerformanceWorkbook.mjs` with the bundled Node.js/Python runtimes to rebuild the workbook. Temporary preview workbooks are disposable staging artifacts only; do not let them become a second source of truth.
+
+Every optimization iteration must run the same 60-second apples-to-apples multi-zoom performance lane before being treated as accepted. Record each iteration in `docs/flightalert-performance-metrics.xlsx`, update the comparison graph, and keep the run parameters, target city/region, map mode, layer state, duration, and thermal state comparable across iterations.
 
 ## 17. Security / Privacy
 

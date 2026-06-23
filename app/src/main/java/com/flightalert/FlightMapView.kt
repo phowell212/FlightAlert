@@ -544,29 +544,6 @@ class FlightMapView(
         val motion_generation: Long
     )
 
-    private data class TrafficRetainedLayerKey(
-        val camera: RetainedCameraKey,
-        val traffic_token: Long,
-        val selected_aircraft_id: String?,
-        val selected_aircraft_key: String?,
-        val filters_restrict_aircraft: Boolean,
-        val map_source: TileSource,
-        val theme_key: Int,
-        val pinch_in_progress: Boolean,
-        val drag_started: Boolean,
-        val map_touch_active: Boolean,
-        val motion_generation: Long
-    )
-
-    private data class OwnshipRetainedLayerKey(
-        val camera: RetainedCameraKey,
-        val location_lat_bits: Long,
-        val location_lon_bits: Long,
-        val location_altitude_bits: Long,
-        val theme_key: Int,
-        val motion_generation: Long
-    )
-
     private data class ChromeRetainedLayerKey(
         val width_px: Int,
         val height_px: Int,
@@ -604,8 +581,6 @@ class FlightMapView(
     private var safe_inset_bottom = 0f
     private val retained_map_layer = RetainedRenderLayer("FlightAlert.mapReferenceLayer")
     private val retained_route_layer = RetainedRenderLayer("FlightAlert.selectedPathLayer")
-    private val retained_traffic_layer = RetainedRenderLayer("FlightAlert.trafficLayer")
-    private val retained_ownship_layer = RetainedRenderLayer("FlightAlert.ownshipLayer")
     private val retained_chrome_layer = RetainedRenderLayer("FlightAlert.chromeLayer")
     private val retained_map_layer_generation = AtomicLong()
     private var retained_traffic_motion_generation = 0L
@@ -886,22 +861,8 @@ class FlightMapView(
             draw_priority_range_circle(layer_canvas, viewport, location)
             draw_selected_flight_path(layer_canvas, viewport)
         }
-        retained_traffic_layer.draw(
-            canvas = canvas,
-            key = traffic_retained_layer_key(viewport, layer_width, layer_height),
-            width = layer_width,
-            height = layer_height
-        ) { layer_canvas ->
-            draw_traffic_overlay(layer_canvas, viewport)
-        }
-        retained_ownship_layer.draw(
-            canvas = canvas,
-            key = ownship_retained_layer_key(viewport, location, layer_width, layer_height),
-            width = layer_width,
-            height = layer_height
-        ) { layer_canvas ->
-            draw_ownship_overlay(layer_canvas, viewport, location)
-        }
+        draw_traffic_overlay(canvas, viewport)
+        draw_ownship_overlay(canvas, viewport, location)
     }
 
     private fun draw_chrome_layers(
@@ -989,42 +950,6 @@ class FlightMapView(
             selected_trace_id = selected_path_controller.selected_trace_aircraft_id,
             trace_identity = System.identityHashCode(selected_path_controller.trace),
             path_visible = selected_path_controller.path_visible,
-            theme_key = visual_theme.hashCode(),
-            motion_generation = retained_traffic_motion_generation
-        )
-    }
-
-    private fun traffic_retained_layer_key(viewport: Viewport, width_px: Int, height_px: Int): TrafficRetainedLayerKey {
-        return TrafficRetainedLayerKey(
-            camera = retained_camera_key(viewport, width_px, height_px),
-            traffic_token = traffic_cache_rebuild_token,
-            selected_aircraft_id = selected_path_controller.selected_aircraft_id,
-            selected_aircraft_key = selected_path_controller.selected_aircraft_key,
-            filters_restrict_aircraft = filters_restrict_aircraft(),
-            map_source = map_source,
-            theme_key = visual_theme.hashCode(),
-            pinch_in_progress = pinch_in_progress,
-            drag_started = drag_started,
-            map_touch_active = map_touch_active,
-            motion_generation = retained_traffic_motion_generation
-        )
-    }
-
-    private fun ownship_retained_layer_key(
-        viewport: Viewport,
-        location: Location,
-        width_px: Int,
-        height_px: Int
-    ): OwnshipRetainedLayerKey {
-        return OwnshipRetainedLayerKey(
-            camera = retained_camera_key(viewport, width_px, height_px),
-            location_lat_bits = java.lang.Double.doubleToLongBits(location.latitude),
-            location_lon_bits = java.lang.Double.doubleToLongBits(location.longitude),
-            location_altitude_bits = if (location.hasAltitude()) {
-                java.lang.Double.doubleToLongBits(location.altitude)
-            } else {
-                0L
-            },
             theme_key = visual_theme.hashCode(),
             motion_generation = retained_traffic_motion_generation
         )

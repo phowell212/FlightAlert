@@ -387,12 +387,15 @@ class TrafficOverlayRenderer(
     private var dot_overlay_recording_offset = 0
     private var dot_overlay_recording_clear_y = 0
     private val dot_overlay_clear_rect = Rect()
+    private var rotorcraft_animation_frame_requested = false
+
     // Draw visible aircraft, smoothly blending dense traffic into dots while keeping selected traffic readable.
     fun draw_aircraft(
         canvas: Canvas,
         state: TrafficOverlayState,
         style: TrafficOverlayStyle
     ) {
+        rotorcraft_animation_frame_requested = false
         state.dot_batch?.let { batch ->
             val marker_blend = smoothed_aircraft_marker_dot_blend(state.viewport)
             val draw_symbols = state.aircraft.isNotEmpty() && marker_blend < AIRCRAFT_BATCH_DOT_BLEND
@@ -407,7 +410,7 @@ class TrafficOverlayRenderer(
                     draw_selected_overlay = false,
                     interaction_active = state.interaction_active
                 )
-                draw_aircraft_symbols_with_pan_cache(
+                draw_aircraft_symbols(
                     canvas = canvas,
                     aircraft = state.aircraft,
                     selected_aircraft_id = state.selected_aircraft_id,
@@ -2372,6 +2375,7 @@ class TrafficOverlayRenderer(
                     track_deg = item.aircraft.track_deg,
                     icon_scale = icon_scale,
                     frame_style = frame_style,
+                    now_ms = now_ms,
                     fill = fill_color,
                     stroke = stroke_color
                 )
@@ -2555,6 +2559,7 @@ class TrafficOverlayRenderer(
         track_deg: Double?,
         icon_scale: Float,
         frame_style: AircraftIconFrameStyle,
+        now_ms: Long,
         fill: Int,
         stroke: Int
     ) {
@@ -2604,35 +2609,21 @@ class TrafficOverlayRenderer(
             val blade_visibility = smooth_step(0.32f, 0.82f, shape_progress)
             val blade_alpha = (Color.alpha(stroke) * blade_visibility * 0.72f).round_to_int().coerceIn(0, 255)
             if (blade_alpha > 4 && (rotor > 0f || tail_rotor > 0f)) {
+                val phase = ((now_ms % ROTORCRAFT_BLADE_CYCLE_MS).toFloat() / ROTORCRAFT_BLADE_CYCLE_MS) * 360f
                 stroke_paint.strokeCap = Paint.Cap.ROUND
                 stroke_paint.color = with_alpha(stroke, blade_alpha)
                 stroke_paint.strokeWidth = chrome.dp(1.55f + 0.3f * rotor)
                 val mast_y = -chrome.dp(1.8f * body)
                 val main_half_length = chrome.dp(5f + 22f * rotor)
                 val main_gap = chrome.dp(2.8f + 1.6f * body)
-                draw_rotorcraft_blade_pair(
-                    canvas = this,
-                    center_x = 0f,
-                    center_y = mast_y,
-                    half_length = main_half_length,
-                    center_gap = main_gap,
-                    angle_deg = ROTORCRAFT_MAIN_BLADE_DEG,
-                    blade_paint = stroke_paint
-                )
+                draw_rotorcraft_blade_pair(this, 0f, mast_y, main_half_length, main_gap, phase, stroke_paint)
                 if (tail_rotor > 0f) {
                     val tail_rotor_y = chrome.dp(7.8f + 19.2f * tail)
                     val tail_blade = chrome.dp(2.3f + 4.2f * tail_rotor)
                     stroke_paint.strokeWidth = chrome.dp(1.25f)
-                    draw_rotorcraft_blade_pair(
-                        canvas = this,
-                        center_x = 0f,
-                        center_y = tail_rotor_y,
-                        half_length = tail_blade,
-                        center_gap = chrome.dp(0.8f),
-                        angle_deg = ROTORCRAFT_TAIL_BLADE_DEG,
-                        blade_paint = stroke_paint
-                    )
+                    draw_rotorcraft_blade_pair(this, 0f, tail_rotor_y, tail_blade, chrome.dp(0.8f), (phase * 5f + 24f) % 360f, stroke_paint)
                 }
+                request_rotorcraft_animation_frame_once()
             }
 
             val mast_y = -chrome.dp(1.8f * body)
@@ -2662,6 +2653,12 @@ class TrafficOverlayRenderer(
             drawLine(center_x - half_length, center_y, center_x - center_gap, center_y, blade_paint)
             drawLine(center_x + center_gap, center_y, center_x + half_length, center_y, blade_paint)
         }
+    }
+
+    private fun request_rotorcraft_animation_frame_once() {
+        if (rotorcraft_animation_frame_requested) return
+        rotorcraft_animation_frame_requested = true
+        chrome.request_animation_frame()
     }
 
     private fun aircraft_symbol_mask(symbol: AircraftSymbol, shape_progress: Float): AircraftSymbolMask {
@@ -3777,10 +3774,9 @@ class TrafficOverlayRenderer(
         const val AIRCRAFT_CULL_EXTRA_DP = 24f
         const val AIRCRAFT_FAST_DOT_BLEND = 0.995f
         const val AIRCRAFT_BATCH_DOT_BLEND = 0.995f
+        const val ROTORCRAFT_BLADE_CYCLE_MS = 288L
         const val ROTORCRAFT_ICON_SCALE_MULTIPLIER = 0.82f
         const val ROTORCRAFT_CULL_RADIUS_DP = 34f
-        const val ROTORCRAFT_MAIN_BLADE_DEG = 18f
-        const val ROTORCRAFT_TAIL_BLADE_DEG = 74f
         const val MAX_BATCH_MOTION_SECONDS = 10f * 60f
         const val AIRCRAFT_DOT_RADIUS_DP = 3.6f
         const val BATCH_DOT_RADIUS_DP = AIRCRAFT_DOT_RADIUS_DP
@@ -4285,6 +4281,7 @@ internal class TrafficOverlayStateBuilder(
     ): DenseSymbolOverlay? {
         // Reuse dense symbol state only while visual keys and padded coverage still describe the current viewport.
         val source_changed = dense_symbol_cache_aircraft !== frame.cache.aircraft
+        if (source_changed) return null
         val zoom_delta = frame.viewport.zoom - dense_symbol_cache_zoom
         val zoom_changed = abs(zoom_delta) > DENSE_DOT_CACHE_ZOOM_EPSILON
         val interaction_reuse = can_reuse_dense_symbol_cache_during_interaction(frame.interaction)
