@@ -161,8 +161,9 @@ internal class SatelliteMapTileRenderer(
     }
     private var transition_cache_key: String? = null
     private var transition_map_source: TileSource? = null
-    private var current_tile_zoom = Int.MIN_VALUE
-    private var tile_zoom_direction = 0
+    private var satellite_color_zoom_start = Double.NaN
+    private var satellite_color_zoom_target = Double.NaN
+    private var satellite_color_zoom_started_ms = 0L
     private var last_satellite_buffer_request_key: String? = null
     private var last_satellite_buffer_request_ms = 0L
     private var last_satellite_prefetch_request_key: String? = null
@@ -275,12 +276,13 @@ internal class SatelliteMapTileRenderer(
         paint.color = style.map_empty
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
 
-        val lower_tile_zoom = floor(viewport.zoom)
+        val color_zoom = satellite_color_zoom(viewport.zoom, now_ms, state)
+        val lower_tile_zoom = floor(color_zoom)
             .toInt()
             .coerceIn(MIN_ZOOM, TileSource.SATELLITE.max_native_zoom)
         val upper_tile_zoom = (lower_tile_zoom + 1)
             .coerceAtMost(TileSource.SATELLITE.max_native_zoom)
-        val zoom_fraction = (viewport.zoom - lower_tile_zoom).toFloat().coerceIn(0f, 1f)
+        val zoom_fraction = (color_zoom - lower_tile_zoom).toFloat().coerceIn(0f, 1f)
         val has_upper_lod = upper_tile_zoom > lower_tile_zoom
         val upper_lod_alpha = if (has_upper_lod) {
             smooth_step(LOD_BLEND_START_FRACTION, LOD_BLEND_END_FRACTION, zoom_fraction)
@@ -292,7 +294,6 @@ internal class SatelliteMapTileRenderer(
                 upper_lod_alpha > MIN_LAYER_ALPHA &&
                 upper_lod_alpha < 1f - MIN_LAYER_ALPHA
 
-        update_tile_zoom_transition(lower_tile_zoom, state)
         val request_generation = begin_tile_request_generation()
 
         val interim_draw_needed = blend_active ||
@@ -637,8 +638,9 @@ internal class SatelliteMapTileRenderer(
         local_reference_renderer.clear()
         transition_cache_key = null
         transition_map_source = null
-        current_tile_zoom = Int.MIN_VALUE
-        tile_zoom_direction = 0
+        satellite_color_zoom_start = Double.NaN
+        satellite_color_zoom_target = Double.NaN
+        satellite_color_zoom_started_ms = 0L
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
         last_satellite_prefetch_request_key = null
@@ -649,8 +651,9 @@ internal class SatelliteMapTileRenderer(
     fun reset_transitions() {
         transition_cache_key = null
         transition_map_source = null
-        current_tile_zoom = Int.MIN_VALUE
-        tile_zoom_direction = 0
+        satellite_color_zoom_start = Double.NaN
+        satellite_color_zoom_target = Double.NaN
+        satellite_color_zoom_started_ms = 0L
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
         last_satellite_prefetch_request_key = null
@@ -3323,21 +3326,47 @@ internal class SatelliteMapTileRenderer(
         }
     }
 
-    private fun update_tile_zoom_transition(tile_zoom: Int, state: MapTileRenderState) {
+    private fun satellite_color_zoom(target_zoom: Double, now_ms: Long, state: MapTileRenderState): Double {
         val changed_source =
             transition_cache_key != state.cache_key || transition_map_source != state.map_source
-        if (changed_source) {
+        if (changed_source || satellite_color_zoom_target.isNaN()) {
             transition_cache_key = state.cache_key
             transition_map_source = state.map_source
-            current_tile_zoom = tile_zoom
-            tile_zoom_direction = 0
-            return
+            satellite_color_zoom_start = target_zoom
+            satellite_color_zoom_target = target_zoom
+            satellite_color_zoom_started_ms = now_ms
+            return target_zoom
         }
-        if (tile_zoom != current_tile_zoom) {
-            tile_zoom_direction = tile_zoom.compareTo(current_tile_zoom)
-            current_tile_zoom = tile_zoom
+
+        val color_zoom = current_satellite_color_zoom(now_ms)
+        if (abs(target_zoom - satellite_color_zoom_target) > SATELLITE_COLOR_ZOOM_EPSILON) {
+            satellite_color_zoom_start = bounded_satellite_color_zoom(color_zoom, target_zoom)
+            satellite_color_zoom_target = target_zoom
+            satellite_color_zoom_started_ms = now_ms
+            request_redraw()
+            return satellite_color_zoom_start
         }
+        if (abs(color_zoom - satellite_color_zoom_target) > SATELLITE_COLOR_ZOOM_EPSILON) {
+            request_redraw()
+        }
+        return bounded_satellite_color_zoom(color_zoom, target_zoom)
     }
+
+    private fun current_satellite_color_zoom(now_ms: Long): Double {
+        val elapsed_ms = now_ms - satellite_color_zoom_started_ms
+        if (elapsed_ms <= 0L) return satellite_color_zoom_start
+        val progress = (elapsed_ms.toFloat() / SATELLITE_COLOR_ZOOM_TRANSITION_MS)
+            .coerceIn(0f, 1f)
+        val eased = smooth_step(0f, 1f, progress).toDouble()
+        return satellite_color_zoom_start +
+                (satellite_color_zoom_target - satellite_color_zoom_start) * eased
+    }
+
+    private fun bounded_satellite_color_zoom(color_zoom: Double, target_zoom: Double): Double =
+        color_zoom.coerceIn(
+            target_zoom - SATELLITE_COLOR_ZOOM_MAX_LAG,
+            target_zoom + SATELLITE_COLOR_ZOOM_MAX_LAG
+        )
 
     private fun satellite_tile_load_alpha(key: String, now_ms: Long): Float {
         val loaded_at = tile_loaded_elapsed_ms[key] ?: 0L
@@ -3437,6 +3466,9 @@ internal class SatelliteMapTileRenderer(
         const val SATELLITE_PARENT_REQUEST_DEPTH = 10
         const val SATELLITE_CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
+        const val SATELLITE_COLOR_ZOOM_TRANSITION_MS = 180f
+        const val SATELLITE_COLOR_ZOOM_MAX_LAG = 2.0
+        const val SATELLITE_COLOR_ZOOM_EPSILON = 0.001
         const val MAX_REFERENCE_MEMORY_TILES = 768
         const val REFERENCE_TILE_CACHE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
         const val REFERENCE_TILE_FADE_MS = 280f
