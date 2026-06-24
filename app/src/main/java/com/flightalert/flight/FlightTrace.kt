@@ -15,16 +15,18 @@
 )
 
 package com.flightalert.flight
+
 import com.flightalert.FlightAlertAppSettings
+
 import com.flightalert.details.json_int_or_null
 import com.flightalert.details.json_number_or_null
 import com.flightalert.map.clamped_haversine_distance_meters
 import com.flightalert.traffic.AirplanesLiveHttp
-import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import kotlin.math.roundToLong
+import org.json.JSONObject
 
 class FlightTraceClient(private val user_agent: String) {
 
@@ -37,20 +39,30 @@ class FlightTraceClient(private val user_agent: String) {
         if (clean_icao.isEmpty()) return null
 
         val source = fetch_trace_source(clean_icao) ?: return null
-        val trace = parse_adsb_trace(source.name, listOfNotNull(source.full_json, source.recent_json), live_point, type_code)
+        val trace = parse_adsb_trace(
+            source.name,
+            listOfNotNull(source.full_json, source.recent_json),
+            live_point,
+            type_code
+        )
         return trace.takeIf { it.point_count >= TRACE_MIN_TRACE_POINTS }
     }
 
     private fun fetch_trace_source(clean_icao: String): TraceSource? {
         for (provider in TRACE_PROVIDERS) {
             val full_json = fetch_trace(provider, clean_icao, "full") ?: continue
-            val recent_json = runCatching { fetch_trace(provider, clean_icao, "recent") }.getOrNull()
+            val recent_json =
+                runCatching { fetch_trace(provider, clean_icao, "recent") }.getOrNull()
             return TraceSource(provider.name, full_json, recent_json)
         }
         return null
     }
 
-    private fun fetch_trace(provider: TraceProvider, clean_icao: String, kind: String): JSONObject? {
+    private fun fetch_trace(
+        provider: TraceProvider,
+        clean_icao: String,
+        kind: String
+    ): JSONObject? {
         val folder = clean_icao.takeLast(2)
         val url = URL("${provider.base_url}/data/traces/$folder/trace_${kind}_$clean_icao.json")
         if (!url.protocol.equals("https", ignoreCase = true)) return null
@@ -87,7 +99,10 @@ class FlightTraceClient(private val user_agent: String) {
         val previous_segments = previous_flight_segments(all_points, current_start_sec)
         val live_state = append_live_point_if_current(segments, live_point)
 
-        if (live_point != null && live_state == LiveTraceState.STALE_OR_DISCONNECTED && !source_trace_is_current(segments)) {
+        if (live_point != null && live_state == LiveTraceState.STALE_OR_DISCONNECTED && !source_trace_is_current(
+                segments
+            )
+        ) {
             return FlightTrace.empty()
         }
 
@@ -132,7 +147,9 @@ class FlightTraceClient(private val user_agent: String) {
                 epoch_sec = (base_epoch_sec + offset_sec).roundToLong(),
                 altitude_m = when (altitude) {
                     is Number -> altitude.toDouble() / TRACE_FEET_PER_METER
-                    is String -> altitude.toDoubleOrNull()?.div(TRACE_FEET_PER_METER) ?: if (on_ground) 0.0 else null
+                    is String -> altitude.toDoubleOrNull()?.div(TRACE_FEET_PER_METER)
+                        ?: if (on_ground) 0.0 else null
+
                     else -> null
                 },
                 track_deg = row.json_number_or_null(5),
@@ -151,12 +168,19 @@ class FlightTraceClient(private val user_agent: String) {
         return points
             .filter {
                 it.point.lat.isFinite() &&
-                    it.point.lon.isFinite() &&
-                    it.point.lat in -90.0..90.0 &&
-                    it.point.lon in -180.0..180.0 &&
-                    it.point.epoch_sec > 0L
+                        it.point.lon.isFinite() &&
+                        it.point.lat in -90.0..90.0 &&
+                        it.point.lon in -180.0..180.0 &&
+                        it.point.epoch_sec > 0L
             }
-            .distinctBy { "${it.point.epoch_sec}:${"%.5f".format(Locale.US, it.point.lat)}:${"%.5f".format(Locale.US, it.point.lon)}" }
+            .distinctBy {
+                "${it.point.epoch_sec}:${
+                    "%.5f".format(
+                        Locale.US,
+                        it.point.lat
+                    )
+                }:${"%.5f".format(Locale.US, it.point.lon)}"
+            }
             .sortedBy { it.point.epoch_sec }
     }
 
@@ -184,7 +208,10 @@ class FlightTraceClient(private val user_agent: String) {
             .takeLast(TRACE_MAX_PREVIOUS_FLIGHT_SEGMENTS)
     }
 
-    private fun is_completed_previous_flight(points: List<TrackPoint>, current_start_sec: Long): Boolean {
+    private fun is_completed_previous_flight(
+        points: List<TrackPoint>,
+        current_start_sec: Long
+    ): Boolean {
         if (points.size < TRACE_MIN_SEGMENT_POINTS) return false
         val first = points.first()
         val last = points.last()
@@ -213,7 +240,10 @@ class FlightTraceClient(private val user_agent: String) {
         return latest_moving_leg(points)
     }
 
-    private fun latest_moving_leg(points: List<TracePointWithFlags>, latest_takeoff_index: Int? = latest_takeoff_index(points)): List<TracePointWithFlags> {
+    private fun latest_moving_leg(
+        points: List<TracePointWithFlags>,
+        latest_takeoff_index: Int? = latest_takeoff_index(points)
+    ): List<TracePointWithFlags> {
         latest_takeoff_index?.let { return points.drop(departure_context_start(points, it)) }
         return latest_source_leg(points)
     }
@@ -230,7 +260,10 @@ class FlightTraceClient(private val user_agent: String) {
         return takeoff_index
     }
 
-    private fun departure_context_start(points: List<TracePointWithFlags>, takeoff_index: Int): Int {
+    private fun departure_context_start(
+        points: List<TracePointWithFlags>,
+        takeoff_index: Int
+    ): Int {
         val takeoff = points[takeoff_index].point
         var start = takeoff_index
         for (index in takeoff_index - 1 downTo 0) {
@@ -238,7 +271,8 @@ class FlightTraceClient(private val user_agent: String) {
             if (candidate.starts_new_leg || candidate.is_moving_flight_point()) break
             val age_seconds = takeoff.epoch_sec - candidate.point.epoch_sec
             if (age_seconds > TRACE_MAX_DEPARTURE_CONTEXT_SECONDS) break
-            val distance_meters = distance_meters(candidate.point.lat, candidate.point.lon, takeoff.lat, takeoff.lon)
+            val distance_meters =
+                distance_meters(candidate.point.lat, candidate.point.lon, takeoff.lat, takeoff.lon)
             if (distance_meters > TRACE_MAX_DEPARTURE_CONTEXT_DISTANCE_M) break
             start = index
         }
@@ -278,12 +312,16 @@ class FlightTraceClient(private val user_agent: String) {
     }
 
     private fun source_trace_is_current(segments: List<TraceSegment>): Boolean {
-        val latest_epoch_sec = segments.flatMap { it.points }.maxOfOrNull { it.epoch_sec } ?: return false
+        val latest_epoch_sec =
+            segments.flatMap { it.points }.maxOfOrNull { it.epoch_sec } ?: return false
         val now_sec = System.currentTimeMillis() / 1000L
         return latest_epoch_sec >= now_sec - TRACE_MAX_SOURCE_TRACE_AGE_SECONDS
     }
 
-    private fun append_live_point_if_current(segments: MutableList<TraceSegment>, live_point: TrackPoint?): LiveTraceState {
+    private fun append_live_point_if_current(
+        segments: MutableList<TraceSegment>,
+        live_point: TrackPoint?
+    ): LiveTraceState {
         val live = live_point ?: return LiveTraceState.NOT_PROVIDED
         val now_sec = System.currentTimeMillis() / 1000L
         if (live.epoch_sec < now_sec - TRACE_MAX_LIVE_POINT_AGE_SECONDS) return LiveTraceState.STALE_OR_DISCONNECTED
@@ -294,13 +332,23 @@ class FlightTraceClient(private val user_agent: String) {
         val dt = live.epoch_sec - last.epoch_sec
         if (dt <= -TRACE_SOURCE_CAN_BE_NEWER_SECONDS) return LiveTraceState.ALREADY_CURRENT
         if (dt !in 1L..TRACE_MAX_LIVE_APPEND_GAP_SECONDS) return LiveTraceState.STALE_OR_DISCONNECTED
-        if (speed_knots(last, live, dt) > TRACE_MAX_LIVE_CONNECT_SPEED_KT) return LiveTraceState.STALE_OR_DISCONNECTED
+        if (speed_knots(
+                last,
+                live,
+                dt
+            ) > TRACE_MAX_LIVE_CONNECT_SPEED_KT
+        ) return LiveTraceState.STALE_OR_DISCONNECTED
         segments[segments.lastIndex] = TraceSegment(last_segment.points + live)
         return LiveTraceState.APPENDED
     }
 
     private fun speed_knots(a: TrackPoint, b: TrackPoint, seconds: Long): Double {
-        return distance_meters(a.lat, a.lon, b.lat, b.lon) / TRACE_METERS_PER_NAUTICAL_MILE / (seconds / 3600.0)
+        return distance_meters(
+            a.lat,
+            a.lon,
+            b.lat,
+            b.lon
+        ) / TRACE_METERS_PER_NAUTICAL_MILE / (seconds / 3600.0)
     }
 
     private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
@@ -346,12 +394,9 @@ class FlightTraceClient(private val user_agent: String) {
     }
 }
 
-
-
 internal fun JSONObject.trace_json_double_or_null(key: String): Double? {
     return if (has(key) && !isNull(key)) optDouble(key) else null
 }
-
 
 internal const val TRACE_FEET_PER_METER = 3.28084
 
@@ -363,37 +408,50 @@ internal const val TRACE_MIN_TRACE_POINTS = FlightAlertAppSettings.FlightTrace.M
 
 internal const val TRACE_MIN_SEGMENT_POINTS = FlightAlertAppSettings.FlightTrace.MIN_SEGMENT_POINTS
 
-internal const val TRACE_MIN_TRACE_DURATION_SECONDS = FlightAlertAppSettings.FlightTrace.MIN_TRACE_DURATION_SECONDS
+internal const val TRACE_MIN_TRACE_DURATION_SECONDS =
+    FlightAlertAppSettings.FlightTrace.MIN_TRACE_DURATION_SECONDS
 
-internal const val TRACE_MAX_TRACE_GAP_SECONDS = FlightAlertAppSettings.FlightTrace.MAX_TRACE_GAP_SECONDS
+internal const val TRACE_MAX_TRACE_GAP_SECONDS =
+    FlightAlertAppSettings.FlightTrace.MAX_TRACE_GAP_SECONDS
 
-internal const val TRACE_MAX_LIVE_APPEND_GAP_SECONDS = FlightAlertAppSettings.FlightTrace.MAX_LIVE_APPEND_GAP_SECONDS
+internal const val TRACE_MAX_LIVE_APPEND_GAP_SECONDS =
+    FlightAlertAppSettings.FlightTrace.MAX_LIVE_APPEND_GAP_SECONDS
 
-internal const val TRACE_SOURCE_CAN_BE_NEWER_SECONDS = FlightAlertAppSettings.FlightTrace.SOURCE_CAN_BE_NEWER_SECONDS
+internal const val TRACE_SOURCE_CAN_BE_NEWER_SECONDS =
+    FlightAlertAppSettings.FlightTrace.SOURCE_CAN_BE_NEWER_SECONDS
 
-internal const val TRACE_MAX_LIVE_CONNECT_SPEED_KT = FlightAlertAppSettings.FlightTrace.MAX_LIVE_CONNECT_SPEED_KT
+internal const val TRACE_MAX_LIVE_CONNECT_SPEED_KT =
+    FlightAlertAppSettings.FlightTrace.MAX_LIVE_CONNECT_SPEED_KT
 
-internal const val TRACE_MIN_LIVE_APPEND_DISTANCE_M = FlightAlertAppSettings.FlightTrace.MIN_LIVE_APPEND_DISTANCE_M
+internal const val TRACE_MIN_LIVE_APPEND_DISTANCE_M =
+    FlightAlertAppSettings.FlightTrace.MIN_LIVE_APPEND_DISTANCE_M
 
-internal const val TRACE_MAX_LIVE_POINT_AGE_SECONDS = FlightAlertAppSettings.FlightTrace.MAX_LIVE_POINT_AGE_SECONDS
+internal const val TRACE_MAX_LIVE_POINT_AGE_SECONDS =
+    FlightAlertAppSettings.FlightTrace.MAX_LIVE_POINT_AGE_SECONDS
 
-internal const val TRACE_MAX_SOURCE_TRACE_AGE_SECONDS = FlightAlertAppSettings.FlightTrace.MAX_SOURCE_TRACE_AGE_SECONDS
+internal const val TRACE_MAX_SOURCE_TRACE_AGE_SECONDS =
+    FlightAlertAppSettings.FlightTrace.MAX_SOURCE_TRACE_AGE_SECONDS
 
-internal const val TRACE_MIN_MOVING_FLIGHT_SPEED_KT = FlightAlertAppSettings.FlightTrace.MIN_MOVING_FLIGHT_SPEED_KT
+internal const val TRACE_MIN_MOVING_FLIGHT_SPEED_KT =
+    FlightAlertAppSettings.FlightTrace.MIN_MOVING_FLIGHT_SPEED_KT
 
-internal const val TRACE_MIN_MOVING_FLIGHT_ALTITUDE_FT = FlightAlertAppSettings.FlightTrace.MIN_MOVING_FLIGHT_ALTITUDE_FT
+internal const val TRACE_MIN_MOVING_FLIGHT_ALTITUDE_FT =
+    FlightAlertAppSettings.FlightTrace.MIN_MOVING_FLIGHT_ALTITUDE_FT
 
-internal const val TRACE_MAX_DEPARTURE_CONTEXT_SECONDS = FlightAlertAppSettings.FlightTrace.MAX_DEPARTURE_CONTEXT_SECONDS
+internal const val TRACE_MAX_DEPARTURE_CONTEXT_SECONDS =
+    FlightAlertAppSettings.FlightTrace.MAX_DEPARTURE_CONTEXT_SECONDS
 
-internal const val TRACE_MAX_DEPARTURE_CONTEXT_DISTANCE_M = FlightAlertAppSettings.FlightTrace.MAX_DEPARTURE_CONTEXT_DISTANCE_M
+internal const val TRACE_MAX_DEPARTURE_CONTEXT_DISTANCE_M =
+    FlightAlertAppSettings.FlightTrace.MAX_DEPARTURE_CONTEXT_DISTANCE_M
 
-internal const val TRACE_MIN_PREVIOUS_FLIGHT_DISTANCE_M = FlightAlertAppSettings.FlightTrace.MIN_PREVIOUS_FLIGHT_DISTANCE_M
+internal const val TRACE_MIN_PREVIOUS_FLIGHT_DISTANCE_M =
+    FlightAlertAppSettings.FlightTrace.MIN_PREVIOUS_FLIGHT_DISTANCE_M
 
-internal const val TRACE_MIN_PREVIOUS_FLIGHT_ALTITUDE_FT = FlightAlertAppSettings.FlightTrace.MIN_PREVIOUS_FLIGHT_ALTITUDE_FT
+internal const val TRACE_MIN_PREVIOUS_FLIGHT_ALTITUDE_FT =
+    FlightAlertAppSettings.FlightTrace.MIN_PREVIOUS_FLIGHT_ALTITUDE_FT
 
-internal const val TRACE_MAX_PREVIOUS_FLIGHT_SEGMENTS = FlightAlertAppSettings.FlightTrace.MAX_PREVIOUS_FLIGHT_SEGMENTS
-
-
+internal const val TRACE_MAX_PREVIOUS_FLIGHT_SEGMENTS =
+    FlightAlertAppSettings.FlightTrace.MAX_PREVIOUS_FLIGHT_SEGMENTS
 
 data class FlightTrace(
     val source: String,
@@ -420,9 +478,7 @@ data class FlightTrace(
     }
 }
 
-
 data class TraceSegment(val points: List<TrackPoint>)
-
 
 data class TrackPoint(
     val lat: Double,
@@ -432,6 +488,3 @@ data class TrackPoint(
     val track_deg: Double?,
     val on_ground: Boolean?
 )
-
-
-// Direct Airplanes.Live globe inventory source backed by lightweight binCraft HTTP.

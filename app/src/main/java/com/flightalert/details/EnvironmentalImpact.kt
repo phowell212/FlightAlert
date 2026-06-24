@@ -15,6 +15,7 @@
 )
 
 package com.flightalert.details
+
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.flight.FlightTrace
 import com.flightalert.flight.TraceSegment
@@ -40,7 +41,12 @@ object AircraftImpactEstimator {
         "https://www.epa.gov/regulations-emissions-vehicles-and-engines/regulations-lead-emissions-aircraft"
     )
 
-    fun facts_for(feed_type_code: String?, category: Int?, on_ground: Boolean?, details: AircraftDetails?): ImpactFacts {
+    fun facts_for(
+        feed_type_code: String?,
+        category: Int?,
+        on_ground: Boolean?,
+        details: AircraftDetails?
+    ): ImpactFacts {
         return ImpactFacts(
             feed_type_code = feed_type_code,
             details_type_code = details?.type_code,
@@ -63,7 +69,14 @@ object AircraftImpactEstimator {
         if (code.isBlank() && text.isBlank()) return null
         if (facts.category == 14 || text.contains("UAV") || text.contains("DRONE")) return null
         if (facts.category == 9 || code.startsWith("GL") || text.contains("GLIDER")) return null
-        if (facts.on_ground == true && facts.category != null && facts.category in listOf(16, 17, 18, 19, 20)) return null
+        if (facts.on_ground == true && facts.category != null && facts.category in listOf(
+                16,
+                17,
+                18,
+                19,
+                20
+            )
+        ) return null
         type_specific_profile(code)?.let { return it }
 
         return when {
@@ -89,9 +102,10 @@ object AircraftImpactEstimator {
     }
 
     fun score_for_kg_per_hour(kg_per_hour: Double): Int {
-        val normalized = ((log10(kg_per_hour.coerceAtLeast(0.01)) - log10(SCORE_MIN_KG_CO2_PER_HOUR)) /
-            (log10(SCORE_MAX_KG_CO2_PER_HOUR) - log10(SCORE_MIN_KG_CO2_PER_HOUR)))
-            .coerceIn(0.0, 1.0)
+        val normalized =
+            ((log10(kg_per_hour.coerceAtLeast(0.01)) - log10(SCORE_MIN_KG_CO2_PER_HOUR)) /
+                    (log10(SCORE_MAX_KG_CO2_PER_HOUR) - log10(SCORE_MIN_KG_CO2_PER_HOUR)))
+                .coerceIn(0.0, 1.0)
         return (normalized * 100.0).roundToInt()
     }
 
@@ -99,11 +113,21 @@ object AircraftImpactEstimator {
         val current = profile.mid_co2_kg_per_hour()
         val piston = PISTON_SINGLE.mid_co2_kg_per_hour()
         val narrow = NARROW_BODY.mid_co2_kg_per_hour()
-        return "${format_multiplier(current, piston)} piston single; ${format_multiplier(current, narrow)} A320/B737 class"
+        return "${format_multiplier(current, piston)} piston single; ${
+            format_multiplier(
+                current,
+                narrow
+            )
+        } A320/B737 class"
     }
 
     private fun search_text(facts: ImpactFacts): String {
-        return listOfNotNull(facts.feed_type_code, facts.details_type_code, facts.manufacturer, facts.model)
+        return listOfNotNull(
+            facts.feed_type_code,
+            facts.details_type_code,
+            facts.manufacturer,
+            facts.model
+        )
             .joinToString(" ")
             .uppercase(Locale.US)
     }
@@ -146,7 +170,12 @@ object AircraftImpactEstimator {
     }
 
     private fun is_military_transport_aircraft(code: String, text: String): Boolean {
-        return matches_impact_terms(code, text, MILITARY_TRANSPORT_PREFIXES, MILITARY_TRANSPORT_TEXT)
+        return matches_impact_terms(
+            code,
+            text,
+            MILITARY_TRANSPORT_PREFIXES,
+            MILITARY_TRANSPORT_TEXT
+        )
     }
 
     private fun is_tactical_jet_aircraft(code: String, text: String): Boolean {
@@ -155,8 +184,8 @@ object AircraftImpactEstimator {
 
     private fun is_airliner_type_code(code: String): Boolean {
         return NARROW_BODY_PREFIXES.any { code.startsWith(it) } ||
-            HEAVY_PREFIXES.any { code.startsWith(it) } ||
-            REGIONAL_PREFIXES.any { code.startsWith(it) }
+                HEAVY_PREFIXES.any { code.startsWith(it) } ||
+                REGIONAL_PREFIXES.any { code.startsWith(it) }
     }
 
     private fun matches_impact_terms(
@@ -170,7 +199,7 @@ object AircraftImpactEstimator {
         return prefixes.any { prefix ->
             val compact_prefix = compact_impact_text(prefix)
             compact_prefix.isNotBlank() &&
-                (compact_code.startsWith(compact_prefix) || compact_text.contains(compact_prefix))
+                    (compact_code.startsWith(compact_prefix) || compact_text.contains(compact_prefix))
         } || phrases.any { phrase ->
             text.contains(phrase) || compact_text.contains(compact_impact_text(phrase))
         }
@@ -298,7 +327,14 @@ object AircraftImpactEstimator {
         "R44" to typed_profile("R44", "Robinson R44", ImpactFuel.AVGAS, 12.0, 18.0, 95.0),
         "C208" to typed_profile("C208", "Cessna 208", ImpactFuel.JET, 45.0, 75.0, 175.0),
         "PC12" to typed_profile("PC12", "Pilatus PC-12", ImpactFuel.JET, 55.0, 85.0, 260.0),
-        "B350" to typed_profile("B350", "Beechcraft King Air 350", ImpactFuel.JET, 90.0, 135.0, 300.0),
+        "B350" to typed_profile(
+            "B350",
+            "Beechcraft King Air 350",
+            ImpactFuel.JET,
+            90.0,
+            135.0,
+            300.0
+        ),
         "SF50" to typed_profile("SF50", "Cirrus Vision Jet", ImpactFuel.JET, 55.0, 85.0, 300.0),
         "E75L" to typed_profile("E75L", "Embraer 175", ImpactFuel.JET, 400.0, 700.0, 430.0),
         "E75S" to typed_profile("E75S", "Embraer 175", ImpactFuel.JET, 400.0, 700.0, 430.0),
@@ -353,28 +389,112 @@ object AircraftImpactEstimator {
     private val PISTON_ROTOR_PREFIXES = listOf("R22", "R44")
     private val PISTON_ROTOR_TEXT = listOf("ROBINSON R22", "ROBINSON R44")
     private val TURBINE_ROTOR_PREFIXES = listOf(
-        "H60", "AS3", "AS5", "EC30", "EC35", "EC45", "B06", "B407", "B429", "S76", "S92", "A109", "A139", "AW13"
+        "H60",
+        "AS3",
+        "AS5",
+        "EC30",
+        "EC35",
+        "EC45",
+        "B06",
+        "B407",
+        "B429",
+        "S76",
+        "S92",
+        "A109",
+        "A139",
+        "AW13"
     )
     private val TURBINE_ROTOR_TEXT = listOf(
         "BLACK HAWK", "SIKORSKY S-76", "SIKORSKY S-92", "AW139", "BELL 407", "BELL 429",
         "EUROCOPTER", "AIRBUS HELICOPTERS"
     )
-    private val TURBOPROP_PREFIXES = listOf("C208", "PC12", "TBM", "B350", "BE20", "BE30", "P46T", "DHC6")
+    private val TURBOPROP_PREFIXES =
+        listOf("C208", "PC12", "TBM", "B350", "BE20", "BE30", "P46T", "DHC6")
     private val TURBOPROP_TEXT = listOf("CARAVAN", "PC-12", "KING AIR", "TBM", "TWIN OTTER")
-    private val LIGHT_JET_PREFIXES = listOf("C25", "C510", "C52", "C55", "C56", "C68", "E50", "E55", "E545", "GLF", "H25", "LJ", "PRM", "SF50", "CL30")
-    private val LIGHT_JET_TEXT = listOf("CITATION", "PHENOM", "LEARJET", "GULFSTREAM", "PILATUS PC-24", "VISION JET", "CHALLENGER 300")
-    private val REGIONAL_PREFIXES = listOf("AT4", "AT7", "CRJ", "DH8", "E17", "E19", "E70", "E75", "F70", "F90", "SB20")
-    private val REGIONAL_TEXT = listOf("CRJ", "EMBRAER 170", "EMBRAER 175", "DASH 8", "ATR 42", "ATR 72", "SAAB 2000")
-    private val NARROW_BODY_PREFIXES = listOf("A19", "A20", "A21", "A30", "A31", "A32", "B37", "B38", "B39", "B70", "B71", "B72", "B73", "B75", "B76", "BCS", "MD8", "MD9")
-    private val NARROW_BODY_TEXT = listOf("AIRBUS A320", "AIRBUS A321", "BOEING 737", "BOEING 757", "BOEING 767", "A220", "737 MAX")
-    private val HEAVY_PREFIXES = listOf("A33", "A34", "A35", "A38", "B74", "B77", "B78", "DC10", "MD11", "A124", "IL76")
-    private val HEAVY_TEXT = listOf("A330", "A340", "A350", "A380", "747", "777", "787", "MD-11", "C-17", "C-5", "IL-76", "AN-124")
-    private val MILITARY_TRANSPORT_PREFIXES = listOf("C17", "C5", "C130", "A400", "K35", "KC10", "R135")
-    private val MILITARY_TRANSPORT_TEXT = listOf("GLOBEMASTER", "GALAXY", "HERCULES", "ATLAS", "STRATOTANKER", "EXTENDER")
-    private val TACTICAL_JET_PREFIXES = listOf("A10", "F15", "F16", "F18", "F22", "F35", "T38", "EUFI", "TOR")
-    private val TACTICAL_JET_TEXT = listOf("F-15", "F-16", "F-18", "F-22", "F-35", "T-38", "TYPHOON", "TORNADO", "WARTHOG")
+    private val LIGHT_JET_PREFIXES = listOf(
+        "C25",
+        "C510",
+        "C52",
+        "C55",
+        "C56",
+        "C68",
+        "E50",
+        "E55",
+        "E545",
+        "GLF",
+        "H25",
+        "LJ",
+        "PRM",
+        "SF50",
+        "CL30"
+    )
+    private val LIGHT_JET_TEXT = listOf(
+        "CITATION",
+        "PHENOM",
+        "LEARJET",
+        "GULFSTREAM",
+        "PILATUS PC-24",
+        "VISION JET",
+        "CHALLENGER 300"
+    )
+    private val REGIONAL_PREFIXES =
+        listOf("AT4", "AT7", "CRJ", "DH8", "E17", "E19", "E70", "E75", "F70", "F90", "SB20")
+    private val REGIONAL_TEXT =
+        listOf("CRJ", "EMBRAER 170", "EMBRAER 175", "DASH 8", "ATR 42", "ATR 72", "SAAB 2000")
+    private val NARROW_BODY_PREFIXES = listOf(
+        "A19",
+        "A20",
+        "A21",
+        "A30",
+        "A31",
+        "A32",
+        "B37",
+        "B38",
+        "B39",
+        "B70",
+        "B71",
+        "B72",
+        "B73",
+        "B75",
+        "B76",
+        "BCS",
+        "MD8",
+        "MD9"
+    )
+    private val NARROW_BODY_TEXT = listOf(
+        "AIRBUS A320",
+        "AIRBUS A321",
+        "BOEING 737",
+        "BOEING 757",
+        "BOEING 767",
+        "A220",
+        "737 MAX"
+    )
+    private val HEAVY_PREFIXES =
+        listOf("A33", "A34", "A35", "A38", "B74", "B77", "B78", "DC10", "MD11", "A124", "IL76")
+    private val HEAVY_TEXT = listOf(
+        "A330",
+        "A340",
+        "A350",
+        "A380",
+        "747",
+        "777",
+        "787",
+        "MD-11",
+        "C-17",
+        "C-5",
+        "IL-76",
+        "AN-124"
+    )
+    private val MILITARY_TRANSPORT_PREFIXES =
+        listOf("C17", "C5", "C130", "A400", "K35", "KC10", "R135")
+    private val MILITARY_TRANSPORT_TEXT =
+        listOf("GLOBEMASTER", "GALAXY", "HERCULES", "ATLAS", "STRATOTANKER", "EXTENDER")
+    private val TACTICAL_JET_PREFIXES =
+        listOf("A10", "F15", "F16", "F18", "F22", "F35", "T38", "EUFI", "TOR")
+    private val TACTICAL_JET_TEXT =
+        listOf("F-15", "F-16", "F-18", "F-22", "F-35", "T-38", "TYPHOON", "TORNADO", "WARTHOG")
 }
-
 
 data class ImpactFacts(
     val feed_type_code: String?,
@@ -385,9 +505,7 @@ data class ImpactFacts(
     val on_ground: Boolean?
 )
 
-
 data class ImpactCarbonRange(val low_kg: Double, val mid_kg: Double, val high_kg: Double)
-
 
 data class ImpactProfile(
     val label: String,
@@ -433,19 +551,15 @@ data class ImpactProfile(
     }
 }
 
-
 enum class ImpactProfileBasis(val display_name: String) {
     TYPE_SPECIFIC("type-specific benchmark"),
     CLASS_BENCHMARK("class benchmark")
 }
 
-
 enum class ImpactFuel(val display_name: String, val co2_kg_per_gallon: Double) {
     JET("Probable jet fuel", 9.75),
     AVGAS("Probable aviation gasoline", 8.31)
 }
-
-
 
 data class ImpactTrace(
     val distance_m: Double,
@@ -454,7 +568,6 @@ data class ImpactTrace(
     val point_count: Int,
     val source: String
 )
-
 
 object AircraftImpactPresenter {
     fun rows(
@@ -473,17 +586,37 @@ object AircraftImpactPresenter {
             "Data basis" to data_basis(aircraft, details, details_loading),
             "Aircraft class" to (profile?.label ?: loading_or_unavailable(loading)),
             "Current trace" to current_trace_impact(trace, trace_loading, units),
-            "Observed CO2 estimate" to current_trace_carbon(profile, trace, trace_estimate, loading),
+            "Observed CO2 estimate" to current_trace_carbon(
+                profile,
+                trace,
+                trace_estimate,
+                loading
+            ),
             "Trace phases" to phase_summary(trace_estimate, trace_loading),
             "Full-flight estimate" to full_flight_summary(trace_estimate, trace_loading),
-            "Observed intensity" to observed_carbon_intensity(profile, trace, trace_estimate, loading, units),
+            "Observed intensity" to observed_carbon_intensity(
+                profile,
+                trace,
+                trace_estimate,
+                loading,
+                units
+            ),
             "Profile basis" to (profile?.profile_basis_label() ?: loading_or_unavailable(loading)),
-            "Class CO2 rate" to (profile?.let { kg_range(it.low_co2_kg_per_hour(), it.high_co2_kg_per_hour()) } ?: loading_or_unavailable(loading)),
-            "Class cruise context" to (profile?.cruise_intensity_label() ?: loading_or_unavailable(loading)),
-            "Fuel and factor" to (profile?.fuel_and_factor_label() ?: loading_or_unavailable(loading)),
+            "Class CO2 rate" to (profile?.let {
+                kg_range(
+                    it.low_co2_kg_per_hour(),
+                    it.high_co2_kg_per_hour()
+                )
+            } ?: loading_or_unavailable(loading)),
+            "Class cruise context" to (profile?.cruise_intensity_label() ?: loading_or_unavailable(
+                loading
+            )),
+            "Fuel and factor" to (profile?.fuel_and_factor_label()
+                ?: loading_or_unavailable(loading)),
             "Live state" to live_state(aircraft, units),
             "Trace history" to trace_history_carbon(usage_trace, profile, trace_loading, loading),
-            "Comparison" to (profile?.let { AircraftImpactEstimator.comparison(it) } ?: loading_or_unavailable(loading)),
+            "Comparison" to (profile?.let { AircraftImpactEstimator.comparison(it) }
+                ?: loading_or_unavailable(loading)),
             "Score meaning" to "0-100 log scale for kg CO2/hr intensity; observed trace phases are used when available, otherwise profile rate.",
             "Lead / non-carbon" to lead_note(profile, loading),
             "Passenger/load" to "Unavailable: passenger count and load factor are not inferred.",
@@ -492,7 +625,12 @@ object AircraftImpactPresenter {
         )
     }
 
-    fun status(profile: ImpactProfile?, trace: ImpactTrace?, details_loading: Boolean, trace_loading: Boolean): String {
+    fun status(
+        profile: ImpactProfile?,
+        trace: ImpactTrace?,
+        details_loading: Boolean,
+        trace_loading: Boolean
+    ): String {
         return when {
             profile != null && trace != null -> "Trace-derived time/distance with benchmark fuel profile; not measured fuel flow"
             profile != null && trace_loading -> "Loading real trace before estimating current-flight carbon"
@@ -522,9 +660,14 @@ object AircraftImpactPresenter {
         return "~${kg_compact(range.low_kg)}-${kg_compact(range.high_kg)} kg CO2"
     }
 
-    private fun data_basis(aircraft: Aircraft, details: AircraftDetails?, loading: Boolean): String {
+    private fun data_basis(
+        aircraft: Aircraft,
+        details: AircraftDetails?,
+        loading: Boolean
+    ): String {
         val code = AircraftImpactEstimator.type_code(facts_for(aircraft, details))
-        val model = listOfNotNull(details?.manufacturer, details?.type).joinToString(" ").ifBlank { null }
+        val model =
+            listOfNotNull(details?.manufacturer, details?.type).joinToString(" ").ifBlank { null }
         val category = aircraft.category?.let { "ADS-B category $it" }
         val source = when {
             details?.registry_source != null -> details.registry_source
@@ -532,9 +675,10 @@ object AircraftImpactPresenter {
             loading -> "Loading"
             else -> "Unavailable"
         }
-        return listOfNotNull(code?.let { "type $it" }, model, category, source).joinToString("; ").ifEmpty {
-            loading_or_unavailable(loading)
-        }
+        return listOfNotNull(code?.let { "type $it" }, model, category, source).joinToString("; ")
+            .ifEmpty {
+                loading_or_unavailable(loading)
+            }
     }
 
     private fun live_state(aircraft: Aircraft, units: UnitSystem): String {
@@ -543,13 +687,32 @@ object AircraftImpactPresenter {
             false -> "Airborne"
             null -> "State unavailable"
         }
-        return "$state, ${altitude(aircraft.altitude_m, units)}, ${speed(aircraft.velocity_ms, units)}, report ${age(aircraft)}"
+        return "$state, ${altitude(aircraft.altitude_m, units)}, ${
+            speed(
+                aircraft.velocity_ms,
+                units
+            )
+        }, report ${age(aircraft)}"
     }
 
-    private fun current_trace_impact(trace: ImpactTrace?, loading: Boolean, units: UnitSystem): String {
+    private fun current_trace_impact(
+        trace: ImpactTrace?,
+        loading: Boolean,
+        units: UnitSystem
+    ): String {
         if (loading) return "Loading"
         trace ?: return "Unavailable"
-        return "${distance(trace.distance_m, units)}, ${AircraftUsageAnalyzer.format_hours(trace.hours)}, ${speed(trace.average_speed_ms, units)} avg from ${trace.source}"
+        return "${
+            distance(
+                trace.distance_m,
+                units
+            )
+        }, ${AircraftUsageAnalyzer.format_hours(trace.hours)}, ${
+            speed(
+                trace.average_speed_ms,
+                units
+            )
+        } avg from ${trace.source}"
     }
 
     private fun current_trace_carbon(
@@ -560,10 +723,18 @@ object AircraftImpactPresenter {
     ): String {
         val estimate = trace_estimate as? TraceImpactEstimate
         if (estimate != null) {
-            return "${carbon_range(estimate.carbon)} over ${AircraftUsageAnalyzer.format_hours(estimate.hours)}"
+            return "${carbon_range(estimate.carbon)} over ${
+                AircraftUsageAnalyzer.format_hours(
+                    estimate.hours
+                )
+            }"
         }
         if (profile == null || trace == null) return loading_or_unavailable(loading)
-        return "${carbon_range(profile.carbon_for_hours(trace.hours))} over ${AircraftUsageAnalyzer.format_hours(trace.hours)}"
+        return "${carbon_range(profile.carbon_for_hours(trace.hours))} over ${
+            AircraftUsageAnalyzer.format_hours(
+                trace.hours
+            )
+        }"
     }
 
     private fun phase_summary(trace_estimate: Any?, loading: Boolean): String {
@@ -659,8 +830,10 @@ object AircraftImpactPresenter {
         val source_note = when {
             details?.registry_source?.contains("Wikipedia", ignoreCase = true) == true ->
                 " Metadata includes broad internet fallback, so model confidence is lower than registry/API metadata."
+
             details?.registry_source?.contains("Airplanes.Live", ignoreCase = true) == true ->
                 " Metadata uses live web/feed aircraft fields before registry/API fallbacks."
+
             else -> ""
         }
         return "${profile.confidence} Basis: $trace_text; ${profile.basis.display_name}, not measured fuel.$source_note"
@@ -671,23 +844,39 @@ object AircraftImpactPresenter {
     }
 
     private fun distance(meters: Double, units: UnitSystem): String {
-        return String.format(Locale.US, "%.1f %s", units.distance_meters_to_display(meters), units.distance_label)
+        return String.format(
+            Locale.US,
+            "%.1f %s",
+            units.distance_meters_to_display(meters),
+            units.distance_label
+        )
     }
 
     private fun altitude(meters: Double?, units: UnitSystem): String {
         return meters?.let {
-            String.format(Locale.US, "%.0f %s", units.altitude_meters_to_display(it), units.altitude_label)
+            String.format(
+                Locale.US,
+                "%.0f %s",
+                units.altitude_meters_to_display(it),
+                units.altitude_label
+            )
         } ?: "Unavailable"
     }
 
     private fun speed(ms: Double?, units: UnitSystem): String {
         return ms?.let {
-            String.format(Locale.US, "%.0f %s", units.speed_meters_per_second_to_display(it), units.speed_label)
+            String.format(
+                Locale.US,
+                "%.0f %s",
+                units.speed_meters_per_second_to_display(it),
+                units.speed_label
+            )
         } ?: "Unavailable"
     }
 
     private fun age(aircraft: Aircraft): String {
-        val contact = aircraft.last_contact_sec ?: aircraft.position_time_sec ?: return "Age unavailable"
+        val contact =
+            aircraft.last_contact_sec ?: aircraft.position_time_sec ?: return "Age unavailable"
         val age = max(0.0, System.currentTimeMillis() / 1000.0 - contact)
         return "${age.toLong()}s old"
     }
@@ -712,8 +901,6 @@ object AircraftImpactPresenter {
         return if (loading) "Loading" else "Unavailable"
     }
 }
-
-
 
 object AircraftTraceImpactAnalyzer {
     fun observed_estimate(
@@ -748,7 +935,8 @@ object AircraftTraceImpactAnalyzer {
         )
         val hours = accumulator.total_seconds / 3600.0
         val distance_m = accumulator.distance_m
-        val altitude_coverage = if (total_legs > 0) supported_altitude_legs.toDouble() / total_legs else 0.0
+        val altitude_coverage =
+            if (total_legs > 0) supported_altitude_legs.toDouble() / total_legs else 0.0
         val full_flight = full_flight_estimate(carbon, distance_m, usable_segments, details)
         val confidence = trace_confidence(
             profile = profile,
@@ -779,7 +967,8 @@ object AircraftTraceImpactAnalyzer {
         val altitude1 = previous.altitude_m
         val altitude2 = current.altitude_m
         val avg_altitude = listOfNotNull(altitude1, altitude2).average().takeIf { it.isFinite() }
-        val vertical_rate = if (altitude1 != null && altitude2 != null) (altitude2 - altitude1) / seconds else null
+        val vertical_rate =
+            if (altitude1 != null && altitude2 != null) (altitude2 - altitude1) / seconds else null
         val cruise_ms = profile.cruise_knots * KNOT_TO_MPS
 
         return when {
@@ -811,11 +1000,16 @@ object AircraftTraceImpactAnalyzer {
         val first = segments.firstOrNull()?.points?.firstOrNull() ?: return null
         val last = segments.lastOrNull()?.points?.lastOrNull() ?: return null
         val first_from_origin_m = distance_meters(origin_lat, origin_lon, first.lat, first.lon)
-        if (first_from_origin_m > max(MAX_ORIGIN_CREDIT_M, direct_route_m * MAX_ORIGIN_CREDIT_FRACTION)) return null
+        if (first_from_origin_m > max(
+                MAX_ORIGIN_CREDIT_M,
+                direct_route_m * MAX_ORIGIN_CREDIT_FRACTION
+            )
+        ) return null
         val remaining_m = distance_meters(last.lat, last.lon, dest_lat, dest_lon)
         val total_estimated_m = first_from_origin_m + observed_distance_m + remaining_m
         if (total_estimated_m < MIN_FULL_ROUTE_DISTANCE_M) return null
-        val progress = ((first_from_origin_m + observed_distance_m) / total_estimated_m).coerceIn(0.0, 1.0)
+        val progress =
+            ((first_from_origin_m + observed_distance_m) / total_estimated_m).coerceIn(0.0, 1.0)
         if (progress !in MIN_FULL_FLIGHT_PROGRESS..MAX_FULL_FLIGHT_PROGRESS) return null
         val scale = 1.0 / progress
         return FullFlightImpactEstimate(
@@ -825,7 +1019,11 @@ object AircraftTraceImpactAnalyzer {
                 high_kg = observed_carbon.high_kg * scale
             ),
             progress_fraction = progress,
-            basis = String.format(Locale.US, "route-scaled from %.0f%% observed trace", progress * 100.0)
+            basis = String.format(
+                Locale.US,
+                "route-scaled from %.0f%% observed trace",
+                progress * 100.0
+            )
         )
     }
 
@@ -850,13 +1048,17 @@ object AircraftTraceImpactAnalyzer {
             altitude_coverage >= 0.5 -> "partial phase-aware"
             else -> "time-only fallback"
         }
-        val full_flight_level = if (full_flight != null) "route-scaled full-flight available" else "full-flight unavailable"
+        val full_flight_level =
+            if (full_flight != null) "route-scaled full-flight available" else "full-flight unavailable"
         val label = when {
             profile.basis == ImpactProfileBasis.TYPE_SPECIFIC && altitude_coverage >= 0.9 && point_count >= 80 -> "High"
             altitude_coverage >= 0.5 && point_count >= 20 -> "Medium"
             else -> "Medium-low"
         }
-        return ImpactEstimateConfidence(label, "$type_level; $trace_level; $phase_level; $full_flight_level")
+        return ImpactEstimateConfidence(
+            label,
+            "$type_level; $trace_level; $phase_level; $full_flight_level"
+        )
     }
 
     private class PhaseAccumulator {
@@ -911,12 +1113,11 @@ object AircraftTraceImpactAnalyzer {
         val r_lat1 = Math.toRadians(lat1)
         val r_lat2 = Math.toRadians(lat2)
         val a = (sin(d_lat / 2.0) * sin(d_lat / 2.0) +
-            cos(r_lat1) * cos(r_lat2) * sin(d_lon / 2.0) * sin(d_lon / 2.0)
-            ).coerceIn(0.0, 1.0)
+                cos(r_lat1) * cos(r_lat2) * sin(d_lon / 2.0) * sin(d_lon / 2.0)
+                ).coerceIn(0.0, 1.0)
         return EARTH_RADIUS_M * 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
     }
 }
-
 
 enum class ImpactFlightPhase(val display_name: String, val fuel_multiplier: Double) {
     GROUND("ground/taxi", 0.18),
@@ -927,9 +1128,7 @@ enum class ImpactFlightPhase(val display_name: String, val fuel_multiplier: Doub
     UNKNOWN("time-only", 1.0)
 }
 
-
 data class ImpactPhaseHours(val phase: ImpactFlightPhase, val hours: Double)
-
 
 data class FullFlightImpactEstimate(
     val carbon: ImpactCarbonRange,
@@ -937,12 +1136,10 @@ data class FullFlightImpactEstimate(
     val basis: String
 )
 
-
 data class ImpactEstimateConfidence(
     val label: String,
     val basis: String
 )
-
 
 data class TraceImpactEstimate(
     val carbon: ImpactCarbonRange,

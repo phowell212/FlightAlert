@@ -1,6 +1,16 @@
 @file:Suppress(
+    "CanBeVal",
+    "FunctionName",
+    "KotlinConstantConditions",
+    "LocalVariableName",
+    "ObsoleteSdkInt",
     "PackageName",
+    "PrivatePropertyName",
     "PropertyName",
+    "RedundantQualifierName",
+    "SameParameterValue",
+    "UNUSED_PARAMETER",
+    "UseKtxExtensionFunction",
     "unused"
 )
 
@@ -341,5 +351,13 @@ enum class VisualTheme(
             texture_alpha = 58,
             heading_scale = 0.94f
         )
-    )
+    );
+
+    companion object {
+        val DEFAULT: VisualTheme = COCKPIT
+
+        fun from_name(name: String?): VisualTheme {
+            return entries.firstOrNull { it.name == name } ?: DEFAULT
+        }
+    }
 }

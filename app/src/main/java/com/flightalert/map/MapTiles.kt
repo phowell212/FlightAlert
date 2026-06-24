@@ -15,6 +15,7 @@
 )
 
 package com.flightalert.map
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -35,18 +36,21 @@ internal fun write_cache_file_async(executor: Executor, file: File, bytes: ByteA
     }
 }
 
-
 internal fun is_fresh_cache_file(file: File): Boolean {
     return file.exists() &&
-        file.length() > 0L &&
-        System.currentTimeMillis() - file.lastModified() < MAP_TILE_CACHE_MAX_AGE_MS
+            file.length() > 0L &&
+            System.currentTimeMillis() - file.lastModified() < MAP_TILE_CACHE_MAX_AGE_MS
 }
 
-
-internal fun map_tile_cache_file(context: Context, cache_key: String, z: Int, x: Int, y: Int): File {
+internal fun map_tile_cache_file(
+    context: Context,
+    cache_key: String,
+    z: Int,
+    x: Int,
+    y: Int
+): File {
     return File(context.cacheDir, "${cache_key}_tiles/$z/$x/$y.png")
 }
-
 
 internal fun draw_unavailable_map_tile(
     canvas: Canvas,
@@ -68,7 +72,7 @@ internal fun draw_unavailable_map_tile(
     canvas.drawText("Loading map", x + size / 2f, y + size / 2f, text_paint)
 }
 
-
+// Public facade kept stable for FlightMapView; source-specific behavior lives in the street/satellite renderers.
 class MapTileRenderer(
     context: Context,
     paint: Paint,
@@ -99,26 +103,41 @@ class MapTileRenderer(
         request_redraw = request_redraw
     )
 
+    var debug_last_tile_summary: String = ""
+        private set
+    var debug_collect_detail_timing: Boolean
+        get() = satellite_renderer.debug_collect_detail_timing
+        set(value) {
+            satellite_renderer.debug_collect_detail_timing = value
+        }
+
     fun draw_tiles(
         canvas: Canvas,
         viewport: Viewport,
         state: MapTileRenderState,
         style: MapTileRenderStyle
     ): String {
-        return when (state.map_source) {
+        val status = when (state.map_source) {
             TileSource.STREET -> street_renderer.draw_tiles(canvas, viewport, state, style)
             TileSource.SATELLITE -> satellite_renderer.draw_tiles(canvas, viewport, state, style)
         }
+        debug_last_tile_summary = when (state.map_source) {
+            TileSource.STREET -> street_renderer.debug_last_tile_summary
+            TileSource.SATELLITE -> satellite_renderer.debug_last_tile_summary
+        }
+        return status
     }
 
     fun clear() {
         street_renderer.clear()
         satellite_renderer.clear()
+        debug_last_tile_summary = ""
     }
 
     fun reset_transitions() {
         street_renderer.reset_transitions()
         satellite_renderer.reset_transitions()
+        debug_last_tile_summary = ""
     }
 
     fun shutdown() {
@@ -126,8 +145,6 @@ class MapTileRenderer(
         satellite_renderer.shutdown()
     }
 }
-
-
 
 data class MapTileRenderState(
     val map_source: TileSource,
@@ -141,13 +158,11 @@ data class MapTileRenderState(
         map_source.reference_overlay_layers(map_labels_enabled, map_borders_enabled)
 }
 
-
 data class MapTileRenderStyle(
     val map_empty: Int,
     val panel_alt: Int,
     val text: Int
 )
-
 
 internal data class TileFallback(
     val bitmap: Bitmap,
@@ -175,7 +190,8 @@ internal data class TileLayerDrawStats(
     val loaded: Int,
     val requested: Int,
     val fallback_drawn: Int,
-    val fading: Boolean
+    val fading: Boolean,
+    val debug_summary: String = ""
 )
 
 internal data class ReferenceTileCoverage(
@@ -227,7 +243,3 @@ internal data class ReferencePrefetchGridPlan(
     val request_stale_generation_tolerance: Long,
     val request_generation: Long
 )
-
-// Satellite renderer restored behind the Satellite toggle, with continuous LOD blending.
-// The satellite base path is intentionally kept independent of optional labels.
-// Labels/reference tiles are drawn afterward in their own cache so they cannot disturb base imagery.

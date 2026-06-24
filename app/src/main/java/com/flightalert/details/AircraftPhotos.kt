@@ -1,4 +1,4 @@
-@file:Suppress(
+﻿@file:Suppress(
     "CanBeVal",
     "FunctionName",
     "KotlinConstantConditions",
@@ -15,20 +15,22 @@
 )
 
 package com.flightalert.details
+
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.traffic.AirplanesLiveHttp
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.LinkedHashMap
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
+import org.json.JSONArray
+import org.json.JSONObject
 
 object AircraftPhotoCatalog {
     fun representative_model_names(details: AircraftDetails): List<String> {
@@ -231,7 +233,11 @@ object AircraftPhotoCatalog {
         val normalized = manufacturer.uppercase(Locale.US)
         return when {
             "GRUMMAN" in normalized -> listOf("Grumman American", "Grumman")
-            "AMERICAN" in normalized && "GENERAL" in normalized -> listOf("American General", "Grumman American")
+            "AMERICAN" in normalized && "GENERAL" in normalized -> listOf(
+                "American General",
+                "Grumman American"
+            )
+
             "CESSNA" in normalized -> listOf("Cessna")
             "PIPER" in normalized -> listOf("Piper")
             "BEECH" in normalized -> listOf("Beechcraft", "Beech")
@@ -249,7 +255,12 @@ object AircraftPhotoCatalog {
         val normalized = type.uppercase(Locale.US).replace(Regex("[^A-Z0-9]+"), " ").trim()
         val compact = normalized.replace(" ", "")
         return when {
-            compact == "AA1" || compact.startsWith("AA1") -> listOf("AA-1", "AA1", "American Yankee")
+            compact == "AA1" || compact.startsWith("AA1") -> listOf(
+                "AA-1",
+                "AA1",
+                "American Yankee"
+            )
+
             compact.startsWith("AA5") -> listOf("AA-5", "AA5", "Cheetah", "Tiger")
             compact.startsWith("GA7") -> listOf("GA-7", "GA7", "Cougar")
             compact.startsWith("C120") -> listOf("120")
@@ -274,7 +285,13 @@ object AircraftPhotoCatalog {
             compact.startsWith("PA32") -> listOf("PA-32 Cherokee Six", "PA-32")
             compact.startsWith("PA34") -> listOf("PA-34 Seneca", "PA-34")
             compact.startsWith("PA44") -> listOf("PA-44 Seminole", "PA-44")
-            compact.startsWith("PA46") || compact.startsWith("P46T") -> listOf("PA-46 Malibu", "PA-46 Mirage", "PA-46 Meridian", "PA-46")
+            compact.startsWith("PA46") || compact.startsWith("P46T") -> listOf(
+                "PA-46 Malibu",
+                "PA-46 Mirage",
+                "PA-46 Meridian",
+                "PA-46"
+            )
+
             compact.startsWith("SR20") -> listOf("SR20")
             compact.startsWith("SR22") || compact.startsWith("S22T") -> listOf("SR22", "SR22T")
             compact.startsWith("DA40") -> listOf("DA40")
@@ -301,9 +318,7 @@ object AircraftPhotoCatalog {
     }
 }
 
-
 // Finds aircraft photos in an honesty ladder: exact first, labeled representative next, investigable last.
-
 class AircraftPhotoFetcher(private val user_agent: String) {
     private val photo_cache = object : LinkedHashMap<String, CachedPhotoResult>(
         PHOTO_CACHE_MAX_ENTRIES,
@@ -322,7 +337,10 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     }
 
     // Exact photos require an aircraft identifier or matching registration from documented photo sources.
-    fun fetch_exact_aircraft_photo(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult.Found? {
+    fun fetch_exact_aircraft_photo(
+        aircraft: Aircraft,
+        details: AircraftDetails
+    ): AircraftPhotoResult.Found? {
         val registration = normalized_registration(details.registration ?: aircraft.registration)
         val cache_key = exact_photo_cache_key(aircraft, details, registration)
         cached_photo(cache_key)?.let { return it }
@@ -337,14 +355,19 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                 return found(found_exact_photo(bitmap, candidate))
             }
         }
-        fetch_planespotters_selected_candidates(aircraft.icao24, registration, details.type_code ?: aircraft.type_code).forEach { candidate ->
+        fetch_planespotters_selected_candidates(
+            aircraft.icao24,
+            registration,
+            details.type_code ?: aircraft.type_code
+        ).forEach { candidate ->
             fetch_bitmap(candidate.image_url, candidate.page_url)?.let { bitmap ->
                 return found(found_exact_photo(bitmap, candidate))
             }
         }
         val exact_sources = listOfNotNull(
             "https://api.planespotters.net/pub/photos/hex/${aircraft.icao24.trim()}",
-            (details.registration ?: aircraft.registration)?.let { "https://api.planespotters.net/pub/photos/reg/${it.trim()}" }
+            (details.registration
+                ?: aircraft.registration)?.let { "https://api.planespotters.net/pub/photos/reg/${it.trim()}" }
         )
         exact_sources.forEach { api_url ->
             fetch_planespotters_photo_candidate(api_url)?.let { candidate ->
@@ -398,20 +421,27 @@ class AircraftPhotoFetcher(private val user_agent: String) {
             items += it.to_gallery_item("Exact exterior", AircraftPhotoViewType.EXTERIOR)
         }
         items += fetch_representative_gallery_items(aircraft, details)
-        return items.distinctBy { it.evidence?.image_url ?: "${it.title}:${it.caption}" }.take(MAX_GALLERY_ITEMS)
+        return items.distinctBy { it.evidence?.image_url ?: "${it.title}:${it.caption}" }
+            .take(MAX_GALLERY_ITEMS)
     }
 
     // ADSBdb can return direct exact-photo URLs keyed by ICAO or registration.
-    private fun fetch_adsb_db_photo_candidates(icao24: String, registration: String?): List<ExactPhotoCandidate> {
+    private fun fetch_adsb_db_photo_candidates(
+        icao24: String,
+        registration: String?
+    ): List<ExactPhotoCandidate> {
         val keys = listOfNotNull(icao24.trim().takeIf { it.isNotBlank() }, registration).distinct()
         return keys.flatMap { key ->
             val encoded = URLEncoder.encode(key, "UTF-8")
             val api_url = "https://api.adsbdb.com/v0/aircraft/$encoded"
             val json = fetch_json_object(api_url) ?: return@flatMap emptyList()
-            val aircraft = json.optJSONObject("response")?.optJSONObject("aircraft") ?: return@flatMap emptyList()
+            val aircraft = json.optJSONObject("response")?.optJSONObject("aircraft")
+                ?: return@flatMap emptyList()
             listOfNotNull(
-                aircraft.optString("url_photo").takeIf { it.startsWith("https://", ignoreCase = true) },
-                aircraft.optString("url_photo_thumbnail").takeIf { it.startsWith("https://", ignoreCase = true) }
+                aircraft.optString("url_photo")
+                    .takeIf { it.startsWith("https://", ignoreCase = true) },
+                aircraft.optString("url_photo_thumbnail")
+                    .takeIf { it.startsWith("https://", ignoreCase = true) }
             ).filter { url -> is_exterior_candidate_text(url) }
                 .map { url ->
                     ExactPhotoCandidate(
@@ -427,7 +457,8 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     // JetPhotos results are accepted only when the returned registration matches exactly.
     private fun fetch_jet_photos_exact_candidates(registration: String): List<ExactPhotoCandidate> {
         val encoded = URLEncoder.encode(registration, "UTF-8")
-        val api_url = "https://jp.rewis.workers.dev/?page=1&sort-order=1&keywords=$encoded&keywords-type=registration&keywords-contain=0"
+        val api_url =
+            "https://jp.rewis.workers.dev/?page=1&sort-order=1&keywords=$encoded&keywords-type=registration&keywords-contain=0"
         val photos = fetch_json_object(api_url)?.optJSONArray("photos") ?: return emptyList()
         val candidates = mutableListOf<ExactPhotoCandidate>()
         for (index in 0 until photos.length()) {
@@ -436,11 +467,16 @@ class AircraftPhotoFetcher(private val user_agent: String) {
             if (found_registration != registration) continue
             if (!is_exterior_candidate_text(item.toString())) continue
             listOf(item.optString("imageUrl"), item.optString("thumbnailUrl")).forEach { url ->
-                if (url.startsWith("https://", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(url)) {
+                if (url.startsWith(
+                        "https://",
+                        ignoreCase = true
+                    ) && IMAGE_URL_PATTERN.containsMatchIn(url)
+                ) {
                     candidates += ExactPhotoCandidate(
                         image_url = url,
                         source_name = "JetPhotos",
-                        page_url = item.optString("link").takeIf { it.startsWith("https://", ignoreCase = true) } ?: api_url,
+                        page_url = item.optString("link")
+                            .takeIf { it.startsWith("https://", ignoreCase = true) } ?: api_url,
                         note = "Exact aircraft photo from JetPhotos; registration verified"
                     )
                 }
@@ -464,7 +500,10 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                 connection.errorStream?.close()
                 return null
             }
-            exterior_image_urls(JSONObject(connection.inputStream.bufferedReader().use { it.readText() }))
+            exterior_image_urls(
+                JSONObject(
+                    connection.inputStream.bufferedReader().use { it.readText() })
+            )
                 .firstOrNull()
                 ?.let { image_url ->
                     ExactPhotoCandidate(
@@ -487,28 +526,39 @@ class AircraftPhotoFetcher(private val user_agent: String) {
         registration: String?,
         type_code: String?
     ): List<ExactPhotoCandidate> {
-        val hex = icao24.trim().trimStart('~').uppercase(Locale.US).takeIf { MODE_S_HEX.matches(it) } ?: return emptyList()
+        val hex =
+            icao24.trim().trimStart('~').uppercase(Locale.US).takeIf { MODE_S_HEX.matches(it) }
+                ?: return emptyList()
         val url = StringBuilder("https://api.planespotters.net/pub/photos/hex/$hex")
         val params = mutableListOf<String>()
-        registration?.takeIf { it.isNotBlank() }?.let { params += "reg=${URLEncoder.encode(it, "UTF-8")}" }
-        type_code?.trim()?.takeIf { it.isNotBlank() }?.let { params += "icaoType=${URLEncoder.encode(it, "UTF-8")}" }
+        registration?.takeIf { it.isNotBlank() }
+            ?.let { params += "reg=${URLEncoder.encode(it, "UTF-8")}" }
+        type_code?.trim()?.takeIf { it.isNotBlank() }
+            ?.let { params += "icaoType=${URLEncoder.encode(it, "UTF-8")}" }
         if (params.isNotEmpty()) url.append("?").append(params.joinToString("&"))
         val json = fetch_json_object(url.toString()) ?: return emptyList()
-        val photos = json.optJSONArray("photos") ?: json.optJSONArray("images") ?: return emptyList()
+        val photos =
+            json.optJSONArray("photos") ?: json.optJSONArray("images") ?: return emptyList()
         val candidates = mutableListOf<ExactPhotoCandidate>()
-            for (index in 0 until photos.length()) {
-                val photo = photos.optJSONObject(index) ?: continue
-                if (!is_exterior_candidate_text(photo.toString())) continue
-                val image_url = photo.optJSONObject("thumbnail")?.optString("src")?.takeIf { it.startsWith("https://", ignoreCase = true) }
-                    ?: photo.optString("thumbnail").takeIf { it.startsWith("https://", ignoreCase = true) }
-                    ?: photo.optString("image").takeIf { it.startsWith("https://", ignoreCase = true) }
-                ?: photo.optString("imageUrl").takeIf { it.startsWith("https://", ignoreCase = true) }
+        for (index in 0 until photos.length()) {
+            val photo = photos.optJSONObject(index) ?: continue
+            if (!is_exterior_candidate_text(photo.toString())) continue
+            val image_url = photo.optJSONObject("thumbnail")?.optString("src")
+                ?.takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?: photo.optString("thumbnail")
+                    .takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?: photo.optString("image").takeIf { it.startsWith("https://", ignoreCase = true) }
+                ?: photo.optString("imageUrl")
+                    .takeIf { it.startsWith("https://", ignoreCase = true) }
                 ?: continue
             if (!is_allowed_https_image_url(image_url)) continue
-            val page_url = photo.optString("link").takeIf { it.startsWith("https://", ignoreCase = true) }
-                ?: photo.optString("url").takeIf { it.startsWith("https://", ignoreCase = true) }
-                ?: url.toString()
-            val photographer = photo.optString("photographer").trim().ifEmpty { photo.optString("user").trim() }
+            val page_url =
+                photo.optString("link").takeIf { it.startsWith("https://", ignoreCase = true) }
+                    ?: photo.optString("url")
+                        .takeIf { it.startsWith("https://", ignoreCase = true) }
+                    ?: url.toString()
+            val photographer =
+                photo.optString("photographer").trim().ifEmpty { photo.optString("user").trim() }
             candidates += ExactPhotoCandidate(
                 image_url = image_url,
                 source_name = "PlaneSpotters",
@@ -528,7 +578,9 @@ class AircraftPhotoFetcher(private val user_agent: String) {
             val queries = AircraftPhotoCatalog.representative_photo_queries(details, model)
             queries.forEach { query ->
                 val candidates = fetch_wikimedia_search_image_candidates(query) +
-                    fetch_openverse_image_candidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
+                        fetch_openverse_image_candidates(query).take(
+                            MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY
+                        )
                 candidates
                     .as_exterior_candidates()
                     .take(MAX_REPRESENTATIVE_PHOTO_CANDIDATES_PER_QUERY)
@@ -548,17 +600,26 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     }
 
     // Generic search results must contain proof terms before they can be shown as verified.
-    private fun fetch_verified_generic_search_photo(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult.Found? {
+    private fun fetch_verified_generic_search_photo(
+        aircraft: Aircraft,
+        details: AircraftDetails
+    ): AircraftPhotoResult.Found? {
         val registration = normalized_registration(details.registration ?: aircraft.registration)
         val exact_terms = listOfNotNull(registration, aircraft.icao24.takeIf { it.isNotBlank() })
         AircraftPhotoCatalog.exact_photo_queries(registration, aircraft.icao24).forEach { query ->
             val candidates = fetch_wikimedia_search_image_candidates(query) +
-                fetch_openverse_image_candidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
+                    fetch_openverse_image_candidates(query).take(
+                        MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY
+                    )
             candidates.as_exterior_candidates().forEach { candidate ->
                 verified_search_photo(
                     candidate = candidate,
                     query = query,
-                    note = "Verified exact-aircraft search result for ${registration ?: aircraft.icao24.uppercase(Locale.US)}",
+                    note = "Verified exact-aircraft search result for ${
+                        registration ?: aircraft.icao24.uppercase(
+                            Locale.US
+                        )
+                    }",
                     verification_terms = exact_terms,
                     quality = PhotoQuality.EXACT
                 )?.let { return it }
@@ -569,7 +630,9 @@ class AircraftPhotoFetcher(private val user_agent: String) {
             val verification_terms = AircraftPhotoCatalog.photo_verification_terms(details, model)
             AircraftPhotoCatalog.representative_photo_queries(details, model).forEach { query ->
                 val candidates = fetch_wikimedia_search_image_candidates(query) +
-                    fetch_openverse_image_candidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
+                        fetch_openverse_image_candidates(query).take(
+                            MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY
+                        )
                 candidates.as_exterior_candidates().forEach { candidate ->
                     verified_search_photo(
                         candidate = candidate,
@@ -585,14 +648,19 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     }
 
     // Investigable photos are a last resort and always carry source evidence for the user to inspect.
-    private fun fetch_investigable_search_photo(aircraft: Aircraft, details: AircraftDetails): AircraftPhotoResult.Found? {
+    private fun fetch_investigable_search_photo(
+        aircraft: Aircraft,
+        details: AircraftDetails
+    ): AircraftPhotoResult.Found? {
         val registration = normalized_registration(details.registration ?: aircraft.registration)
         val exact_queries = AircraftPhotoCatalog.exact_photo_queries(registration, aircraft.icao24)
         val representative_queries = AircraftPhotoCatalog.representative_model_names(details)
             .flatMap { AircraftPhotoCatalog.representative_photo_queries(details, it) }
         (exact_queries + representative_queries).distinct().forEach { query ->
             val candidates = fetch_wikimedia_search_image_candidates(query) +
-                fetch_openverse_image_candidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
+                    fetch_openverse_image_candidates(query).take(
+                        MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY
+                    )
             candidates.as_exterior_candidates().forEach { candidate ->
                 val bitmap = fetch_bitmap(candidate.image_url, candidate.page_url) ?: return@forEach
                 val evidence = PhotoEvidence(
@@ -634,7 +702,11 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                 view_type = AircraftPhotoViewType.COCKPIT
             )
             items += fetch_gallery_item_for_queries(
-                queries = listOf("\"$model\" cabin interior", "$model cabin interior", "$model interior"),
+                queries = listOf(
+                    "\"$model\" cabin interior",
+                    "$model cabin interior",
+                    "$model interior"
+                ),
                 title = "Representative interior",
                 caption = "Representative interior/cabin view for $model; not this exact aircraft",
                 view_type = AircraftPhotoViewType.INTERIOR
@@ -656,13 +728,16 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     ): List<AircraftPhotoGalleryItem> {
         queries.distinct().forEach { query ->
             val candidates = fetch_wikimedia_search_image_candidates(query) +
-                fetch_openverse_image_candidates(query).take(MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY)
+                    fetch_openverse_image_candidates(query).take(
+                        MAX_SEARCH_PHOTO_CANDIDATES_PER_QUERY
+                    )
             candidates
                 .filter { candidate -> candidate.matches_gallery_view_type(view_type) }
                 .distinctBy { it.image_url }
                 .take(MAX_GALLERY_CANDIDATES_PER_QUERY)
                 .forEach { candidate ->
-                    val bitmap = fetch_bitmap(candidate.image_url, candidate.page_url) ?: return@forEach
+                    val bitmap =
+                        fetch_bitmap(candidate.image_url, candidate.page_url) ?: return@forEach
                     return listOf(
                         AircraftPhotoGalleryItem(
                             bitmap = bitmap,
@@ -793,7 +868,8 @@ class AircraftPhotoFetcher(private val user_agent: String) {
         var connection: HttpURLConnection? = null
         return try {
             val encoded = URLEncoder.encode(query, "UTF-8")
-            val api_url = "https://api.openverse.org/v1/images/?format=json&page_size=12&mature=false&q=$encoded"
+            val api_url =
+                "https://api.openverse.org/v1/images/?format=json&page_size=12&mature=false&q=$encoded"
             connection = (URL(api_url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5000
                 readTimeout = 9000
@@ -822,13 +898,15 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                 ) {
                     val tags = item.optJSONArray("tags")?.let { tag_array ->
                         (0 until tag_array.length()).mapNotNull { tag_index ->
-                            tag_array.optJSONObject(tag_index)?.optString("name")?.trim()?.takeIf { it.isNotBlank() }
+                            tag_array.optJSONObject(tag_index)?.optString("name")?.trim()
+                                ?.takeIf { it.isNotBlank() }
                         }
                     }.orEmpty()
                     candidates += SearchImageCandidate(
                         image_url = image_url,
                         page_url = page_url,
-                        source_name = item.optString("provider").trim().ifEmpty { "Openverse source" },
+                        source_name = item.optString("provider").trim()
+                            .ifEmpty { "Openverse source" },
                         title = title,
                         verification_text = listOf(
                             title,
@@ -850,8 +928,8 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     private fun fetch_wikimedia_search_image_candidates(query: String): List<SearchImageCandidate> {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val api_url = "https://commons.wikimedia.org/w/api.php" +
-            "?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=10" +
-            "&gsrsearch=$encoded&prop=imageinfo&iiprop=url|mime|extmetadata"
+                "?action=query&format=json&generator=search&gsrnamespace=6&gsrlimit=10" +
+                "&gsrsearch=$encoded&prop=imageinfo&iiprop=url|mime|extmetadata"
         val pages = fetch_json_object(api_url)
             ?.optJSONObject("query")
             ?.optJSONObject("pages")
@@ -886,7 +964,10 @@ class AircraftPhotoFetcher(private val user_agent: String) {
     }
 
     // Pull a small proof quote from the source page when it mentions the aircraft or model terms.
-    private fun fetch_verification_quote(page_url: String, terms: List<String>): VerificationQuote? {
+    private fun fetch_verification_quote(
+        page_url: String,
+        terms: List<String>
+    ): VerificationQuote? {
         val html = fetch_text(page_url) ?: return null
         return quote_from_text(plain_text_from_html(html), terms)
     }
@@ -957,7 +1038,11 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                 return null
             }
             val content_type = connection.contentType.orEmpty()
-            if (!content_type.startsWith("image/", ignoreCase = true) && !IMAGE_URL_PATTERN.containsMatchIn(url)) {
+            if (!content_type.startsWith(
+                    "image/",
+                    ignoreCase = true
+                ) && !IMAGE_URL_PATTERN.containsMatchIn(url)
+            ) {
                 return null
             }
             val bytes = read_image_bytes(connection.inputStream) ?: return null
@@ -1015,7 +1100,11 @@ class AircraftPhotoFetcher(private val user_agent: String) {
         return urls.distinct()
     }
 
-    private fun collect_exterior_image_urls(value: Any?, context_text: String, output: MutableList<String>) {
+    private fun collect_exterior_image_urls(
+        value: Any?,
+        context_text: String,
+        output: MutableList<String>
+    ) {
         when (value) {
             is JSONObject -> {
                 val next_context = listOf(
@@ -1031,11 +1120,13 @@ class AircraftPhotoFetcher(private val user_agent: String) {
                     collect_exterior_image_urls(value.opt(keys.next()), next_context, output)
                 }
             }
+
             is JSONArray -> {
                 for (index in 0 until value.length()) {
                     collect_exterior_image_urls(value.opt(index), context_text, output)
                 }
             }
+
             is String -> {
                 if (is_allowed_https_image_url(value) && is_exterior_candidate_text("$context_text $value")) output += value
             }
@@ -1048,9 +1139,10 @@ class AircraftPhotoFetcher(private val user_agent: String) {
 
     private fun is_allowed_https_image_url(value: String?): Boolean {
         val url = value?.trim() ?: return false
-        return url.startsWith("https://", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(url)
+        return url.startsWith("https://", ignoreCase = true) && IMAGE_URL_PATTERN.containsMatchIn(
+            url
+        )
     }
-
 
     private fun normalized_registration(value: String?): String? =
         normalized_photo_registration(value)
@@ -1117,9 +1209,13 @@ class AircraftPhotoFetcher(private val user_agent: String) {
             "\\b(exterior|side\\s*view|ramp|apron|taxi|taxiing|takeoff|landing|in\\s*flight|airborne|livery)\\b",
             RegexOption.IGNORE_CASE
         )
-        val AIRCRAFT_TEXT = Regex("\\b(aircraft|airplane|aeroplane|airliner|jet|helicopter|rotorcraft)\\b", RegexOption.IGNORE_CASE)
+        val AIRCRAFT_TEXT = Regex(
+            "\\b(aircraft|airplane|aeroplane|airliner|jet|helicopter|rotorcraft)\\b",
+            RegexOption.IGNORE_CASE
+        )
         val COCKPIT_TEXT = Regex("\\b(cockpit|flight\\s*deck)\\b", RegexOption.IGNORE_CASE)
-        val INTERIOR_TEXT = Regex("\\b(interior|cabin|seat|seats|seating|lavatory)\\b", RegexOption.IGNORE_CASE)
+        val INTERIOR_TEXT =
+            Regex("\\b(interior|cabin|seat|seats|seating|lavatory)\\b", RegexOption.IGNORE_CASE)
         val MODE_S_HEX = Regex("^[0-9A-F]{6}$")
     }
 }
@@ -1136,8 +1232,6 @@ internal data class CachedPhotoResult(
     val stored_at_ms: Long
 )
 
-
-
 sealed class AircraftPhotoResult {
     data class Found(
         val bitmap: Bitmap,
@@ -1149,13 +1243,11 @@ sealed class AircraftPhotoResult {
     data class Unavailable(val reason: String) : AircraftPhotoResult()
 }
 
-
 enum class PhotoQuality(val rank: Int) {
     INVESTIGABLE(1),
     REPRESENTATIVE(2),
     EXACT(3)
 }
-
 
 data class PhotoEvidence(
     val source_name: String,
@@ -1166,7 +1258,6 @@ data class PhotoEvidence(
     val matched_terms: List<String>
 )
 
-
 data class SearchImageCandidate(
     val image_url: String,
     val page_url: String,
@@ -1174,7 +1265,6 @@ data class SearchImageCandidate(
     val title: String = "",
     val verification_text: String? = null
 )
-
 
 data class AircraftPhotoGalleryItem(
     val bitmap: Bitmap,
@@ -1185,14 +1275,12 @@ data class AircraftPhotoGalleryItem(
     val view_type: AircraftPhotoViewType
 )
 
-
 enum class AircraftPhotoViewType {
     EXTERIOR,
     INTERIOR,
     COCKPIT,
     CABIN
 }
-
 
 data class VerificationQuote(
     val text: String,

@@ -15,15 +15,13 @@
 )
 
 package com.flightalert.traffic
+
 import android.os.SystemClock
-import com.flightalert.*
-import com.flightalert.aircraft.*
-import com.flightalert.alerts.*
-import com.flightalert.details.*
-import com.flightalert.flight.*
-import com.flightalert.map.*
-import com.flightalert.traffic.*
-import com.flightalert.ui.*
+import com.flightalert.aircraft.Aircraft
+import com.flightalert.aircraft.AircraftSymbol
+import com.flightalert.aircraft.AircraftSymbolClassifier
+import com.flightalert.map.Viewport
+import com.flightalert.ui.ensure_point_capacity
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.sqrt
@@ -41,7 +39,6 @@ internal data class CachedTraffic(
     val max_projected_speed_zoom_zero: Double
 )
 
-
 internal data class TrafficSpatialEntry(
     val aircraft: Aircraft,
     val world_x_zoom_zero: Double,
@@ -57,7 +54,6 @@ internal data class TrafficSpatialEntry(
     val color: Int = 0,
     val color_theme_key: Int = 0
 )
-
 
 @Suppress("ArrayInDataClass")
 internal data class TrafficWorldDotBatch(
@@ -90,14 +86,15 @@ internal data class TrafficWorldDotBatch(
     }
 }
 
-
 internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
     private val cells = arrayOfNulls<MutableList<TrafficSpatialEntry>>(CELL_COUNT * CELL_COUNT)
 
     init {
         entries.forEach { entry ->
-            val column = (entry.world_x_zoom_zero / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
-            val row = (entry.world_y_zoom_zero / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
+            val column =
+                (entry.world_x_zoom_zero / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
+            val row =
+                (entry.world_y_zoom_zero / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
             val index = row * CELL_COUNT + column
             val cell = cells[index] ?: ArrayList<TrafficSpatialEntry>().also { cells[index] = it }
             cell += entry
@@ -107,8 +104,14 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
     // Pan frames use this grid to ask only the cells near the viewport instead of scanning all aircraft.
     fun query(viewport: Viewport, padding_px: Float): List<TrafficSpatialEntry> {
         val scale = 2.0.pow(viewport.zoom)
-        val min_y = ((viewport.center_y - viewport.height / 2.0 - padding_px) / scale).coerceIn(0.0, WORLD_SIZE)
-        val max_y = ((viewport.center_y + viewport.height / 2.0 + padding_px) / scale).coerceIn(0.0, WORLD_SIZE)
+        val min_y = ((viewport.center_y - viewport.height / 2.0 - padding_px) / scale).coerceIn(
+            0.0,
+            WORLD_SIZE
+        )
+        val max_y = ((viewport.center_y + viewport.height / 2.0 + padding_px) / scale).coerceIn(
+            0.0,
+            WORLD_SIZE
+        )
         val raw_min_x = (viewport.center_x - viewport.width / 2.0 - padding_px) / scale
         val raw_max_x = (viewport.center_x + viewport.width / 2.0 + padding_px) / scale
         val result = ArrayList<TrafficSpatialEntry>()
@@ -129,8 +132,14 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
 
     fun query_count(viewport: Viewport, padding_px: Float): Int {
         val scale = 2.0.pow(viewport.zoom)
-        val min_y = ((viewport.center_y - viewport.height / 2.0 - padding_px) / scale).coerceIn(0.0, WORLD_SIZE)
-        val max_y = ((viewport.center_y + viewport.height / 2.0 + padding_px) / scale).coerceIn(0.0, WORLD_SIZE)
+        val min_y = ((viewport.center_y - viewport.height / 2.0 - padding_px) / scale).coerceIn(
+            0.0,
+            WORLD_SIZE
+        )
+        val max_y = ((viewport.center_y + viewport.height / 2.0 + padding_px) / scale).coerceIn(
+            0.0,
+            WORLD_SIZE
+        )
         val raw_min_x = (viewport.center_x - viewport.width / 2.0 - padding_px) / scale
         val raw_max_x = (viewport.center_x + viewport.width / 2.0 + padding_px) / scale
         return if (raw_max_x - raw_min_x >= WORLD_SIZE) {
@@ -142,7 +151,7 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
                 count_range(min_x, max_x, min_y, max_y)
             } else {
                 count_range(min_x, WORLD_SIZE, min_y, max_y) +
-                    count_range(0.0, max_x, min_y, max_y)
+                        count_range(0.0, max_x, min_y, max_y)
             }
         }
     }
@@ -197,7 +206,6 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
     }
 }
 
-
 internal object TrafficDotGrouper {
     fun dot_group(aircraft: Aircraft): Int {
         if (aircraft.is_military) return TrafficDotBatchOverlayState.GROUP_MILITARY
@@ -212,8 +220,6 @@ internal object TrafficDotGrouper {
 
     private const val FEET_PER_METER = 3.28084
 }
-
-
 
 internal class TrafficCacheController(
     private val passes_aircraft_filters: (Aircraft, Double) -> Boolean,
@@ -276,7 +282,8 @@ internal class TrafficCacheController(
         } else {
             emptyList()
         }
-        val priority_keys = priority_aircraft.mapTo(HashSet(priority_aircraft.size)) { aircraft_icao_key(it) }
+        val priority_keys =
+            priority_aircraft.mapTo(HashSet(priority_aircraft.size)) { aircraft_icao_key(it) }
         val max_projected_speed = max_projected_speed_zoom_zero(entries)
         return CachedTraffic(
             aircraft = filtered,
@@ -339,10 +346,31 @@ internal class TrafficCacheController(
         var outline_velocities = FloatArray(max(128, entries.size * 2))
         var outline_motion_limits = FloatArray(max(128, entries.size * 2))
         var outline_count = 0
-        val fill_points = Array(TrafficDotBatchOverlayState.GROUP_COUNT) { FloatArray(max(128, entries.size / 2)) }
+        val fill_points = Array(TrafficDotBatchOverlayState.GROUP_COUNT) {
+            FloatArray(
+                max(
+                    128,
+                    entries.size / 2
+                )
+            )
+        }
         val fill_counts = IntArray(TrafficDotBatchOverlayState.GROUP_COUNT)
-        val fill_velocities = Array(TrafficDotBatchOverlayState.GROUP_COUNT) { FloatArray(max(128, entries.size / 2)) }
-        val fill_motion_limits = Array(TrafficDotBatchOverlayState.GROUP_COUNT) { FloatArray(max(128, entries.size / 2)) }
+        val fill_velocities = Array(TrafficDotBatchOverlayState.GROUP_COUNT) {
+            FloatArray(
+                max(
+                    128,
+                    entries.size / 2
+                )
+            )
+        }
+        val fill_motion_limits = Array(TrafficDotBatchOverlayState.GROUP_COUNT) {
+            FloatArray(
+                max(
+                    128,
+                    entries.size / 2
+                )
+            )
+        }
         for (entry in entries) {
             val x = entry.world_x_zoom_zero.toFloat()
             val y = entry.world_y_zoom_zero.toFloat()
@@ -358,12 +386,16 @@ internal class TrafficCacheController(
             outline_motion_limits[outline_count - 1] = motion_limit_sec
             val group = TrafficDotGrouper.dot_group(entry.aircraft)
             fill_points[group] = ensure_point_capacity(fill_points[group], fill_counts[group] + 2)
-            fill_velocities[group] = ensure_point_capacity(fill_velocities[group], fill_counts[group] + 2)
-            fill_motion_limits[group] = ensure_point_capacity(fill_motion_limits[group], fill_counts[group] + 2)
+            fill_velocities[group] =
+                ensure_point_capacity(fill_velocities[group], fill_counts[group] + 2)
+            fill_motion_limits[group] =
+                ensure_point_capacity(fill_motion_limits[group], fill_counts[group] + 2)
             fill_points[group][fill_counts[group]++] = x
             fill_points[group][fill_counts[group]++] = y
-            fill_velocities[group][fill_counts[group] - 2] = entry.projected_velocity_x_zoom_zero.toFloat()
-            fill_velocities[group][fill_counts[group] - 1] = entry.projected_velocity_y_zoom_zero.toFloat()
+            fill_velocities[group][fill_counts[group] - 2] =
+                entry.projected_velocity_x_zoom_zero.toFloat()
+            fill_velocities[group][fill_counts[group] - 1] =
+                entry.projected_velocity_y_zoom_zero.toFloat()
             fill_motion_limits[group][fill_counts[group] - 2] = motion_limit_sec
             fill_motion_limits[group][fill_counts[group] - 1] = motion_limit_sec
         }
@@ -381,4 +413,4 @@ internal class TrafficCacheController(
         )
     }
 
-    }
+}

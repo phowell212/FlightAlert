@@ -1,4 +1,4 @@
-@file:Suppress(
+﻿@file:Suppress(
     "CanBeVal",
     "FunctionName",
     "KotlinConstantConditions",
@@ -15,6 +15,9 @@
 )
 
 package com.flightalert.map
+
+import com.flightalert.FlightAlertAppSettings
+
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -26,15 +29,12 @@ import android.graphics.RectF
 import android.os.SystemClock
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withTranslation
-import com.flightalert.FlightAlertAppSettings
 import com.flightalert.TILE_SIZE
-import com.flightalert.ThemeTreatment
 import com.flightalert.details.json_number_or_null
+import com.flightalert.ThemeTreatment
 import com.flightalert.ui.lerp
 import com.flightalert.ui.smooth_step
 import com.flightalert.ui.with_alpha
-import org.json.JSONArray
-import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -43,6 +43,8 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import org.json.JSONArray
+import org.json.JSONObject
 
 internal fun project_aviation_point_to_screen(
     point: AviationLayerPoint,
@@ -65,7 +67,6 @@ internal fun project_aviation_point_to_screen(
     }
     return ScreenPoint(screen_x, screen_y)
 }
-
 
 class AviationLayerClient(private val user_agent: String) {
 
@@ -148,26 +149,35 @@ class AviationLayerClient(private val user_agent: String) {
         return try {
             val url = URL(
                 "$base_url?f=geojson" +
-                    "&where=${encode(where)}" +
-                    "&geometry=${encode(bounds.arc_gis_envelope())}" +
-                    "&geometryType=esriGeometryEnvelope" +
-                    "&inSR=4326" +
-                    "&spatialRel=esriSpatialRelIntersects" +
-                    "&outFields=${encode(out_fields)}" +
-                    "&outSR=4326" +
-                    "&returnGeometry=true" +
-                    "&resultRecordCount=$max_records"
+                        "&where=${encode(where)}" +
+                        "&geometry=${encode(bounds.arc_gis_envelope())}" +
+                        "&geometryType=esriGeometryEnvelope" +
+                        "&inSR=4326" +
+                        "&spatialRel=esriSpatialRelIntersects" +
+                        "&outFields=${encode(out_fields)}" +
+                        "&outSR=4326" +
+                        "&returnGeometry=true" +
+                        "&resultRecordCount=$max_records"
             )
             val json = fetch_json(url)
             val parsed = parser(json)
             statuses[kind] = if (parsed.isEmpty()) {
-                AviationLayerStatus(AviationLayerState.EMPTY, "No ${kind.display_name.lowercase(Locale.US)} in view")
+                AviationLayerStatus(
+                    AviationLayerState.EMPTY,
+                    "No ${kind.display_name.lowercase(Locale.US)} in view"
+                )
             } else {
-                AviationLayerStatus(AviationLayerState.LOADED, "${parsed.size} ${kind.display_name.lowercase(Locale.US)} loaded")
+                AviationLayerStatus(
+                    AviationLayerState.LOADED,
+                    "${parsed.size} ${kind.display_name.lowercase(Locale.US)} loaded"
+                )
             }
             parsed
         } catch (_: Exception) {
-            statuses[kind] = AviationLayerStatus(AviationLayerState.UNAVAILABLE, "${kind.display_name} unavailable")
+            statuses[kind] = AviationLayerStatus(
+                AviationLayerState.UNAVAILABLE,
+                "${kind.display_name} unavailable"
+            )
             emptyList()
         }
     }
@@ -183,7 +193,8 @@ class AviationLayerClient(private val user_agent: String) {
             }
             tracks
         } catch (_: Exception) {
-            statuses[AviationLayerKind.OCEANIC_TRACKS] = AviationLayerStatus(AviationLayerState.UNAVAILABLE, "NAT tracks unavailable")
+            statuses[AviationLayerKind.OCEANIC_TRACKS] =
+                AviationLayerStatus(AviationLayerState.UNAVAILABLE, "NAT tracks unavailable")
             emptyList()
         }
     }
@@ -196,7 +207,8 @@ class AviationLayerClient(private val user_agent: String) {
             val properties = feature.optJSONObject("properties") ?: JSONObject()
             val rings = polygon_rings(feature.optJSONObject("geometry")).take(MAX_RINGS_PER_FEATURE)
             if (rings.isEmpty()) continue
-            val type = properties.aviation_json_clean_string("TYPE_CODE") ?: properties.aviation_json_clean_string("LOCAL_TYPE") ?: "Airspace"
+            val type = properties.aviation_json_clean_string("TYPE_CODE")
+                ?: properties.aviation_json_clean_string("LOCAL_TYPE") ?: "Airspace"
             val name = properties.aviation_json_clean_string("NAME")
                 ?: properties.aviation_json_clean_string("IDENT")
                 ?: type
@@ -234,7 +246,8 @@ class AviationLayerClient(private val user_agent: String) {
                 ident = ident,
                 name = name,
                 type = properties.aviation_json_clean_string("TYPE_CODE") ?: "AD",
-                military = properties.aviation_json_clean_string("MIL_CODE")?.contains("MIL", ignoreCase = true) == true,
+                military = properties.aviation_json_clean_string("MIL_CODE")
+                    ?.contains("MIL", ignoreCase = true) == true,
                 lat = lat,
                 lon = lon
             )
@@ -246,8 +259,12 @@ class AviationLayerClient(private val user_agent: String) {
         val tracks = linkedMapOf<String, AviationOceanicTrack>()
         for (index in 0 until json.length()) {
             val item = json.optJSONObject(index) ?: continue
-            val source = item.aviation_json_clean_string("notam_number_formatted") ?: item.aviation_json_clean_string("icao_id") ?: "FAA NMS"
-            val window = listOfNotNull(item.aviation_json_clean_string("start_datetime"), item.aviation_json_clean_string("end_datetime"))
+            val source = item.aviation_json_clean_string("notam_number_formatted")
+                ?: item.aviation_json_clean_string("icao_id") ?: "FAA NMS"
+            val window = listOfNotNull(
+                item.aviation_json_clean_string("start_datetime"),
+                item.aviation_json_clean_string("end_datetime")
+            )
                 .joinToString(" to ")
                 .ifBlank { null }
             val message = item.aviation_json_clean_string("condition_message") ?: continue
@@ -256,7 +273,8 @@ class AviationLayerClient(private val user_agent: String) {
                 .forEach { line ->
                     val tokens = line.split(Regex("\\s+")).filter { it.isNotBlank() }
                     if (tokens.size < 3) return@forEach
-                    val designator = tokens.first().takeIf { TRACK_DESIGNATOR.matches(it) } ?: return@forEach
+                    val designator =
+                        tokens.first().takeIf { TRACK_DESIGNATOR.matches(it) } ?: return@forEach
                     val points = tokens.drop(1).mapNotNull(::parse_nat_coordinate)
                     if (points.size < 2) return@forEach
                     val key = "$source:$designator"
@@ -276,9 +294,11 @@ class AviationLayerClient(private val user_agent: String) {
         val token = raw.trim().uppercase(Locale.US).trimEnd(',', '.', ';')
         val match = NAT_COORDINATE.matchEntire(token) ?: return null
         val lat_degrees = match.groupValues[1].toDoubleOrNull() ?: return null
-        val lat_minutes = match.groupValues[2].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
+        val lat_minutes =
+            match.groupValues[2].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
         val lon_degrees = match.groupValues[3].toDoubleOrNull() ?: return null
-        val lon_minutes = match.groupValues[4].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
+        val lon_minutes =
+            match.groupValues[4].takeIf { it.isNotBlank() }?.toDoubleOrNull()?.div(60.0) ?: 0.0
         val lat = lat_degrees + lat_minutes
         val lon = -(lon_degrees + lon_minutes)
         if (lat !in -90.0..90.0 || lon !in -180.0..180.0) return null
@@ -297,6 +317,7 @@ class AviationLayerClient(private val user_agent: String) {
                 }
                 rings
             }
+
             else -> emptyList()
         }
     }
@@ -334,7 +355,12 @@ class AviationLayerClient(private val user_agent: String) {
     }
 
     private fun fetch_text(url: URL): String {
-        require(url.protocol.equals("https", ignoreCase = true)) { "Only HTTPS aviation layers are allowed" }
+        require(
+            url.protocol.equals(
+                "https",
+                ignoreCase = true
+            )
+        ) { "Only HTTPS aviation layers are allowed" }
         var connection: HttpURLConnection? = null
         return try {
             connection = (url.openConnection() as HttpURLConnection).apply {
@@ -378,13 +404,10 @@ class AviationLayerClient(private val user_agent: String) {
     }
 }
 
-
 internal fun JSONObject.aviation_json_clean_string(key: String): String? {
     if (!has(key) || isNull(key)) return null
     return optString(key).trim().takeIf { it.isNotBlank() }
 }
-
-
 
 enum class AviationLayerKind(val display_name: String) {
     ATC_BOUNDARIES("ATC boundaries"),
@@ -393,19 +416,16 @@ enum class AviationLayerKind(val display_name: String) {
     OCEANIC_TRACKS("Oceanic tracks")
 }
 
-
 enum class AviationLayerState {
     LOADED,
     EMPTY,
     UNAVAILABLE
 }
 
-
 data class AviationLayerStatus(
     val state: AviationLayerState,
     val message: String
 )
-
 
 data class AviationLayerSnapshot(
     val atc_boundaries: List<AviationAirspaceFeature>,
@@ -416,7 +436,6 @@ data class AviationLayerSnapshot(
     val fetched_at_ms: Long
 )
 
-
 data class AviationLayerBounds(
     val min_lat: Double,
     val min_lon: Double,
@@ -426,9 +445,7 @@ data class AviationLayerBounds(
     fun arc_gis_envelope(): String = "$min_lon,$min_lat,$max_lon,$max_lat"
 }
 
-
 data class AviationLayerPoint(val lat: Double, val lon: Double)
-
 
 data class AviationGeoBounds(
     val min_lat: Double,
@@ -438,12 +455,11 @@ data class AviationGeoBounds(
 ) {
     fun intersects(other: AviationGeoBounds): Boolean {
         return max_lat >= other.min_lat &&
-            min_lat <= other.max_lat &&
-            max_lon >= other.min_lon &&
-            min_lon <= other.max_lon
+                min_lat <= other.max_lat &&
+                max_lon >= other.min_lon &&
+                min_lon <= other.max_lon
     }
 }
-
 
 data class AviationAirspaceFeature(
     val name: String,
@@ -457,7 +473,6 @@ data class AviationAirspaceFeature(
     val bounds: AviationGeoBounds
 )
 
-
 data class AviationAirportFeature(
     val ident: String,
     val name: String,
@@ -467,7 +482,6 @@ data class AviationAirportFeature(
     val lon: Double
 )
 
-
 data class AviationOceanicTrack(
     val name: String,
     val source: String,
@@ -475,7 +489,6 @@ data class AviationOceanicTrack(
     val points: List<AviationLayerPoint>,
     val bounds: AviationGeoBounds
 )
-
 
 fun List<AviationLayerPoint>.to_bounds(): AviationGeoBounds {
     if (isEmpty()) return AviationGeoBounds(0.0, 0.0, 0.0, 0.0)
@@ -491,8 +504,6 @@ fun List<AviationLayerPoint>.to_bounds(): AviationGeoBounds {
     }
     return AviationGeoBounds(min_lat, min_lon, max_lat, max_lon)
 }
-
-
 
 class AviationLayerController(
     private val client: AviationLayerClient,
@@ -534,7 +545,11 @@ class AviationLayerController(
         airport_labels_enabled = false
     )
 
-    fun request_if_needed(viewport: Viewport, visibility: AviationLayerVisibility, force: Boolean = false) {
+    fun request_if_needed(
+        viewport: Viewport,
+        visibility: AviationLayerVisibility,
+        force: Boolean = false
+    ) {
         latest_visibility = visibility
         if (!has_enabled_layers(visibility)) {
             status_text = "Layers off"
@@ -546,10 +561,10 @@ class AviationLayerController(
         val selection_key = selection_key(visibility)
         val now = now_ms()
         val needs_fetch = force ||
-            snapshot == null ||
-            !snapshot_covers_visibility(snapshot, visibility) ||
-            last_bounds?.contains(visible_viewport_bounds) != true ||
-            now - last_fetch_ms >= refresh_ms
+                snapshot == null ||
+                !snapshot_covers_visibility(snapshot, visibility) ||
+                last_bounds?.contains(visible_viewport_bounds) != true ||
+                now - last_fetch_ms >= refresh_ms
         if (!needs_fetch || fetch_in_flight) {
             if (!needs_fetch) status_text = summary(snapshot, visibility)
             return
@@ -572,9 +587,9 @@ class AviationLayerController(
         val selection_key = selection_key(visibility)
         val now = now_ms()
         val needs_fetch = snapshot == null ||
-            !snapshot_covers_visibility(snapshot, visibility) ||
-            last_bounds?.contains(visible_viewport_bounds) != true ||
-            now - last_fetch_ms >= refresh_ms
+                !snapshot_covers_visibility(snapshot, visibility) ||
+                last_bounds?.contains(visible_viewport_bounds) != true ||
+                now - last_fetch_ms >= refresh_ms
         if (!needs_fetch || fetch_in_flight) return
         start_fetch(
             query_bounds = query_bounds,
@@ -641,9 +656,9 @@ class AviationLayerController(
 
     fun has_enabled_layers(visibility: AviationLayerVisibility): Boolean {
         return visibility.atc_boundaries_enabled ||
-            visibility.restricted_airspaces_enabled ||
-            visibility.oceanic_tracks_enabled ||
-            visibility.airport_labels_enabled
+                visibility.restricted_airspaces_enabled ||
+                visibility.oceanic_tracks_enabled ||
+                visibility.airport_labels_enabled
     }
 
     private fun apply_fetch_result(
@@ -678,7 +693,7 @@ class AviationLayerController(
 
         val requested_kind_set = requested_kinds.toSet()
         val all_unavailable = requested_kinds.isNotEmpty() &&
-            requested_kinds.all { snapshot.statuses[it]?.state == AviationLayerState.UNAVAILABLE }
+                requested_kinds.all { snapshot.statuses[it]?.state == AviationLayerState.UNAVAILABLE }
         val previous = this.snapshot
         this.snapshot = if (all_unavailable && previous != null) {
             merge_layer_snapshot(previous, snapshot, emptySet())
@@ -688,7 +703,11 @@ class AviationLayerController(
         last_bounds = query_bounds
         last_selection_key = selection_key
         status_text = if (latest_enabled) {
-            summary(this.snapshot, latest_visibility, kept_last_good = all_unavailable && previous != null)
+            summary(
+                this.snapshot,
+                latest_visibility,
+                kept_last_good = all_unavailable && previous != null
+            )
         } else {
             "Layers off"
         }
@@ -706,12 +725,18 @@ class AviationLayerController(
         val world_width = TILE_SIZE * 2.0.pow(viewport.zoom)
         val longitude_span_degrees = ((right - left) / world_width) * 360.0
         val use_world_longitude_bounds = abs(top_left.lon - bottom_right.lon) > 180.0 ||
-            longitude_span_degrees >= 180.0
+                longitude_span_degrees >= 180.0
         return Bounds(
             min_lat = min(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
-            min_lon = if (use_world_longitude_bounds) -180.0 else min(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0),
+            min_lon = if (use_world_longitude_bounds) -180.0 else min(
+                top_left.lon,
+                bottom_right.lon
+            ).coerceIn(-180.0, 180.0),
             max_lat = max(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
-            max_lon = if (use_world_longitude_bounds) 180.0 else max(top_left.lon, bottom_right.lon).coerceIn(-180.0, 180.0)
+            max_lon = if (use_world_longitude_bounds) 180.0 else max(
+                top_left.lon,
+                bottom_right.lon
+            ).coerceIn(-180.0, 180.0)
         )
     }
 
@@ -740,7 +765,8 @@ class AviationLayerController(
     ): String {
         if (!has_enabled_layers(visibility)) return "Layers off"
         snapshot ?: return "Waiting for aviation layers"
-        val loaded = active_kinds(visibility).count { snapshot.statuses[it]?.state == AviationLayerState.LOADED }
+        val loaded =
+            active_kinds(visibility).count { snapshot.statuses[it]?.state == AviationLayerState.LOADED }
         return when {
             kept_last_good -> "Network unavailable; showing last aviation layers"
             loaded > 0 -> "$loaded aviation layer${if (loaded == 1) "" else "s"} loaded"
@@ -748,7 +774,10 @@ class AviationLayerController(
         }
     }
 
-    private fun snapshot_covers_visibility(snapshot: AviationLayerSnapshot?, visibility: AviationLayerVisibility): Boolean {
+    private fun snapshot_covers_visibility(
+        snapshot: AviationLayerSnapshot?,
+        visibility: AviationLayerVisibility
+    ): Boolean {
         snapshot ?: return false
         return active_kinds(visibility).all { kind ->
             snapshot.statuses[kind] != null
@@ -807,14 +836,19 @@ class AviationLayerController(
     }
 
     private fun Bounds.to_aviation_layer_bounds(): AviationLayerBounds {
-        return AviationLayerBounds(min_lat = min_lat, min_lon = min_lon, max_lat = max_lat, max_lon = max_lon)
+        return AviationLayerBounds(
+            min_lat = min_lat,
+            min_lon = min_lon,
+            max_lat = max_lat,
+            max_lon = max_lon
+        )
     }
 
     private fun Bounds.contains(other: Bounds): Boolean {
         return min_lat <= other.min_lat &&
-            min_lon <= other.min_lon &&
-            max_lat >= other.max_lat &&
-            max_lon >= other.max_lon
+                min_lon <= other.min_lon &&
+                max_lat >= other.max_lat &&
+                max_lon >= other.max_lon
     }
 
     private companion object {
@@ -828,18 +862,12 @@ class AviationLayerController(
     }
 }
 
-// endregion
-
-// region SELECTED AIRCRAFT INTELLIGENCE
-
-
 data class AviationLayerVisibility(
     val restricted_airspaces_enabled: Boolean,
     val atc_boundaries_enabled: Boolean,
     val oceanic_tracks_enabled: Boolean,
     val airport_labels_enabled: Boolean
 )
-
 
 data class AviationLayerStyle(
     val accent_orange: Int,
@@ -853,7 +881,6 @@ data class AviationLayerStyle(
     val text: Int,
     val treatment: ThemeTreatment
 )
-
 
 class AviationLayerRenderer(
     private val paint: Paint,
@@ -884,13 +911,39 @@ class AviationLayerRenderer(
         interaction_active: Boolean = false
     ) {
         prepare_snapshot_if_needed(snapshot)
-        if (interaction_active && draw_transformed_settled_cache(canvas, viewport, snapshot, visibility, style, selected_restricted_airspace)) {
+        if (interaction_active && draw_transformed_settled_cache(
+                canvas,
+                viewport,
+                snapshot,
+                visibility,
+                style,
+                selected_restricted_airspace
+            )
+        ) {
             return
         }
-        if (!interaction_active && draw_settled_cache_if_current(canvas, viewport, snapshot, visible_bounds, visibility, style, selected_restricted_airspace)) {
+        if (!interaction_active && draw_settled_cache_if_current(
+                canvas,
+                viewport,
+                snapshot,
+                visible_bounds,
+                visibility,
+                style,
+                selected_restricted_airspace
+            )
+        ) {
             return
         }
-        if (!interaction_active && draw_into_settled_cache(canvas, viewport, snapshot, visible_bounds, visibility, style, selected_restricted_airspace)) {
+        if (!interaction_active && draw_into_settled_cache(
+                canvas,
+                viewport,
+                snapshot,
+                visible_bounds,
+                visibility,
+                style,
+                selected_restricted_airspace
+            )
+        ) {
             return
         }
         draw_layers_direct(
@@ -916,7 +969,15 @@ class AviationLayerRenderer(
     ): Boolean {
         val bitmap = settled_cache_bitmap ?: return false
         val key = settled_cache_key ?: return false
-        if (key != settled_layer_cache_key(viewport, snapshot, visible_bounds, visibility, style, selected_restricted_airspace)) return false
+        if (key != settled_layer_cache_key(
+                viewport,
+                snapshot,
+                visible_bounds,
+                visibility,
+                style,
+                selected_restricted_airspace
+            )
+        ) return false
         canvas.drawBitmap(bitmap, 0f, 0f, null)
         return true
     }
@@ -945,8 +1006,10 @@ class AviationLayerRenderer(
         if (abs(zoom_delta) > MAX_TRANSFORMED_CACHE_ZOOM_DELTA) return false
         val scale = 2.0.pow(zoom_delta).toFloat()
         if (scale <= 0f || !scale.isFinite()) return false
-        val translation_x = (key.center_x * scale - viewport.center_x + viewport.width / 2.0 - key.width * scale / 2.0).toFloat()
-        val translation_y = (key.center_y * scale - viewport.center_y + viewport.height / 2.0 - key.height * scale / 2.0).toFloat()
+        val translation_x =
+            (key.center_x * scale - viewport.center_x + viewport.width / 2.0 - key.width * scale / 2.0).toFloat()
+        val translation_y =
+            (key.center_y * scale - viewport.center_y + viewport.height / 2.0 - key.height * scale / 2.0).toFloat()
         if (abs(translation_x) > viewport.width * MAX_TRANSFORMED_CACHE_TRANSLATION_FRACTION ||
             abs(translation_y) > viewport.height * MAX_TRANSFORMED_CACHE_TRANSLATION_FRACTION
         ) {
@@ -981,7 +1044,14 @@ class AviationLayerRenderer(
             selected_restricted_airspace = selected_restricted_airspace,
             interaction_active = false
         )
-        settled_cache_key = settled_layer_cache_key(viewport, snapshot, visible_bounds, visibility, style, selected_restricted_airspace)
+        settled_cache_key = settled_layer_cache_key(
+            viewport,
+            snapshot,
+            visible_bounds,
+            visibility,
+            style,
+            selected_restricted_airspace
+        )
         canvas.drawBitmap(bitmap, 0f, 0f, null)
         return true
     }
@@ -1059,12 +1129,19 @@ class AviationLayerRenderer(
             selected_restricted_airspace
                 ?.takeIf { it.bounds.intersects(visible_bounds) }
                 ?.let { selected ->
-                    val selected_prepared = prepared_restricted_airspaces.firstOrNull { it.source == selected }
-                        ?: prepare_airspace_feature(selected)
-                        ?: return@let
+                    val selected_prepared =
+                        prepared_restricted_airspaces.firstOrNull { it.source == selected }
+                            ?: prepare_airspace_feature(selected)
+                            ?: return@let
                     draw_selected_airspace(canvas, viewport, selected, style)
                     if (viewport.zoom >= AIRSPACE_LABEL_MIN_ZOOM) {
-                        draw_airspace_label(canvas, viewport, selected_prepared, layer_label_rects, style)
+                        draw_airspace_label(
+                            canvas,
+                            viewport,
+                            selected_prepared,
+                            layer_label_rects,
+                            style
+                        )
                     }
                 }
         }
@@ -1129,7 +1206,12 @@ class AviationLayerRenderer(
             .mapNotNull { ring -> prepare_airspace_ring(ring, MAX_DRAWN_AIRSPACE_POINTS_PER_RING) }
         val interaction_rings = feature.rings
             .take(MAX_DRAWN_RINGS_PER_FEATURE)
-            .mapNotNull { ring -> prepare_airspace_ring(ring, MAX_DRAWN_AIRSPACE_POINTS_PER_RING_INTERACTION) }
+            .mapNotNull { ring ->
+                prepare_airspace_ring(
+                    ring,
+                    MAX_DRAWN_AIRSPACE_POINTS_PER_RING_INTERACTION
+                )
+            }
         if (rings.isEmpty()) return null
         val label = airspace_label(feature)
         return PreparedAirspaceFeature(
@@ -1145,14 +1227,21 @@ class AviationLayerRenderer(
     private fun airspace_label(feature: AviationAirspaceFeature): String {
         val type = feature.type.trim()
         if (type.isBlank() || type.equals(feature.name, ignoreCase = true)) return feature.name
-        val type_already_in_name = Regex("\\b${Regex.escape(type)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(feature.name)
+        val type_already_in_name = Regex(
+            "\\b${Regex.escape(type)}\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(feature.name)
         return if (type_already_in_name) feature.name else "${feature.name} $type"
     }
 
-    private fun prepare_airspace_ring(ring: List<AviationLayerPoint>, max_points: Int): PreparedAirspaceRing? {
+    private fun prepare_airspace_ring(
+        ring: List<AviationLayerPoint>,
+        max_points: Int
+    ): PreparedAirspaceRing? {
         if (ring.size < 3) return null
         val step = max(1, ring.size / max_points)
-        val sampled_count = ring.indices.count { index -> index % step == 0 || index == ring.lastIndex }
+        val sampled_count =
+            ring.indices.count { index -> index % step == 0 || index == ring.lastIndex }
         if (sampled_count < 3) return null
         val world_path = Path()
         var point_index = 0
@@ -1212,7 +1301,8 @@ class AviationLayerRenderer(
             else -> 1.1f
         }
         val min_stroke_width_dp = if (restricted) 0.55f else 0.42f
-        stroke_paint.strokeWidth = dp(lerp(min_stroke_width_dp, base_stroke_width_dp, low_zoom_emphasis))
+        stroke_paint.strokeWidth =
+            dp(lerp(min_stroke_width_dp, base_stroke_width_dp, low_zoom_emphasis))
         val raw_stroke_alpha = when {
             interaction_active && viewport.zoom >= 8.0 -> 190
             interaction_active -> 150
@@ -1224,13 +1314,17 @@ class AviationLayerRenderer(
         val base_stroke_alpha = (raw_stroke_alpha * stroke_alpha_scale).toInt().coerceIn(24, 235)
         paint.style = Paint.Style.FILL
         val fill_zoom_emphasis = smooth_step(5.3f, 8.5f, viewport.zoom.toFloat())
-        val raw_fill_alpha = if (restricted && viewport.zoom >= 8.5) 28 else if (viewport.zoom >= 8.5) 18 else 10
+        val raw_fill_alpha =
+            if (restricted && viewport.zoom >= 8.5) 28 else if (viewport.zoom >= 8.5) 18 else 10
         val base_fill_alpha = (raw_fill_alpha * fill_zoom_emphasis).toInt()
 
         var labels_drawn = 0
         var drawn_features = 0
         for (feature in features) {
-            if (feature.source == excluded_feature || !feature.source.bounds.intersects(visible_bounds)) continue
+            if (feature.source == excluded_feature || !feature.source.bounds.intersects(
+                    visible_bounds
+                )
+            ) continue
             if (drawn_features >= MAX_DRAWN_AIRSPACE_FEATURES) break
             val is_focused = focused_feature == null || focused_feature === feature
             val fill_alpha = when {
@@ -1275,19 +1369,18 @@ class AviationLayerRenderer(
         return smooth_step(start, end, zoom.toFloat())
     }
 
-
-
     private fun focused_airspace_feature(
         viewport: Viewport,
         features: List<PreparedAirspaceFeature>,
         visible_bounds: AviationGeoBounds
     ): PreparedAirspaceFeature? {
-        val center = MapProjection.world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
+        val center =
+            MapProjection.world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
         val point = AviationLayerPoint(center.lat, center.lon)
         return features.firstOrNull { feature ->
             feature.source.bounds.intersects(visible_bounds) &&
-                feature.source.bounds.contains(point) &&
-                point_inside_airspace(point, feature.source)
+                    feature.source.bounds.contains(point) &&
+                    point_inside_airspace(point, feature.source)
         }
     }
 
@@ -1295,7 +1388,10 @@ class AviationLayerRenderer(
         return point.lat in min_lat..max_lat && point.lon in min_lon..max_lon
     }
 
-    private fun point_inside_airspace(point: AviationLayerPoint, feature: AviationAirspaceFeature): Boolean {
+    private fun point_inside_airspace(
+        point: AviationLayerPoint,
+        feature: AviationAirspaceFeature
+    ): Boolean {
         var crossings = 0
         feature.rings.forEach { ring ->
             if (point_inside_ring(point, ring)) crossings++
@@ -1303,7 +1399,10 @@ class AviationLayerRenderer(
         return crossings % 2 == 1
     }
 
-    private fun point_inside_ring(point: AviationLayerPoint, ring: List<AviationLayerPoint>): Boolean {
+    private fun point_inside_ring(
+        point: AviationLayerPoint,
+        ring: List<AviationLayerPoint>
+    ): Boolean {
         if (ring.size < 3) return false
         var inside = false
         var j = ring.lastIndex
@@ -1311,7 +1410,11 @@ class AviationLayerRenderer(
             val pi = ring[i]
             val pj = ring[j]
             val intersects = (pi.lat > point.lat) != (pj.lat > point.lat) &&
-                point.lon < (pj.lon - pi.lon) * (point.lat - pi.lat) / ((pj.lat - pi.lat).takeIf { abs(it) > 1e-9 } ?: 1e-9) + pi.lon
+                    point.lon < (pj.lon - pi.lon) * (point.lat - pi.lat) / ((pj.lat - pi.lat).takeIf {
+                abs(
+                    it
+                ) > 1e-9
+            } ?: 1e-9) + pi.lon
             if (intersects) inside = !inside
             j = i
         }
@@ -1328,7 +1431,10 @@ class AviationLayerRenderer(
             ?: prepare_airspace_feature(feature)
             ?: return
         paint.style = Paint.Style.FILL
-        paint.color = with_alpha(restricted_airspace_fill(style), selected_restricted_airspace_fill_alpha(style))
+        paint.color = with_alpha(
+            restricted_airspace_fill(style),
+            selected_restricted_airspace_fill_alpha(style)
+        )
         stroke_paint.style = Paint.Style.STROKE
         stroke_paint.strokeCap = Paint.Cap.ROUND
         stroke_paint.strokeJoin = Paint.Join.ROUND
@@ -1419,15 +1525,25 @@ class AviationLayerRenderer(
         label_rects: MutableList<RectF>,
         style: AviationLayerStyle
     ): Boolean {
-        val screen = project_aviation_point_to_screen(feature.center, viewport, MapProjection::lat_lon_to_world) ?: return false
+        val screen = project_aviation_point_to_screen(
+            feature.center,
+            viewport,
+            MapProjection::lat_lon_to_world
+        ) ?: return false
         if (screen.x !in 0f..viewport.width || screen.y !in 0f..viewport.height) return false
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(if (feature.source.type.equals("R", ignoreCase = true)) 11f else 10f)
+        text_paint.textSize =
+            sp(if (feature.source.type.equals("R", ignoreCase = true)) 11f else 10f)
         text_paint.color = with_alpha(style.text, 224)
         val display = ellipsize(feature.label, dp(142f))
         val width = text_paint.measureText(display) + dp(14f)
-        val rect = RectF(screen.x - width / 2f, screen.y - dp(20f), screen.x + width / 2f, screen.y + dp(3f))
+        val rect = RectF(
+            screen.x - width / 2f,
+            screen.y - dp(20f),
+            screen.x + width / 2f,
+            screen.y + dp(3f)
+        )
         if (!rect.intersects(0f, 0f, viewport.width, viewport.height)) return false
         val padded = rect.padded_copy(dp(3f))
         if (label_rects.any { RectF.intersects(padded, it) }) return false
@@ -1501,11 +1617,13 @@ class AviationLayerRenderer(
     ) {
         if (viewport.zoom < AIRPORT_LABEL_MIN_ZOOM) return
         val visible = airports
-            .mapNotNull { airport -> project_aviation_point_to_screen(
+            .mapNotNull { airport ->
+                project_aviation_point_to_screen(
                     AviationLayerPoint(airport.lat, airport.lon),
                     viewport,
                     MapProjection::lat_lon_to_world
-                )?.let { airport to it } }
+                )?.let { airport to it }
+            }
             .filter { (_, point) -> point.x in 0f..viewport.width && point.y in 0f..viewport.height }
             .sortedBy { (_, point) -> distance_from_screen_center(point, viewport) }
             .take(if (viewport.zoom >= 10.0) MAX_DRAWN_AIRPORT_LABELS else MAX_DRAWN_AIRPORT_LABELS_LOW_ZOOM)
@@ -1525,7 +1643,10 @@ class AviationLayerRenderer(
             } else {
                 point.x - dp(5f) - width
             }
-            val left = preferred_left.coerceIn(dp(2f), (viewport.width - width - dp(2f)).coerceAtLeast(dp(2f)))
+            val left = preferred_left.coerceIn(
+                dp(2f),
+                (viewport.width - width - dp(2f)).coerceAtLeast(dp(2f))
+            )
             val top = (point.y - dp(16f)).coerceIn(dp(2f), viewport.height - dp(22f))
             val rect = RectF(left, top, left + width, top + dp(20f))
             if (!rect.intersects(0f, 0f, viewport.width, viewport.height)) return@forEach
@@ -1542,13 +1663,20 @@ class AviationLayerRenderer(
         text_paint.isFakeBoldText = false
     }
 
-    private fun ring_to_screen_points(points: List<AviationLayerPoint>, viewport: Viewport): List<ScreenPoint> {
+    private fun ring_to_screen_points(
+        points: List<AviationLayerPoint>,
+        viewport: Viewport
+    ): List<ScreenPoint> {
         if (points.isEmpty()) return emptyList()
         val step = max(1, points.size / MAX_DRAWN_OCEANIC_POINTS)
         val result = mutableListOf<ScreenPoint>()
         points.forEachIndexed { index, point ->
             if (index % step == 0 || index == points.lastIndex) {
-                project_aviation_point_to_screen(point, viewport, MapProjection::lat_lon_to_world)?.let { result += it }
+                project_aviation_point_to_screen(
+                    point,
+                    viewport,
+                    MapProjection::lat_lon_to_world
+                )?.let { result += it }
             }
         }
         return result
@@ -1567,7 +1695,6 @@ class AviationLayerRenderer(
     private fun RectF.padded_copy(padding: Float): RectF {
         return RectF(left - padding, top - padding, right + padding, bottom + padding)
     }
-
 
     private fun restricted_airspace_stroke(style: AviationLayerStyle): Int {
         return when (style.treatment) {
@@ -1660,8 +1787,6 @@ class AviationLayerRenderer(
     }
 }
 
-
-
 internal data class RestrictedAirspaceStyle(
     val panel_color: Int,
     val modal_panel_alpha: Int,
@@ -1669,7 +1794,6 @@ internal data class RestrictedAirspaceStyle(
     val muted_color: Int,
     val accent_orange_color: Int
 )
-
 
 internal class RestrictedAirspaceInspector(
     private val text_paint: Paint,
@@ -1698,21 +1822,45 @@ internal class RestrictedAirspaceInspector(
         text_paint.textSize = sp(22f)
         text_paint.color = style.text_color
         val title_max_width = panel.width() - dp(142f)
-        canvas.drawText(ellipsize(feature.name, title_max_width), panel.left + dp(18f), panel.top + dp(34f), text_paint)
+        canvas.drawText(
+            ellipsize(feature.name, title_max_width),
+            panel.left + dp(18f),
+            panel.top + dp(34f),
+            text_paint
+        )
 
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(11f)
         text_paint.color = style.accent_orange_color
-        canvas.drawText("FAA SPECIAL USE AIRSPACE", panel.left + dp(18f), panel.top + dp(55f), text_paint)
+        canvas.drawText(
+            "FAA SPECIAL USE AIRSPACE",
+            panel.left + dp(18f),
+            panel.top + dp(55f),
+            text_paint
+        )
 
         val vertical = listOf(
             feature.lower_limit ?: "Lower unavailable",
             feature.upper_limit ?: "Upper unavailable"
         ).joinToString(" to ")
         var row_y = panel.top + dp(88f)
-        row_y = draw_detail_row(canvas, panel, row_y, "Type", feature.type.ifBlank { "Unavailable" }, style)
+        row_y = draw_detail_row(
+            canvas,
+            panel,
+            row_y,
+            "Type",
+            feature.type.ifBlank { "Unavailable" },
+            style
+        )
         row_y = draw_detail_row(canvas, panel, row_y, "Vertical", vertical, style)
-        row_y = draw_detail_row(canvas, panel, row_y, "Schedule", feature.schedule ?: "Unavailable from FAA feature", style)
+        row_y = draw_detail_row(
+            canvas,
+            panel,
+            row_y,
+            "Schedule",
+            feature.schedule ?: "Unavailable from FAA feature",
+            style
+        )
         row_y = draw_detail_row(canvas, panel, row_y, "Location", location_label(feature), style)
         draw_detail_row(canvas, panel, row_y, "Source", RESTRICTED_AIRSPACE_SOURCE_LABEL, style)
     }
@@ -1726,7 +1874,12 @@ internal class RestrictedAirspaceInspector(
     }
 
     fun close_button_bounds(panel: RectF): RectF {
-        return RectF(panel.right - dp(118f), panel.top + dp(14f), panel.right - dp(18f), panel.top + dp(48f))
+        return RectF(
+            panel.right - dp(118f),
+            panel.top + dp(14f),
+            panel.right - dp(18f),
+            panel.top + dp(48f)
+        )
     }
 
     fun airspace_at(
@@ -1750,7 +1903,8 @@ internal class RestrictedAirspaceInspector(
         val max_distance_sq = dp(RESTRICTED_AIRSPACE_HIT_RADIUS_DP).let { it * it }
         return candidates
             .mapNotNull { feature ->
-                val distance_sq = distance_to_airspace_screen_sq(x, y, feature, viewport) ?: return@mapNotNull null
+                val distance_sq = distance_to_airspace_screen_sq(x, y, feature, viewport)
+                    ?: return@mapNotNull null
                 if (distance_sq <= max_distance_sq) feature to distance_sq else null
             }
             .minByOrNull { it.second }
@@ -1808,9 +1962,9 @@ internal class RestrictedAirspaceInspector(
             val crosses_lat = (current.lat > point.lat) != (previous.lat > point.lat)
             if (crosses_lat) {
                 val lon_at_lat = (previous.lon - current.lon) *
-                    (point.lat - current.lat) /
-                    (previous.lat - current.lat) +
-                    current.lon
+                        (point.lat - current.lat) /
+                        (previous.lat - current.lat) +
+                        current.lon
                 if (point.lon < lon_at_lat) inside = !inside
             }
             previous = current
@@ -1838,19 +1992,32 @@ internal class RestrictedAirspaceInspector(
         return best
     }
 
-    private fun airspace_ring_screen_points(ring: List<AviationLayerPoint>, viewport: Viewport): List<ScreenPoint> {
+    private fun airspace_ring_screen_points(
+        ring: List<AviationLayerPoint>,
+        viewport: Viewport
+    ): List<ScreenPoint> {
         if (ring.isEmpty()) return emptyList()
         val step = max(1, ring.size / MAX_RESTRICTED_AIRSPACE_HIT_POINTS_PER_RING)
-        val result = ArrayList<ScreenPoint>(min(ring.size, MAX_RESTRICTED_AIRSPACE_HIT_POINTS_PER_RING + 1))
+        val result =
+            ArrayList<ScreenPoint>(min(ring.size, MAX_RESTRICTED_AIRSPACE_HIT_POINTS_PER_RING + 1))
         ring.forEachIndexed { index, point ->
             if (index % step == 0 || index == ring.lastIndex) {
-                project_aviation_point_to_screen(point, viewport, lat_lon_to_world)?.let(result::add)
+                project_aviation_point_to_screen(
+                    point,
+                    viewport,
+                    lat_lon_to_world
+                )?.let(result::add)
             }
         }
         return result
     }
 
-    private fun point_to_segment_distance_sq(x: Float, y: Float, start: ScreenPoint, end: ScreenPoint): Float {
+    private fun point_to_segment_distance_sq(
+        x: Float,
+        y: Float,
+        start: ScreenPoint,
+        end: ScreenPoint
+    ): Float {
         val dx = end.x - start.x
         val dy = end.y - start.y
         val length_sq = dx * dx + dy * dy
@@ -1869,7 +2036,7 @@ internal class RestrictedAirspaceInspector(
 
     private fun airspace_bounds_area(bounds: AviationGeoBounds): Double {
         return (bounds.max_lat - bounds.min_lat).coerceAtLeast(0.0) *
-            (bounds.max_lon - bounds.min_lon).coerceAtLeast(0.0)
+                (bounds.max_lon - bounds.min_lon).coerceAtLeast(0.0)
     }
 
     private companion object {
@@ -1881,7 +2048,3 @@ internal class RestrictedAirspaceInspector(
         const val RESTRICTED_AIRSPACE_SOURCE_LABEL = "FAA AIS Special Use Airspace"
     }
 }
-
-// endregion
-
-// region ROUTE REASONING

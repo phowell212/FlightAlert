@@ -1,4 +1,4 @@
-@file:Suppress(
+﻿@file:Suppress(
     "CanBeVal",
     "FunctionName",
     "KotlinConstantConditions",
@@ -15,15 +15,16 @@
 )
 
 package com.flightalert.details
+
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import androidx.core.graphics.withClip
+import com.flightalert.map.ScreenPoint
 import com.flightalert.ThemeTreatment
 import com.flightalert.VisualTheme
-import com.flightalert.map.ScreenPoint
 import com.flightalert.ui.draw_fitted_text
 import com.flightalert.ui.draw_wrapped_text
 import com.flightalert.ui.with_alpha
@@ -36,17 +37,16 @@ import kotlin.math.min
 
 data class AircraftDetailsPanelStyle(val visual_theme: VisualTheme)
 
-
 data class AircraftDetailsRow(
     val label: String,
     val value: String,
     val section: Boolean = false
 ) {
     companion object {
-        fun section(label: String): AircraftDetailsRow = AircraftDetailsRow(label, "", section = true)
+        fun section(label: String): AircraftDetailsRow =
+            AircraftDetailsRow(label, "", section = true)
     }
 }
-
 
 data class AircraftDetailsPhotoState(
     val bitmap: Bitmap?,
@@ -55,7 +55,6 @@ data class AircraftDetailsPhotoState(
     val transition_progress: Float = 1f
 )
 
-
 data class AircraftDetailsPanelState(
     val content: AircraftDetailsPanelContent,
     val photo: AircraftDetailsPhotoState,
@@ -63,9 +62,7 @@ data class AircraftDetailsPanelState(
     val wide_layout: Boolean
 )
 
-
 sealed interface AircraftDetailsPanelContent
-
 
 data class AircraftDetailsMainState(
     val title: String,
@@ -74,7 +71,6 @@ data class AircraftDetailsMainState(
     val has_aircraft: Boolean,
     val has_usage_trace: Boolean
 ) : AircraftDetailsPanelContent
-
 
 data class AircraftImpactPanelState(
     val selected_aircraft_available: Boolean,
@@ -87,7 +83,6 @@ data class AircraftImpactPanelState(
     val rows: List<AircraftDetailsRow>
 ) : AircraftDetailsPanelContent
 
-
 data class AircraftUsagePanelState(
     val selected_aircraft_available: Boolean,
     val status: String,
@@ -96,11 +91,9 @@ data class AircraftUsagePanelState(
     val stats: UsageStats?
 ) : AircraftDetailsPanelContent
 
-
 data class AircraftPhotoEvidencePanelState(
     val evidence: PhotoEvidence?
 ) : AircraftDetailsPanelContent
-
 
 data class AircraftPhotoGalleryPanelState(
     val items: List<AircraftPhotoGalleryItem>,
@@ -108,12 +101,10 @@ data class AircraftPhotoGalleryPanelState(
     val loading: Boolean
 ) : AircraftDetailsPanelContent
 
-
 data class AircraftDetailsDrawResult(
     val scroll_y: Float,
     val max_scroll_y: Float
 )
-
 
 interface AircraftDetailsPanelChrome {
     fun dp(value: Float): Float
@@ -125,7 +116,6 @@ interface AircraftDetailsPanelChrome {
 }
 
 // Draws the selected-aircraft modal; FlightMapView provides state and this object owns all panel geometry.
-
 class AircraftDetailsPanelRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
@@ -148,8 +138,22 @@ class AircraftDetailsPanelRenderer(
                 draw_usage_panel(canvas, rect, style, content)
                 AircraftDetailsDrawResult(0f, 0f)
             }
-            is AircraftPhotoEvidencePanelState -> draw_photo_evidence_panel(canvas, rect, style, state, content)
-            is AircraftPhotoGalleryPanelState -> draw_photo_gallery_panel(canvas, rect, style, state, content)
+
+            is AircraftPhotoEvidencePanelState -> draw_photo_evidence_panel(
+                canvas,
+                rect,
+                style,
+                state,
+                content
+            )
+
+            is AircraftPhotoGalleryPanelState -> draw_photo_gallery_panel(
+                canvas,
+                rect,
+                style,
+                state,
+                content
+            )
         }
     }
 
@@ -157,39 +161,75 @@ class AircraftDetailsPanelRenderer(
     fun panel_bounds(w: Float, h: Float, wide_layout: Boolean): RectF {
         val margin = dp(14)
         val width = if (wide_layout) min(dp(800), w - margin * 2f) else w - margin * 2f
-        val height = if (wide_layout) min(h - margin * 2f, dp(390)) else min(h - margin * 2f, dp(720))
+        val height =
+            if (wide_layout) min(h - margin * 2f, dp(390)) else min(h - margin * 2f, dp(720))
         return RectF((w - width) / 2f, (h - height) / 2f, (w + width) / 2f, (h + height) / 2f)
     }
 
     fun close_button_bounds(panel: RectF): RectF {
-        return RectF(panel.right - dp(112), panel.top + dp(14), panel.right - dp(18), panel.top + dp(48))
+        return RectF(
+            panel.right - dp(112),
+            panel.top + dp(14),
+            panel.right - dp(18),
+            panel.top + dp(48)
+        )
     }
 
     fun usage_button_bounds(panel: RectF): RectF {
-        return RectF(panel.right - dp(214), panel.top + dp(14), panel.right - dp(122), panel.top + dp(48))
+        return RectF(
+            panel.right - dp(214),
+            panel.top + dp(14),
+            panel.right - dp(122),
+            panel.top + dp(48)
+        )
     }
 
     fun impact_button_bounds(panel: RectF): RectF {
-        return RectF(panel.left + dp(18), panel.bottom - dp(52), panel.right - dp(18), panel.bottom - dp(16))
+        return RectF(
+            panel.left + dp(18),
+            panel.bottom - dp(52),
+            panel.right - dp(18),
+            panel.bottom - dp(16)
+        )
     }
 
     fun impact_hit_bounds(panel: RectF): RectF {
         val button = impact_button_bounds(panel)
-        return RectF(button.left - dp(4), button.top - dp(4), button.right + dp(4), button.bottom + dp(4))
+        return RectF(
+            button.left - dp(4),
+            button.top - dp(4),
+            button.right + dp(4),
+            button.bottom + dp(4)
+        )
     }
 
     fun photo_image_source_button_bounds(panel: RectF): RectF {
-        return RectF(panel.left + dp(18), panel.bottom - dp(58), panel.left + dp(138), panel.bottom - dp(18))
+        return RectF(
+            panel.left + dp(18),
+            panel.bottom - dp(58),
+            panel.left + dp(138),
+            panel.bottom - dp(18)
+        )
     }
 
     fun photo_page_source_button_bounds(panel: RectF): RectF {
-        return RectF(panel.left + dp(150), panel.bottom - dp(58), panel.left + dp(286), panel.bottom - dp(18))
+        return RectF(
+            panel.left + dp(150),
+            panel.bottom - dp(58),
+            panel.left + dp(286),
+            panel.bottom - dp(18)
+        )
     }
 
     // The current photo hit area matches the rendered photo, not the whole photo/status column.
     fun current_photo_bounds(panel: RectF, wide_layout: Boolean, has_photo: Boolean): RectF {
         return if (wide_layout) {
-            val left = RectF(panel.left + dp(18), panel.top + dp(78), panel.left + panel.width() * 0.38f, panel.bottom - dp(18))
+            val left = RectF(
+                panel.left + dp(18),
+                panel.top + dp(78),
+                panel.left + panel.width() * 0.38f,
+                panel.bottom - dp(18)
+            )
             photo_bounds(left, wide = true, has_photo = has_photo)
         } else {
             photo_bounds(panel, wide = false, has_photo = has_photo)
@@ -218,10 +258,20 @@ class AircraftDetailsPanelRenderer(
         state: AircraftDetailsPanelState,
         content: AircraftDetailsMainState
     ): AircraftDetailsDrawResult {
-        chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Close", false)
         if (content.has_aircraft) {
-            chrome.draw_choice_button(canvas, usage_button_bounds(rect), "Usage", content.has_usage_trace)
+            chrome.draw_choice_button(
+                canvas,
+                usage_button_bounds(rect),
+                "Usage",
+                content.has_usage_trace
+            )
         }
 
         val title_left = rect.left + dp(18)
@@ -247,7 +297,12 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(chrome.ellipsize(content.status, rect.width() - dp(36)), rect.left + dp(18), rect.top + dp(60), text_paint)
+        canvas.drawText(
+            chrome.ellipsize(content.status, rect.width() - dp(36)),
+            rect.left + dp(18),
+            rect.top + dp(60),
+            text_paint
+        )
 
         val reserve_bottom = if (content.has_aircraft) dp(64) else dp(12)
         val clip = content_bounds(rect, reserve_bottom)
@@ -258,22 +313,45 @@ class AircraftDetailsPanelRenderer(
         canvas.clipRect(clip)
         canvas.translate(0f, -scroll_y)
         val content_bottom = if (state.wide_layout && content.has_aircraft) {
-            draw_wide_details(canvas, rect, state.photo, content.rows, style, visible_top, visible_bottom)
+            draw_wide_details(
+                canvas,
+                rect,
+                state.photo,
+                content.rows,
+                style,
+                visible_top,
+                visible_bottom
+            )
         } else {
-            val photo_rect = photo_bounds(rect, wide = state.wide_layout, has_photo = state.photo.bitmap != null)
+            val photo_rect =
+                photo_bounds(rect, wide = state.wide_layout, has_photo = state.photo.bitmap != null)
             draw_photo_block(canvas, photo_rect, state.photo, style)
             var y = photo_rect.bottom + dp(30)
             content.rows.forEach { row ->
-                y = draw_adaptive_detail_row(canvas, row_bounds(rect), y, row, style, visible_top, visible_bottom)
+                y = draw_adaptive_detail_row(
+                    canvas,
+                    row_bounds(rect),
+                    y,
+                    row,
+                    style,
+                    visible_top,
+                    visible_bottom
+                )
             }
             y
         }
         canvas.restoreToCount(checkpoint)
 
-        val result = scroll_result(content_bottom - clip.top + dp(12), clip.height(), state.scroll_y)
+        val result =
+            scroll_result(content_bottom - clip.top + dp(12), clip.height(), state.scroll_y)
         draw_scroll_indicator(canvas, clip, result, style)
         if (content.has_aircraft) {
-            chrome.draw_choice_button(canvas, impact_button_bounds(rect), "Environmental impact", false)
+            chrome.draw_choice_button(
+                canvas,
+                impact_button_bounds(rect),
+                "Environmental impact",
+                false
+            )
         }
         return result
     }
@@ -288,13 +366,19 @@ class AircraftDetailsPanelRenderer(
         visible_top: Float,
         visible_bottom: Float
     ): Float {
-        val left = RectF(rect.left + dp(18), rect.top + dp(78), rect.left + rect.width() * 0.38f, rect.bottom - dp(18))
+        val left = RectF(
+            rect.left + dp(18),
+            rect.top + dp(78),
+            rect.left + rect.width() * 0.38f,
+            rect.bottom - dp(18)
+        )
         val gap = dp(18)
         val right_left = left.right + gap
         val right_width = rect.right - dp(18) - right_left
         val col_gap = dp(16)
         val col_width = (right_width - col_gap) / 2f
-        val col_a = RectF(right_left, rect.top + dp(88), right_left + col_width, rect.bottom - dp(18))
+        val col_a =
+            RectF(right_left, rect.top + dp(88), right_left + col_width, rect.bottom - dp(18))
         val col_b = RectF(col_a.right + col_gap, col_a.top, rect.right - dp(18), col_a.bottom)
 
         val photo_rect = photo_bounds(left, wide = true, has_photo = photo.bitmap != null)
@@ -303,11 +387,29 @@ class AircraftDetailsPanelRenderer(
         val split = section_aware_split_index(rows)
         var y_a = col_a.top
         rows.take(split).forEach { row ->
-            y_a = draw_adaptive_detail_row(canvas, col_a, y_a, row, style, visible_top, visible_bottom, compact = true)
+            y_a = draw_adaptive_detail_row(
+                canvas,
+                col_a,
+                y_a,
+                row,
+                style,
+                visible_top,
+                visible_bottom,
+                compact = true
+            )
         }
         var y_b = col_b.top
         rows.drop(split).forEach { row ->
-            y_b = draw_adaptive_detail_row(canvas, col_b, y_b, row, style, visible_top, visible_bottom, compact = true)
+            y_b = draw_adaptive_detail_row(
+                canvas,
+                col_b,
+                y_b,
+                row,
+                style,
+                visible_top,
+                visible_bottom,
+                compact = true
+            )
         }
         return maxOf(photo_rect.bottom, y_a, y_b)
     }
@@ -329,7 +431,12 @@ class AircraftDetailsPanelRenderer(
         state: AircraftDetailsPanelState,
         content: AircraftImpactPanelState
     ): AircraftDetailsDrawResult {
-        chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Back", false)
 
         text_paint.textAlign = Paint.Align.LEFT
@@ -339,14 +446,29 @@ class AircraftDetailsPanelRenderer(
         canvas.drawText("Environmental impact", rect.left + dp(18), rect.top + dp(38), text_paint)
 
         if (!content.selected_aircraft_available) {
-            draw_centered_message(canvas, "Unavailable: no selected live aircraft.", RectF(rect.left + dp(18), rect.top + dp(86), rect.right - dp(18), rect.bottom - dp(24)), style)
+            draw_centered_message(
+                canvas,
+                "Unavailable: no selected live aircraft.",
+                RectF(
+                    rect.left + dp(18),
+                    rect.top + dp(86),
+                    rect.right - dp(18),
+                    rect.bottom - dp(24)
+                ),
+                style
+            )
             return AircraftDetailsDrawResult(0f, 0f)
         }
 
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(chrome.ellipsize(content.status, rect.width() - dp(36)), rect.left + dp(18), rect.top + dp(62), text_paint)
+        canvas.drawText(
+            chrome.ellipsize(content.status, rect.width() - dp(36)),
+            rect.left + dp(18),
+            rect.top + dp(62),
+            text_paint
+        )
 
         val clip = content_bounds(rect)
         val visible_top = clip.top + state.scroll_y
@@ -359,7 +481,15 @@ class AircraftDetailsPanelRenderer(
         y = draw_impact_score_summary(canvas, rect, y, content, style)
         y += dp(10)
         content.rows.forEach { row ->
-            y = draw_adaptive_detail_row(canvas, row_bounds(rect), y, row, style, visible_top, visible_bottom)
+            y = draw_adaptive_detail_row(
+                canvas,
+                row_bounds(rect),
+                y,
+                row,
+                style,
+                visible_top,
+                visible_bottom
+            )
         }
 
         canvas.restoreToCount(checkpoint)
@@ -381,19 +511,43 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(10)
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(if (content.show_trace_co2) "TRACE CO2 SO FAR" else "CLASS CO2 RATE", left, y, text_paint)
+        canvas.drawText(
+            if (content.show_trace_co2) "TRACE CO2 SO FAR" else "CLASS CO2 RATE",
+            left,
+            y,
+            text_paint
+        )
         canvas.drawText(content.score_label, rect.centerX() + dp(8), y, text_paint)
 
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(19)
         text_paint.color = style.visual_theme.colors.text
-        draw_fitted_left_text(canvas, content.co2_text, left, y + dp(32), rect.width() * 0.56f, sp(19), sp(10))
+        draw_fitted_left_text(
+            canvas,
+            content.co2_text,
+            left,
+            y + dp(32),
+            rect.width() * 0.56f,
+            sp(19),
+            sp(10)
+        )
 
         text_paint.textSize = sp(24)
         text_paint.color = content.score_color
-        draw_fitted_right_text(canvas, content.score_text, right, y + dp(32), rect.width() * 0.34f, sp(24), sp(10))
+        draw_fitted_right_text(
+            canvas,
+            content.score_text,
+            right,
+            y + dp(32),
+            rect.width() * 0.34f,
+            sp(24),
+            sp(10)
+        )
 
-        stroke_paint.color = with_alpha(style.visual_theme.colors.panel_stroke, style.visual_theme.style.divider_alpha + 36)
+        stroke_paint.color = with_alpha(
+            style.visual_theme.colors.panel_stroke,
+            style.visual_theme.style.divider_alpha + 36
+        )
         stroke_paint.strokeWidth = dp(1)
         canvas.drawLine(left, y + dp(48), right, y + dp(48), stroke_paint)
         text_paint.isFakeBoldText = false
@@ -407,7 +561,12 @@ class AircraftDetailsPanelRenderer(
         style: AircraftDetailsPanelStyle,
         content: AircraftUsagePanelState
     ) {
-        chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Back", false)
 
         text_paint.textAlign = Paint.Align.LEFT
@@ -417,7 +576,17 @@ class AircraftDetailsPanelRenderer(
         canvas.drawText("Aircraft usage", rect.left + dp(18), rect.top + dp(38), text_paint)
 
         if (!content.selected_aircraft_available) {
-            draw_centered_message(canvas, "Unavailable: no selected live aircraft.", RectF(rect.left + dp(18), rect.top + dp(86), rect.right - dp(18), rect.bottom - dp(24)), style)
+            draw_centered_message(
+                canvas,
+                "Unavailable: no selected live aircraft.",
+                RectF(
+                    rect.left + dp(18),
+                    rect.top + dp(86),
+                    rect.right - dp(18),
+                    rect.bottom - dp(24)
+                ),
+                style
+            )
             return
         }
 
@@ -425,11 +594,26 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(chrome.ellipsize(content.status, rect.width() - dp(36)), rect.left + dp(18), rect.top + dp(62), text_paint)
+        canvas.drawText(
+            chrome.ellipsize(content.status, rect.width() - dp(36)),
+            rect.left + dp(18),
+            rect.top + dp(62),
+            text_paint
+        )
 
         val unavailable = content.unavailable_message
         if (unavailable != null) {
-            draw_centered_message(canvas, unavailable, RectF(rect.left + dp(18), rect.top + dp(96), rect.right - dp(18), rect.bottom - dp(24)), style)
+            draw_centered_message(
+                canvas,
+                unavailable,
+                RectF(
+                    rect.left + dp(18),
+                    rect.top + dp(96),
+                    rect.right - dp(18),
+                    rect.bottom - dp(24)
+                ),
+                style
+            )
             return
         }
 
@@ -438,7 +622,8 @@ class AircraftDetailsPanelRenderer(
             y = draw_usage_stat_line(canvas, rect, y, row.label, row.value, style)
         }
         content.stats?.let { stats ->
-            val graph = RectF(rect.left + dp(18), y + dp(14), rect.right - dp(18), rect.bottom - dp(28))
+            val graph =
+                RectF(rect.left + dp(18), y + dp(14), rect.right - dp(18), rect.bottom - dp(28))
             draw_usage_graph(canvas, graph, stats, style)
         }
     }
@@ -460,16 +645,38 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(13)
         text_paint.color = style.visual_theme.colors.text
-        draw_fitted_right_text(canvas, value, rect.right - dp(18), y, rect.width() * 0.56f, sp(13), sp(9))
-        stroke_paint.color = with_alpha(style.visual_theme.colors.panel_stroke, style.visual_theme.style.divider_alpha)
+        draw_fitted_right_text(
+            canvas,
+            value,
+            rect.right - dp(18),
+            y,
+            rect.width() * 0.56f,
+            sp(13),
+            sp(9)
+        )
+        stroke_paint.color = with_alpha(
+            style.visual_theme.colors.panel_stroke,
+            style.visual_theme.style.divider_alpha
+        )
         stroke_paint.strokeWidth = dp(1)
-        canvas.drawLine(rect.left + dp(18), y + dp(10), rect.right - dp(18), y + dp(10), stroke_paint)
+        canvas.drawLine(
+            rect.left + dp(18),
+            y + dp(10),
+            rect.right - dp(18),
+            y + dp(10),
+            stroke_paint
+        )
         text_paint.isFakeBoldText = false
         return y + dp(28)
     }
 
     // Draw a small seven-day chart from trace buckets without implying broader historical coverage.
-    private fun draw_usage_graph(canvas: Canvas, rect: RectF, stats: UsageStats, style: AircraftDetailsPanelStyle) {
+    private fun draw_usage_graph(
+        canvas: Canvas,
+        rect: RectF,
+        stats: UsageStats,
+        style: AircraftDetailsPanelStyle
+    ) {
         if (rect.height() < dp(96) || rect.width() < dp(180)) return
         paint.style = Paint.Style.FILL
         paint.color = if (style.visual_theme.style.treatment == ThemeTreatment.PLAIN) {
@@ -479,11 +686,15 @@ class AircraftDetailsPanelRenderer(
         }
         val radius = chrome.control_radius().coerceAtMost(dp(8))
         canvas.drawRoundRect(rect, radius, radius, paint)
-        stroke_paint.color = with_alpha(style.visual_theme.colors.panel_stroke, style.visual_theme.style.divider_alpha + 44)
+        stroke_paint.color = with_alpha(
+            style.visual_theme.colors.panel_stroke,
+            style.visual_theme.style.divider_alpha + 44
+        )
         stroke_paint.strokeWidth = dp(1)
         canvas.drawRoundRect(rect, radius, radius, stroke_paint)
 
-        val chart = RectF(rect.left + dp(16), rect.top + dp(28), rect.right - dp(16), rect.bottom - dp(28))
+        val chart =
+            RectF(rect.left + dp(16), rect.top + dp(28), rect.right - dp(16), rect.bottom - dp(28))
         val max_hours = max(1.0, stats.buckets.maxOf { it.hours })
         val max_flights = max(1, stats.buckets.maxOf { it.flights })
         val step = chart.width() / max(1, stats.buckets.size - 1)
@@ -498,7 +709,12 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(10)
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText("hours line / flights bars", rect.right - dp(14), rect.top + dp(18), text_paint)
+        canvas.drawText(
+            "hours line / flights bars",
+            rect.right - dp(14),
+            rect.top + dp(18),
+            text_paint
+        )
 
         stroke_paint.color = with_alpha(style.visual_theme.colors.muted, 90)
         stroke_paint.strokeWidth = dp(1)
@@ -507,11 +723,27 @@ class AircraftDetailsPanelRenderer(
         var previous: ScreenPoint? = null
         stats.buckets.forEachIndexed { index, bucket ->
             val x = chart.left + step * index
-            val bar_height = (chart.height() * (bucket.flights.toFloat() / max_flights)).coerceAtLeast(if (bucket.flights > 0) dp(3) else 0f)
-            paint.color = with_alpha(style.visual_theme.colors.accent_blue, if (bucket.flights > 0) 150 else 42)
-            canvas.drawRoundRect(RectF(x - bar_width / 2f, chart.bottom - bar_height, x + bar_width / 2f, chart.bottom), dp(2), dp(2), paint)
+            val bar_height =
+                (chart.height() * (bucket.flights.toFloat() / max_flights)).coerceAtLeast(
+                    if (bucket.flights > 0) dp(3) else 0f
+                )
+            paint.color = with_alpha(
+                style.visual_theme.colors.accent_blue,
+                if (bucket.flights > 0) 150 else 42
+            )
+            canvas.drawRoundRect(
+                RectF(
+                    x - bar_width / 2f,
+                    chart.bottom - bar_height,
+                    x + bar_width / 2f,
+                    chart.bottom
+                ), dp(2), dp(2), paint
+            )
 
-            val point = ScreenPoint(x, chart.bottom - (chart.height() * (bucket.hours / max_hours)).toFloat())
+            val point = ScreenPoint(
+                x,
+                chart.bottom - (chart.height() * (bucket.hours / max_hours)).toFloat()
+            )
             previous?.let { old ->
                 stroke_paint.color = style.visual_theme.colors.accent_yellow
                 stroke_paint.strokeWidth = dp(2)
@@ -538,7 +770,12 @@ class AircraftDetailsPanelRenderer(
         content: AircraftPhotoEvidencePanelState
     ): AircraftDetailsDrawResult {
         val evidence = content.evidence
-        chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Close", false)
 
         text_paint.textAlign = Paint.Align.LEFT
@@ -551,13 +788,23 @@ class AircraftDetailsPanelRenderer(
             text_paint.isFakeBoldText = false
             text_paint.textSize = sp(13)
             text_paint.color = style.visual_theme.colors.muted
-            canvas.drawText("No search-engine verification is attached to this photo.", rect.left + dp(18), rect.top + dp(78), text_paint)
+            canvas.drawText(
+                "No search-engine verification is attached to this photo.",
+                rect.left + dp(18),
+                rect.top + dp(78),
+                text_paint
+            )
             return AircraftDetailsDrawResult(0f, 0f)
         }
 
         val wide = rect.width() > rect.height()
         val image_rect = if (wide) {
-            RectF(rect.left + dp(18), rect.top + dp(72), rect.left + rect.width() * 0.44f, rect.bottom - dp(80))
+            RectF(
+                rect.left + dp(18),
+                rect.top + dp(72),
+                rect.left + rect.width() * 0.44f,
+                rect.bottom - dp(80)
+            )
         } else {
             RectF(rect.left + dp(18), rect.top + dp(72), rect.right - dp(18), rect.top + dp(270))
         }
@@ -573,7 +820,14 @@ class AircraftDetailsPanelRenderer(
 
         y = draw_evidence_text_line(canvas, text_rect, y, "Source", evidence.source_name, style)
         y = draw_evidence_text_line(canvas, text_rect, y, "Search", evidence.search_query, style)
-        y = draw_evidence_text_line(canvas, text_rect, y, "Matched", evidence.matched_terms.joinToString(", ").ifBlank { "Unavailable" }, style)
+        y = draw_evidence_text_line(
+            canvas,
+            text_rect,
+            y,
+            "Matched",
+            evidence.matched_terms.joinToString(", ").ifBlank { "Unavailable" },
+            style
+        )
 
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = false
@@ -582,7 +836,14 @@ class AircraftDetailsPanelRenderer(
         canvas.drawText("Verification quote", text_rect.left, y + dp(10), text_paint)
         text_paint.textSize = sp(13)
         text_paint.color = style.visual_theme.colors.text
-        val quote_bottom = draw_wrapped_text(canvas, evidence.quote, text_rect.left, y + dp(34), text_rect.width(), DETAILS_PROOF_QUOTE_LINES)
+        val quote_bottom = draw_wrapped_text(
+            canvas,
+            evidence.quote,
+            text_rect.left,
+            y + dp(34),
+            text_rect.width(),
+            DETAILS_PROOF_QUOTE_LINES
+        )
         val content_bottom = maxOf(image_rect.bottom, quote_bottom) + dp(14)
         canvas.restoreToCount(checkpoint)
 
@@ -590,10 +851,20 @@ class AircraftDetailsPanelRenderer(
         draw_scroll_indicator(canvas, clip, result, style)
 
         evidence.image_url.takeIf { it.isNotBlank() }?.let {
-            chrome.draw_choice_button(canvas, photo_image_source_button_bounds(rect), "Open image", false)
+            chrome.draw_choice_button(
+                canvas,
+                photo_image_source_button_bounds(rect),
+                "Open image",
+                false
+            )
         }
         evidence.page_url.takeIf { it.isNotBlank() }?.let {
-            chrome.draw_choice_button(canvas, photo_page_source_button_bounds(rect), "Open source", false)
+            chrome.draw_choice_button(
+                canvas,
+                photo_page_source_button_bounds(rect),
+                "Open source",
+                false
+            )
         }
         return result
     }
@@ -605,7 +876,12 @@ class AircraftDetailsPanelRenderer(
         state: AircraftDetailsPanelState,
         content: AircraftPhotoGalleryPanelState
     ): AircraftDetailsDrawResult {
-        chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel_alt, style.visual_theme.style.modal_panel_alpha)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Back", false)
 
         text_paint.textAlign = Paint.Align.LEFT
@@ -617,11 +893,17 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(chrome.ellipsize(content.status, rect.width() - dp(36)), rect.left + dp(18), rect.top + dp(62), text_paint)
+        canvas.drawText(
+            chrome.ellipsize(content.status, rect.width() - dp(36)),
+            rect.left + dp(18),
+            rect.top + dp(62),
+            text_paint
+        )
 
         val clip = content_bounds(rect)
         if (content.items.isEmpty()) {
-            val message = if (content.loading) content.status else "No real gallery photos available from checked sources."
+            val message =
+                if (content.loading) content.status else "No real gallery photos available from checked sources."
             draw_centered_message(canvas, message, clip.inset_copy(dp(18), dp(18)), style)
             return AircraftDetailsDrawResult(0f, 0f)
         }
@@ -650,9 +932,19 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(10)
         text_paint.color = style.visual_theme.colors.text
-        canvas.drawText(chrome.ellipsize(item.title, rect.width()), rect.left, rect.top + dp(10), text_paint)
+        canvas.drawText(
+            chrome.ellipsize(item.title, rect.width()),
+            rect.left,
+            rect.top + dp(10),
+            text_paint
+        )
         val photo_rect = RectF(rect.left, rect.top + dp(16), rect.right, rect.bottom)
-        draw_photo_block(canvas, photo_rect, AircraftDetailsPhotoState(item.bitmap, item.caption), style)
+        draw_photo_block(
+            canvas,
+            photo_rect,
+            AircraftDetailsPhotoState(item.bitmap, item.caption),
+            style
+        )
         if (item.evidence != null) {
             paint.style = Paint.Style.FILL
             paint.color = with_alpha(style.visual_theme.colors.accent_blue, 176)
@@ -679,7 +971,12 @@ class AircraftDetailsPanelRenderer(
             if (previous != null && progress < 0.999f) {
                 val eased = progress * progress * (3f - 2f * progress)
                 canvas.withClip(photo_rect) {
-                    draw_photo_bitmap(canvas, previous, photo_rect, -photo_rect.width() * eased * 0.42f)
+                    draw_photo_bitmap(
+                        canvas,
+                        previous,
+                        photo_rect,
+                        -photo_rect.width() * eased * 0.42f
+                    )
                     draw_photo_bitmap(canvas, bitmap, photo_rect, photo_rect.width() * (1f - eased))
                 }
             } else {
@@ -694,7 +991,12 @@ class AircraftDetailsPanelRenderer(
         }
     }
 
-    private fun draw_photo_bitmap(canvas: Canvas, bitmap: Bitmap, photo_rect: RectF, offset_x: Float = 0f) {
+    private fun draw_photo_bitmap(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        photo_rect: RectF,
+        offset_x: Float = 0f
+    ) {
         val src = Rect(0, 0, bitmap.width, bitmap.height)
         val dest = aspect_fit_rect(bitmap.width, bitmap.height, photo_rect)
         dest.offset(offset_x, 0f)
@@ -713,7 +1015,16 @@ class AircraftDetailsPanelRenderer(
         compact: Boolean = false
     ): Float {
         if (row.section) {
-            return draw_detail_section_header(canvas, rect, y, row.label, style, visible_top, visible_bottom, compact)
+            return draw_detail_section_header(
+                canvas,
+                rect,
+                y,
+                row.label,
+                style,
+                visible_top,
+                visible_bottom,
+                compact
+            )
         }
         val label_size = if (compact) sp(9) else sp(10)
         val value_size = if (compact) sp(12) else sp(13)
@@ -734,20 +1045,42 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = label_size
         text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(row.label.uppercase(Locale.US), rect.left + if (compact) 0f else dp(16), y, text_paint)
+        canvas.drawText(
+            row.label.uppercase(Locale.US),
+            rect.left + if (compact) 0f else dp(16),
+            y,
+            text_paint
+        )
 
         text_paint.isFakeBoldText = true
         text_paint.textSize = value_size
         text_paint.color = style.visual_theme.colors.text
         if (text_paint.measureText(row.value) <= one_line_width) {
             text_paint.textAlign = Paint.Align.RIGHT
-            draw_fitted_right_text(canvas, row.value, right, y, one_line_width, value_size, min_value_size)
+            draw_fitted_right_text(
+                canvas,
+                row.value,
+                right,
+                y,
+                one_line_width,
+                value_size,
+                min_value_size
+            )
             stroke_paint.color = with_alpha(
                 style.visual_theme.colors.panel_stroke,
-                if (compact) max(36, style.visual_theme.style.divider_alpha - 10) else style.visual_theme.style.divider_alpha
+                if (compact) max(
+                    36,
+                    style.visual_theme.style.divider_alpha - 10
+                ) else style.visual_theme.style.divider_alpha
             )
             stroke_paint.strokeWidth = dp(1)
-            canvas.drawLine(left, y + dp(if (compact) 9 else 10), right, y + dp(if (compact) 9 else 10), stroke_paint)
+            canvas.drawLine(
+                left,
+                y + dp(if (compact) 9 else 10),
+                right,
+                y + dp(if (compact) 9 else 10),
+                stroke_paint
+            )
             text_paint.isFakeBoldText = false
             return row_bottom
         }
@@ -763,7 +1096,10 @@ class AircraftDetailsPanelRenderer(
         }
         stroke_paint.color = with_alpha(
             style.visual_theme.colors.panel_stroke,
-            if (compact) max(36, style.visual_theme.style.divider_alpha - 10) else style.visual_theme.style.divider_alpha
+            if (compact) max(
+                36,
+                style.visual_theme.style.divider_alpha - 10
+            ) else style.visual_theme.style.divider_alpha
         )
         stroke_paint.strokeWidth = dp(1)
         canvas.drawLine(left, cy - dp(6), right, cy - dp(6), stroke_paint)
@@ -793,7 +1129,10 @@ class AircraftDetailsPanelRenderer(
         text_paint.color = style.visual_theme.colors.accent_blue
         canvas.drawText(label.uppercase(Locale.US), left, y + top_gap, text_paint)
 
-        stroke_paint.color = with_alpha(style.visual_theme.colors.panel_stroke, style.visual_theme.style.divider_alpha + 42)
+        stroke_paint.color = with_alpha(
+            style.visual_theme.colors.panel_stroke,
+            style.visual_theme.style.divider_alpha + 42
+        )
         stroke_paint.strokeWidth = dp(1)
         canvas.drawLine(left, y + top_gap + dp(8), right, y + top_gap + dp(8), stroke_paint)
         text_paint.isFakeBoldText = false
@@ -826,20 +1165,39 @@ class AircraftDetailsPanelRenderer(
         return cy + dp(10)
     }
 
-    private fun draw_photo_caption(canvas: Canvas, photo_rect: RectF, caption: String, style: AircraftDetailsPanelStyle) {
+    private fun draw_photo_caption(
+        canvas: Canvas,
+        photo_rect: RectF,
+        caption: String,
+        style: AircraftDetailsPanelStyle
+    ) {
         if (caption.isBlank()) return
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(10)
         val max_width = photo_rect.width() - dp(18)
         val line_height = dp(13)
-        val max_lines = max(1, floor((photo_rect.height() - dp(12)) / line_height).toInt()).coerceAtMost(PHOTO_CAPTION_MAX_LINES)
+        val max_lines =
+            max(1, floor((photo_rect.height() - dp(12)) / line_height).toInt()).coerceAtMost(
+                PHOTO_CAPTION_MAX_LINES
+            )
         val lines = wrapped_text_lines(caption, max_width, max_lines)
-        val caption_height = (dp(12) + lines.size * line_height).coerceAtMost(photo_rect.height() - dp(8))
-        val caption_rect = RectF(photo_rect.left, photo_rect.bottom - caption_height, photo_rect.right, photo_rect.bottom)
+        val caption_height =
+            (dp(12) + lines.size * line_height).coerceAtMost(photo_rect.height() - dp(8))
+        val caption_rect = RectF(
+            photo_rect.left,
+            photo_rect.bottom - caption_height,
+            photo_rect.right,
+            photo_rect.bottom
+        )
         paint.style = Paint.Style.FILL
-        paint.color = with_alpha(style.visual_theme.colors.panel, if (style.visual_theme.style.treatment == ThemeTreatment.PLAIN) 190 else 216)
-        val radius = if (style.visual_theme.style.treatment == ThemeTreatment.PLAIN) dp(4) else chrome.control_radius().coerceAtMost(dp(8))
+        paint.color = with_alpha(
+            style.visual_theme.colors.panel,
+            if (style.visual_theme.style.treatment == ThemeTreatment.PLAIN) 190 else 216
+        )
+        val radius =
+            if (style.visual_theme.style.treatment == ThemeTreatment.PLAIN) dp(4) else chrome.control_radius()
+                .coerceAtMost(dp(8))
         canvas.drawRoundRect(caption_rect, radius, radius, paint)
         text_paint.color = style.visual_theme.colors.text
         val metrics = text_paint.fontMetrics
@@ -850,7 +1208,12 @@ class AircraftDetailsPanelRenderer(
         }
     }
 
-    private fun draw_centered_message(canvas: Canvas, message: String, rect: RectF, style: AircraftDetailsPanelStyle) {
+    private fun draw_centered_message(
+        canvas: Canvas,
+        message: String,
+        rect: RectF,
+        style: AircraftDetailsPanelStyle
+    ) {
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(13)
@@ -870,25 +1233,63 @@ class AircraftDetailsPanelRenderer(
         }
     }
 
-    private fun draw_wrapped_text(canvas: Canvas, value: String, x: Float, y: Float, width: Float, max_lines: Int): Float =
+    private fun draw_wrapped_text(
+        canvas: Canvas,
+        value: String,
+        x: Float,
+        y: Float,
+        width: Float,
+        max_lines: Int
+    ): Float =
         draw_wrapped_text(canvas, text_paint, value, x, y, width, max_lines, dp(19))
 
     private fun draw_fitted_right_text(
-        canvas: Canvas, value: String, right: Float, y: Float, max_width: Float, start_size: Float, min_size: Float
+        canvas: Canvas,
+        value: String,
+        right: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
     ) = draw_fitted_text(
-        canvas, text_paint, value, right, y, max_width, start_size, min_size, Paint.Align.RIGHT, dp(0.5f), chrome::ellipsize
+        canvas,
+        text_paint,
+        value,
+        right,
+        y,
+        max_width,
+        start_size,
+        min_size,
+        Paint.Align.RIGHT,
+        dp(0.5f),
+        chrome::ellipsize
     )
 
     private fun draw_fitted_left_text(
-        canvas: Canvas, value: String, left: Float, y: Float, max_width: Float, start_size: Float, min_size: Float
+        canvas: Canvas,
+        value: String,
+        left: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
     ) = draw_fitted_text(
-        canvas, text_paint, value, left, y, max_width, start_size, min_size, Paint.Align.LEFT, dp(0.5f), chrome::ellipsize
+        canvas,
+        text_paint,
+        value,
+        left,
+        y,
+        max_width,
+        start_size,
+        min_size,
+        Paint.Align.LEFT,
+        dp(0.5f),
+        chrome::ellipsize
     )
 
     // Long words are split by the shared text primitive so every panel wraps identically.
     private fun wrapped_text_lines(value: String, width: Float, max_lines: Int): List<String> =
         wrapped_text_lines(text_paint, value, width, max_lines)
-
 
     private fun photo_bounds(area: RectF, wide: Boolean, has_photo: Boolean): RectF {
         return if (wide) {
@@ -896,7 +1297,12 @@ class AircraftDetailsPanelRenderer(
             RectF(area.left + dp(18), area.top, area.right - dp(18), area.top + height)
         } else {
             val height = if (has_photo) dp(206) else dp(86)
-            RectF(area.left + dp(18), area.top + dp(78), area.right - dp(18), area.top + dp(78) + height)
+            RectF(
+                area.left + dp(18),
+                area.top + dp(78),
+                area.right - dp(18),
+                area.top + dp(78) + height
+            )
         }
     }
 
@@ -909,7 +1315,11 @@ class AircraftDetailsPanelRenderer(
     }
 
     // Return corrected scroll values to FlightMapView so touch scrolling and drawing stay in sync.
-    private fun scroll_result(content_height: Float, viewport_height: Float, requested_scroll_y: Float): AircraftDetailsDrawResult {
+    private fun scroll_result(
+        content_height: Float,
+        viewport_height: Float,
+        requested_scroll_y: Float
+    ): AircraftDetailsDrawResult {
         val max_scroll_y = max(0f, content_height - viewport_height)
         return AircraftDetailsDrawResult(
             scroll_y = requested_scroll_y.coerceIn(0f, max_scroll_y),
@@ -924,18 +1334,30 @@ class AircraftDetailsPanelRenderer(
         style: AircraftDetailsPanelStyle
     ) {
         if (result.max_scroll_y <= dp(2)) return
-        val track = RectF(clip.right - dp(6), clip.top + dp(8), clip.right - dp(3), clip.bottom - dp(8))
+        val track =
+            RectF(clip.right - dp(6), clip.top + dp(8), clip.right - dp(3), clip.bottom - dp(8))
         paint.style = Paint.Style.FILL
         paint.color = with_alpha(style.visual_theme.colors.text, 54)
         canvas.drawRoundRect(track, dp(2), dp(2), paint)
-        val thumb_height = (track.height() * (clip.height() / (clip.height() + result.max_scroll_y))).coerceIn(dp(24), track.height())
-        val top = track.top + (track.height() - thumb_height) * (result.scroll_y / result.max_scroll_y)
+        val thumb_height =
+            (track.height() * (clip.height() / (clip.height() + result.max_scroll_y))).coerceIn(
+                dp(24), track.height()
+            )
+        val top =
+            track.top + (track.height() - thumb_height) * (result.scroll_y / result.max_scroll_y)
         paint.color = with_alpha(style.visual_theme.colors.accent_blue, 170)
-        canvas.drawRoundRect(RectF(track.left, top, track.right, top + thumb_height), dp(2), dp(2), paint)
+        canvas.drawRoundRect(
+            RectF(track.left, top, track.right, top + thumb_height),
+            dp(2),
+            dp(2),
+            paint
+        )
     }
 
     private fun aspect_fit_rect(source_width: Int, source_height: Int, outer: RectF): RectF {
-        if (source_width <= 0 || source_height <= 0 || outer.width() <= 0f || outer.height() <= 0f) return RectF(outer)
+        if (source_width <= 0 || source_height <= 0 || outer.width() <= 0f || outer.height() <= 0f) return RectF(
+            outer
+        )
         val source_ratio = source_width.toFloat() / source_height
         val outer_ratio = outer.width() / outer.height()
         return if (source_ratio > outer_ratio) {
@@ -961,7 +1383,6 @@ class AircraftDetailsPanelRenderer(
 
     private fun sp(value: Float): Float = chrome.sp(value)
 
-
     private companion object {
         const val PHOTO_UNAVAILABLE_LINES = 4
         const val PHOTO_CAPTION_MAX_LINES = 7
@@ -970,6 +1391,3 @@ class AircraftDetailsPanelRenderer(
         const val DETAILS_PROOF_QUOTE_LINES = 12
     }
 }
-
-
-// Picks likely next-tapped aircraft for warm details/photo requests while the map is idle.

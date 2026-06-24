@@ -15,10 +15,10 @@
 )
 
 package com.flightalert
+
 import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -26,19 +26,16 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import com.flightalert.alerts.AircraftMonitorService
+import com.flightalert.alerts.AircraftAlertService
 import com.flightalert.traffic.GlobeBinCraftAircraftSource
+import com.flightalert.ui.FlightAlertSettings
 
 internal fun Context.has_flight_location_permission(): Boolean {
     return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-        checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 }
 
-internal fun Context.is_flightalert_debuggable(): Boolean {
-    return (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-}
-
-
+// Activity stays intentionally thin: permissions, lifecycle, and the single custom map surface.
 class MainActivity : ComponentActivity() {
     private var flight_map_view: FlightMapView? = null
     private var globe_bin_craft_aircraft_source: GlobeBinCraftAircraftSource? = null
@@ -77,7 +74,7 @@ class MainActivity : ComponentActivity() {
         // Make the globe source first. It uses lightweight binCraft HTTP for live wide-area inventory.
         val globe_source = GlobeBinCraftAircraftSource(APP_USER_AGENT)
         globe_source.set_enabled(
-            FlightAlertAppSettings.read_aircraft_feed_mode(this).uses_globe
+            FlightAlertSettings.read_aircraft_feed_mode(this).uses_globe
         )
         globe_bin_craft_aircraft_source = globe_source
 
@@ -89,7 +86,6 @@ class MainActivity : ComponentActivity() {
 
         setContentView(view)
         view.post { configure_high_refresh_rate(view) }
-        apply_perf_intent_if_allowed(intent)
 
         // Put keyboard focus on FlightMapView so emulator keys and filter typing land in the map controller.
         view.requestFocus()
@@ -100,7 +96,6 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        apply_perf_intent_if_allowed(intent)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -137,15 +132,10 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun apply_perf_intent_if_allowed(intent: Intent?) {
-        if (!is_flightalert_debuggable()) return
-        flight_map_view?.apply_perf_intent(intent)
-    }
-
     // The map view handles insets; opaque bars keep Android chrome from blending into app UI.
     @Suppress("DEPRECATION")
     private fun configure_system_bars() {
-        val system_bar_color = FlightAlertAppSettings.read_visual_theme(this).colors.system_bar
+        val system_bar_color = FlightAlertSettings.read_visual_theme(this).colors.system_bar
         window.statusBarColor = system_bar_color
         window.navigationBarColor = system_bar_color
         window.isStatusBarContrastEnforced = false
@@ -195,21 +185,17 @@ class MainActivity : ComponentActivity() {
 
     // Keep the background watcher alive only when alerts need it and Android has granted location.
     private fun update_alert_service() {
-        val prefs = FlightAlertAppSettings.prefs(this)
-        val enabled = prefs.getBoolean(FlightAlertAppSettings.KEY_ALERTS_ENABLED, true) ||
-            prefs.getBoolean(FlightAlertAppSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
+        val prefs = FlightAlertSettings.prefs(this)
+        val enabled = prefs.getBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true) ||
+                prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
         if (enabled && has_location_permission()) {
-            AircraftMonitorService.start(this)
+            AircraftAlertService.start(this)
         } else {
-            AircraftMonitorService.stop(this)
+            AircraftAlertService.stop(this)
         }
     }
 
     private companion object {
         const val APP_USER_AGENT = FlightAlertAppSettings.App.USER_AGENT
-        const val TAG = FlightAlertAppSettings.App.TAG
     }
 }
-
-
-// Foreground watcher for drone-flight safety: live position plus live aircraft feed, no stored tracks.

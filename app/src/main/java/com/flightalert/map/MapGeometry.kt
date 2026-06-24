@@ -15,6 +15,7 @@
 )
 
 package com.flightalert.map
+
 import android.location.Location
 import java.util.Locale
 import kotlin.math.asin
@@ -43,17 +44,20 @@ internal fun bounds_around_location(location: Location, radius_meters: Double): 
     )
 }
 
-
-internal fun spherical_distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+internal fun spherical_distance_meters(
+    lat1: Double,
+    lon1: Double,
+    lat2: Double,
+    lon2: Double
+): Double {
     val lat_distance = Math.toRadians(lat2 - lat1)
     val lon_distance = Math.toRadians(lon2 - lon1)
     val a = sin(lat_distance / 2) * sin(lat_distance / 2) +
-        cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
-        sin(lon_distance / 2) * sin(lon_distance / 2)
+            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
+            sin(lon_distance / 2) * sin(lon_distance / 2)
     val c = 2 * atan2(sqrt(a), sqrt(1 - a))
     return 6_371_000.0 * c
 }
-
 
 internal fun clamped_haversine_distance_meters(
     lat1: Double,
@@ -66,20 +70,16 @@ internal fun clamped_haversine_distance_meters(
     val delta_lat = Math.toRadians(lat2 - lat1)
     val delta_lon = Math.toRadians(lon2 - lon1)
     val haversine = sin(delta_lat / 2.0).pow(2.0) +
-        cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2.0).pow(2.0)
+            cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2.0).pow(2.0)
     return 2.0 * 6_371_000.0 * atan2(sqrt(haversine), sqrt(max(0.0, 1.0 - haversine)))
 }
 
-// Cache/state builders intentionally share geometric growth. The renderer keeps its
-// separate exact-size growth path because that allocation policy is a hot-path choice.
-
 internal fun is_inside_viewport(x: Float, y: Float, viewport: Viewport, padding: Float): Boolean {
     return x >= -padding &&
-        x <= viewport.width + padding &&
-        y >= -padding &&
-        y <= viewport.height + padding
+            x <= viewport.width + padding &&
+            y >= -padding &&
+            y <= viewport.height + padding
 }
-
 
 enum class ReferenceTileOverlay(
     val cache_key: String,
@@ -102,7 +102,6 @@ enum class ReferenceTileOverlay(
     }
 }
 
-
 enum class TileSource(
     val base_cache_key: String,
     val display_name: String,
@@ -120,7 +119,10 @@ enum class TileSource(
         }
     }
 
-    fun reference_overlay_layers(street_labels_enabled: Boolean, borders_enabled: Boolean): List<ReferenceTileOverlay> {
+    fun reference_overlay_layers(
+        street_labels_enabled: Boolean,
+        borders_enabled: Boolean
+    ): List<ReferenceTileOverlay> {
         return when (this) {
             STREET -> emptyList()
             SATELLITE -> buildList {
@@ -130,7 +132,10 @@ enum class TileSource(
         }
     }
 
-    fun attribution_text(labels_enabled: Boolean, borders_enabled: Boolean = labels_enabled): String {
+    fun attribution_text(
+        labels_enabled: Boolean,
+        borders_enabled: Boolean = labels_enabled
+    ): String {
         return when (this) {
             STREET -> if (labels_enabled) base_attribution else "CARTO no-label tiles, OpenStreetMap data"
             SATELLITE -> {
@@ -150,12 +155,12 @@ enum class TileSource(
             } else {
                 "https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/$z/$x/$y.png"
             }
+
             SATELLITE -> "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
         }
     }
 
 }
-
 
 enum class UnitSystem(
     val distance_label: String,
@@ -178,31 +183,43 @@ enum class UnitSystem(
     }
 }
 
-
-
 class MapMeasurementFormatter(
     private val units: () -> UnitSystem
 ) {
     fun current_map_scale(target_pixels: Float, center_latitude: Double, zoom: Double): ScaleLabel {
-        val meters_per_pixel = MapProjection.meters_per_pixel_at(center_latitude, zoom).coerceAtLeast(0.0001)
+        val meters_per_pixel =
+            MapProjection.meters_per_pixel_at(center_latitude, zoom).coerceAtLeast(0.0001)
         val raw_meters = meters_per_pixel * target_pixels
         val scale_meters = if (units() == UnitSystem.IMPERIAL) {
             nice_imperial_scale_meters(raw_meters)
         } else {
             nice_metric_scale_meters(raw_meters)
         }
-        return ScaleLabel((scale_meters / meters_per_pixel).toFloat(), format_scale_distance(scale_meters))
+        return ScaleLabel(
+            (scale_meters / meters_per_pixel).toFloat(),
+            format_scale_distance(scale_meters)
+        )
     }
 
     fun format_distance(meters: Double): String {
         val unit_system = units()
-        return String.format(Locale.US, "%.1f %s", unit_system.distance_meters_to_display(meters), unit_system.distance_label)
+        return String.format(
+            Locale.US,
+            "%.1f %s",
+            unit_system.distance_meters_to_display(meters),
+            unit_system.distance_label
+        )
     }
 
     fun format_altitude(meters: Double?): String {
         val unit_system = units()
         return meters?.let {
-            String.format(Locale.US, "%.0f %s", unit_system.altitude_meters_to_display(it), unit_system.altitude_label)
+            String.format(
+                Locale.US,
+                "%.0f %s",
+                unit_system.altitude_meters_to_display(it),
+                unit_system.altitude_label
+            )
         } ?: "Unavailable"
     }
 
@@ -217,7 +234,12 @@ class MapMeasurementFormatter(
     fun format_speed(meters_per_second: Double?): String {
         val unit_system = units()
         return meters_per_second?.let {
-            String.format(Locale.US, "%.0f %s", unit_system.speed_meters_per_second_to_display(it), unit_system.speed_label)
+            String.format(
+                Locale.US,
+                "%.0f %s",
+                unit_system.speed_meters_per_second_to_display(it),
+                unit_system.speed_label
+            )
         } ?: "Unavailable"
     }
 
@@ -281,7 +303,11 @@ class MapMeasurementFormatter(
                 "${feet.roundToInt()} ft"
             } else {
                 val miles = feet / FEET_PER_MILE
-                if (miles < 10.0) String.format(Locale.US, "%.1f mi", miles) else "${miles.roundToInt()} mi"
+                if (miles < 10.0) String.format(
+                    Locale.US,
+                    "%.1f mi",
+                    miles
+                ) else "${miles.roundToInt()} mi"
             }
         } else if (meters < 1000.0) {
             "${meters.roundToInt()} m"
@@ -301,16 +327,11 @@ class MapMeasurementFormatter(
     }
 }
 
-
-
 data class GeoPoint(val lat: Double, val lon: Double)
-
 
 data class ScreenPoint(val x: Float, val y: Float)
 
-
 data class WorldPoint(val x: Double, val y: Double)
-
 
 data class Viewport(
     val zoom: Double,
@@ -320,13 +341,14 @@ data class Viewport(
     val height: Float
 )
 
-
-data class Bounds(val min_lat: Double, val min_lon: Double, val max_lat: Double, val max_lon: Double)
-
+data class Bounds(
+    val min_lat: Double,
+    val min_lon: Double,
+    val max_lat: Double,
+    val max_lon: Double
+)
 
 data class ScaleLabel(val pixels: Float, val label: String)
-
-
 
 object MapProjection {
     fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -337,8 +359,8 @@ object MapProjection {
 
     fun meters_per_pixel_at(latitude: Double, zoom: Double): Double {
         return cos(Math.toRadians(latitude.coerceIn(-85.0, 85.0))) *
-            EARTH_CIRCUMFERENCE_M /
-            (TILE_SIZE * 2.0.pow(zoom))
+                EARTH_CIRCUMFERENCE_M /
+                (TILE_SIZE * 2.0.pow(zoom))
     }
 
     fun lat_lon_to_world(lat: Double, lon: Double, zoom: Double): WorldPoint {
@@ -357,12 +379,18 @@ object MapProjection {
         return GeoPoint(lat.coerceIn(MERCATOR_MIN_LAT, MERCATOR_MAX_LAT), normalize_longitude(lon))
     }
 
-    fun destination_point(lat: Double, lon: Double, bearing_deg: Double, distance_m: Double): GeoPoint {
+    fun destination_point(
+        lat: Double,
+        lon: Double,
+        bearing_deg: Double,
+        distance_m: Double
+    ): GeoPoint {
         val angular_distance = distance_m / EARTH_RADIUS_M
         val bearing = Math.toRadians(bearing_deg)
         val lat1 = Math.toRadians(lat)
         val lon1 = Math.toRadians(lon)
-        val lat2 = asin(sin(lat1) * cos(angular_distance) + cos(lat1) * sin(angular_distance) * cos(bearing))
+        val lat2 =
+            asin(sin(lat1) * cos(angular_distance) + cos(lat1) * sin(angular_distance) * cos(bearing))
         val lon2 = lon1 + atan2(
             sin(bearing) * sin(angular_distance) * cos(lat1),
             cos(angular_distance) - sin(lat1) * sin(lat2)
@@ -381,7 +409,3 @@ object MapProjection {
     private const val MERCATOR_MIN_LAT = -85.05112878
     private const val MERCATOR_MAX_LAT = 85.05112878
 }
-
-// endregion
-
-// region LAYOUT, PANELS, AND MEDIA

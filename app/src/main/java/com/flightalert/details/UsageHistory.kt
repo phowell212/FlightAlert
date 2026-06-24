@@ -15,7 +15,9 @@
 )
 
 package com.flightalert.details
+
 import com.flightalert.FlightAlertAppSettings
+
 import com.flightalert.flight.FlightTrace
 import com.flightalert.flight.TraceSegment
 import com.flightalert.map.spherical_distance_meters
@@ -44,14 +46,16 @@ object AircraftUsageAnalyzer {
             .atStartOfDay(zone)
             .toEpochSecond()
         val now = System.currentTimeMillis() / 1000L
-        val week_flights = flights.filter { it.end_epoch_sec >= week_start && it.start_epoch_sec <= now }
+        val week_flights =
+            flights.filter { it.end_epoch_sec >= week_start && it.start_epoch_sec <= now }
         val week_hours = week_flights.sumOf { overlap_hours(it, week_start, now) }
 
         val buckets = (6 downTo 0).map { offset ->
             val day = today.minusDays(offset.toLong())
             val start = day.atStartOfDay(zone).toEpochSecond()
             val end = day.plusDays(1).atStartOfDay(zone).toEpochSecond()
-            val day_flights = flights.filter { it.end_epoch_sec >= start && it.start_epoch_sec < end }
+            val day_flights =
+                flights.filter { it.end_epoch_sec >= start && it.start_epoch_sec < end }
             UsageBucket(
                 label = day.format(USAGE_DAY_FORMATTER),
                 flights = day_flights.size,
@@ -91,14 +95,19 @@ object AircraftUsageAnalyzer {
         return UsageFlight(start, end, duration / 3600.0)
     }
 
-    private fun overlap_hours(flight: UsageFlight, start_epoch_sec: Long, end_epoch_sec: Long): Double {
+    private fun overlap_hours(
+        flight: UsageFlight,
+        start_epoch_sec: Long,
+        end_epoch_sec: Long
+    ): Double {
         val start = max(flight.start_epoch_sec, start_epoch_sec)
         val end = min(flight.end_epoch_sec, end_epoch_sec)
         return max(0L, end - start) / 3600.0
     }
 
     private fun format_date(epoch_sec: Long, zone: ZoneId): String {
-        return Instant.ofEpochSecond(epoch_sec).atZone(zone).toLocalDate().format(USAGE_DATE_FORMATTER)
+        return Instant.ofEpochSecond(epoch_sec).atZone(zone).toLocalDate()
+            .format(USAGE_DATE_FORMATTER)
     }
 
     private fun trace_distance_meters(segment: TraceSegment): Double {
@@ -112,13 +121,13 @@ object AircraftUsageAnalyzer {
     private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
         spherical_distance_meters(lat1, lon1, lat2, lon2)
 
-    private val USAGE_DAY_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE", Locale.US)
-    private val USAGE_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d", Locale.US)
+    private val USAGE_DAY_FORMATTER: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("EEE", Locale.US)
+    private val USAGE_DATE_FORMATTER: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("MMM d", Locale.US)
 }
 
-
 data class UsageBucket(val label: String, val flights: Int, val hours: Double)
-
 
 data class UsageStats(
     val buckets: List<UsageBucket>,
@@ -129,8 +138,11 @@ data class UsageStats(
     val window_label: String
 )
 
-internal data class UsageFlight(val start_epoch_sec: Long, val end_epoch_sec: Long, val hours: Double)
-
+internal data class UsageFlight(
+    val start_epoch_sec: Long,
+    val end_epoch_sec: Long,
+    val hours: Double
+)
 
 internal data class OriginAerodrome(
     val name: String?,

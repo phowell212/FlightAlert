@@ -15,52 +15,8 @@
 )
 
 package com.flightalert
-import android.content.Context
-import android.content.SharedPreferences
-
-internal const val MAP_TILE_CACHE_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
-
 
 object FlightAlertAppSettings {
-    const val PREFS_NAME = "flight_alert"
-    const val KEY_UNITS = "units"
-    const val KEY_ZOOM = "zoom"
-    const val KEY_ALERTS_ENABLED = "alerts_enabled"
-    const val KEY_ALERT_DISTANCE_FEET = "alert_distance_feet"
-    const val KEY_ALERT_ALTITUDE_FEET = "alert_altitude_feet"
-    const val KEY_PRIORITY_TRACKING_ENABLED = "priority_tracking_enabled"
-    const val KEY_PRIORITY_RANGE_FEET = "priority_range_feet"
-    const val KEY_PRIORITY_RANGE_CIRCLE_VISIBLE = "priority_range_circle_visible"
-    const val KEY_MAP_SOURCE = "map_source"
-    const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
-    const val KEY_MAP_BORDERS_ENABLED = "map_borders_enabled"
-    const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
-    const val KEY_GLOBE_BINCRAFT_SOURCE_ENABLED = "globe_bin_craft_source_enabled"
-    const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
-    const val KEY_LAYER_RESTRICTED_AIRSPACES_ENABLED = "layer_restricted_airspaces_enabled"
-    const val KEY_LAYER_OCEANIC_TRACKS_ENABLED = "layer_oceanic_tracks_enabled"
-    const val KEY_LAYER_AIRPORT_LABELS_ENABLED = "layer_airport_labels_enabled"
-    const val KEY_VISUAL_THEME = "visual_theme"
-    const val KEY_FILTER_SEARCH_QUERY = "filter_search_query"
-    const val KEY_FILTER_AIRCRAFT_TYPE = "filter_aircraft_type"
-    const val KEY_FILTER_ALTITUDE = "filter_altitude"
-    const val KEY_FILTER_DISTANCE = "filter_distance"
-    const val KEY_FILTER_FLIGHT_STATUS = "filter_flight_status"
-    const val KEY_FILTER_REPORT_AGE = "filter_report_age"
-    const val KEY_FILTER_ALERT_VOLUME = "filter_alert_volume"
-
-    const val DEFAULT_ALERT_DISTANCE_FEET = 5000f
-    const val DEFAULT_ALERT_ALTITUDE_FEET = 1000f
-    const val DEFAULT_PRIORITY_RANGE_FEET = 52800f
-    const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
-    const val DEFAULT_MAP_LABELS_ENABLED = true
-    const val DEFAULT_MAP_BORDERS_ENABLED = true
-    const val DEFAULT_GLOBE_BINCRAFT_SOURCE_ENABLED = true
-    const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
-    const val DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED = false
-    const val DEFAULT_LAYER_OCEANIC_TRACKS_ENABLED = false
-    const val DEFAULT_LAYER_AIRPORT_LABELS_ENABLED = false
-
     object App {
         const val USER_AGENT = "FlightAlertPrototype/0.1"
         const val TAG = "FlightAlert"
@@ -216,154 +172,90 @@ object FlightAlertAppSettings {
     object AviationLayer {
         const val TILE_SIZE = MapTuning.TILE_SIZE
     }
-
-    fun prefs(context: Context): SharedPreferences {
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    }
-
-    fun read_visual_theme(prefs: SharedPreferences): VisualTheme {
-        val stored = prefs.getString(KEY_VISUAL_THEME, VisualTheme.COCKPIT.name) ?: VisualTheme.COCKPIT.name
-        return VisualTheme.entries.firstOrNull { it.name == stored } ?: VisualTheme.COCKPIT
-    }
-
-    fun read_visual_theme(context: Context): VisualTheme = read_visual_theme(prefs(context))
-
-    fun read_aircraft_feed_mode(prefs: SharedPreferences): AircraftFeedMode {
-        val stored = prefs.getString(KEY_AIRCRAFT_FEED_MODE, null)
-        if (stored != null) {
-            return AircraftFeedMode.entries.firstOrNull { it.name == stored } ?: AircraftFeedMode.HYBRID
-        }
-        return AircraftFeedMode.HYBRID
-    }
-
-    fun read_aircraft_feed_mode(context: Context): AircraftFeedMode = read_aircraft_feed_mode(prefs(context))
-
-    enum class AircraftFeedMode(
-        val display_name: String,
-        val compact_name: String,
-        val uses_globe: Boolean
-    ) {
-        WEB("binCraft feed", "binCraft", true),
-        API("API feed", "API feed", false),
-        HYBRID("Hybrid feed", "Hybrid", true);
-
-        fun next(): AircraftFeedMode = when (this) {
-            WEB -> API
-            API -> HYBRID
-            HYBRID -> WEB
-        }
-    }
-
-
 }
+
+// Both map providers use the same disk-cache contract. Network scheduling and bitmap
+// decoding stay provider-specific because their priorities and allocation policies differ.
+internal const val MAP_TILE_CACHE_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
+
 const val TILE_SIZE = FlightAlertAppSettings.MapTuning.TILE_SIZE
-
 const val MIN_ZOOM = FlightAlertAppSettings.MapTuning.MIN_ZOOM
-
 const val MAX_ZOOM = FlightAlertAppSettings.MapTuning.MAX_ZOOM
-
 const val AIRCRAFT_REFRESH_MS = FlightAlertAppSettings.MapTuning.AIRCRAFT_REFRESH_MS
-
 const val AIRCRAFT_FORCE_REFRESH_MS = FlightAlertAppSettings.MapTuning.AIRCRAFT_FORCE_REFRESH_MS
-
-const val BINCRAFT_SNAPSHOT_REFRESH_MS = FlightAlertAppSettings.MapTuning.BINCRAFT_SNAPSHOT_REFRESH_MS
-
+const val BINCRAFT_SNAPSHOT_REFRESH_MS =
+    FlightAlertAppSettings.MapTuning.BINCRAFT_SNAPSHOT_REFRESH_MS
 const val BINCRAFT_API_GRACE_MS = FlightAlertAppSettings.MapTuning.BINCRAFT_API_GRACE_MS
-
-const val HYBRID_BINCRAFT_SUPPLEMENT_RETRY_MS = FlightAlertAppSettings.MapTuning.HYBRID_BINCRAFT_SUPPLEMENT_RETRY_MS
-
+const val HYBRID_BINCRAFT_SUPPLEMENT_RETRY_MS =
+    FlightAlertAppSettings.MapTuning.HYBRID_BINCRAFT_SUPPLEMENT_RETRY_MS
 const val AIRCRAFT_IN_FLIGHT_RETRY_MS = FlightAlertAppSettings.MapTuning.AIRCRAFT_IN_FLIGHT_RETRY_MS
-
 const val AIRCRAFT_TICKER_FETCH_MS = FlightAlertAppSettings.MapTuning.AIRCRAFT_TICKER_FETCH_MS
-
-const val PRIORITY_NOTIFICATION_SNAPSHOT_CHECK_MS = FlightAlertAppSettings.MapTuning.PRIORITY_NOTIFICATION_SNAPSHOT_CHECK_MS
-
-const val AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM = FlightAlertAppSettings.MapTuning.AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM
-
-const val AIRCRAFT_MOTION_REDRAW_MIN_PIXEL_DELTA = FlightAlertAppSettings.MapTuning.AIRCRAFT_MOTION_REDRAW_MIN_PIXEL_DELTA
-
-const val AIRCRAFT_MOTION_REDRAW_MAX_INTERVAL_MS = FlightAlertAppSettings.MapTuning.AIRCRAFT_MOTION_REDRAW_MAX_INTERVAL_MS
-
-const val MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS = FlightAlertAppSettings.MapTuning.MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS
-
-const val MAP_INTERACTION_BINCRAFT_EXTRACTION_PAUSE_MS = FlightAlertAppSettings.MapTuning.MAP_INTERACTION_BINCRAFT_EXTRACTION_PAUSE_MS
-
-const val MAP_TILE_INTERACTION_SETTLE_MS = FlightAlertAppSettings.MapTuning.MAP_TILE_INTERACTION_SETTLE_MS
-
-const val BINCRAFT_FEED_READY_AIRCRAFT_MIN = FlightAlertAppSettings.MapTuning.BINCRAFT_FEED_READY_AIRCRAFT_MIN
-
-const val PARTIAL_FEED_REGRESSION_RATIO = FlightAlertAppSettings.MapTuning.PARTIAL_FEED_REGRESSION_RATIO
-
-const val FAR_ZOOM_POSITION_ESTIMATE_THRESHOLD = FlightAlertAppSettings.MapTuning.FAR_ZOOM_POSITION_ESTIMATE_THRESHOLD
-
+const val PRIORITY_NOTIFICATION_SNAPSHOT_CHECK_MS =
+    FlightAlertAppSettings.MapTuning.PRIORITY_NOTIFICATION_SNAPSHOT_CHECK_MS
+const val AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM =
+    FlightAlertAppSettings.MapTuning.AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM
+const val AIRCRAFT_MOTION_REDRAW_MIN_PIXEL_DELTA =
+    FlightAlertAppSettings.MapTuning.AIRCRAFT_MOTION_REDRAW_MIN_PIXEL_DELTA
+const val AIRCRAFT_MOTION_REDRAW_MAX_INTERVAL_MS =
+    FlightAlertAppSettings.MapTuning.AIRCRAFT_MOTION_REDRAW_MAX_INTERVAL_MS
+const val MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS =
+    FlightAlertAppSettings.MapTuning.MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS
+const val MAP_INTERACTION_BINCRAFT_EXTRACTION_PAUSE_MS =
+    FlightAlertAppSettings.MapTuning.MAP_INTERACTION_BINCRAFT_EXTRACTION_PAUSE_MS
+const val MAP_TILE_INTERACTION_SETTLE_MS =
+    FlightAlertAppSettings.MapTuning.MAP_TILE_INTERACTION_SETTLE_MS
+const val BINCRAFT_FEED_READY_AIRCRAFT_MIN =
+    FlightAlertAppSettings.MapTuning.BINCRAFT_FEED_READY_AIRCRAFT_MIN
+const val PARTIAL_FEED_REGRESSION_RATIO =
+    FlightAlertAppSettings.MapTuning.PARTIAL_FEED_REGRESSION_RATIO
+const val FAR_ZOOM_POSITION_ESTIMATE_THRESHOLD =
+    FlightAlertAppSettings.MapTuning.FAR_ZOOM_POSITION_ESTIMATE_THRESHOLD
 const val PHOTO_LONG_PRESS_MS = FlightAlertAppSettings.MapTuning.PHOTO_LONG_PRESS_MS
-
-const val PHOTO_REPLACEMENT_TRANSITION_MS = FlightAlertAppSettings.MapTuning.PHOTO_REPLACEMENT_TRANSITION_MS
-
+const val PHOTO_REPLACEMENT_TRANSITION_MS =
+    FlightAlertAppSettings.MapTuning.PHOTO_REPLACEMENT_TRANSITION_MS
 const val AIRCRAFT_BOUNDS_PADDING_PX = FlightAlertAppSettings.MapTuning.AIRCRAFT_BOUNDS_PADDING_PX
-
 const val SAFETY_API_MIN_RADIUS_FEET = FlightAlertAppSettings.MapTuning.SAFETY_API_MIN_RADIUS_FEET
-
 const val SAFETY_API_MIN_PADDING_FEET = FlightAlertAppSettings.MapTuning.SAFETY_API_MIN_PADDING_FEET
-
-const val SAFETY_API_RADIUS_MULTIPLIER = FlightAlertAppSettings.MapTuning.SAFETY_API_RADIUS_MULTIPLIER
-
+const val SAFETY_API_RADIUS_MULTIPLIER =
+    FlightAlertAppSettings.MapTuning.SAFETY_API_RADIUS_MULTIPLIER
 const val AIRCRAFT_APPEAR_DURATION_MS = FlightAlertAppSettings.MapTuning.AIRCRAFT_APPEAR_DURATION_MS
-
-const val AIRCRAFT_APPEARANCE_RETENTION_MS = FlightAlertAppSettings.MapTuning.AIRCRAFT_APPEARANCE_RETENTION_MS
-
-const val AVIATION_LAYER_INTERACTION_SETTLE_MS = FlightAlertAppSettings.MapTuning.AVIATION_LAYER_INTERACTION_SETTLE_MS
-
-const val ZOOM_PREFERENCE_SAVE_DELAY_MS = FlightAlertAppSettings.MapTuning.ZOOM_PREFERENCE_SAVE_DELAY_MS
-
+const val AIRCRAFT_APPEARANCE_RETENTION_MS =
+    FlightAlertAppSettings.MapTuning.AIRCRAFT_APPEARANCE_RETENTION_MS
+const val AVIATION_LAYER_INTERACTION_SETTLE_MS =
+    FlightAlertAppSettings.MapTuning.AVIATION_LAYER_INTERACTION_SETTLE_MS
+const val ZOOM_PREFERENCE_SAVE_DELAY_MS =
+    FlightAlertAppSettings.MapTuning.ZOOM_PREFERENCE_SAVE_DELAY_MS
 const val AVIATION_LAYER_REFRESH_MS = FlightAlertAppSettings.MapTuning.AVIATION_LAYER_REFRESH_MS
-
-const val AVIATION_LAYER_BOUNDS_PADDING_FRACTION = FlightAlertAppSettings.MapTuning.AVIATION_LAYER_BOUNDS_PADDING_FRACTION
-
+const val AVIATION_LAYER_BOUNDS_PADDING_FRACTION =
+    FlightAlertAppSettings.MapTuning.AVIATION_LAYER_BOUNDS_PADDING_FRACTION
 const val PATH_FIT_CONTEXT_MULTIPLIER = FlightAlertAppSettings.MapTuning.PATH_FIT_CONTEXT_MULTIPLIER
-
 const val PRIORITY_PANEL_ROWS = FlightAlertAppSettings.MapTuning.PRIORITY_PANEL_ROWS
-
 const val PROOF_QUOTE_LINES = FlightAlertAppSettings.MapTuning.PROOF_QUOTE_LINES
-
 const val AIRCRAFT_TAP_RADIUS_DP = FlightAlertAppSettings.MapTuning.AIRCRAFT_TAP_RADIUS_DP
-
 const val HOLE_PUNCH_MAX_SIZE_DP = FlightAlertAppSettings.MapTuning.HOLE_PUNCH_MAX_SIZE_DP
-
 const val MAX_ESTIMATION_SECONDS = FlightAlertAppSettings.MapTuning.MAX_ESTIMATION_SECONDS
-
-const val DETAILS_WARM_CACHE_MAX_ENTRIES = FlightAlertAppSettings.MapTuning.DETAILS_WARM_CACHE_MAX_ENTRIES
-
-const val DETAILS_WARM_CACHE_MAX_AGE_MS = FlightAlertAppSettings.MapTuning.DETAILS_WARM_CACHE_MAX_AGE_MS
-
-const val DETAILS_PREFETCH_IDLE_DELAY_MS = FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_IDLE_DELAY_MS
-
-const val DETAILS_PREFETCH_INTERVAL_MS = FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_INTERVAL_MS
-
+const val DETAILS_WARM_CACHE_MAX_ENTRIES =
+    FlightAlertAppSettings.MapTuning.DETAILS_WARM_CACHE_MAX_ENTRIES
+const val DETAILS_WARM_CACHE_MAX_AGE_MS =
+    FlightAlertAppSettings.MapTuning.DETAILS_WARM_CACHE_MAX_AGE_MS
+const val DETAILS_PREFETCH_IDLE_DELAY_MS =
+    FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_IDLE_DELAY_MS
+const val DETAILS_PREFETCH_INTERVAL_MS =
+    FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_INTERVAL_MS
 const val DETAILS_PREFETCH_MIN_ZOOM = FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_MIN_ZOOM
-
-const val DETAILS_PREFETCH_MAX_IN_FLIGHT = FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_MAX_IN_FLIGHT
-
-const val DETAILS_PREFETCH_MAX_VISIBLE_CANDIDATES = FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_MAX_VISIBLE_CANDIDATES
-
+const val DETAILS_PREFETCH_MAX_IN_FLIGHT =
+    FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_MAX_IN_FLIGHT
+const val DETAILS_PREFETCH_MAX_VISIBLE_CANDIDATES =
+    FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_MAX_VISIBLE_CANDIDATES
 const val DETAILS_PREFETCH_SCAN_LIMIT = FlightAlertAppSettings.MapTuning.DETAILS_PREFETCH_SCAN_LIMIT
-
-const val PATH_TRACE_NEWER_THAN_FEED_SECONDS = FlightAlertAppSettings.MapTuning.PATH_TRACE_NEWER_THAN_FEED_SECONDS
-
-const val MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS = FlightAlertAppSettings.MapTuning.MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS
-
+const val PATH_TRACE_NEWER_THAN_FEED_SECONDS =
+    FlightAlertAppSettings.MapTuning.PATH_TRACE_NEWER_THAN_FEED_SECONDS
+const val MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS =
+    FlightAlertAppSettings.MapTuning.MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS
 const val ALTITUDE_COLOR_MAX_FEET = FlightAlertAppSettings.MapTuning.ALTITUDE_COLOR_MAX_FEET
-
 const val KNOTS_TO_METERS_PER_SECOND = FlightAlertAppSettings.MapTuning.KNOTS_TO_METERS_PER_SECOND
-
-const val DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M = FlightAlertAppSettings.MapTuning.DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M
-
+const val DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M =
+    FlightAlertAppSettings.MapTuning.DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M
 const val INITIAL_RANGE_MULTIPLIER = FlightAlertAppSettings.MapTuning.INITIAL_RANGE_MULTIPLIER
-
 const val USER_AGENT = FlightAlertAppSettings.MapTuning.USER_AGENT
-
 const val TAG = FlightAlertAppSettings.MapTuning.TAG
-
-// endregion
-
-// region DOMAIN STATE AND DATA ACQUISITION

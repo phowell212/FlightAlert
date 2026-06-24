@@ -1,4 +1,4 @@
-@file:Suppress(
+﻿@file:Suppress(
     "CanBeVal",
     "FunctionName",
     "KotlinConstantConditions",
@@ -15,18 +15,20 @@
 )
 
 package com.flightalert.aircraft
+
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import com.flightalert.map.Viewport
 import com.flightalert.ThemeTreatment
 import com.flightalert.VisualTheme
-import com.flightalert.map.Viewport
 import com.flightalert.ui.lerp
 import com.flightalert.ui.mix_color
 import com.flightalert.ui.safe_smooth_step
 import com.flightalert.ui.smooth_step
+import java.util.LinkedHashMap
 import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -39,7 +41,6 @@ data class AltitudeColorPalette(
     val mid: Int,
     val high: Int
 )
-
 
 object AircraftMarkerMorph {
     fun marker_dot_blend(viewport: Viewport): Float {
@@ -56,7 +57,11 @@ object AircraftMarkerMorph {
     }
 
     fun symbol_visibility(dot_blend: Float): Float {
-        return smooth_step(SYMBOL_VISIBILITY_START, SYMBOL_VISIBILITY_FULL, symbol_progress(dot_blend))
+        return smooth_step(
+            SYMBOL_VISIBILITY_START,
+            SYMBOL_VISIBILITY_FULL,
+            symbol_progress(dot_blend)
+        )
     }
 
     fun dot_progress(dot_blend: Float): Float {
@@ -73,14 +78,18 @@ object AircraftMarkerMorph {
     }
 
     fun aircraft_dot_scale(zoom: Double): Float {
-        val far_progress = smooth_step(DOT_SCALE_FLOOR_ZOOM_MIN, DOT_SCALE_FLOOR_ZOOM_MAX, zoom.toFloat())
+        val far_progress =
+            smooth_step(DOT_SCALE_FLOOR_ZOOM_MIN, DOT_SCALE_FLOOR_ZOOM_MAX, zoom.toFloat())
         val far_scale = lerp(DOT_SCALE_FLOOR_MIN, DOT_SCALE_FLOOR_MAX, far_progress)
         val transition_progress = smooth_step(
             DOT_SCALE_TRANSITION_ZOOM_START,
             DOT_SCALE_TRANSITION_ZOOM_END,
             zoom.toFloat()
         )
-        return max(READABLE_DOT_SCALE_MIN, lerp(far_scale, DOT_SCALE_TRANSITION_MAX, transition_progress))
+        return max(
+            READABLE_DOT_SCALE_MIN,
+            lerp(far_scale, DOT_SCALE_TRANSITION_MAX, transition_progress)
+        )
     }
 
     fun blended_icon_scale(zoom: Double, dot_blend: Float): Float {
@@ -97,7 +106,6 @@ object AircraftMarkerMorph {
 
     fun smooth_step(edge0: Float, edge1: Float, value: Float): Float =
         safe_smooth_step(edge0, edge1, value)
-
 
     const val SYMBOL_ACTIVE_MIN_PROGRESS = 0.03f
     const val SYMBOL_IDLE_MIN_PROGRESS = 0.03f
@@ -125,8 +133,6 @@ object AircraftMarkerMorph {
     private const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
 }
 
-
-
 object AircraftSymbolRenderer {
     private val path = Path()
     private val body_path_cache = object : LinkedHashMap<SymbolBodyPathKey, Path>(64, 0.75f, true) {
@@ -134,11 +140,12 @@ object AircraftSymbolRenderer {
             return size > SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES
         }
     }
-    private val body_point_cache = object : LinkedHashMap<SymbolBodyPathKey, FloatArray>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<SymbolBodyPathKey, FloatArray>): Boolean {
-            return size > SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES
+    private val body_point_cache =
+        object : LinkedHashMap<SymbolBodyPathKey, FloatArray>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<SymbolBodyPathKey, FloatArray>): Boolean {
+                return size > SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES
+            }
         }
-    }
 
     fun draw(
         canvas: Canvas,
@@ -154,7 +161,13 @@ object AircraftSymbolRenderer {
             AircraftSymbol.UAV -> draw_uav(canvas, progress, paint, stroke_paint, dp)
             AircraftSymbol.SURFACE -> draw_surface(canvas, progress, paint, stroke_paint, dp)
             AircraftSymbol.AIRLINER -> draw_airliner(canvas, progress, paint, stroke_paint, dp)
-            AircraftSymbol.GENERAL_AVIATION -> draw_general_aviation(canvas, progress, paint, stroke_paint, dp)
+            AircraftSymbol.GENERAL_AVIATION -> draw_general_aviation(
+                canvas,
+                progress,
+                paint,
+                stroke_paint,
+                dp
+            )
         }
     }
 
@@ -167,9 +180,34 @@ object AircraftSymbolRenderer {
         dp: (Float) -> Float
     ) {
         when (symbol) {
-            AircraftSymbol.GENERAL_AVIATION -> draw_cached_morphed_polygon(canvas, symbol, GENERAL_AVIATION_POINTS, progress, paint, stroke_paint, dp)
-            AircraftSymbol.GLIDER -> draw_cached_morphed_polygon(canvas, symbol, GLIDER_POINTS, progress, paint, stroke_paint, dp)
-            AircraftSymbol.AIRLINER -> draw_cached_airliner(canvas, progress, paint, stroke_paint, dp)
+            AircraftSymbol.GENERAL_AVIATION -> draw_cached_morphed_polygon(
+                canvas,
+                symbol,
+                GENERAL_AVIATION_POINTS,
+                progress,
+                paint,
+                stroke_paint,
+                dp
+            )
+
+            AircraftSymbol.GLIDER -> draw_cached_morphed_polygon(
+                canvas,
+                symbol,
+                GLIDER_POINTS,
+                progress,
+                paint,
+                stroke_paint,
+                dp
+            )
+
+            AircraftSymbol.AIRLINER -> draw_cached_airliner(
+                canvas,
+                progress,
+                paint,
+                stroke_paint,
+                dp
+            )
+
             AircraftSymbol.SURFACE -> draw_cached_surface(canvas, progress, paint, stroke_paint, dp)
             AircraftSymbol.ROTORCRAFT,
             AircraftSymbol.UAV -> draw(canvas, symbol, progress, paint, stroke_paint, dp)
@@ -212,8 +250,18 @@ object AircraftSymbolRenderer {
 
         val engine = smooth_step(0.48f, 1f, p)
         if (engine > 0f) {
-            canvas.drawCircle(-dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), stroke_paint)
-            canvas.drawCircle(dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), stroke_paint)
+            canvas.drawCircle(
+                -dp(11.8f * engine),
+                dp(5.6f * engine),
+                dp(2.2f * engine),
+                stroke_paint
+            )
+            canvas.drawCircle(
+                dp(11.8f * engine),
+                dp(5.6f * engine),
+                dp(2.2f * engine),
+                stroke_paint
+            )
         }
     }
 
@@ -228,15 +276,28 @@ object AircraftSymbolRenderer {
         val body = smooth_step(0f, 0.55f, p)
         val rotor = smooth_step(0.25f, 1f, p)
         val tail = smooth_step(0.45f, 1f, p)
-        val body_rect = RectF(-dp(4f + 4f * body), -dp(4f + 3f * body), dp(4f + 5f * body), dp(4f + 4f * body))
+        val body_rect =
+            RectF(-dp(4f + 4f * body), -dp(4f + 3f * body), dp(4f + 5f * body), dp(4f + 4f * body))
         canvas.drawOval(body_rect, paint)
         canvas.drawOval(body_rect, stroke_paint)
         stroke_paint.strokeWidth = dp(2.5f)
         canvas.drawLine(-dp(5f + 19f * rotor), 0f, dp(5f + 19f * rotor), 0f, stroke_paint)
         canvas.drawLine(0f, -dp(5f + 17f * rotor), 0f, dp(5f + 17f * rotor), stroke_paint)
         stroke_paint.strokeWidth = dp(2f)
-        canvas.drawLine(dp(5f + 4f * body), dp(1f), dp(7f + 16f * tail), dp(4f + 5f * tail), stroke_paint)
-        canvas.drawLine(dp(8f + 13f * tail), dp(3f + 2f * tail), dp(9f + 16f * tail), dp(5f + 8f * tail), stroke_paint)
+        canvas.drawLine(
+            dp(5f + 4f * body),
+            dp(1f),
+            dp(7f + 16f * tail),
+            dp(4f + 5f * tail),
+            stroke_paint
+        )
+        canvas.drawLine(
+            dp(8f + 13f * tail),
+            dp(3f + 2f * tail),
+            dp(9f + 16f * tail),
+            dp(5f + 8f * tail),
+            stroke_paint
+        )
         stroke_paint.strokeWidth = dp(1.2f)
     }
 
@@ -286,10 +347,42 @@ object AircraftSymbolRenderer {
         val rotor_offset = dp(8f + 12f * arms)
         val rotor_radius = dp(1.5f + 3.5f * rotors)
         val rotor_blade = dp(5f * rotors)
-        draw_uav_rotor(canvas, -rotor_offset, -rotor_offset, rotor_radius, rotor_blade, paint, stroke_paint)
-        draw_uav_rotor(canvas, rotor_offset, -rotor_offset, rotor_radius, rotor_blade, paint, stroke_paint)
-        draw_uav_rotor(canvas, -rotor_offset, rotor_offset, rotor_radius, rotor_blade, paint, stroke_paint)
-        draw_uav_rotor(canvas, rotor_offset, rotor_offset, rotor_radius, rotor_blade, paint, stroke_paint)
+        draw_uav_rotor(
+            canvas,
+            -rotor_offset,
+            -rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
+        draw_uav_rotor(
+            canvas,
+            rotor_offset,
+            -rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
+        draw_uav_rotor(
+            canvas,
+            -rotor_offset,
+            rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
+        draw_uav_rotor(
+            canvas,
+            rotor_offset,
+            rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
         stroke_paint.strokeWidth = dp(1.2f)
     }
 
@@ -312,7 +405,13 @@ object AircraftSymbolRenderer {
             dp = dp
         )
         stroke_paint.strokeWidth = dp(2f)
-        canvas.drawLine(-dp(5f + 9f * gear), dp(8f + 10f * body), dp(5f + 9f * gear), dp(8f + 10f * body), stroke_paint)
+        canvas.drawLine(
+            -dp(5f + 9f * gear),
+            dp(8f + 10f * body),
+            dp(5f + 9f * gear),
+            dp(8f + 10f * body),
+            stroke_paint
+        )
         canvas.drawCircle(-dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
         canvas.drawCircle(dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
         stroke_paint.strokeWidth = dp(1.2f)
@@ -326,7 +425,15 @@ object AircraftSymbolRenderer {
         dp: (Float) -> Float
     ) {
         val p = progress.coerceIn(0f, 1f)
-        draw_cached_morphed_polygon(canvas, AircraftSymbol.AIRLINER, AIRLINER_POINTS, p, paint, stroke_paint, dp)
+        draw_cached_morphed_polygon(
+            canvas,
+            AircraftSymbol.AIRLINER,
+            AIRLINER_POINTS,
+            p,
+            paint,
+            stroke_paint,
+            dp
+        )
         draw_airliner_details(canvas, p, stroke_paint, dp)
     }
 
@@ -339,8 +446,18 @@ object AircraftSymbolRenderer {
         val p = progress.coerceIn(0f, 1f)
         val engine = smooth_step(0.48f, 1f, p)
         if (engine > 0f) {
-            canvas.drawCircle(-dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), stroke_paint)
-            canvas.drawCircle(dp(11.8f * engine), dp(5.6f * engine), dp(2.2f * engine), stroke_paint)
+            canvas.drawCircle(
+                -dp(11.8f * engine),
+                dp(5.6f * engine),
+                dp(2.2f * engine),
+                stroke_paint
+            )
+            canvas.drawCircle(
+                dp(11.8f * engine),
+                dp(5.6f * engine),
+                dp(2.2f * engine),
+                stroke_paint
+            )
         }
     }
 
@@ -352,7 +469,15 @@ object AircraftSymbolRenderer {
         dp: (Float) -> Float
     ) {
         val p = progress.coerceIn(0f, 1f)
-        draw_cached_morphed_polygon(canvas, AircraftSymbol.SURFACE, SURFACE_POINTS, p, paint, stroke_paint, dp)
+        draw_cached_morphed_polygon(
+            canvas,
+            AircraftSymbol.SURFACE,
+            SURFACE_POINTS,
+            p,
+            paint,
+            stroke_paint,
+            dp
+        )
         draw_surface_details(canvas, p, stroke_paint, dp)
     }
 
@@ -366,7 +491,13 @@ object AircraftSymbolRenderer {
         val body = smooth_step(0f, 0.6f, p)
         val gear = smooth_step(0.55f, 1f, p)
         stroke_paint.strokeWidth = dp(2f)
-        canvas.drawLine(-dp(5f + 9f * gear), dp(8f + 10f * body), dp(5f + 9f * gear), dp(8f + 10f * body), stroke_paint)
+        canvas.drawLine(
+            -dp(5f + 9f * gear),
+            dp(8f + 10f * body),
+            dp(5f + 9f * gear),
+            dp(8f + 10f * body),
+            stroke_paint
+        )
         canvas.drawCircle(-dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
         canvas.drawCircle(dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
         stroke_paint.strokeWidth = dp(1.2f)
@@ -496,8 +627,6 @@ object AircraftSymbolRenderer {
         canvas.drawLine(x - blade, y, x + blade, y, stroke_paint)
     }
 
-
-
     private data class SymbolBodyPathKey(
         val symbol: AircraftSymbol,
         val progress_bucket: Int,
@@ -571,15 +700,12 @@ object AircraftSymbolRenderer {
     )
 }
 
-
-
 data class TrafficAltitudeColorPalette(
     val aggressive: Int,
     val aggressive_shade: Int,
     val distinct: Int,
     val calmest: Int
 )
-
 
 object AircraftColorResolver {
     fun aircraft_color(aircraft: Aircraft, theme: VisualTheme): Int {
@@ -599,10 +725,12 @@ object AircraftColorResolver {
                 val progress = altitude_progress(altitude, 0.0, LOW_ALTITUDE_FEET)
                 mix_color(palette.aggressive, palette.aggressive_shade, progress)
             }
+
             altitude < MID_ALTITUDE_FEET -> {
                 val progress = altitude_progress(altitude, LOW_ALTITUDE_FEET, MID_ALTITUDE_FEET)
                 mix_color(palette.aggressive_shade, palette.distinct, progress)
             }
+
             else -> {
                 val progress = altitude_progress(altitude, MID_ALTITUDE_FEET, HIGH_ALTITUDE_FEET)
                 mix_color(palette.distinct, palette.calmest, progress)
@@ -611,7 +739,8 @@ object AircraftColorResolver {
     }
 
     private fun military_altitude_color(altitude_feet: Double?, theme: VisualTheme): Int {
-        val progress = altitude_feet?.let { altitude_progress(it, 0.0, HIGH_ALTITUDE_FEET) } ?: 0.55f
+        val progress =
+            altitude_feet?.let { altitude_progress(it, 0.0, HIGH_ALTITUDE_FEET) } ?: 0.55f
         val low_gray = mix_color(theme.colors.military, Color.WHITE, 0.34f)
         val high_gray = mix_color(theme.colors.military, theme.colors.scrim, 0.22f)
         return mix_color(low_gray, high_gray, progress)
@@ -626,30 +755,35 @@ object AircraftColorResolver {
                 distinct = colors.accent_green,
                 calmest = colors.accent_blue
             )
+
             ThemeTreatment.CRT_SCANLINE -> TrafficAltitudeColorPalette(
                 aggressive = colors.danger,
                 aggressive_shade = colors.accent_yellow,
                 distinct = colors.accent_green,
                 calmest = mix_color(colors.accent_blue, colors.muted, 0.25f)
             )
+
             ThemeTreatment.DAYLIGHT_CARD -> TrafficAltitudeColorPalette(
                 aggressive = colors.danger,
                 aggressive_shade = colors.accent_orange,
                 distinct = colors.accent_green,
                 calmest = colors.accent_blue
             )
+
             ThemeTreatment.STORM_BAND -> TrafficAltitudeColorPalette(
                 aggressive = colors.danger,
                 aggressive_shade = colors.accent_pink,
                 distinct = colors.accent_green,
                 calmest = colors.accent_blue
             )
+
             ThemeTreatment.GLASS -> TrafficAltitudeColorPalette(
                 aggressive = colors.accent_orange,
                 aggressive_shade = colors.accent_yellow,
                 distinct = colors.accent_green,
                 calmest = colors.accent_blue
             )
+
             ThemeTreatment.PLAIN -> TrafficAltitudeColorPalette(
                 aggressive = colors.danger,
                 aggressive_shade = colors.accent_orange,
@@ -659,22 +793,26 @@ object AircraftColorResolver {
         }
     }
 
-    private fun altitude_progress(altitude_feet: Double, lower_feet: Double, upper_feet: Double): Float {
-        return smooth_step(0f, 1f, ((altitude_feet - lower_feet) / (upper_feet - lower_feet)).toFloat())
+    private fun altitude_progress(
+        altitude_feet: Double,
+        lower_feet: Double,
+        upper_feet: Double
+    ): Float {
+        return smooth_step(
+            0f,
+            1f,
+            ((altitude_feet - lower_feet) / (upper_feet - lower_feet)).toFloat()
+        )
     }
 
     private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float =
         safe_smooth_step(edge0, edge1, value)
-
-
 
     private const val FEET_PER_METER = 3.28084
     private const val LOW_ALTITUDE_FEET = 5000.0
     private const val MID_ALTITUDE_FEET = 25000.0
     private const val HIGH_ALTITUDE_FEET = 45000.0
 }
-
-
 
 enum class AircraftSymbol {
     GENERAL_AVIATION,
@@ -684,7 +822,6 @@ enum class AircraftSymbol {
     UAV,
     SURFACE
 }
-
 
 object AircraftSymbolClassifier {
     fun symbol_for(aircraft: Aircraft): AircraftSymbol {
@@ -708,11 +845,13 @@ object AircraftSymbolClassifier {
                 REGIONAL_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 0.98f
                 else -> 1.05f
             }
+
             AircraftSymbol.GENERAL_AVIATION -> when {
                 LIGHT_JET_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.04f
                 SMALL_GENERAL_AVIATION_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 0.86f
                 else -> 1.0f
             }
+
             AircraftSymbol.ROTORCRAFT -> 0.9f
             AircraftSymbol.GLIDER -> 0.82f
             AircraftSymbol.UAV -> 0.74f
@@ -835,6 +974,3 @@ object AircraftSymbolClassifier {
         "MD9"
     )
 }
-
-
-// Chooses and merges live aircraft sources so FlightMapView can ask for traffic without knowing source policy.

@@ -1,4 +1,4 @@
-@file:Suppress(
+﻿@file:Suppress(
     "CanBeVal",
     "FunctionName",
     "KotlinConstantConditions",
@@ -15,6 +15,7 @@
 )
 
 package com.flightalert.details
+
 import android.graphics.Bitmap
 import android.os.SystemClock
 import com.flightalert.DETAILS_PREFETCH_IDLE_DELAY_MS
@@ -23,7 +24,6 @@ import com.flightalert.DETAILS_PREFETCH_MAX_IN_FLIGHT
 import com.flightalert.DETAILS_PREFETCH_MAX_VISIBLE_CANDIDATES
 import com.flightalert.DETAILS_PREFETCH_MIN_ZOOM
 import com.flightalert.DETAILS_PREFETCH_SCAN_LIMIT
-import com.flightalert.FlightAlertAppSettings.AircraftFeedMode
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftPositionProjector
@@ -41,6 +41,8 @@ import com.flightalert.map.Viewport
 import com.flightalert.traffic.CachedTraffic
 import com.flightalert.traffic.TrafficOverlayState
 import com.flightalert.traffic.TrafficSpatialEntry
+import com.flightalert.ui.AircraftFeedMode
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
@@ -57,7 +59,10 @@ internal class AircraftDetailsContentBuilder(
     private val usage_trace_for: (Aircraft) -> FlightTrace?,
     private val units: () -> UnitSystem
 ) {
-    fun impact_panel_state(aircraft: Aircraft?, details: AircraftDetails?): AircraftImpactPanelState {
+    fun impact_panel_state(
+        aircraft: Aircraft?,
+        details: AircraftDetails?
+    ): AircraftImpactPanelState {
         if (aircraft == null) {
             return AircraftImpactPanelState(
                 selected_aircraft_available = false,
@@ -88,9 +93,18 @@ internal class AircraftDetailsContentBuilder(
         val score_text = score_value?.let { "$it / 100" } ?: loading_or_unavailable(details_loading)
         val co2_text = when {
             trace_estimate != null -> AircraftImpactPresenter.carbon_range(trace_estimate.carbon)
-            profile != null && trace != null -> AircraftImpactPresenter.carbon_range(profile.carbon_for_hours(trace.hours))
+            profile != null && trace != null -> AircraftImpactPresenter.carbon_range(
+                profile.carbon_for_hours(
+                    trace.hours
+                )
+            )
+
             trace_loading -> "Loading"
-            profile != null -> AircraftImpactPresenter.kg_range(profile.low_co2_kg_per_hour(), profile.high_co2_kg_per_hour())
+            profile != null -> AircraftImpactPresenter.kg_range(
+                profile.low_co2_kg_per_hour(),
+                profile.high_co2_kg_per_hour()
+            )
+
             else -> loading_or_unavailable(loading)
         }
         return AircraftImpactPanelState(
@@ -160,8 +174,14 @@ internal class AircraftDetailsContentBuilder(
             status = status,
             unavailable_message = null,
             stat_rows = listOf(
-                AircraftDetailsRow("Current week", "${stats.week_flight_count} flights  ${AircraftUsageAnalyzer.format_hours(stats.week_hours)}"),
-                AircraftDetailsRow("Trace window total", "${stats.flight_count} flights  ${AircraftUsageAnalyzer.format_hours(stats.total_hours)}"),
+                AircraftDetailsRow(
+                    "Current week",
+                    "${stats.week_flight_count} flights  ${AircraftUsageAnalyzer.format_hours(stats.week_hours)}"
+                ),
+                AircraftDetailsRow(
+                    "Trace window total",
+                    "${stats.flight_count} flights  ${AircraftUsageAnalyzer.format_hours(stats.total_hours)}"
+                ),
                 AircraftDetailsRow("Trace window", stats.window_label)
             ),
             stats = stats
@@ -169,14 +189,12 @@ internal class AircraftDetailsContentBuilder(
     }
 }
 
-
 internal data class AircraftDetailCandidate(
     val source_name: String,
     val fetch: () -> AircraftDetails?
 )
 
 // Coordinates details, photo, and feed seed lookups so FlightMapView only reacts to finished callbacks.
-
 class AircraftDetailsCoordinator(
     private val aircraft_details_client: AircraftDetailsClient,
     private val aircraft_photo_fetcher: AircraftPhotoFetcher,
@@ -233,17 +251,30 @@ class AircraftDetailsCoordinator(
 
             if (should_run_fallback) {
                 executor.execute {
-                    val photo = runCatching { aircraft_photo_fetcher.fetch_fallback_photo(aircraft, details) }
+                    val photo = runCatching {
+                        aircraft_photo_fetcher.fetch_fallback_photo(
+                            aircraft,
+                            details
+                        )
+                    }
                         .getOrElse { AircraftPhotoResult.Unavailable("Exact, representative, and search photos unavailable") }
                     photo_in_flight.decrementAndGet()
                     when (photo) {
                         is AircraftPhotoResult.Found -> {
                             val first_photo = photo_found.compareAndSet(false, true)
                             if (first_photo || photo.quality == PhotoQuality.EXACT) {
-                                post_to_main { on_photo_found(requested_id, request_token, photo, photo.quality == PhotoQuality.EXACT) }
+                                post_to_main {
+                                    on_photo_found(
+                                        requested_id,
+                                        request_token,
+                                        photo,
+                                        photo.quality == PhotoQuality.EXACT
+                                    )
+                                }
                             }
                             maybe_post_final_photo_unavailable()
                         }
+
                         is AircraftPhotoResult.Unavailable -> maybe_post_final_photo_unavailable()
                     }
                 }
@@ -251,7 +282,12 @@ class AircraftDetailsCoordinator(
 
             if (should_run_exact) {
                 executor.execute {
-                    val exact = runCatching { aircraft_photo_fetcher.fetch_exact_aircraft_photo(aircraft, details) }.getOrNull()
+                    val exact = runCatching {
+                        aircraft_photo_fetcher.fetch_exact_aircraft_photo(
+                            aircraft,
+                            details
+                        )
+                    }.getOrNull()
                     photo_in_flight.decrementAndGet()
                     if (exact != null) {
                         photo_found.set(true)
@@ -269,7 +305,8 @@ class AircraftDetailsCoordinator(
                 val details = runCatching { candidate.fetch() }.getOrNull()
                 val merged = synchronized(detail_lock) {
                     if (details != null) {
-                        merged_details = merged_details?.let { merge_aircraft_details(it, details) } ?: details
+                        merged_details =
+                            merged_details?.let { merge_aircraft_details(it, details) } ?: details
                     }
                     merged_details
                 }
@@ -332,7 +369,10 @@ class AircraftDetailsCoordinator(
         return listOf(seed, direct)
     }
 
-    private fun details_from_feed_seed(aircraft: Aircraft, seed: AircraftMetadataSeed?): AircraftDetails {
+    private fun details_from_feed_seed(
+        aircraft: Aircraft,
+        seed: AircraftMetadataSeed?
+    ): AircraftDetails {
         return AircraftDetails(
             icao24 = aircraft.icao24.trim().trimStart('~').lowercase(Locale.US),
             registration = normalized_registration(seed?.registration ?: aircraft.registration),
@@ -363,7 +403,10 @@ class AircraftDetailsCoordinator(
     }
 
     // Prefer specific documented enrichment but keep live/feed seed values when enrichment is missing.
-    private fun merge_aircraft_details(seed: AircraftDetails, enrichment: AircraftDetails): AircraftDetails {
+    private fun merge_aircraft_details(
+        seed: AircraftDetails,
+        enrichment: AircraftDetails
+    ): AircraftDetails {
         val source = listOfNotNull(seed.registry_source, enrichment.registry_source)
             .asSequence()
             .flatMap { it.split(" + ").asSequence() }
@@ -383,7 +426,8 @@ class AircraftDetailsCoordinator(
             registry_source = source,
             operator_code = enrichment.operator_code ?: seed.operator_code,
             route = enrichment.route ?: seed.route,
-            route_updated_epoch_sec = enrichment.route_updated_epoch_sec ?: seed.route_updated_epoch_sec,
+            route_updated_epoch_sec = enrichment.route_updated_epoch_sec
+                ?: seed.route_updated_epoch_sec,
             route_source = enrichment.route_source ?: seed.route_source,
             origin_airport = enrichment.origin_airport ?: seed.origin_airport,
             destination_airport = enrichment.destination_airport ?: seed.destination_airport,
@@ -399,7 +443,6 @@ class AircraftDetailsCoordinator(
             ?.takeIf { it.isNotBlank() }
     }
 
-
     companion object {
         fun details_status(details: AircraftDetails, still_loading: Boolean): String {
             return when {
@@ -413,16 +456,15 @@ class AircraftDetailsCoordinator(
 
         fun has_aircraft_metadata(details: AircraftDetails): Boolean {
             return details.registration != null ||
-                details.manufacturer != null ||
-                details.type != null ||
-                details.type_code != null ||
-                details.owner != null
+                    details.manufacturer != null ||
+                    details.type != null ||
+                    details.type_code != null ||
+                    details.owner != null
         }
     }
 }
 
-
-
+// Picks likely next-tapped aircraft for warm details/photo requests while the map is idle.
 internal class AircraftDetailsPrefetchPlanner(
     private val warm_requester: AircraftDetailsWarmRequester,
     private val displayed_aircraft: () -> Aircraft?,
@@ -508,8 +550,6 @@ internal class AircraftDetailsPrefetchPlanner(
     }
 }
 
-
-
 internal class AircraftDetailsRowsBuilder(
     private val telemetry_formatter: AircraftTelemetryFormatter,
     private val is_details_loading_for: (Aircraft) -> Boolean,
@@ -523,38 +563,102 @@ internal class AircraftDetailsRowsBuilder(
     private val loading_or_unavailable: (Boolean) -> String
 ) {
     // Build honest detail rows from live aircraft plus documented metadata; missing data stays unavailable.
-    fun aircraft_details_rows(aircraft: Aircraft, details: AircraftDetails?): List<AircraftDetailsRow> {
+    fun aircraft_details_rows(
+        aircraft: Aircraft,
+        details: AircraftDetails?
+    ): List<AircraftDetailsRow> {
         val details_loading = is_details_loading_for(aircraft)
         val enriched_details = details_with_trace_origin(details, aircraft)
         val route_details = current_flight_route_details(enriched_details, aircraft)
         val route_context = route_trace_context(aircraft)
-        val telemetry = enriched_details?.telemetry?.with_fallback(aircraft.telemetry) ?: aircraft.telemetry
+        val telemetry =
+            enriched_details?.telemetry?.with_fallback(aircraft.telemetry) ?: aircraft.telemetry
         val rows = mutableListOf<AircraftDetailsRow>()
         rows += AircraftDetailsRow.section("Aircraft")
         rows += AircraftDetailsRow("Callsign", aircraft.callsign)
         rows += AircraftDetailsRow("ICAO hex", aircraft.icao24.uppercase(Locale.US))
-        rows += AircraftDetailsRow("Registration", enriched_details?.registration ?: aircraft.registration ?: loading_or_unavailable(details_loading))
-        rows += AircraftDetailsRow("Registry country", registry_country_label(aircraft, enriched_details, details_loading))
-        rows += AircraftDetailsRow("Owner/Operator", AircraftRoutePresenter.details_value(enriched_details?.owner, details_loading))
-        rows += AircraftDetailsRow("Aircraft", AircraftRoutePresenter.aircraft_type(enriched_details, aircraft, details_loading))
-        rows += AircraftDetailsRow("MFR year", AircraftRoutePresenter.details_value(enriched_details?.manufactured_year, details_loading))
-        rows += AircraftDetailsRow("Type code", enriched_details?.type_code ?: aircraft.type_code ?: loading_or_unavailable(details_loading))
+        rows += AircraftDetailsRow(
+            "Registration",
+            enriched_details?.registration ?: aircraft.registration ?: loading_or_unavailable(
+                details_loading
+            )
+        )
+        rows += AircraftDetailsRow(
+            "Registry country",
+            registry_country_label(aircraft, enriched_details, details_loading)
+        )
+        rows += AircraftDetailsRow(
+            "Owner/Operator",
+            AircraftRoutePresenter.details_value(enriched_details?.owner, details_loading)
+        )
+        rows += AircraftDetailsRow(
+            "Aircraft",
+            AircraftRoutePresenter.aircraft_type(enriched_details, aircraft, details_loading)
+        )
+        rows += AircraftDetailsRow(
+            "MFR year",
+            AircraftRoutePresenter.details_value(
+                enriched_details?.manufactured_year,
+                details_loading
+            )
+        )
+        rows += AircraftDetailsRow(
+            "Type code",
+            enriched_details?.type_code ?: aircraft.type_code ?: loading_or_unavailable(
+                details_loading
+            )
+        )
         rows += AircraftDetailsRow("Squawk", telemetry_formatter.telemetry_value(telemetry?.squawk))
-        rows += AircraftDetailsRow("Data source", telemetry_formatter.telemetry_value(telemetry_formatter.source_type(telemetry?.source_type)))
-        rows += AircraftDetailsRow("Registry source", AircraftRoutePresenter.details_value(enriched_details?.registry_source, details_loading))
+        rows += AircraftDetailsRow(
+            "Data source",
+            telemetry_formatter.telemetry_value(telemetry_formatter.source_type(telemetry?.source_type))
+        )
+        rows += AircraftDetailsRow(
+            "Registry source",
+            AircraftRoutePresenter.details_value(enriched_details?.registry_source, details_loading)
+        )
         if (aircraft.is_military) {
             rows += AircraftDetailsRow("Military", "Tagged military")
-            rows += AircraftDetailsRow("Origin status", format_origin_status(aircraft, route_details))
+            rows += AircraftDetailsRow(
+                "Origin status",
+                format_origin_status(aircraft, route_details)
+            )
         }
         val route_loading = current_flight_route_loading(aircraft, details_loading)
         rows += AircraftDetailsRow.section("Route")
-        rows += AircraftDetailsRow("Route", AircraftRoutePresenter.value(route_details?.route, route_loading))
-        rows += AircraftDetailsRow("Origin", AircraftRoutePresenter.airport(route_details?.origin_airport, route_loading))
-        rows += AircraftDetailsRow("Destination", AircraftRoutePresenter.airport(route_details?.destination_airport, route_loading))
-        rows += AircraftDetailsRow("Path source", AircraftRoutePresenter.trace_source(route_context))
-        rows += AircraftDetailsRow("Flight time", AircraftRoutePresenter.observed_flight_time(route_context))
-        rows += AircraftDetailsRow("Route complete", AircraftRoutePresenter.route_completion(route_details, aircraft, route_context, route_loading))
-        rows += AircraftDetailsRow("Observed path span", AircraftRoutePresenter.observed_path_span(route_context))
+        rows += AircraftDetailsRow(
+            "Route",
+            AircraftRoutePresenter.value(route_details?.route, route_loading)
+        )
+        rows += AircraftDetailsRow(
+            "Origin",
+            AircraftRoutePresenter.airport(route_details?.origin_airport, route_loading)
+        )
+        rows += AircraftDetailsRow(
+            "Destination",
+            AircraftRoutePresenter.airport(route_details?.destination_airport, route_loading)
+        )
+        rows += AircraftDetailsRow(
+            "Path source",
+            AircraftRoutePresenter.trace_source(route_context)
+        )
+        rows += AircraftDetailsRow(
+            "Flight time",
+            AircraftRoutePresenter.observed_flight_time(route_context)
+        )
+        rows += AircraftDetailsRow(
+            "Route complete",
+            AircraftRoutePresenter.route_completion(
+                route_details,
+                aircraft,
+                route_context,
+                route_loading
+            )
+        )
+        rows += AircraftDetailsRow(
+            "Observed path span",
+            AircraftRoutePresenter.observed_path_span(route_context)
+        )
         rows += spatial_rows(aircraft, telemetry)
         rows += speed_rows(aircraft, telemetry)
         rows += wind_rows(telemetry, details_loading)
@@ -563,66 +667,166 @@ internal class AircraftDetailsRowsBuilder(
         return rows
     }
 
-    private fun spatial_rows(aircraft: Aircraft, telemetry: AircraftTelemetry?): List<AircraftDetailsRow> {
+    private fun spatial_rows(
+        aircraft: Aircraft,
+        telemetry: AircraftTelemetry?
+    ): List<AircraftDetailsRow> {
         return listOf(
             AircraftDetailsRow.section("Spatial"),
-            AircraftDetailsRow("Groundspeed", telemetry_formatter.aviation_speed(telemetry?.ground_speed_ms ?: aircraft.velocity_ms)),
-            AircraftDetailsRow("Baro. altitude", telemetry_formatter.altitude_value(telemetry?.baro_altitude_m ?: aircraft.altitude_m)),
-            AircraftDetailsRow("WGS84 altitude", telemetry_formatter.altitude_value(telemetry?.geom_altitude_m)),
-            AircraftDetailsRow("Vert. Rate", telemetry_formatter.vertical_rate(telemetry?.baro_rate_ms ?: aircraft.vertical_rate_ms)),
-            AircraftDetailsRow("Track", telemetry_formatter.degrees_decimal(aircraft.track_deg, decimals = 1)),
+            AircraftDetailsRow(
+                "Groundspeed",
+                telemetry_formatter.aviation_speed(
+                    telemetry?.ground_speed_ms ?: aircraft.velocity_ms
+                )
+            ),
+            AircraftDetailsRow(
+                "Baro. altitude",
+                telemetry_formatter.altitude_value(
+                    telemetry?.baro_altitude_m ?: aircraft.altitude_m
+                )
+            ),
+            AircraftDetailsRow(
+                "WGS84 altitude",
+                telemetry_formatter.altitude_value(telemetry?.geom_altitude_m)
+            ),
+            AircraftDetailsRow(
+                "Vert. Rate",
+                telemetry_formatter.vertical_rate(
+                    telemetry?.baro_rate_ms ?: aircraft.vertical_rate_ms
+                )
+            ),
+            AircraftDetailsRow(
+                "Track",
+                telemetry_formatter.degrees_decimal(aircraft.track_deg, decimals = 1)
+            ),
             AircraftDetailsRow("Pos.", telemetry_formatter.reported_position(aircraft)),
-            AircraftDetailsRow("Distance", telemetry_formatter.distance(reported_distance_meters(aircraft)))
+            AircraftDetailsRow(
+                "Distance",
+                telemetry_formatter.distance(reported_distance_meters(aircraft))
+            )
         )
     }
 
-    private fun wind_rows(telemetry: AircraftTelemetry?, loading: Boolean): List<AircraftDetailsRow> {
+    private fun wind_rows(
+        telemetry: AircraftTelemetry?,
+        loading: Boolean
+    ): List<AircraftDetailsRow> {
         return listOf(
             AircraftDetailsRow.section("Wind"),
-            AircraftDetailsRow("Speed", telemetry_formatter.aviation_speed(telemetry?.wind_speed_ms, loading)),
-            AircraftDetailsRow("Direction (from)", telemetry_formatter.degrees_decimal(telemetry?.wind_direction_deg, loading = loading)),
-            AircraftDetailsRow("TAT / OAT", telemetry_formatter.temperature_pair(telemetry?.tat_c, telemetry?.oat_c, loading))
+            AircraftDetailsRow(
+                "Speed",
+                telemetry_formatter.aviation_speed(telemetry?.wind_speed_ms, loading)
+            ),
+            AircraftDetailsRow(
+                "Direction (from)",
+                telemetry_formatter.degrees_decimal(
+                    telemetry?.wind_direction_deg,
+                    loading = loading
+                )
+            ),
+            AircraftDetailsRow(
+                "TAT / OAT",
+                telemetry_formatter.temperature_pair(telemetry?.tat_c, telemetry?.oat_c, loading)
+            )
         )
     }
 
-    private fun speed_rows(aircraft: Aircraft, telemetry: AircraftTelemetry?): List<AircraftDetailsRow> {
+    private fun speed_rows(
+        aircraft: Aircraft,
+        telemetry: AircraftTelemetry?
+    ): List<AircraftDetailsRow> {
         return listOf(
             AircraftDetailsRow.section("Speed"),
-            AircraftDetailsRow("Ground", telemetry_formatter.aviation_speed(telemetry?.ground_speed_ms ?: aircraft.velocity_ms)),
-            AircraftDetailsRow("True", telemetry_formatter.aviation_speed(telemetry?.true_speed_ms)),
-            AircraftDetailsRow("Indicated", telemetry_formatter.aviation_speed(telemetry?.indicated_speed_ms)),
+            AircraftDetailsRow(
+                "Ground",
+                telemetry_formatter.aviation_speed(
+                    telemetry?.ground_speed_ms ?: aircraft.velocity_ms
+                )
+            ),
+            AircraftDetailsRow(
+                "True",
+                telemetry_formatter.aviation_speed(telemetry?.true_speed_ms)
+            ),
+            AircraftDetailsRow(
+                "Indicated",
+                telemetry_formatter.aviation_speed(telemetry?.indicated_speed_ms)
+            ),
             AircraftDetailsRow("Mach", telemetry_formatter.mach(telemetry?.mach))
         )
     }
 
-    private fun altitude_rows(aircraft: Aircraft, telemetry: AircraftTelemetry?): List<AircraftDetailsRow> {
+    private fun altitude_rows(
+        aircraft: Aircraft,
+        telemetry: AircraftTelemetry?
+    ): List<AircraftDetailsRow> {
         return listOf(
             AircraftDetailsRow.section("Altitude"),
-            AircraftDetailsRow("Barometric", telemetry_formatter.altitude_value(telemetry?.baro_altitude_m ?: aircraft.altitude_m)),
-            AircraftDetailsRow("Baro. Rate", telemetry_formatter.vertical_rate(telemetry?.baro_rate_ms ?: aircraft.vertical_rate_ms)),
-            AircraftDetailsRow("Geom. WGS84", telemetry_formatter.altitude_value(telemetry?.geom_altitude_m)),
-            AircraftDetailsRow("Geom. Rate", telemetry_formatter.vertical_rate(telemetry?.geom_rate_ms)),
+            AircraftDetailsRow(
+                "Barometric",
+                telemetry_formatter.altitude_value(
+                    telemetry?.baro_altitude_m ?: aircraft.altitude_m
+                )
+            ),
+            AircraftDetailsRow(
+                "Baro. Rate",
+                telemetry_formatter.vertical_rate(
+                    telemetry?.baro_rate_ms ?: aircraft.vertical_rate_ms
+                )
+            ),
+            AircraftDetailsRow(
+                "Geom. WGS84",
+                telemetry_formatter.altitude_value(telemetry?.geom_altitude_m)
+            ),
+            AircraftDetailsRow(
+                "Geom. Rate",
+                telemetry_formatter.vertical_rate(telemetry?.geom_rate_ms)
+            ),
             AircraftDetailsRow("QNH", telemetry_formatter.pressure(telemetry?.qnh_hpa)),
-            AircraftDetailsRow("Sel. Alt.", telemetry_formatter.altitude_value(telemetry?.selected_altitude_m))
+            AircraftDetailsRow(
+                "Sel. Alt.",
+                telemetry_formatter.altitude_value(telemetry?.selected_altitude_m)
+            )
         )
     }
 
-    private fun direction_rows(aircraft: Aircraft, telemetry: AircraftTelemetry?): List<AircraftDetailsRow> {
+    private fun direction_rows(
+        aircraft: Aircraft,
+        telemetry: AircraftTelemetry?
+    ): List<AircraftDetailsRow> {
         return listOf(
             AircraftDetailsRow.section("Direction"),
-            AircraftDetailsRow("Ground Track", telemetry_formatter.degrees_decimal(aircraft.track_deg, decimals = 1)),
-            AircraftDetailsRow("True Heading", telemetry_formatter.degrees_decimal(telemetry?.true_heading_deg, decimals = 1)),
-            AircraftDetailsRow("Magnetic Heading", telemetry_formatter.degrees_decimal(telemetry?.magnetic_heading_deg, decimals = 1)),
-            AircraftDetailsRow("Magnetic Decl.", telemetry_formatter.signed_degrees(telemetry?.magnetic_declination_deg)),
-            AircraftDetailsRow("Track Rate", telemetry_formatter.track_rate(telemetry?.track_rate_deg_per_sec)),
+            AircraftDetailsRow(
+                "Ground Track",
+                telemetry_formatter.degrees_decimal(aircraft.track_deg, decimals = 1)
+            ),
+            AircraftDetailsRow(
+                "True Heading",
+                telemetry_formatter.degrees_decimal(telemetry?.true_heading_deg, decimals = 1)
+            ),
+            AircraftDetailsRow(
+                "Magnetic Heading",
+                telemetry_formatter.degrees_decimal(telemetry?.magnetic_heading_deg, decimals = 1)
+            ),
+            AircraftDetailsRow(
+                "Magnetic Decl.",
+                telemetry_formatter.signed_degrees(telemetry?.magnetic_declination_deg)
+            ),
+            AircraftDetailsRow(
+                "Track Rate",
+                telemetry_formatter.track_rate(telemetry?.track_rate_deg_per_sec)
+            ),
             AircraftDetailsRow("Roll", telemetry_formatter.signed_degrees(telemetry?.roll_deg)),
-            AircraftDetailsRow("Sel. Head.", telemetry_formatter.degrees_decimal(telemetry?.selected_heading_deg, decimals = 1)),
-            AircraftDetailsRow("Nav. Modes", telemetry?.nav_modes?.joinToString(", ")?.takeIf { it.isNotBlank() } ?: "Unavailable")
+            AircraftDetailsRow(
+                "Sel. Head.",
+                telemetry_formatter.degrees_decimal(telemetry?.selected_heading_deg, decimals = 1)
+            ),
+            AircraftDetailsRow(
+                "Nav. Modes",
+                telemetry?.nav_modes?.joinToString(", ")?.takeIf { it.isNotBlank() }
+                    ?: "Unavailable")
         )
     }
 }
-
-
 
 class AircraftDetailsSession(
     private val coordinator: AircraftDetailsCoordinator,
@@ -787,11 +991,15 @@ class AircraftDetailsSession(
 
     fun is_current_details_request(requested_id: String, request_token: Long): Boolean {
         return details_open &&
-            details_request_token == request_token &&
-            selected_aircraft()?.icao24 == requested_id
+                details_request_token == request_token &&
+                selected_aircraft()?.icao24 == requested_id
     }
 
-    fun apply_warm_cache_to_current_details(key: String, entry: AircraftDetailsWarmCacheEntry, current_key: String?) {
+    fun apply_warm_cache_to_current_details(
+        key: String,
+        entry: AircraftDetailsWarmCacheEntry,
+        current_key: String?
+    ) {
         if (!details_open || current_key != key) return
         apply_warmed_details(entry, preserve_existing = true)
         request_redraw()
@@ -812,7 +1020,12 @@ class AircraftDetailsSession(
         )
     }
 
-    private fun post_aircraft_details(requested_id: String, request_token: Long, details: AircraftDetails, still_loading: Boolean) {
+    private fun post_aircraft_details(
+        requested_id: String,
+        request_token: Long,
+        details: AircraftDetails,
+        still_loading: Boolean
+    ) {
         if (!is_current_details_request(requested_id, request_token)) return
         aircraft_details = details
         aircraft_details_loading = still_loading
@@ -857,7 +1070,8 @@ class AircraftDetailsSession(
         warm_requester.cache_aircraft_details(aircraft, details, still_loading = true)
         aircraft_details = details
         aircraft_details_loading = true
-        aircraft_details_status = AircraftDetailsCoordinator.details_status(details, still_loading = true)
+        aircraft_details_status =
+            AircraftDetailsCoordinator.details_status(details, still_loading = true)
         aircraft_photo_status = "Searching real photo sources"
         request_redraw()
         return true
@@ -913,7 +1127,8 @@ class AircraftDetailsSession(
         }
         apply_aircraft_photo(
             photo,
-            animate_replace = allow_replace && aircraft_photo != null && photo.quality.rank > (current_quality?.rank ?: 0)
+            animate_replace = allow_replace && aircraft_photo != null && photo.quality.rank > (current_quality?.rank
+                ?: 0)
         )
         request_redraw()
     }
@@ -953,8 +1168,6 @@ class AircraftDetailsSession(
     }
 }
 
-
-
 data class AircraftDetailsWarmCacheEntry(
     val details: AircraftDetails? = null,
     val details_loading: Boolean = false,
@@ -963,7 +1176,6 @@ data class AircraftDetailsWarmCacheEntry(
     val photo_status: String = "Photo unavailable",
     val updated_elapsed_ms: Long
 )
-
 
 class AircraftDetailsWarmCache(
     max_entries: Int,
@@ -998,7 +1210,12 @@ class AircraftDetailsWarmCache(
         return request_tokens.containsKey(key)
     }
 
-    fun is_current_request(key: String, selected_aircraft_id: String, requested_id: String, request_token: Long): Boolean {
+    fun is_current_request(
+        key: String,
+        selected_aircraft_id: String,
+        requested_id: String,
+        request_token: Long
+    ): Boolean {
         return request_tokens[key] == request_token && requested_id == selected_aircraft_id
     }
 
@@ -1031,13 +1248,14 @@ class AircraftDetailsWarmCache(
         now_elapsed_ms: Long
     ): AircraftDetailsWarmCacheEntry {
         val previous = entries[key]
-        val entry = (previous ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)).copy(
-            details = details,
-            details_loading = still_loading,
-            details_status = AircraftDetailsCoordinator.details_status(details, still_loading),
-            photo_status = previous?.photo_status ?: "Searching real photo sources",
-            updated_elapsed_ms = now_elapsed_ms
-        )
+        val entry =
+            (previous ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)).copy(
+                details = details,
+                details_loading = still_loading,
+                details_status = AircraftDetailsCoordinator.details_status(details, still_loading),
+                photo_status = previous?.photo_status ?: "Searching real photo sources",
+                updated_elapsed_ms = now_elapsed_ms
+            )
         entries[key] = entry
         if (previous == null && aircraft_current_key != key) {
             entries.remove(key)
@@ -1045,13 +1263,17 @@ class AircraftDetailsWarmCache(
         return entry
     }
 
-    fun cache_details_unavailable(key: String, now_elapsed_ms: Long): AircraftDetailsWarmCacheEntry {
+    fun cache_details_unavailable(
+        key: String,
+        now_elapsed_ms: Long
+    ): AircraftDetailsWarmCacheEntry {
         val previous = entries[key]
-        val entry = (previous ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)).copy(
-            details_loading = false,
-            details_status = "Metadata unavailable from configured sources",
-            updated_elapsed_ms = now_elapsed_ms
-        )
+        val entry =
+            (previous ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)).copy(
+                details_loading = false,
+                details_status = "Metadata unavailable from configured sources",
+                updated_elapsed_ms = now_elapsed_ms
+            )
         entries[key] = entry
         return entry
     }
@@ -1062,9 +1284,11 @@ class AircraftDetailsWarmCache(
         allow_replace: Boolean,
         now_elapsed_ms: Long
     ): AircraftDetailsWarmCacheEntry {
-        val previous = entries[key] ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)
+        val previous =
+            entries[key] ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)
         val current_photo = previous.photo
-        val should_replace = current_photo == null || (allow_replace && photo.quality.rank > current_photo.quality.rank)
+        val should_replace =
+            current_photo == null || (allow_replace && photo.quality.rank > current_photo.quality.rank)
         val entry = if (should_replace) {
             previous.copy(
                 photo = photo,
@@ -1079,7 +1303,8 @@ class AircraftDetailsWarmCache(
     }
 
     fun cache_photo_unavailable(key: String, now_elapsed_ms: Long): AircraftDetailsWarmCacheEntry {
-        val previous = entries[key] ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)
+        val previous =
+            entries[key] ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)
         val entry = previous.copy(
             photo_status = photo_unavailable_status(),
             updated_elapsed_ms = now_elapsed_ms
@@ -1089,8 +1314,6 @@ class AircraftDetailsWarmCache(
         return entry
     }
 }
-
-
 
 class AircraftDetailsWarmRequester(
     private val coordinator: AircraftDetailsCoordinator,
@@ -1139,7 +1362,12 @@ class AircraftDetailsWarmRequester(
             is_current_request = { requested_id, token ->
                 is_current_warmed_request(key, aircraft, requested_id, token)
             },
-            is_photo_available = { warm_cache.fresh_entry(key, SystemClock.elapsedRealtime())?.photo != null },
+            is_photo_available = {
+                warm_cache.fresh_entry(
+                    key,
+                    SystemClock.elapsedRealtime()
+                )?.photo != null
+            },
             on_details = { requested_id, token, details, still_loading ->
                 if (is_current_warmed_request(key, aircraft, requested_id, token)) {
                     cache_aircraft_details(aircraft, details, still_loading)
@@ -1223,8 +1451,6 @@ class AircraftDetailsWarmRequester(
     }
 }
 
-
-
 internal class AircraftTelemetryFormatter(
     private val measurement_formatter: MapMeasurementFormatter,
     private val reported_distance_meters: (Aircraft) -> Double,
@@ -1291,7 +1517,13 @@ internal class AircraftTelemetryFormatter(
 
     fun temperature_pair(tat_c: Double?, oat_c: Double?, loading: Boolean = false): String {
         return when {
-            tat_c != null && oat_c != null -> String.format(Locale.US, "%.0f / %.0f C", tat_c, oat_c)
+            tat_c != null && oat_c != null -> String.format(
+                Locale.US,
+                "%.0f / %.0f C",
+                tat_c,
+                oat_c
+            )
+
             tat_c != null -> String.format(Locale.US, "TAT %.0f C", tat_c)
             oat_c != null -> String.format(Locale.US, "OAT %.0f C", oat_c)
             else -> loading_or_unavailable(loading)
@@ -1328,8 +1560,6 @@ internal class AircraftTelemetryFormatter(
     }
 }
 
-
-
 internal class AircraftTraceDetailsPresenter(
     private val selected_trace_aircraft_id: () -> String?,
     private val trace: () -> FlightTrace?,
@@ -1337,9 +1567,13 @@ internal class AircraftTraceDetailsPresenter(
     private val is_flight_path_loading: (Aircraft) -> Boolean,
     private val trace_origin_airport_for: (Aircraft) -> AirportDetails?,
     private val trace_origin_loading_for: (Aircraft) -> Boolean,
-    private val aircraft_feed_mode: () -> AircraftFeedMode
+    private val aircraft_feed_mode: () -> AircraftFeedMode,
+    private val log_route_diagnostic: (String) -> Unit
 ) {
-    fun current_flight_route_details(details: AircraftDetails?, aircraft: Aircraft): AircraftDetails? {
+    fun current_flight_route_details(
+        details: AircraftDetails?,
+        aircraft: Aircraft
+    ): AircraftDetails? {
         val route_details = details_with_trace_origin(details, aircraft) ?: return null
         if (!CurrentRouteValidator.has_route_metadata(route_details)) return null
         val validation = CurrentRouteValidator.evaluate(
@@ -1349,12 +1583,22 @@ internal class AircraftTraceDetailsPresenter(
             selected_trace_aircraft_id = selected_trace_aircraft_id(),
             trace_segments = selected_segments(false)
         )
+        log_route_diagnostic(validation.diagnostic)
         return route_details.takeIf { validation.accepted }
+    }
+
+    fun flight_trace_diagnostic(trace: FlightTrace?): String {
+        if (trace == null) return "source=none points=0"
+        val points = trace.all_points.sortedBy { it.epoch_sec }
+        val first = points.firstOrNull()
+        val last = points.lastOrNull()
+        return "source=${trace.source.ifBlank { "unknown" }} points=${trace.point_count} previous=${trace.previous_point_count} " +
+                "first=${first?.lat_lon_label() ?: "none"} last=${last?.lat_lon_label() ?: "none"}"
     }
 
     fun current_flight_route_loading(aircraft: Aircraft, details_loading: Boolean): Boolean {
         val trace_origin_pending = trace_origin_loading_for(aircraft) &&
-            aircraft_feed_mode() == AircraftFeedMode.HYBRID
+                aircraft_feed_mode() == AircraftFeedMode.HYBRID
         return details_loading || is_flight_path_loading(aircraft) || trace_origin_pending
     }
 

@@ -15,6 +15,7 @@
 )
 
 package com.flightalert.flight
+
 import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.Paint
@@ -41,13 +42,11 @@ data class FlightPathProjection(
     val projected_endpoint: GeoPoint
 )
 
-
 data class FlightPathRenderState(
     val selected_segments: List<TraceSegment>,
     val previous_segments: List<TraceSegment>,
     val projection: FlightPathProjection?
 )
-
 
 data class FlightPathRenderStyle(
     val path_shadow: Int,
@@ -55,14 +54,18 @@ data class FlightPathRenderStyle(
     val accent_blue: Int
 )
 
-
 class FlightPathRenderer(
     private val stroke_paint: Paint,
     private val path: Path,
     private val dp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int
 ) {
-    fun draw_selected_path(canvas: Canvas, viewport: Viewport, state: FlightPathRenderState, style: FlightPathRenderStyle) {
+    fun draw_selected_path(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: FlightPathRenderState,
+        style: FlightPathRenderStyle
+    ) {
         if (state.selected_segments.isEmpty()) return
         if (state.previous_segments.isNotEmpty()) {
             draw_previous_paths(canvas, viewport, state.previous_segments, style)
@@ -123,8 +126,16 @@ class FlightPathRenderer(
         )
         if (distance < MIN_PROJECTED_PATH_CONNECTOR_M) return
 
-        val start = MapProjection.lat_lon_to_world(projection.last_trace_point.lat, projection.last_trace_point.lon, viewport.zoom)
-        val end = MapProjection.lat_lon_to_world(projection.projected_endpoint.lat, projection.projected_endpoint.lon, viewport.zoom)
+        val start = MapProjection.lat_lon_to_world(
+            projection.last_trace_point.lat,
+            projection.last_trace_point.lon,
+            viewport.zoom
+        )
+        val end = MapProjection.lat_lon_to_world(
+            projection.projected_endpoint.lat,
+            projection.projected_endpoint.lon,
+            viewport.zoom
+        )
         val world_span = TILE_SIZE * 2.0.pow(viewport.zoom)
         val start_x = (start.x - viewport.center_x + viewport.width / 2.0).toFloat()
         var end_x = (end.x - viewport.center_x + viewport.width / 2.0).toFloat()
@@ -184,8 +195,7 @@ class FlightPathRenderer(
     }
 }
 
-
-
+// Owns selected aircraft trace state so FlightMapView can ask what to draw without editing trace internals.
 class SelectedFlightPathController(
     private val now_epoch_seconds: () -> Double,
     private val max_projection_seconds: Double,
@@ -386,12 +396,9 @@ class SelectedFlightPathController(
     }
 }
 
-
-
 data class FlightPathCameraUpdate(val zoom: Double, val center: GeoPoint)
 
 // Frames selected real trace data inside the part of the map not blocked by panels.
-
 internal class SelectedFlightPathViewportController(
     private val selected_path_controller: SelectedFlightPathController
 ) {
@@ -405,7 +412,10 @@ internal class SelectedFlightPathViewportController(
         val path_height_at_zoom_zero = max(1.0, abs(bottom_right.y - top_left.y))
         val width_fit = usable.width() / (path_width_at_zoom_zero * PATH_FIT_CONTEXT_MULTIPLIER)
         val height_fit = usable.height() / (path_height_at_zoom_zero * PATH_FIT_CONTEXT_MULTIPLIER)
-        val zoom = (ln(min(width_fit, height_fit)) / ln(2.0)).coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
+        val zoom = (ln(min(width_fit, height_fit)) / ln(2.0)).coerceIn(
+            MIN_ZOOM.toDouble(),
+            MAX_ZOOM.toDouble()
+        )
 
         val center_lat = (bounds.min_lat + bounds.max_lat) / 2.0
         val center_lon = MapProjection.normalize_longitude((bounds.min_lon + bounds.max_lon) / 2.0)
@@ -441,7 +451,3 @@ internal class SelectedFlightPathViewportController(
         }
     }
 }
-
-// endregion
-
-// region LIVE TRAFFIC PIPELINE

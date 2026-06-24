@@ -25,7 +25,7 @@
         android:usesCleartextTraffic="false">
 
         <service
-            android:name="com.flightalert.alerts.AircraftMonitorService"
+            android:name="com.flightalert.alerts.AircraftAlertService"
             android:exported="false"
             android:foregroundServiceType="location" />
 

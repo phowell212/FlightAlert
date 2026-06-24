@@ -1,4 +1,4 @@
-@file:Suppress(
+﻿@file:Suppress(
     "CanBeVal",
     "FunctionName",
     "KotlinConstantConditions",
@@ -15,6 +15,9 @@
 )
 
 package com.flightalert.ui
+
+import com.flightalert.VisualTheme
+import com.flightalert.ThemeTreatment
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -24,12 +27,11 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import androidx.core.graphics.createBitmap
-import com.flightalert.ThemeTreatment
-import com.flightalert.VisualTheme
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.details.AircraftDetailsPanelChrome
 import com.flightalert.map.ScaleLabel
 import com.flightalert.traffic.TrafficOverlayChrome
+import java.util.LinkedHashMap
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.max
@@ -42,33 +44,37 @@ internal fun smooth_step(edge0: Float, edge1: Float, value: Float): Float {
     return t * t * (3f - 2f * t)
 }
 
-
 internal fun safe_smooth_step(edge0: Float, edge1: Float, value: Float): Float {
     if (edge0 == edge1) return if (value >= edge1) 1f else 0f
     return smooth_step(edge0, edge1, value)
 }
 
-
 internal fun lerp(start: Float, end: Float, progress: Float): Float {
     return start + (end - start) * progress.coerceIn(0f, 1f)
 }
-
 
 internal fun mix_color(start: Int, end: Int, progress: Float): Int {
     val t = progress.coerceIn(0f, 1f)
     return Color.rgb(
         lerp(Color.red(start).toFloat(), Color.red(end).toFloat(), t).roundToInt().coerceIn(0, 255),
-        lerp(Color.green(start).toFloat(), Color.green(end).toFloat(), t).roundToInt().coerceIn(0, 255),
-        lerp(Color.blue(start).toFloat(), Color.blue(end).toFloat(), t).roundToInt().coerceIn(0, 255)
+        lerp(Color.green(start).toFloat(), Color.green(end).toFloat(), t).roundToInt()
+            .coerceIn(0, 255),
+        lerp(Color.blue(start).toFloat(), Color.blue(end).toFloat(), t).roundToInt()
+            .coerceIn(0, 255)
     )
 }
 
-
 internal fun with_alpha(color: Int, alpha: Int): Int {
-    return Color.argb(alpha.coerceIn(0, 255), Color.red(color), Color.green(color), Color.blue(color))
+    return Color.argb(
+        alpha.coerceIn(0, 255),
+        Color.red(color),
+        Color.green(color),
+        Color.blue(color)
+    )
 }
 
-
+// Cache/state builders intentionally share geometric growth. The renderer keeps its
+// separate exact-size growth path because that allocation policy is a hot-path choice.
 internal fun ensure_point_capacity(points: FloatArray, required: Int): FloatArray {
     if (points.size >= required) return points
     var next_size = max(128, points.size * 2)
@@ -78,8 +84,12 @@ internal fun ensure_point_capacity(points: FloatArray, required: Int): FloatArra
 
 // Text sizing and wrapping are policy, not renderer-specific behavior. Renderers keep
 // small vocabulary wrappers, while this code owns the exact measurement algorithm.
-
-internal fun wrapped_text_lines(paint: Paint, value: String, width: Float, max_lines: Int): List<String> {
+internal fun wrapped_text_lines(
+    paint: Paint,
+    value: String,
+    width: Float,
+    max_lines: Int
+): List<String> {
     val words = value.split(Regex("\\s+")).filter { it.isNotBlank() }
     if (words.isEmpty()) return emptyList()
     val lines = mutableListOf<String>()
@@ -111,7 +121,6 @@ internal fun wrapped_text_lines(paint: Paint, value: String, width: Float, max_l
     return lines
 }
 
-
 internal fun split_long_word(paint: Paint, word: String, width: Float): List<String> {
     val parts = mutableListOf<String>()
     var part = ""
@@ -127,7 +136,6 @@ internal fun split_long_word(paint: Paint, word: String, width: Float): List<Str
     if (part.isNotBlank()) parts += part
     return parts
 }
-
 
 internal fun draw_wrapped_text(
     canvas: Canvas,
@@ -146,7 +154,6 @@ internal fun draw_wrapped_text(
     }
     return current_y
 }
-
 
 internal fun draw_fitted_text(
     canvas: Canvas,
@@ -172,15 +179,10 @@ internal fun draw_fitted_text(
     canvas.drawText(display, x, y, paint)
 }
 
-// Both map providers use the same disk-cache contract. Network scheduling and bitmap
-// decoding stay provider-specific because their priorities and allocation policies differ.
-
 internal fun recycle_bitmap_pair(first: Bitmap, second: Bitmap) {
     first.recycle()
     second.recycle()
 }
-
-
 
 class FlightMapChromeBridge(
     override val layout: FlightMapLayout,
@@ -216,7 +218,13 @@ class FlightMapChromeBridge(
         choice_button(canvas, rect, label, selected)
     }
 
-    override fun draw_control_surface(canvas: Canvas, rect: RectF, fill: Int, stroke: Int, selected: Boolean) {
+    override fun draw_control_surface(
+        canvas: Canvas,
+        rect: RectF,
+        fill: Int,
+        stroke: Int,
+        selected: Boolean
+    ) {
         control_surface(canvas, rect, fill, stroke, selected)
     }
 
@@ -238,8 +246,6 @@ class FlightMapChromeBridge(
     }
 }
 
-
-
 data class FlightMapChromeStyle(val visual_theme: VisualTheme)
 
 internal enum class ChromeSurfaceKind {
@@ -259,7 +265,6 @@ internal data class ChromeSurfaceKey(
     val visual_theme: VisualTheme
 )
 
-
 interface FlightMapChromeHost {
     fun dp(value: Float): Float
     fun sp(value: Float): Float
@@ -267,7 +272,6 @@ interface FlightMapChromeHost {
 }
 
 // Draws shared map chrome: panels, controls, status labels, and theme treatments.
-
 class FlightMapChromeRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
@@ -277,13 +281,14 @@ class FlightMapChromeRenderer(
 ) {
     private val surface_cache_paint = Paint(Paint.DITHER_FLAG)
     private val surface_cache_rect = RectF()
-    private val surface_cache = object : LinkedHashMap<ChromeSurfaceKey, Bitmap>(CHROME_SURFACE_CACHE_LIMIT, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ChromeSurfaceKey, Bitmap>): Boolean {
-            val remove = size > CHROME_SURFACE_CACHE_LIMIT
-            if (remove && !eldest.value.isRecycled) eldest.value.recycle()
-            return remove
+    private val surface_cache =
+        object : LinkedHashMap<ChromeSurfaceKey, Bitmap>(CHROME_SURFACE_CACHE_LIMIT, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ChromeSurfaceKey, Bitmap>): Boolean {
+                val remove = size > CHROME_SURFACE_CACHE_LIMIT
+                if (remove && !eldest.value.isRecycled) eldest.value.recycle()
+                return remove
+            }
         }
-    }
 
     fun panel_radius(style: FlightMapChromeStyle): Float {
         return host.dp(style.visual_theme.style.panel_corner_dp)
@@ -321,7 +326,7 @@ class FlightMapChromeRenderer(
         val available_height = (rect.height() - host.dp(8f)).coerceAtLeast(host.dp(4f))
         while (text_paint.textSize > host.sp(8f) &&
             (text_paint.measureText(label) > available_width ||
-                text_paint.fontMetrics.let { it.descent - it.ascent } > available_height)
+                    text_paint.fontMetrics.let { it.descent - it.ascent } > available_height)
         ) {
             text_paint.textSize -= host.dp(0.5f)
         }
@@ -332,7 +337,12 @@ class FlightMapChromeRenderer(
         }
         text_paint.color = if (selected) colors.accent_green else colors.text
         val metrics = text_paint.fontMetrics
-        canvas.drawText(display, rect.centerX(), rect.centerY() - (metrics.ascent + metrics.descent) / 2f, text_paint)
+        canvas.drawText(
+            display,
+            rect.centerX(),
+            rect.centerY() - (metrics.ascent + metrics.descent) / 2f,
+            text_paint
+        )
         text_paint.isFakeBoldText = false
         text_paint.textAlign = previous_align
     }
@@ -346,9 +356,19 @@ class FlightMapChromeRenderer(
     ) {
         val theme_style = style.visual_theme.style
         val colors = style.visual_theme.colors
-        val alpha = if (theme_style.treatment == ThemeTreatment.PLAIN) 235 else theme_style.control_alpha
-        val stroke_width = if (theme_style.treatment == ThemeTreatment.PLAIN) 1.4f else theme_style.control_stroke_dp
-        draw_control_surface(canvas, rect, with_alpha(colors.control_fill, alpha), stroke, false, stroke_width, style)
+        val alpha =
+            if (theme_style.treatment == ThemeTreatment.PLAIN) 235 else theme_style.control_alpha
+        val stroke_width =
+            if (theme_style.treatment == ThemeTreatment.PLAIN) 1.4f else theme_style.control_stroke_dp
+        draw_control_surface(
+            canvas,
+            rect,
+            with_alpha(colors.control_fill, alpha),
+            stroke,
+            false,
+            stroke_width,
+            style
+        )
     }
 
     // Draw the reusable control surface before icons or text are placed on top.
@@ -413,7 +433,12 @@ class FlightMapChromeRenderer(
             paint.style = Paint.Style.FILL
             paint.color = with_alpha(colors.scrim, 28)
             canvas.drawRoundRect(
-                RectF(rect.left + host.dp(1f), rect.top + host.dp(2f), rect.right + host.dp(1f), rect.bottom + host.dp(2f)),
+                RectF(
+                    rect.left + host.dp(1f),
+                    rect.top + host.dp(2f),
+                    rect.right + host.dp(1f),
+                    rect.bottom + host.dp(2f)
+                ),
                 radius,
                 radius,
                 paint
@@ -489,7 +514,12 @@ class FlightMapChromeRenderer(
             paint.style = Paint.Style.FILL
             paint.color = with_alpha(colors.scrim, 42)
             canvas.drawRoundRect(
-                RectF(rect.left + host.dp(2f), rect.top + host.dp(3f), rect.right + host.dp(2f), rect.bottom + host.dp(3f)),
+                RectF(
+                    rect.left + host.dp(2f),
+                    rect.top + host.dp(3f),
+                    rect.right + host.dp(2f),
+                    rect.bottom + host.dp(3f)
+                ),
                 radius,
                 radius,
                 paint
@@ -515,7 +545,10 @@ class FlightMapChromeRenderer(
     ): Boolean {
         if (key.width <= 0 || key.height <= 0) return false
         val bitmap = synchronized(surface_cache) {
-            surface_cache[key]?.takeIf { !it.isRecycled } ?: create_surface_bitmap(key, create_surface)?.also {
+            surface_cache[key]?.takeIf { !it.isRecycled } ?: create_surface_bitmap(
+                key,
+                create_surface
+            )?.also {
                 surface_cache[key] = it
             }
         } ?: return false
@@ -539,7 +572,7 @@ class FlightMapChromeRenderer(
         return bitmap
     }
 
-        // Modal backdrop dims the map while keeping the active panel visually attached to the cockpit.
+    // Modal backdrop dims the map while keeping the active panel visually attached to the cockpit.
     fun draw_modal_backdrop(canvas: Canvas, w: Float, h: Float, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val alpha = when (style.visual_theme.style.treatment) {
@@ -569,12 +602,18 @@ class FlightMapChromeRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = host.sp(18f)
         text_paint.color = colors.text
-        val message = if (location_permission_granted) "Waiting for device location" else "Location permission required"
+        val message =
+            if (location_permission_granted) "Waiting for device location" else "Location permission required"
         canvas.drawText(message, w / 2f, h * 0.45f, text_paint)
         text_paint.isFakeBoldText = false
         text_paint.textSize = host.sp(12f)
         text_paint.color = colors.muted
-        canvas.drawText("No map or aircraft will be shown until real location data is available.", w / 2f, h * 0.45f + host.dp(24f), text_paint)
+        canvas.drawText(
+            "No map or aircraft will be shown until real location data is available.",
+            w / 2f,
+            h * 0.45f + host.dp(24f),
+            text_paint
+        )
     }
 
     // Top status combines source truth, alert status, and scale into one quick-read card.
@@ -619,8 +658,24 @@ class FlightMapChromeRenderer(
             start_size = host.sp(12f),
             min_size = host.sp(9f)
         )
-        draw_status_label(canvas, right_status_left, rect.top + host.dp(14f), host.dp(116f), host.dp(26f), traffic_status.first, traffic_status.second)
-        draw_scale_label(canvas, right_status_left, rect.top + host.dp(45f), host.dp(116f), host.dp(17f), scale_label, style)
+        draw_status_label(
+            canvas,
+            right_status_left,
+            rect.top + host.dp(14f),
+            host.dp(116f),
+            host.dp(26f),
+            traffic_status.first,
+            traffic_status.second
+        )
+        draw_scale_label(
+            canvas,
+            right_status_left,
+            rect.top + host.dp(45f),
+            host.dp(116f),
+            host.dp(17f),
+            scale_label,
+            style
+        )
     }
 
     // Recenter uses the same context-control surface as path controls so the top toolbar stays predictable.
@@ -650,10 +705,23 @@ class FlightMapChromeRenderer(
     fun draw_settings_button(canvas: Canvas, bounds: RectF, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
-        val stroke = if (theme_style.treatment == ThemeTreatment.PLAIN) with_alpha(colors.control_stroke, 155) else colors.control_stroke
-        val fill_alpha = if (theme_style.treatment == ThemeTreatment.PLAIN) 228 else theme_style.control_alpha
-        val stroke_width = if (theme_style.treatment == ThemeTreatment.PLAIN) 1f else theme_style.control_stroke_dp
-        draw_control_surface(canvas, bounds, with_alpha(colors.control_fill, fill_alpha), stroke, false, stroke_width, style)
+        val stroke = if (theme_style.treatment == ThemeTreatment.PLAIN) with_alpha(
+            colors.control_stroke,
+            155
+        ) else colors.control_stroke
+        val fill_alpha =
+            if (theme_style.treatment == ThemeTreatment.PLAIN) 228 else theme_style.control_alpha
+        val stroke_width =
+            if (theme_style.treatment == ThemeTreatment.PLAIN) 1f else theme_style.control_stroke_dp
+        draw_control_surface(
+            canvas,
+            bounds,
+            with_alpha(colors.control_fill, fill_alpha),
+            stroke,
+            false,
+            stroke_width,
+            style
+        )
         draw_gear_icon(canvas, bounds.centerX(), bounds.centerY() - host.dp(4f), colors.accent_blue)
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.textSize = host.sp(8f)
@@ -662,7 +730,12 @@ class FlightMapChromeRenderer(
     }
 
     // Filters button changes label and accent only when a filter is actively changing visible traffic.
-    fun draw_filters_button(canvas: Canvas, bounds: RectF, active: Boolean, style: FlightMapChromeStyle) {
+    fun draw_filters_button(
+        canvas: Canvas,
+        bounds: RectF,
+        active: Boolean,
+        style: FlightMapChromeStyle
+    ) {
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
         val stroke = when {
@@ -670,19 +743,31 @@ class FlightMapChromeRenderer(
             theme_style.treatment == ThemeTreatment.PLAIN -> with_alpha(colors.control_stroke, 155)
             else -> colors.control_stroke
         }
-        val fill_alpha = if (theme_style.treatment == ThemeTreatment.PLAIN) 228 else theme_style.control_alpha
+        val fill_alpha =
+            if (theme_style.treatment == ThemeTreatment.PLAIN) 228 else theme_style.control_alpha
         val fill = if (active) {
             with_alpha(colors.accent_orange, colors.selected_fill_alpha)
         } else {
             with_alpha(colors.control_fill, fill_alpha)
         }
-        val stroke_width = if (theme_style.treatment == ThemeTreatment.PLAIN) 1f else theme_style.control_stroke_dp
+        val stroke_width =
+            if (theme_style.treatment == ThemeTreatment.PLAIN) 1f else theme_style.control_stroke_dp
         draw_control_surface(canvas, bounds, fill, stroke, active, stroke_width, style)
-        draw_filter_icon(canvas, bounds.centerX(), bounds.centerY() - host.dp(4f), if (active) colors.accent_orange else colors.accent_blue)
+        draw_filter_icon(
+            canvas,
+            bounds.centerX(),
+            bounds.centerY() - host.dp(4f),
+            if (active) colors.accent_orange else colors.accent_blue
+        )
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.textSize = host.sp(8f)
         text_paint.color = if (active) colors.accent_orange else colors.text
-        canvas.drawText(if (active) "Filtered" else "Filters", bounds.centerX(), bounds.bottom - host.dp(6f), text_paint)
+        canvas.drawText(
+            if (active) "Filtered" else "Filters",
+            bounds.centerX(),
+            bounds.bottom - host.dp(6f),
+            text_paint
+        )
     }
 
     fun draw_gear_icon(canvas: Canvas, cx: Float, cy: Float, color: Int) {
@@ -738,10 +823,34 @@ class FlightMapChromeRenderer(
         paint.color = color
         val size = host.dp(15f)
         canvas.drawRect(cx - size / 2f, cy - size / 2f, cx + size / 2f, cy + size / 2f, paint)
-        canvas.drawLine(cx - host.dp(12f), cy - host.dp(12f), cx - host.dp(6f), cy - host.dp(12f), paint)
-        canvas.drawLine(cx - host.dp(12f), cy - host.dp(12f), cx - host.dp(12f), cy - host.dp(6f), paint)
-        canvas.drawLine(cx + host.dp(12f), cy + host.dp(12f), cx + host.dp(6f), cy + host.dp(12f), paint)
-        canvas.drawLine(cx + host.dp(12f), cy + host.dp(12f), cx + host.dp(12f), cy + host.dp(6f), paint)
+        canvas.drawLine(
+            cx - host.dp(12f),
+            cy - host.dp(12f),
+            cx - host.dp(6f),
+            cy - host.dp(12f),
+            paint
+        )
+        canvas.drawLine(
+            cx - host.dp(12f),
+            cy - host.dp(12f),
+            cx - host.dp(12f),
+            cy - host.dp(6f),
+            paint
+        )
+        canvas.drawLine(
+            cx + host.dp(12f),
+            cy + host.dp(12f),
+            cx + host.dp(6f),
+            cy + host.dp(12f),
+            paint
+        )
+        canvas.drawLine(
+            cx + host.dp(12f),
+            cy + host.dp(12f),
+            cx + host.dp(12f),
+            cy + host.dp(6f),
+            paint
+        )
     }
 
     fun draw_history_icon(canvas: Canvas, cx: Float, cy: Float, color: Int) {
@@ -752,7 +861,14 @@ class FlightMapChromeRenderer(
         paint.color = color
         path.reset()
         path.moveTo(cx - host.dp(12f), cy + host.dp(8f))
-        path.cubicTo(cx - host.dp(5f), cy - host.dp(11f), cx + host.dp(6f), cy + host.dp(12f), cx + host.dp(12f), cy - host.dp(8f))
+        path.cubicTo(
+            cx - host.dp(5f),
+            cy - host.dp(11f),
+            cx + host.dp(6f),
+            cy + host.dp(12f),
+            cx + host.dp(12f),
+            cy - host.dp(8f)
+        )
         canvas.drawPath(path, paint)
         paint.style = Paint.Style.FILL
         canvas.drawCircle(cx - host.dp(12f), cy + host.dp(8f), host.dp(3f), paint)
@@ -767,14 +883,42 @@ class FlightMapChromeRenderer(
         paint.strokeWidth = host.dp(2.4f)
         paint.color = color
         canvas.drawCircle(cx, cy, host.dp(12f), paint)
-        canvas.drawLine(cx - host.dp(6f), cy - host.dp(6f), cx + host.dp(6f), cy + host.dp(6f), paint)
-        canvas.drawLine(cx + host.dp(6f), cy - host.dp(6f), cx - host.dp(6f), cy + host.dp(6f), paint)
+        canvas.drawLine(
+            cx - host.dp(6f),
+            cy - host.dp(6f),
+            cx + host.dp(6f),
+            cy + host.dp(6f),
+            paint
+        )
+        canvas.drawLine(
+            cx + host.dp(6f),
+            cy - host.dp(6f),
+            cx - host.dp(6f),
+            cy + host.dp(6f),
+            paint
+        )
     }
 
     private fun draw_fitted_left_text(
-        canvas: Canvas, value: String, left: Float, y: Float, max_width: Float, start_size: Float, min_size: Float
+        canvas: Canvas,
+        value: String,
+        left: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
     ) = draw_fitted_text(
-        canvas, text_paint, value, left, y, max_width, start_size, min_size, Paint.Align.LEFT, host.dp(0.5f), host::ellipsize
+        canvas,
+        text_paint,
+        value,
+        left,
+        y,
+        max_width,
+        start_size,
+        min_size,
+        Paint.Align.LEFT,
+        host.dp(0.5f),
+        host::ellipsize
     )
 
     private fun draw_status_label(
@@ -798,9 +942,17 @@ class FlightMapChromeRenderer(
         while (text_paint.textSize > host.sp(7f) && text_paint.measureText(label) > max_width) {
             text_paint.textSize -= host.dp(0.5f)
         }
-        val display = if (text_paint.measureText(label) <= max_width) label else host.ellipsize(label, max_width)
+        val display = if (text_paint.measureText(label) <= max_width) label else host.ellipsize(
+            label,
+            max_width
+        )
         val metrics = text_paint.fontMetrics
-        canvas.drawText(display, rect.centerX(), rect.centerY() - (metrics.ascent + metrics.descent) / 2f, text_paint)
+        canvas.drawText(
+            display,
+            rect.centerX(),
+            rect.centerY() - (metrics.ascent + metrics.descent) / 2f,
+            text_paint
+        )
         text_paint.isFakeBoldText = false
     }
 
@@ -816,7 +968,12 @@ class FlightMapChromeRenderer(
         val colors = style.visual_theme.colors
         val rect = RectF(x, y, x + width, y + height)
         paint.style = Paint.Style.FILL
-        paint.color = Color.argb(34, Color.red(colors.accent_yellow), Color.green(colors.accent_yellow), Color.blue(colors.accent_yellow))
+        paint.color = Color.argb(
+            34,
+            Color.red(colors.accent_yellow),
+            Color.green(colors.accent_yellow),
+            Color.blue(colors.accent_yellow)
+        )
         canvas.drawRoundRect(rect, height / 2f, height / 2f, paint)
 
         val line_left = rect.left + host.dp(9f)
@@ -826,8 +983,20 @@ class FlightMapChromeRenderer(
         stroke_paint.color = colors.accent_yellow
         stroke_paint.strokeWidth = host.dp(1.2f)
         canvas.drawLine(line_left, line_y, line_right, line_y, stroke_paint)
-        canvas.drawLine(line_left, line_y - host.dp(3f), line_left, line_y + host.dp(3f), stroke_paint)
-        canvas.drawLine(line_right, line_y - host.dp(3f), line_right, line_y + host.dp(3f), stroke_paint)
+        canvas.drawLine(
+            line_left,
+            line_y - host.dp(3f),
+            line_left,
+            line_y + host.dp(3f),
+            stroke_paint
+        )
+        canvas.drawLine(
+            line_right,
+            line_y - host.dp(3f),
+            line_right,
+            line_y + host.dp(3f),
+            stroke_paint
+        )
 
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = true
@@ -884,7 +1053,8 @@ class FlightMapChromeRenderer(
                 canvas.drawRect(rect, paint)
                 paint.shader = null
 
-                val shine_height = min(rect.height() * 0.42f, host.dp(18f)).coerceAtLeast(host.dp(7f))
+                val shine_height =
+                    min(rect.height() * 0.42f, host.dp(18f)).coerceAtLeast(host.dp(7f))
                 paint.shader = LinearGradient(
                     rect.left,
                     rect.top,
@@ -898,12 +1068,29 @@ class FlightMapChromeRenderer(
                 paint.shader = null
 
                 paint.color = with_alpha(glass_accent, (alpha * 0.40f).roundToInt())
-                canvas.drawRect(rect.left, rect.top + host.dp(2f), rect.left + host.dp(2f), rect.bottom - host.dp(2f), paint)
+                canvas.drawRect(
+                    rect.left,
+                    rect.top + host.dp(2f),
+                    rect.left + host.dp(2f),
+                    rect.bottom - host.dp(2f),
+                    paint
+                )
                 paint.color = with_alpha(Color.WHITE, (alpha * 0.18f).roundToInt())
-                canvas.drawRect(rect.right - host.dp(1.2f), rect.top + radius * 0.44f, rect.right, rect.bottom - radius * 0.44f, paint)
+                canvas.drawRect(
+                    rect.right - host.dp(1.2f),
+                    rect.top + radius * 0.44f,
+                    rect.right,
+                    rect.bottom - radius * 0.44f,
+                    paint
+                )
 
                 val inset = host.dp(1.1f)
-                val inner = RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset)
+                val inner = RectF(
+                    rect.left + inset,
+                    rect.top + inset,
+                    rect.right - inset,
+                    rect.bottom - inset
+                )
                 val inner_radius = max(0f, radius - inset)
                 stroke_paint.style = Paint.Style.STROKE
                 stroke_paint.strokeWidth = host.dp(0.75f)
@@ -911,60 +1098,154 @@ class FlightMapChromeRenderer(
                 canvas.drawRoundRect(inner, inner_radius, inner_radius, stroke_paint)
 
                 stroke_paint.strokeWidth = host.dp(0.9f)
-                val line_inset = min(radius * 0.86f, rect.width() * 0.22f).coerceAtLeast(host.dp(7f))
+                val line_inset =
+                    min(radius * 0.86f, rect.width() * 0.22f).coerceAtLeast(host.dp(7f))
                 stroke_paint.color = with_alpha(glass_accent, (alpha * 0.95f).roundToInt())
-                canvas.drawLine(rect.left + line_inset, rect.top + host.dp(4f), rect.right - line_inset, rect.top + host.dp(4f), stroke_paint)
+                canvas.drawLine(
+                    rect.left + line_inset,
+                    rect.top + host.dp(4f),
+                    rect.right - line_inset,
+                    rect.top + host.dp(4f),
+                    stroke_paint
+                )
                 stroke_paint.strokeWidth = host.dp(0.7f)
                 stroke_paint.color = with_alpha(Color.WHITE, (alpha * 0.34f).roundToInt())
-                canvas.drawLine(rect.left + line_inset, rect.bottom - host.dp(4f), rect.right - line_inset, rect.bottom - host.dp(4f), stroke_paint)
+                canvas.drawLine(
+                    rect.left + line_inset,
+                    rect.bottom - host.dp(4f),
+                    rect.right - line_inset,
+                    rect.bottom - host.dp(4f),
+                    stroke_paint
+                )
                 canvas.restoreToCount(save)
             }
+
             ThemeTreatment.RADAR_GRID -> {
                 stroke_paint.strokeWidth = host.dp(1f)
                 stroke_paint.color = with_alpha(stroke, alpha)
                 val inset = host.dp(5f)
                 val tick = min(rect.width(), rect.height()) * 0.22f
-                canvas.drawLine(rect.left + inset, rect.top + inset, rect.left + inset + tick, rect.top + inset, stroke_paint)
-                canvas.drawLine(rect.left + inset, rect.top + inset, rect.left + inset, rect.top + inset + tick, stroke_paint)
-                canvas.drawLine(rect.right - inset - tick, rect.top + inset, rect.right - inset, rect.top + inset, stroke_paint)
-                canvas.drawLine(rect.right - inset, rect.top + inset, rect.right - inset, rect.top + inset + tick, stroke_paint)
-                canvas.drawLine(rect.left + inset, rect.bottom - inset, rect.left + inset + tick, rect.bottom - inset, stroke_paint)
-                canvas.drawLine(rect.left + inset, rect.bottom - inset - tick, rect.left + inset, rect.bottom - inset, stroke_paint)
-                canvas.drawLine(rect.right - inset - tick, rect.bottom - inset, rect.right - inset, rect.bottom - inset, stroke_paint)
-                canvas.drawLine(rect.right - inset, rect.bottom - inset - tick, rect.right - inset, rect.bottom - inset, stroke_paint)
+                canvas.drawLine(
+                    rect.left + inset,
+                    rect.top + inset,
+                    rect.left + inset + tick,
+                    rect.top + inset,
+                    stroke_paint
+                )
+                canvas.drawLine(
+                    rect.left + inset,
+                    rect.top + inset,
+                    rect.left + inset,
+                    rect.top + inset + tick,
+                    stroke_paint
+                )
+                canvas.drawLine(
+                    rect.right - inset - tick,
+                    rect.top + inset,
+                    rect.right - inset,
+                    rect.top + inset,
+                    stroke_paint
+                )
+                canvas.drawLine(
+                    rect.right - inset,
+                    rect.top + inset,
+                    rect.right - inset,
+                    rect.top + inset + tick,
+                    stroke_paint
+                )
+                canvas.drawLine(
+                    rect.left + inset,
+                    rect.bottom - inset,
+                    rect.left + inset + tick,
+                    rect.bottom - inset,
+                    stroke_paint
+                )
+                canvas.drawLine(
+                    rect.left + inset,
+                    rect.bottom - inset - tick,
+                    rect.left + inset,
+                    rect.bottom - inset,
+                    stroke_paint
+                )
+                canvas.drawLine(
+                    rect.right - inset - tick,
+                    rect.bottom - inset,
+                    rect.right - inset,
+                    rect.bottom - inset,
+                    stroke_paint
+                )
+                canvas.drawLine(
+                    rect.right - inset,
+                    rect.bottom - inset - tick,
+                    rect.right - inset,
+                    rect.bottom - inset,
+                    stroke_paint
+                )
             }
+
             ThemeTreatment.DAYLIGHT_CARD -> {
                 paint.style = Paint.Style.FILL
                 paint.color = with_alpha(stroke, alpha)
                 canvas.drawRect(rect.left, rect.top, rect.right, rect.top + host.dp(3f), paint)
                 paint.color = with_alpha(colors.accent_pink, (alpha * 0.65f).roundToInt())
-                canvas.drawRect(rect.left, rect.bottom - host.dp(2f), rect.right, rect.bottom, paint)
+                canvas.drawRect(
+                    rect.left,
+                    rect.bottom - host.dp(2f),
+                    rect.right,
+                    rect.bottom,
+                    paint
+                )
             }
+
             ThemeTreatment.STORM_BAND -> {
                 paint.style = Paint.Style.FILL
                 paint.color = with_alpha(stroke, alpha)
                 canvas.drawRect(rect.left, rect.top, rect.left + host.dp(4f), rect.bottom, paint)
                 stroke_paint.strokeWidth = host.dp(1.2f)
                 stroke_paint.color = with_alpha(colors.accent_orange, (alpha * 0.85f).roundToInt())
-                canvas.drawLine(rect.right - host.dp(15f), rect.top + host.dp(7f), rect.right - host.dp(7f), rect.bottom - host.dp(7f), stroke_paint)
+                canvas.drawLine(
+                    rect.right - host.dp(15f),
+                    rect.top + host.dp(7f),
+                    rect.right - host.dp(7f),
+                    rect.bottom - host.dp(7f),
+                    stroke_paint
+                )
             }
+
             ThemeTreatment.CRT_SCANLINE -> {
                 stroke_paint.strokeWidth = host.dp(0.7f)
                 stroke_paint.color = with_alpha(colors.accent_green, (alpha * 0.9f).roundToInt())
                 var y = rect.top + host.dp(5f)
                 while (y < rect.bottom - host.dp(2f)) {
-                    canvas.drawLine(rect.left + host.dp(3f), y, rect.right - host.dp(3f), y, stroke_paint)
+                    canvas.drawLine(
+                        rect.left + host.dp(3f),
+                        y,
+                        rect.right - host.dp(3f),
+                        y,
+                        stroke_paint
+                    )
                     y += host.dp(10f)
                 }
                 stroke_paint.strokeWidth = host.dp(0.8f)
                 stroke_paint.color = with_alpha(colors.text, (alpha * 0.55f).roundToInt())
-                canvas.drawRect(rect.left + host.dp(3f), rect.top + host.dp(3f), rect.right - host.dp(3f), rect.bottom - host.dp(3f), stroke_paint)
+                canvas.drawRect(
+                    rect.left + host.dp(3f),
+                    rect.top + host.dp(3f),
+                    rect.right - host.dp(3f),
+                    rect.bottom - host.dp(3f),
+                    stroke_paint
+                )
             }
         }
     }
 
     // Panel treatments are visual-only layers that keep map/provider attribution and data states untouched.
-    private fun draw_panel_treatment(canvas: Canvas, rect: RectF, radius: Float, style: FlightMapChromeStyle) {
+    private fun draw_panel_treatment(
+        canvas: Canvas,
+        rect: RectF,
+        radius: Float,
+        style: FlightMapChromeStyle
+    ) {
         val colors = style.visual_theme.colors
         val theme_style = style.visual_theme.style
         if (theme_style.texture_alpha <= 0) return
@@ -984,7 +1265,10 @@ class FlightMapChromeRenderer(
                     rect.bottom,
                     intArrayOf(
                         with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.58f).roundToInt()),
-                        with_alpha(colors.accent_blue, (theme_style.texture_alpha * 0.16f).roundToInt()),
+                        with_alpha(
+                            colors.accent_blue,
+                            (theme_style.texture_alpha * 0.16f).roundToInt()
+                        ),
                         with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.10f).roundToInt())
                     ),
                     floatArrayOf(0f, 0.56f, 1f),
@@ -1006,38 +1290,75 @@ class FlightMapChromeRenderer(
                 canvas.drawRect(rect.left, rect.top, rect.right, rect.top + shine_height, paint)
                 paint.shader = null
 
-                paint.color = with_alpha(colors.accent_blue, (theme_style.texture_alpha * 0.34f).roundToInt())
-                canvas.drawRect(rect.left, rect.top + host.dp(4f), rect.left + host.dp(3f), rect.bottom - host.dp(4f), paint)
-                paint.color = with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.13f).roundToInt())
-                canvas.drawRect(rect.right - host.dp(2f), rect.top + radius * 0.5f, rect.right, rect.bottom - radius * 0.5f, paint)
+                paint.color =
+                    with_alpha(colors.accent_blue, (theme_style.texture_alpha * 0.34f).roundToInt())
+                canvas.drawRect(
+                    rect.left,
+                    rect.top + host.dp(4f),
+                    rect.left + host.dp(3f),
+                    rect.bottom - host.dp(4f),
+                    paint
+                )
+                paint.color =
+                    with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.13f).roundToInt())
+                canvas.drawRect(
+                    rect.right - host.dp(2f),
+                    rect.top + radius * 0.5f,
+                    rect.right,
+                    rect.bottom - radius * 0.5f,
+                    paint
+                )
 
                 val inset = host.dp(1.4f)
-                val inner = RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset)
+                val inner = RectF(
+                    rect.left + inset,
+                    rect.top + inset,
+                    rect.right - inset,
+                    rect.bottom - inset
+                )
                 val inner_radius = max(0f, radius - inset)
                 stroke_paint.style = Paint.Style.STROKE
                 stroke_paint.strokeWidth = host.dp(0.8f)
-                stroke_paint.color = with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.58f).roundToInt())
+                stroke_paint.color =
+                    with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.58f).roundToInt())
                 canvas.drawRoundRect(inner, inner_radius, inner_radius, stroke_paint)
 
                 val line_inset = max(host.dp(16f), min(rect.width(), rect.height()) * 0.1f)
                 stroke_paint.strokeWidth = host.dp(0.9f)
-                stroke_paint.color = with_alpha(colors.accent_blue, (theme_style.texture_alpha * 1.05f).roundToInt())
-                canvas.drawLine(rect.left + line_inset, rect.top + host.dp(8f), rect.right - line_inset, rect.top + host.dp(8f), stroke_paint)
+                stroke_paint.color =
+                    with_alpha(colors.accent_blue, (theme_style.texture_alpha * 1.05f).roundToInt())
+                canvas.drawLine(
+                    rect.left + line_inset,
+                    rect.top + host.dp(8f),
+                    rect.right - line_inset,
+                    rect.top + host.dp(8f),
+                    stroke_paint
+                )
                 stroke_paint.strokeWidth = host.dp(0.75f)
-                stroke_paint.color = with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.38f).roundToInt())
-                canvas.drawLine(rect.left + line_inset, rect.bottom - host.dp(9f), rect.right - line_inset, rect.bottom - host.dp(9f), stroke_paint)
+                stroke_paint.color =
+                    with_alpha(Color.WHITE, (theme_style.texture_alpha * 0.38f).roundToInt())
+                canvas.drawLine(
+                    rect.left + line_inset,
+                    rect.bottom - host.dp(9f),
+                    rect.right - line_inset,
+                    rect.bottom - host.dp(9f),
+                    stroke_paint
+                )
                 canvas.restoreToCount(save)
             }
+
             ThemeTreatment.RADAR_GRID -> {
                 stroke_paint.strokeWidth = host.dp(0.6f)
                 stroke_paint.color = with_alpha(colors.accent_yellow, theme_style.texture_alpha)
                 draw_even_radar_grid(canvas, rect)
             }
+
             ThemeTreatment.DAYLIGHT_CARD -> {
                 paint.style = Paint.Style.FILL
                 paint.color = with_alpha(colors.accent_blue, theme_style.texture_alpha)
                 canvas.drawRect(rect.left, rect.top, rect.right, rect.top + host.dp(3f), paint)
             }
+
             ThemeTreatment.STORM_BAND -> {
                 paint.style = Paint.Style.FILL
                 paint.color = with_alpha(colors.accent_blue, theme_style.texture_alpha)
@@ -1045,12 +1366,19 @@ class FlightMapChromeRenderer(
                 paint.color = with_alpha(colors.text, (theme_style.texture_alpha * 0.5f).toInt())
                 canvas.drawRect(rect.left, rect.top, rect.right, rect.top + host.dp(2f), paint)
             }
+
             ThemeTreatment.CRT_SCANLINE -> {
                 stroke_paint.strokeWidth = host.dp(0.7f)
                 stroke_paint.color = with_alpha(colors.accent_green, theme_style.texture_alpha)
                 var y = rect.top + host.dp(6f)
                 while (y < rect.bottom) {
-                    canvas.drawLine(rect.left + host.dp(2f), y, rect.right - host.dp(2f), y, stroke_paint)
+                    canvas.drawLine(
+                        rect.left + host.dp(2f),
+                        y,
+                        rect.right - host.dp(2f),
+                        y,
+                        stroke_paint
+                    )
                     y += host.dp(12f)
                 }
             }
@@ -1089,7 +1417,6 @@ class FlightMapChromeRenderer(
             }
         }
     }
-
 
     private companion object {
         const val CHROME_SURFACE_CACHE_LIMIT = 48

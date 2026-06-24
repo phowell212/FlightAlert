@@ -15,6 +15,7 @@
 )
 
 package com.flightalert.aircraft
+
 import com.flightalert.flight.TrackPoint
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapProjection
@@ -33,7 +34,6 @@ internal fun aircraft_identity_key(
     callsign.trim().uppercase(Locale.US).takeIf { it.isNotBlank() }?.let { return "call:$it" }
     return "pos:${"%.4f".format(Locale.US, latitude)}:${"%.4f".format(Locale.US, longitude)}"
 }
-
 
 data class AircraftTelemetry(
     val source_type: String? = null,
@@ -130,7 +130,8 @@ data class AircraftTelemetry(
             qnh_hpa = qnh_hpa ?: fallback.qnh_hpa,
             true_heading_deg = true_heading_deg ?: fallback.true_heading_deg,
             magnetic_heading_deg = magnetic_heading_deg ?: fallback.magnetic_heading_deg,
-            magnetic_declination_deg = magnetic_declination_deg ?: fallback.magnetic_declination_deg,
+            magnetic_declination_deg = magnetic_declination_deg
+                ?: fallback.magnetic_declination_deg,
             track_rate_deg_per_sec = track_rate_deg_per_sec ?: fallback.track_rate_deg_per_sec,
             roll_deg = roll_deg ?: fallback.roll_deg,
             nav_modes = nav_modes.ifEmpty { fallback.nav_modes },
@@ -149,7 +150,6 @@ data class AircraftTelemetry(
     }
 }
 
-
 data class AircraftMetadataSeed(
     val source_name: String,
     val registration: String? = null,
@@ -161,10 +161,17 @@ data class AircraftMetadataSeed(
     val operator_code: String? = null
 ) {
     val has_details: Boolean
-        get() = listOf(registration, manufacturer, type, type_code, owner, manufactured_year, operator_code)
+        get() = listOf(
+            registration,
+            manufacturer,
+            type,
+            type_code,
+            owner,
+            manufactured_year,
+            operator_code
+        )
             .any { !it.isNullOrBlank() }
 }
-
 
 data class Aircraft(
     val icao24: String,
@@ -190,15 +197,11 @@ data class Aircraft(
         aircraft_identity_key(icao24, registration, callsign, lat, lon)
 }
 
-
 data class AircraftAppearance(val first_seen_ms: Long, val delay_ms: Long, val last_seen_ms: Long)
-
 
 data class TrafficDisplay(val aircraft: Aircraft?, val selected: Boolean)
 
-
 data class AircraftHit(val aircraft: Aircraft, val distance_squared: Float)
-
 
 data class AircraftDisplayPosition(
     val point: GeoPoint,
@@ -206,14 +209,12 @@ data class AircraftDisplayPosition(
     val motion_remaining_seconds: Double = 0.0
 )
 
-
 data class AircraftProjectionMotion(
     val speed_ms: Double,
     val track_deg: Double,
     val elapsed_seconds: Double,
     val remaining_seconds: Double
 )
-
 
 object AircraftPositionProjector {
     fun reported_position(aircraft: Aircraft): GeoPoint {
@@ -256,7 +257,9 @@ object AircraftPositionProjector {
     ): AircraftProjectionMotion? {
         if (aircraft.on_ground == true || !aircraft.lat.isFinite() || !aircraft.lon.isFinite()) return null
         if (!now_epoch_sec.isFinite() || !max_projection_seconds.isFinite() || max_projection_seconds <= 0.0) return null
-        val speed = aircraft.velocity_ms?.takeIf { it.isFinite() && it > MIN_PROJECTABLE_SPEED_MS && it <= MAX_PROJECTABLE_SPEED_MS } ?: return null
+        val speed =
+            aircraft.velocity_ms?.takeIf { it.isFinite() && it > MIN_PROJECTABLE_SPEED_MS && it <= MAX_PROJECTABLE_SPEED_MS }
+                ?: return null
         val track = normalized_track_degrees(aircraft.track_deg) ?: return null
         val report_time = aircraft.position_time_sec?.takeIf { it.isFinite() } ?: return null
         val raw_elapsed = now_epoch_sec - report_time
@@ -286,7 +289,8 @@ object AircraftPositionProjector {
     }
 
     fun to_track_point(aircraft: Aircraft): TrackPoint? {
-        val epoch_sec = (aircraft.position_time_sec ?: aircraft.last_contact_sec)?.toLong() ?: return null
+        val epoch_sec =
+            (aircraft.position_time_sec ?: aircraft.last_contact_sec)?.toLong() ?: return null
         if (epoch_sec <= 0L) return null
         return TrackPoint(
             lat = aircraft.lat,
@@ -307,9 +311,11 @@ object AircraftPositionProjector {
     private const val MAX_PROJECTABLE_SPEED_MS = 1_200.0
 }
 
-
-
-data class RegistryCountry(val iso_code: String, val name: String, val flag_code: String? = iso_code) {
+data class RegistryCountry(
+    val iso_code: String,
+    val name: String,
+    val flag_code: String? = iso_code
+) {
     val label: String
         get() = flag_code?.let { "${flag_emoji(it)} $name" } ?: name
 
@@ -322,21 +328,17 @@ data class RegistryCountry(val iso_code: String, val name: String, val flag_code
     }
 }
 
-
 data class IcaoRegistryRange(val start: Int, val end: Int, val country: RegistryCountry)
-
 
 enum class RegistryCountrySource {
     REGISTRATION,
     ICAO_ALLOCATION
 }
 
-
 data class RegistryCountryMatch(val country: RegistryCountry, val source: RegistryCountrySource) {
     val label: String
         get() = country.label
 }
-
 
 object AircraftRegistryResolver {
     fun country_for(registration: String?, icao24: String): RegistryCountryMatch? {
@@ -357,7 +359,10 @@ object AircraftRegistryResolver {
         val reg = registration?.trim()?.uppercase(Locale.US) ?: return null
         return when {
             reg.startsWith("N") && reg.getOrNull(1)?.isDigit() == true -> REGISTRY_UNITED_STATES
-            reg.startsWith("C-F") || reg.startsWith("C-G") || reg.startsWith("C-I") || reg.startsWith("CF") -> RegistryCountry("CA", "Canada")
+            reg.startsWith("C-F") || reg.startsWith("C-G") || reg.startsWith("C-I") || reg.startsWith(
+                "CF"
+            ) -> RegistryCountry("CA", "Canada")
+
             reg.startsWith("G-") -> RegistryCountry("GB", "United Kingdom")
             reg.startsWith("D-") -> RegistryCountry("DE", "Germany")
             reg.startsWith("F-") -> RegistryCountry("FR", "France")
@@ -384,9 +389,17 @@ object AircraftRegistryResolver {
             reg.startsWith("HL") -> RegistryCountry("KR", "South Korea")
             reg.startsWith("VH-") -> RegistryCountry("AU", "Australia")
             reg.startsWith("ZK-") -> RegistryCountry("NZ", "New Zealand")
-            reg.startsWith("PT") || reg.startsWith("PR") || reg.startsWith("PP") || reg.startsWith("PS") -> RegistryCountry("BR", "Brazil")
+            reg.startsWith("PT") || reg.startsWith("PR") || reg.startsWith("PP") || reg.startsWith("PS") -> RegistryCountry(
+                "BR",
+                "Brazil"
+            )
+
             reg.startsWith("LV-") -> RegistryCountry("AR", "Argentina")
-            reg.startsWith("XA") || reg.startsWith("XB") || reg.startsWith("XC") -> RegistryCountry("MX", "Mexico")
+            reg.startsWith("XA") || reg.startsWith("XB") || reg.startsWith("XC") -> RegistryCountry(
+                "MX",
+                "Mexico"
+            )
+
             reg.startsWith("HK-") -> RegistryCountry("CO", "Colombia")
             reg.startsWith("CC-") -> RegistryCountry("CL", "Chile")
             reg.startsWith("9M-") -> RegistryCountry("MY", "Malaysia")
@@ -398,7 +411,11 @@ object AircraftRegistryResolver {
             reg.startsWith("A6-") -> RegistryCountry("AE", "United Arab Emirates")
             reg.startsWith("A7-") -> RegistryCountry("QA", "Qatar")
             reg.startsWith("HZ-") -> RegistryCountry("SA", "Saudi Arabia")
-            reg.startsWith("ZS") || reg.startsWith("ZU") || reg.startsWith("ZT") -> RegistryCountry("ZA", "South Africa")
+            reg.startsWith("ZS") || reg.startsWith("ZU") || reg.startsWith("ZT") -> RegistryCountry(
+                "ZA",
+                "South Africa"
+            )
+
             else -> null
         }
     }
@@ -412,11 +429,21 @@ object AircraftRegistryResolver {
 
     private val REGISTRY_UNITED_STATES = country("US", "United States")
 
-    private fun country(iso_code: String, name: String, flag_code: String? = iso_code): RegistryCountry {
+    private fun country(
+        iso_code: String,
+        name: String,
+        flag_code: String? = iso_code
+    ): RegistryCountry {
         return RegistryCountry(iso_code, name, flag_code)
     }
 
-    private fun icao_range(start: Int, end: Int, iso_code: String, name: String, flag_code: String? = iso_code): IcaoRegistryRange {
+    private fun icao_range(
+        start: Int,
+        end: Int,
+        iso_code: String,
+        name: String,
+        flag_code: String? = iso_code
+    ): IcaoRegistryRange {
         return IcaoRegistryRange(start, end, country(iso_code, name, flag_code))
     }
 

@@ -1,4 +1,4 @@
-@file:Suppress(
+﻿@file:Suppress(
     "CanBeVal",
     "FunctionName",
     "KotlinConstantConditions",
@@ -15,17 +15,18 @@
 )
 
 package com.flightalert.flight
-import com.flightalert.FlightAlertAppSettings.AircraftFeedMode
+
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.details.AircraftDetails
 import com.flightalert.details.AirportDetails
 import com.flightalert.details.OriginAerodrome
 import com.flightalert.details.fetch_json_object
 import com.flightalert.map.MapProjection
-import org.json.JSONObject
+import com.flightalert.ui.AircraftFeedMode
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.Executor
+import org.json.JSONObject
 
 class AircraftOriginLookupController(
     private val military_origin_resolver: MilitaryOriginResolver,
@@ -49,7 +50,8 @@ class AircraftOriginLookupController(
 
     fun reset_for_selection(aircraft: Aircraft) {
         military_origin_aircraft_id = aircraft.icao24
-        military_origin_status = if (aircraft.is_military) "Waiting for flight path origin" else "Unavailable"
+        military_origin_status =
+            if (aircraft.is_military) "Waiting for flight path origin" else "Unavailable"
         military_origin_request_key = null
         trace_origin_aircraft_id = aircraft.icao24
         trace_origin_airport = null
@@ -138,16 +140,22 @@ class AircraftOriginLookupController(
 
     private fun should_skip_airport_origin_fallback(aircraft: Aircraft): Boolean {
         val type = aircraft.type_code?.trim()?.uppercase(Locale.US).orEmpty()
-        if (type.startsWith("H") || type.startsWith("R") || type.startsWith("UAV") || type.startsWith("DRON")) return true
+        if (type.startsWith("H") || type.startsWith("R") || type.startsWith("UAV") || type.startsWith(
+                "DRON"
+            )
+        ) return true
         return aircraft.category == 8 || aircraft.category == 14
     }
 
     private fun trace_request_key(key: String, first_point: TrackPoint): String {
-        return "${key}:${first_point.epoch_sec}:${"%.4f".format(Locale.US, first_point.lat)}:${"%.4f".format(Locale.US, first_point.lon)}"
+        return "${key}:${first_point.epoch_sec}:${
+            "%.4f".format(
+                Locale.US,
+                first_point.lat
+            )
+        }:${"%.4f".format(Locale.US, first_point.lon)}"
     }
 }
-
-
 
 class MilitaryOriginResolver(private val user_agent: String) {
     fun resolve_origin(point: TrackPoint): String {
@@ -160,14 +168,18 @@ class MilitaryOriginResolver(private val user_agent: String) {
             );
             out center tags 20;
         """.trimIndent()
-        val api_url = "https://overpass-api.de/api/interpreter?data=${URLEncoder.encode(query, "UTF-8")}"
-        val elements = fetch_json_object(api_url)?.optJSONArray("elements") ?: return "Origin lookup unavailable"
+        val api_url =
+            "https://overpass-api.de/api/interpreter?data=${URLEncoder.encode(query, "UTF-8")}"
+        val elements = fetch_json_object(api_url)?.optJSONArray("elements")
+            ?: return "Origin lookup unavailable"
         val candidates = mutableListOf<OriginAerodrome>()
         for (index in 0 until elements.length()) {
             val item = elements.optJSONObject(index) ?: continue
             val center = item.optJSONObject("center")
-            val lat = if (item.has("lat")) item.optDouble("lat") else center?.optDouble("lat") ?: continue
-            val lon = if (item.has("lon")) item.optDouble("lon") else center?.optDouble("lon") ?: continue
+            val lat =
+                if (item.has("lat")) item.optDouble("lat") else center?.optDouble("lat") ?: continue
+            val lon =
+                if (item.has("lon")) item.optDouble("lon") else center?.optDouble("lon") ?: continue
             val distance_m = MapProjection.distance_meters(point.lat, point.lon, lat, lon)
             if (distance_m > ORIGIN_AERODROME_RADIUS_M) continue
             val tags = item.optJSONObject("tags")
@@ -181,7 +193,8 @@ class MilitaryOriginResolver(private val user_agent: String) {
             )
         }
 
-        val nearest = candidates.minByOrNull { it.distance_m } ?: return "Track origin not matched to an aerodrome"
+        val nearest = candidates.minByOrNull { it.distance_m }
+            ?: return "Track origin not matched to an aerodrome"
         val label = nearest.label()
         return if (nearest.military) {
             "Military base: $label"
@@ -206,7 +219,6 @@ class MilitaryOriginResolver(private val user_agent: String) {
 
     private fun fetch_json_object(url: String): JSONObject? =
         fetch_json_object(url, user_agent)
-
 
     companion object {
         fun is_military_airport_name(name: String?, icao: String?): Boolean {
@@ -238,8 +250,6 @@ class MilitaryOriginResolver(private val user_agent: String) {
     }
 }
 
-
-
 class TraceOriginAirportResolver(private val user_agent: String) {
     fun resolve_origin_airport(point: TrackPoint): AirportDetails? {
         ORIGIN_SEARCH_RADII_M.forEach { radius_m ->
@@ -249,7 +259,10 @@ class TraceOriginAirportResolver(private val user_agent: String) {
         return null
     }
 
-    private fun aerodromes_near(point: TrackPoint, radius_m: Double): List<TraceOriginAirportCandidate> {
+    private fun aerodromes_near(
+        point: TrackPoint,
+        radius_m: Double
+    ): List<TraceOriginAirportCandidate> {
         val query = """
             [out:json][timeout:8];
             (
@@ -259,15 +272,18 @@ class TraceOriginAirportResolver(private val user_agent: String) {
             );
             out center tags 30;
         """.trimIndent()
-        val api_url = "https://overpass-api.de/api/interpreter?data=${URLEncoder.encode(query, "UTF-8")}"
+        val api_url =
+            "https://overpass-api.de/api/interpreter?data=${URLEncoder.encode(query, "UTF-8")}"
         val elements = fetch_json_object(api_url)?.optJSONArray("elements") ?: return emptyList()
         val candidates = mutableListOf<TraceOriginAirportCandidate>()
         for (index in 0 until elements.length()) {
             val item = elements.optJSONObject(index) ?: continue
             val tags = item.optJSONObject("tags")
             val center = item.optJSONObject("center")
-            val lat = if (item.has("lat")) item.optDouble("lat") else center?.optDouble("lat") ?: continue
-            val lon = if (item.has("lon")) item.optDouble("lon") else center?.optDouble("lon") ?: continue
+            val lat =
+                if (item.has("lat")) item.optDouble("lat") else center?.optDouble("lat") ?: continue
+            val lon =
+                if (item.has("lon")) item.optDouble("lon") else center?.optDouble("lon") ?: continue
             val distance_m = MapProjection.distance_meters(point.lat, point.lon, lat, lon)
             if (distance_m > radius_m) continue
             val airport = airport_from_tags(tags, lat, lon) ?: continue
@@ -277,7 +293,8 @@ class TraceOriginAirportResolver(private val user_agent: String) {
     }
 
     private fun airport_from_tags(tags: JSONObject?, lat: Double, lon: Double): AirportDetails? {
-        val name = tags?.trace_origin_json_clean_string("name") ?: tags?.trace_origin_json_clean_string("official_name")
+        val name = tags?.trace_origin_json_clean_string("name")
+            ?: tags?.trace_origin_json_clean_string("official_name")
         val icao = tags?.trace_origin_json_clean_string("icao")
         val iata = tags?.trace_origin_json_clean_string("iata")
         val display_code = listOfNotNull(icao, iata, name)
@@ -287,8 +304,10 @@ class TraceOriginAirportResolver(private val user_agent: String) {
             icao = display_code.uppercase(Locale.US),
             iata = iata,
             name = name,
-            country_code = tags?.trace_origin_json_clean_string("addr:country") ?: tags?.trace_origin_json_clean_string("ISO3166-1"),
-            region_name = tags?.trace_origin_json_clean_string("addr:state") ?: tags?.trace_origin_json_clean_string("is_in:state"),
+            country_code = tags?.trace_origin_json_clean_string("addr:country")
+                ?: tags?.trace_origin_json_clean_string("ISO3166-1"),
+            region_name = tags?.trace_origin_json_clean_string("addr:state")
+                ?: tags?.trace_origin_json_clean_string("is_in:state"),
             latitude = lat,
             longitude = lon
         )
@@ -296,7 +315,6 @@ class TraceOriginAirportResolver(private val user_agent: String) {
 
     private fun fetch_json_object(url: String): JSONObject? =
         fetch_json_object(url, user_agent)
-
 
     private data class TraceOriginAirportCandidate(
         val airport: AirportDetails,
@@ -307,7 +325,6 @@ class TraceOriginAirportResolver(private val user_agent: String) {
         val ORIGIN_SEARCH_RADII_M = listOf(9000.0, 18000.0, 30000.0)
     }
 }
-
 
 internal fun JSONObject.trace_origin_json_clean_string(key: String): String? {
     if (!has(key) || isNull(key)) return null

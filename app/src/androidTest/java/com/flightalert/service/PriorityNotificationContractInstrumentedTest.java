@@ -10,12 +10,13 @@ import android.app.NotificationManager;
 import android.content.Context;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 
-import com.flightalert.FlightAlertAppSettings;
-import com.flightalert.alerts.AircraftMonitorService;
 import com.flightalert.alerts.AlertAircraft;
 import com.flightalert.alerts.AlertAircraftClassifier;
+import com.flightalert.alerts.AircraftAlertService;
 import com.flightalert.alerts.PriorityNotificationPresenter;
+import com.flightalert.ui.FlightAlertSettings;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -46,19 +47,19 @@ public class PriorityNotificationContractInstrumentedTest {
         manager = context.getSystemService(NotificationManager.class);
         manager.createNotificationChannel(
                 new NotificationChannel(
-                        AircraftMonitorService.PRIORITY_CHANNEL_ID,
+                        AircraftAlertService.PRIORITY_CHANNEL_ID,
                         "Extreme priority aircraft",
                         NotificationManager.IMPORTANCE_HIGH
                 )
         );
-        manager.cancel(AircraftMonitorService.PRIORITY_NOTIFICATION_ID);
+        manager.cancel(AircraftAlertService.PRIORITY_NOTIFICATION_ID);
         waitForNotification(false);
     }
 
     @After
-    public void tearDown() throws Exception {
+    public void tearDown() {
         if (manager != null) {
-            manager.cancel(AircraftMonitorService.PRIORITY_NOTIFICATION_ID);
+            manager.cancel(AircraftAlertService.PRIORITY_NOTIFICATION_ID);
             waitForNotification(false);
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -67,7 +68,7 @@ public class PriorityNotificationContractInstrumentedTest {
     }
 
     @Test
-    public void priorityNotificationExistsOnlyWhileExtremeAircraftRemain() throws Exception {
+    public void priorityNotificationExistsOnlyWhileExtremeAircraftRemain() {
         applyPriorityNotification(Collections.singletonList(aircraft("NEAR1", "N-NEAR", 900.0, false)));
         assertFalse(hasPriorityNotification());
 
@@ -77,30 +78,30 @@ public class PriorityNotificationContractInstrumentedTest {
         applyPriorityNotification(Collections.singletonList(aircraft("EXT1", "N-EXT", 1500.0, true)));
         assertTrue(notificationTextContains("N-EXT 1500 ft"));
 
-        applyPriorityNotification(Collections.<AlertAircraft>emptyList());
+        applyPriorityNotification(Collections.emptyList());
         assertFalse(hasPriorityNotification());
     }
 
     @Test
-    public void serviceSnapshotPublishesAndClearsExtremePriorityNotification() throws Exception {
-        FlightAlertAppSettings.INSTANCE.prefs(context)
+    public void serviceSnapshotPublishesAndClearsExtremePriorityNotification() {
+        FlightAlertSettings.INSTANCE.prefs(context)
                 .edit()
-                .putBoolean(FlightAlertAppSettings.KEY_ALERTS_ENABLED, true)
-                .putBoolean(FlightAlertAppSettings.KEY_PRIORITY_TRACKING_ENABLED, true)
+                .putBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true)
+                .putBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, true)
                 .apply();
 
-        AircraftMonitorService.Companion.publish_priority_snapshot(
+        AircraftAlertService.Companion.publish_priority_snapshot(
                 context,
                 Collections.singletonList(aircraft("EXT2", "N-SNAP", 1800.0, true, true))
         );
         assertTrue(notificationTextContains("N-SNAP 1800 ft est."));
 
-        AircraftMonitorService.Companion.publish_priority_snapshot(context, Collections.<AlertAircraft>emptyList());
+        AircraftAlertService.Companion.publish_priority_snapshot(context, Collections.emptyList());
         waitForNotification(false);
         assertFalse(hasPriorityNotification());
     }
 
-    private void applyPriorityNotification(List<AlertAircraft> priorityAircraft) throws Exception {
+    private void applyPriorityNotification(List<AlertAircraft> priorityAircraft) {
         List<AlertAircraft> extremePriorityAircraft =
                 PriorityNotificationPresenter.INSTANCE.extreme_priority_aircraft(priorityAircraft);
         if (!AlertAircraftClassifier.INSTANCE.should_show_persistent_priority_notification(
@@ -108,11 +109,11 @@ public class PriorityNotificationContractInstrumentedTest {
                 extremePriorityAircraft,
                 true
         )) {
-            manager.cancel(AircraftMonitorService.PRIORITY_NOTIFICATION_ID);
+            manager.cancel(AircraftAlertService.PRIORITY_NOTIFICATION_ID);
             waitForNotification(false);
             return;
         }
-        Notification notification = new Notification.Builder(context, AircraftMonitorService.PRIORITY_CHANNEL_ID)
+        Notification notification = new Notification.Builder(context, AircraftAlertService.PRIORITY_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
                 .setContentTitle("Extreme priority aircraft")
                 .setContentText(PriorityNotificationPresenter.INSTANCE.notification_body(extremePriorityAircraft))
@@ -122,36 +123,37 @@ public class PriorityNotificationContractInstrumentedTest {
                 .setOnlyAlertOnce(true)
                 .setOngoing(true)
                 .build();
-        manager.notify(AircraftMonitorService.PRIORITY_NOTIFICATION_ID, notification);
+        manager.notify(AircraftAlertService.PRIORITY_NOTIFICATION_ID, notification);
         waitForNotification(true);
     }
 
-    private boolean notificationTextContains(String expected) throws Exception {
+    private boolean notificationTextContains(String expected) {
         long deadline = System.currentTimeMillis() + 3000L;
         while (System.currentTimeMillis() < deadline) {
             for (android.service.notification.StatusBarNotification active : manager.getActiveNotifications()) {
-                if (active.getId() != AircraftMonitorService.PRIORITY_NOTIFICATION_ID) continue;
+                if (active.getId() != AircraftAlertService.PRIORITY_NOTIFICATION_ID) continue;
                 CharSequence title = active.getNotification().extras.getCharSequence(Notification.EXTRA_TITLE);
                 CharSequence text = active.getNotification().extras.getCharSequence(Notification.EXTRA_TEXT);
-                if (contains(title, "Extreme priority aircraft") && contains(text, expected)) return true;
+                if (contains(title, "Extreme priority aircraft") && contains(text, expected))
+                    return true;
             }
-            Thread.sleep(80L);
+            SystemClock.sleep(80L);
         }
         return false;
     }
 
     private boolean hasPriorityNotification() {
         for (android.service.notification.StatusBarNotification active : manager.getActiveNotifications()) {
-            if (active.getId() == AircraftMonitorService.PRIORITY_NOTIFICATION_ID) return true;
+            if (active.getId() == AircraftAlertService.PRIORITY_NOTIFICATION_ID) return true;
         }
         return false;
     }
 
-    private void waitForNotification(boolean expected) throws Exception {
+    private void waitForNotification(boolean expected) {
         long deadline = System.currentTimeMillis() + 3000L;
         while (System.currentTimeMillis() < deadline) {
             if (hasPriorityNotification() == expected) return;
-            Thread.sleep(80L);
+            SystemClock.sleep(80L);
         }
     }
 
@@ -165,9 +167,10 @@ public class PriorityNotificationContractInstrumentedTest {
                 .executeShellCommand(command);
         try (InputStream stream = new ParcelFileDescriptor.AutoCloseInputStream(fd)) {
             byte[] buffer = new byte[256];
-            while (stream.read(buffer) != -1) {
-                // Drain command output so the shell command completes before the test continues.
-            }
+            int bytesRead;
+            do {
+                bytesRead = stream.read(buffer);
+            } while (bytesRead != -1);
         }
     }
 

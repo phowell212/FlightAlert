@@ -15,69 +15,73 @@
 )
 
 package com.flightalert.traffic
+
 import android.content.SharedPreferences
 import androidx.core.content.edit
-import com.flightalert.FlightAlertAppSettings
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftSymbol
 import com.flightalert.aircraft.AircraftSymbolClassifier
+import com.flightalert.ui.FlightAlertSettings
 import java.util.Locale
 import kotlin.math.max
 
 class AircraftFilterController(private val prefs: SharedPreferences) {
     var search_query = AircraftFilterEngine.sanitize_search(
-        prefs.getString(FlightAlertAppSettings.KEY_FILTER_SEARCH_QUERY, "").orEmpty()
+        prefs.getString(FlightAlertSettings.KEY_FILTER_SEARCH_QUERY, "").orEmpty()
     )
         private set
-    var aircraft_type = read_enum_setting(FlightAlertAppSettings.KEY_FILTER_AIRCRAFT_TYPE, AircraftTypeFilter.ALL)
+    var aircraft_type =
+        read_enum_setting(FlightAlertSettings.KEY_FILTER_AIRCRAFT_TYPE, AircraftTypeFilter.ALL)
         private set
-    var altitude = read_enum_setting(FlightAlertAppSettings.KEY_FILTER_ALTITUDE, AltitudeFilter.ANY)
+    var altitude = read_enum_setting(FlightAlertSettings.KEY_FILTER_ALTITUDE, AltitudeFilter.ANY)
         private set
-    var distance = read_enum_setting(FlightAlertAppSettings.KEY_FILTER_DISTANCE, DistanceFilter.ANY)
+    var distance = read_enum_setting(FlightAlertSettings.KEY_FILTER_DISTANCE, DistanceFilter.ANY)
         private set
-    var flight_status = read_enum_setting(FlightAlertAppSettings.KEY_FILTER_FLIGHT_STATUS, FlightStatusFilter.AIRBORNE)
+    var flight_status =
+        read_enum_setting(FlightAlertSettings.KEY_FILTER_FLIGHT_STATUS, FlightStatusFilter.AIRBORNE)
         private set
-    var report_age = read_enum_setting(FlightAlertAppSettings.KEY_FILTER_REPORT_AGE, ReportAgeFilter.ANY)
+    var report_age =
+        read_enum_setting(FlightAlertSettings.KEY_FILTER_REPORT_AGE, ReportAgeFilter.ANY)
         private set
-    var alert_volume_only = prefs.getBoolean(FlightAlertAppSettings.KEY_FILTER_ALERT_VOLUME, false)
+    var alert_volume_only = prefs.getBoolean(FlightAlertSettings.KEY_FILTER_ALERT_VOLUME, false)
         private set
 
     fun set_search_query(value: String): Boolean {
         val sanitized = AircraftFilterEngine.sanitize_search(value)
         if (search_query == sanitized) return false
         search_query = sanitized
-        prefs.edit { putString(FlightAlertAppSettings.KEY_FILTER_SEARCH_QUERY, search_query) }
+        prefs.edit { putString(FlightAlertSettings.KEY_FILTER_SEARCH_QUERY, search_query) }
         return true
     }
 
     fun set_aircraft_type(next: AircraftTypeFilter) {
         aircraft_type = next
-        prefs.edit { putString(FlightAlertAppSettings.KEY_FILTER_AIRCRAFT_TYPE, next.name) }
+        prefs.edit { putString(FlightAlertSettings.KEY_FILTER_AIRCRAFT_TYPE, next.name) }
     }
 
     fun set_altitude(next: AltitudeFilter) {
         altitude = next
-        prefs.edit { putString(FlightAlertAppSettings.KEY_FILTER_ALTITUDE, next.name) }
+        prefs.edit { putString(FlightAlertSettings.KEY_FILTER_ALTITUDE, next.name) }
     }
 
     fun set_distance(next: DistanceFilter) {
         distance = next
-        prefs.edit { putString(FlightAlertAppSettings.KEY_FILTER_DISTANCE, next.name) }
+        prefs.edit { putString(FlightAlertSettings.KEY_FILTER_DISTANCE, next.name) }
     }
 
     fun set_flight_status(next: FlightStatusFilter) {
         flight_status = next
-        prefs.edit { putString(FlightAlertAppSettings.KEY_FILTER_FLIGHT_STATUS, next.name) }
+        prefs.edit { putString(FlightAlertSettings.KEY_FILTER_FLIGHT_STATUS, next.name) }
     }
 
     fun set_report_age(next: ReportAgeFilter) {
         report_age = next
-        prefs.edit { putString(FlightAlertAppSettings.KEY_FILTER_REPORT_AGE, next.name) }
+        prefs.edit { putString(FlightAlertSettings.KEY_FILTER_REPORT_AGE, next.name) }
     }
 
     fun set_alert_volume_only(enabled: Boolean) {
         alert_volume_only = enabled
-        prefs.edit { putBoolean(FlightAlertAppSettings.KEY_FILTER_ALERT_VOLUME, enabled) }
+        prefs.edit { putBoolean(FlightAlertSettings.KEY_FILTER_ALERT_VOLUME, enabled) }
     }
 
     fun reset() {
@@ -89,13 +93,13 @@ class AircraftFilterController(private val prefs: SharedPreferences) {
         report_age = ReportAgeFilter.ANY
         alert_volume_only = false
         prefs.edit {
-            putString(FlightAlertAppSettings.KEY_FILTER_SEARCH_QUERY, search_query)
-            putString(FlightAlertAppSettings.KEY_FILTER_AIRCRAFT_TYPE, aircraft_type.name)
-            putString(FlightAlertAppSettings.KEY_FILTER_ALTITUDE, altitude.name)
-            putString(FlightAlertAppSettings.KEY_FILTER_DISTANCE, distance.name)
-            putString(FlightAlertAppSettings.KEY_FILTER_FLIGHT_STATUS, flight_status.name)
-            putString(FlightAlertAppSettings.KEY_FILTER_REPORT_AGE, report_age.name)
-            putBoolean(FlightAlertAppSettings.KEY_FILTER_ALERT_VOLUME, alert_volume_only)
+            putString(FlightAlertSettings.KEY_FILTER_SEARCH_QUERY, search_query)
+            putString(FlightAlertSettings.KEY_FILTER_AIRCRAFT_TYPE, aircraft_type.name)
+            putString(FlightAlertSettings.KEY_FILTER_ALTITUDE, altitude.name)
+            putString(FlightAlertSettings.KEY_FILTER_DISTANCE, distance.name)
+            putString(FlightAlertSettings.KEY_FILTER_FLIGHT_STATUS, flight_status.name)
+            putString(FlightAlertSettings.KEY_FILTER_REPORT_AGE, report_age.name)
+            putBoolean(FlightAlertSettings.KEY_FILTER_ALERT_VOLUME, alert_volume_only)
         }
     }
 
@@ -167,8 +171,6 @@ class AircraftFilterController(private val prefs: SharedPreferences) {
     }
 }
 
-
-
 data class AircraftFilterState(
     val search_query: String,
     val aircraft_type: AircraftTypeFilter,
@@ -191,9 +193,7 @@ data class AircraftFilterState(
     }
 }
 
-
 data class FilterStats(val total: Int, val matched: Int, val summary: String)
-
 
 enum class AircraftTypeFilter(val short_label: String) {
     ALL("All"),
@@ -207,7 +207,6 @@ enum class AircraftTypeFilter(val short_label: String) {
     fun next(): AircraftTypeFilter = entries[(ordinal + 1) % entries.size]
 }
 
-
 enum class AltitudeFilter(val short_label: String) {
     ANY("Any"),
     BELOW_1000("<1k ft"),
@@ -219,7 +218,6 @@ enum class AltitudeFilter(val short_label: String) {
     fun next(): AltitudeFilter = entries[(ordinal + 1) % entries.size]
 }
 
-
 enum class DistanceFilter(val short_label: String) {
     ANY("Any"),
     WITHIN_5("<5 mi"),
@@ -230,7 +228,6 @@ enum class DistanceFilter(val short_label: String) {
     fun next(): DistanceFilter = entries[(ordinal + 1) % entries.size]
 }
 
-
 enum class FlightStatusFilter(val short_label: String) {
     ANY("Any"),
     AIRBORNE("Airborne"),
@@ -240,7 +237,6 @@ enum class FlightStatusFilter(val short_label: String) {
     fun next(): FlightStatusFilter = entries[(ordinal + 1) % entries.size]
 }
 
-
 enum class ReportAgeFilter(val short_label: String) {
     ANY("Any"),
     FRESH_30("Fresh <=30s"),
@@ -249,7 +245,6 @@ enum class ReportAgeFilter(val short_label: String) {
 
     fun next(): ReportAgeFilter = entries[(ordinal + 1) % entries.size]
 }
-
 
 object AircraftFilterEngine {
     fun sanitize_search(value: String): String {
@@ -265,22 +260,22 @@ object AircraftFilterEngine {
 
     fun is_normal_airborne_mode(filters: AircraftFilterState): Boolean {
         return filters.search_query.isBlank() &&
-            filters.aircraft_type == AircraftTypeFilter.ALL &&
-            filters.altitude == AltitudeFilter.ANY &&
-            filters.distance == DistanceFilter.ANY &&
-            filters.flight_status == FlightStatusFilter.AIRBORNE &&
-            filters.report_age == ReportAgeFilter.ANY &&
-            !filters.alert_volume_only
+                filters.aircraft_type == AircraftTypeFilter.ALL &&
+                filters.altitude == AltitudeFilter.ANY &&
+                filters.distance == DistanceFilter.ANY &&
+                filters.flight_status == FlightStatusFilter.AIRBORNE &&
+                filters.report_age == ReportAgeFilter.ANY &&
+                !filters.alert_volume_only
     }
 
     fun restricts_aircraft(filters: AircraftFilterState): Boolean {
         return filters.search_query.isNotBlank() ||
-            filters.aircraft_type != AircraftTypeFilter.ALL ||
-            filters.altitude != AltitudeFilter.ANY ||
-            filters.distance != DistanceFilter.ANY ||
-            filters.flight_status != FlightStatusFilter.ANY ||
-            filters.report_age != ReportAgeFilter.ANY ||
-            filters.alert_volume_only
+                filters.aircraft_type != AircraftTypeFilter.ALL ||
+                filters.altitude != AltitudeFilter.ANY ||
+                filters.distance != DistanceFilter.ANY ||
+                filters.flight_status != FlightStatusFilter.ANY ||
+                filters.report_age != ReportAgeFilter.ANY ||
+                filters.alert_volume_only
     }
 
     fun stats(
@@ -290,7 +285,15 @@ object AircraftFilterEngine {
         distance_meters: (Aircraft) -> Double,
         is_hazard_aircraft: (Aircraft) -> Boolean
     ): FilterStats {
-        val matched = aircraft.count { passes(it, filters, now_epoch_sec, distance_meters, is_hazard_aircraft) }
+        val matched = aircraft.count {
+            passes(
+                it,
+                filters,
+                now_epoch_sec,
+                distance_meters,
+                is_hazard_aircraft
+            )
+        }
         return stats_from_counts(
             total = aircraft.size,
             matched = matched,
@@ -390,7 +393,11 @@ object AircraftFilterEngine {
         }
     }
 
-    private fun matches_report_age(aircraft: Aircraft, filter: ReportAgeFilter, now_epoch_sec: Double): Boolean {
+    private fun matches_report_age(
+        aircraft: Aircraft,
+        filter: ReportAgeFilter,
+        now_epoch_sec: Double
+    ): Boolean {
         val age = contact_age_seconds(aircraft, now_epoch_sec)
         return when (filter) {
             ReportAgeFilter.ANY -> true

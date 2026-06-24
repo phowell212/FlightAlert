@@ -15,10 +15,11 @@
 )
 
 package com.flightalert.ui
+
+import com.flightalert.VisualTheme
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
-import com.flightalert.VisualTheme
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.TrafficDisplay
 import com.flightalert.details.AircraftDetails
@@ -29,16 +30,13 @@ import kotlin.math.min
 
 data class TrafficPanelStyle(val visual_theme: VisualTheme)
 
-
 data class TrafficPanelState(
     val title: String,
     val title_color: Int,
     val content: TrafficPanelContent
 )
 
-
 sealed interface TrafficPanelContent
-
 
 data class TrafficPanelAircraftState(
     val callsign: String,
@@ -50,16 +48,13 @@ data class TrafficPanelAircraftState(
     val military_label: String?
 ) : TrafficPanelContent
 
-
 data class TrafficPanelEmptyState(
     val headline: String,
     val message: String,
     val data_time_label: String?
 ) : TrafficPanelContent
 
-
 data class TrafficPanelRow(val label: String, val value: String)
-
 
 interface TrafficPanelChrome {
     fun dp(value: Float): Float
@@ -68,26 +63,58 @@ interface TrafficPanelChrome {
     fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int)
 }
 
-
 class TrafficPanelRenderer(
     private val text_paint: Paint,
     private val stroke_paint: Paint,
     private val chrome: TrafficPanelChrome,
     private val with_alpha: (Int, Int) -> Int
 ) {
-    fun draw_panel(canvas: Canvas, rect: RectF, wide: Boolean, style: TrafficPanelStyle, state: TrafficPanelState) {
-        chrome.draw_panel_surface(canvas, rect, style.visual_theme.colors.panel, style.visual_theme.style.info_panel_alpha)
+    fun draw_panel(
+        canvas: Canvas,
+        rect: RectF,
+        wide: Boolean,
+        style: TrafficPanelStyle,
+        state: TrafficPanelState
+    ) {
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel,
+            style.visual_theme.style.info_panel_alpha
+        )
 
         val y = rect.top + if (wide) dp(32) else dp(27)
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(13)
         text_paint.color = state.title_color
-        draw_fitted_left_text(canvas, state.title, rect.left + dp(16), y, rect.width() - dp(32), sp(13), sp(9))
+        draw_fitted_left_text(
+            canvas,
+            state.title,
+            rect.left + dp(16),
+            y,
+            rect.width() - dp(32),
+            sp(13),
+            sp(9)
+        )
 
         when (val content = state.content) {
-            is TrafficPanelEmptyState -> draw_empty_panel(canvas, rect, y + if (wide) dp(60) else dp(38), style, content)
-            is TrafficPanelAircraftState -> draw_aircraft_panel(canvas, rect, wide, y, style, content)
+            is TrafficPanelEmptyState -> draw_empty_panel(
+                canvas,
+                rect,
+                y + if (wide) dp(60) else dp(38),
+                style,
+                content
+            )
+
+            is TrafficPanelAircraftState -> draw_aircraft_panel(
+                canvas,
+                rect,
+                wide,
+                y,
+                style,
+                content
+            )
         }
     }
 
@@ -173,7 +200,15 @@ class TrafficPanelRenderer(
             y += dp(22)
             text_paint.isFakeBoldText = true
             text_paint.color = style.visual_theme.colors.military
-            draw_fitted_left_text(canvas, label, rect.left + dp(16), y, rect.width() - dp(32), sp(13), sp(9))
+            draw_fitted_left_text(
+                canvas,
+                label,
+                rect.left + dp(16),
+                y,
+                rect.width() - dp(32),
+                sp(13),
+                sp(9)
+            )
             text_paint.isFakeBoldText = false
         }
     }
@@ -189,13 +224,37 @@ class TrafficPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(20)
         text_paint.color = style.visual_theme.colors.text
-        draw_fitted_left_text(canvas, content.headline, rect.left + dp(16), y, rect.width() - dp(32), sp(20), sp(12))
+        draw_fitted_left_text(
+            canvas,
+            content.headline,
+            rect.left + dp(16),
+            y,
+            rect.width() - dp(32),
+            sp(20),
+            sp(12)
+        )
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        draw_fitted_left_text(canvas, content.message, rect.left + dp(16), y + dp(24), rect.width() - dp(32), sp(12), sp(9))
+        draw_fitted_left_text(
+            canvas,
+            content.message,
+            rect.left + dp(16),
+            y + dp(24),
+            rect.width() - dp(32),
+            sp(12),
+            sp(9)
+        )
         content.data_time_label?.let {
-            draw_fitted_left_text(canvas, it, rect.left + dp(16), y + dp(44), rect.width() - dp(32), sp(12), sp(9))
+            draw_fitted_left_text(
+                canvas,
+                it,
+                rect.left + dp(16),
+                y + dp(44),
+                rect.width() - dp(32),
+                sp(12),
+                sp(9)
+            )
         }
     }
 
@@ -223,9 +282,20 @@ class TrafficPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(13)
         text_paint.color = style.visual_theme.colors.text
-        draw_fitted_right_text(canvas, row.value, rect.right - dp(16), y, rect.width() * 0.56f, sp(13), sp(9))
+        draw_fitted_right_text(
+            canvas,
+            row.value,
+            rect.right - dp(16),
+            y,
+            rect.width() * 0.56f,
+            sp(13),
+            sp(9)
+        )
 
-        stroke_paint.color = with_alpha(style.visual_theme.colors.panel_stroke, style.visual_theme.style.divider_alpha)
+        stroke_paint.color = with_alpha(
+            style.visual_theme.colors.panel_stroke,
+            style.visual_theme.style.divider_alpha
+        )
         stroke_paint.strokeWidth = dp(1)
         val divider_y = y + min(dp(10), row_height - dp(7))
         canvas.drawLine(rect.left + dp(16), divider_y, rect.right - dp(16), divider_y, stroke_paint)
@@ -234,15 +304,47 @@ class TrafficPanelRenderer(
     }
 
     private fun draw_fitted_right_text(
-        canvas: Canvas, value: String, right: Float, y: Float, max_width: Float, start_size: Float, min_size: Float
+        canvas: Canvas,
+        value: String,
+        right: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
     ) = draw_fitted_text(
-        canvas, text_paint, value, right, y, max_width, start_size, min_size, Paint.Align.RIGHT, dp(0.5f), chrome::ellipsize
+        canvas,
+        text_paint,
+        value,
+        right,
+        y,
+        max_width,
+        start_size,
+        min_size,
+        Paint.Align.RIGHT,
+        dp(0.5f),
+        chrome::ellipsize
     )
 
     private fun draw_fitted_left_text(
-        canvas: Canvas, value: String, left: Float, y: Float, max_width: Float, start_size: Float, min_size: Float
+        canvas: Canvas,
+        value: String,
+        left: Float,
+        y: Float,
+        max_width: Float,
+        start_size: Float,
+        min_size: Float
     ) = draw_fitted_text(
-        canvas, text_paint, value, left, y, max_width, start_size, min_size, Paint.Align.LEFT, dp(0.5f), chrome::ellipsize
+        canvas,
+        text_paint,
+        value,
+        left,
+        y,
+        max_width,
+        start_size,
+        min_size,
+        Paint.Align.LEFT,
+        dp(0.5f),
+        chrome::ellipsize
     )
 
     private fun draw_compact_value(
@@ -255,7 +357,15 @@ class TrafficPanelRenderer(
         value: String
     ) {
         val left = compact_column_x(rect, index, primary)
-        draw_fitted_left_text(canvas, value, left, y, compact_column_width(rect, index, item_count, primary), sp(13), sp(8))
+        draw_fitted_left_text(
+            canvas,
+            value,
+            left,
+            y,
+            compact_column_width(rect, index, item_count, primary),
+            sp(13),
+            sp(8)
+        )
     }
 
     private fun compact_column_x(rect: RectF, index: Int, primary: Boolean): Float {
@@ -266,7 +376,12 @@ class TrafficPanelRenderer(
         }
     }
 
-    private fun compact_column_width(rect: RectF, index: Int, item_count: Int, primary: Boolean): Float {
+    private fun compact_column_width(
+        rect: RectF,
+        index: Int,
+        item_count: Int,
+        primary: Boolean
+    ): Float {
         val left = compact_column_x(rect, index, primary)
         val next = when (index) {
             0 -> compact_column_x(rect, 1, primary)
@@ -284,8 +399,6 @@ class TrafficPanelRenderer(
 
     private fun sp(value: Float): Float = chrome.sp(value)
 }
-
-
 
 internal class TrafficPanelStateBuilder(
     private val telemetry_formatter: AircraftTelemetryFormatter,
@@ -356,7 +469,10 @@ internal class TrafficPanelStateBuilder(
             TrafficPanelRow("Altitude", telemetry_formatter.altitude_value(target.altitude_m)),
             TrafficPanelRow("Speed", telemetry_formatter.speed_value(target.velocity_ms)),
             TrafficPanelRow("Track", telemetry_formatter.track(target.track_deg)),
-            TrafficPanelRow("Vertical rate", telemetry_formatter.vertical_rate(target.vertical_rate_ms)),
+            TrafficPanelRow(
+                "Vertical rate",
+                telemetry_formatter.vertical_rate(target.vertical_rate_ms)
+            ),
             TrafficPanelRow("Last contact", telemetry_formatter.age(target)),
             TrafficPanelRow("Registration", target.registration ?: "Unavailable"),
             TrafficPanelRow("Registry country", registry_country_label(target)),
@@ -364,7 +480,10 @@ internal class TrafficPanelStateBuilder(
         )
         if (target.is_military) {
             rows += TrafficPanelRow("Military", "Tagged military")
-            rows += TrafficPanelRow("Origin status", format_origin_status(target, current_route_details_for_panel(target)))
+            rows += TrafficPanelRow(
+                "Origin status",
+                format_origin_status(target, current_route_details_for_panel(target))
+            )
         }
         rows += TrafficPanelRow("ICAO", target.icao24.uppercase(Locale.US))
         rows += TrafficPanelRow("Reported position", telemetry_formatter.reported_position(target))

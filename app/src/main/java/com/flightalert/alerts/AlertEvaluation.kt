@@ -15,7 +15,9 @@
 )
 
 package com.flightalert.alerts
+
 import com.flightalert.FlightAlertAppSettings
+
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
@@ -38,7 +40,6 @@ data class AlertAircraft(
     val is_extreme_priority: Boolean,
     val is_estimated_position: Boolean = false
 )
-
 
 object AlertAircraftClassifier {
     // The classifier is the single place that decides whether a live contact can enter the alert volume.
@@ -65,11 +66,13 @@ object AlertAircraftClassifier {
         val distance_feet = meters_to_feet(distance_meters)
         val altitude_feet = meters_to_feet(altitude_meters)
         val vertical_separation_feet = own_altitude_feet?.let { abs(altitude_feet - it) }
-        val contact_is_fresh_for_alert = contact_age_seconds <= EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
+        val contact_is_fresh_for_alert =
+            contact_age_seconds <= EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
         val is_inside_alert_range = distance_feet <= alert_distance_feet &&
-            vertical_separation_feet != null &&
-            vertical_separation_feet <= alert_altitude_feet
-        val is_alert_aircraft = alerts_enabled && contact_is_fresh_for_alert && is_inside_alert_range
+                vertical_separation_feet != null &&
+                vertical_separation_feet <= alert_altitude_feet
+        val is_alert_aircraft =
+            alerts_enabled && contact_is_fresh_for_alert && is_inside_alert_range
         return AlertAircraft(
             icao24 = icao24,
             callsign = callsign,
@@ -100,14 +103,11 @@ object AlertAircraftClassifier {
     private const val FEET_PER_METER = 3.28084
 }
 
-
-
 data class ProjectedAlertPosition(
     val distance_meters: Double,
     val altitude_meters: Double?,
     val estimated: Boolean
 )
-
 
 object AlertPositionProjector {
     fun projected_alert_position(
@@ -132,21 +132,46 @@ object AlertPositionProjector {
             aircraft_lon = aircraft_lon,
             reported_distance_meters = reported_distance_meters
         )
-        val age_seconds = projection_age_seconds(position_time_sec, last_contact_sec, now_epoch_sec, max_projection_seconds)
-        if (age_seconds <= ALERT_PROJECTION_MIN_SECONDS || !has_projectable_motion(velocity_ms, track_deg)) {
+        val age_seconds = projection_age_seconds(
+            position_time_sec,
+            last_contact_sec,
+            now_epoch_sec,
+            max_projection_seconds
+        )
+        if (age_seconds <= ALERT_PROJECTION_MIN_SECONDS || !has_projectable_motion(
+                velocity_ms,
+                track_deg
+            )
+        ) {
             return ProjectedAlertPosition(reported_distance, altitude_meters, estimated = false)
         }
-        val speed = velocity_ms ?: return ProjectedAlertPosition(reported_distance, altitude_meters, estimated = false)
-        val track = normalized_degrees(track_deg) ?: return ProjectedAlertPosition(reported_distance, altitude_meters, estimated = false)
+        val speed = velocity_ms ?: return ProjectedAlertPosition(
+            reported_distance,
+            altitude_meters,
+            estimated = false
+        )
+        val track = normalized_degrees(track_deg) ?: return ProjectedAlertPosition(
+            reported_distance,
+            altitude_meters,
+            estimated = false
+        )
         val projected = advance_position(aircraft_lat, aircraft_lon, track, speed * age_seconds)
         return ProjectedAlertPosition(
             distance_meters = distance_meters(own_lat, own_lon, projected.lat, projected.lon),
-            altitude_meters = projected_altitude_meters(altitude_meters, vertical_rate_ms, age_seconds),
+            altitude_meters = projected_altitude_meters(
+                altitude_meters,
+                vertical_rate_ms,
+                age_seconds
+            ),
             estimated = true
         )
     }
 
-    fun contact_age_seconds(position_time_sec: Double?, last_contact_sec: Double?, now_epoch_sec: Double): Double? {
+    fun contact_age_seconds(
+        position_time_sec: Double?,
+        last_contact_sec: Double?,
+        now_epoch_sec: Double
+    ): Double? {
         val contact = last_contact_sec ?: position_time_sec ?: return null
         return (now_epoch_sec - contact).coerceAtLeast(0.0)
     }
@@ -168,7 +193,7 @@ object AlertPositionProjector {
         val d_lat = Math.toRadians(lat2 - lat1)
         val d_lon = Math.toRadians(lon2 - lon1)
         val a = sin(d_lat / 2).pow(2.0) +
-            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(d_lon / 2).pow(2.0)
+                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(d_lon / 2).pow(2.0)
         return 2 * EARTH_RADIUS_M * atan2(sqrt(a), sqrt(1 - a))
     }
 
@@ -198,7 +223,11 @@ object AlertPositionProjector {
             .coerceAtMost(max_projection_seconds.coerceAtLeast(0.0))
     }
 
-    private fun projected_altitude_meters(altitude_meters: Double?, vertical_rate_ms: Double?, age_seconds: Double): Double? {
+    private fun projected_altitude_meters(
+        altitude_meters: Double?,
+        vertical_rate_ms: Double?,
+        age_seconds: Double
+    ): Double? {
         val altitude = altitude_meters ?: return null
         val vertical_rate = vertical_rate_ms
             ?.takeIf { it.isFinite() && abs(it) <= MAX_PROJECTABLE_VERTICAL_RATE_MS }
@@ -209,16 +238,22 @@ object AlertPositionProjector {
     private fun has_projectable_motion(velocity_ms: Double?, track_deg: Double?): Boolean {
         val speed = velocity_ms ?: return false
         return speed.isFinite() &&
-            speed in MIN_PROJECTABLE_ALERT_SPEED_MS..MAX_PROJECTABLE_ALERT_SPEED_MS &&
-            normalized_degrees(track_deg) != null
+                speed in MIN_PROJECTABLE_ALERT_SPEED_MS..MAX_PROJECTABLE_ALERT_SPEED_MS &&
+                normalized_degrees(track_deg) != null
     }
 
-    private fun advance_position(lat: Double, lon: Double, track_degrees: Double, distance_meters: Double): GeoPosition {
+    private fun advance_position(
+        lat: Double,
+        lon: Double,
+        track_degrees: Double,
+        distance_meters: Double
+    ): GeoPosition {
         val angular_distance = distance_meters / EARTH_RADIUS_M
         val bearing = Math.toRadians(track_degrees)
         val lat1 = Math.toRadians(lat)
         val lon1 = Math.toRadians(lon)
-        val lat2 = asin(sin(lat1) * cos(angular_distance) + cos(lat1) * sin(angular_distance) * cos(bearing))
+        val lat2 =
+            asin(sin(lat1) * cos(angular_distance) + cos(lat1) * sin(angular_distance) * cos(bearing))
         val lon2 = lon1 + atan2(
             sin(bearing) * sin(angular_distance) * cos(lat1),
             cos(angular_distance) - sin(lat1) * sin(lat2)
@@ -242,8 +277,11 @@ object AlertPositionProjector {
 
     const val ALERT_PROJECTION_MAX_SECONDS = FlightAlertAppSettings.AlertProjection.MAX_SECONDS
     const val ALERT_PROJECTION_MIN_SECONDS = FlightAlertAppSettings.AlertProjection.MIN_SECONDS
-    const val MIN_PROJECTABLE_ALERT_SPEED_MS = FlightAlertAppSettings.AlertProjection.MIN_PROJECTABLE_SPEED_MS
-    const val MAX_PROJECTABLE_ALERT_SPEED_MS = FlightAlertAppSettings.AlertProjection.MAX_PROJECTABLE_SPEED_MS
-    const val MAX_PROJECTABLE_VERTICAL_RATE_MS = FlightAlertAppSettings.AlertProjection.MAX_PROJECTABLE_VERTICAL_RATE_MS
+    const val MIN_PROJECTABLE_ALERT_SPEED_MS =
+        FlightAlertAppSettings.AlertProjection.MIN_PROJECTABLE_SPEED_MS
+    const val MAX_PROJECTABLE_ALERT_SPEED_MS =
+        FlightAlertAppSettings.AlertProjection.MAX_PROJECTABLE_SPEED_MS
+    const val MAX_PROJECTABLE_VERTICAL_RATE_MS =
+        FlightAlertAppSettings.AlertProjection.MAX_PROJECTABLE_VERTICAL_RATE_MS
     const val EARTH_RADIUS_M = 6371000.0
 }

@@ -15,9 +15,11 @@
 )
 
 package com.flightalert.traffic
+
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
 import com.github.luben.zstd.ZstdInputStream
@@ -37,6 +39,7 @@ import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+// Direct Airplanes.Live globe inventory source backed by lightweight binCraft HTTP.
 class GlobeBinCraftAircraftSource(user_agent: String) {
     var on_snapshot_updated: (() -> Unit)? = null
 
@@ -114,14 +117,20 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
     }
 
     @Suppress("UNUSED_PARAMETER")
-    fun latest_snapshot(bounds: FeedBounds, own_lat: Double, own_lon: Double, exact_search: String?): FeedResult? {
+    fun latest_snapshot(
+        bounds: FeedBounds,
+        own_lat: Double,
+        own_lon: Double,
+        exact_search: String?
+    ): FeedResult? {
         if (!source_enabled || destroyed) return null
         val viewport = pending_viewport ?: return null
         val snapshot = latest ?: return null
         if (snapshot.viewport_generation != viewport.generation) return null
         if (SystemClock.elapsedRealtime() - snapshot.received_elapsed_ms > MAX_SNAPSHOT_AGE_MS) return null
         if (snapshot.aircraft.isEmpty() && snapshot.partial_coverage) return null
-        val normalized_search = exact_search?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }
+        val normalized_search =
+            exact_search?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }
         val filtered = ArrayList<FeedAircraft>(snapshot.aircraft.size)
         snapshot.aircraft.forEach { aircraft ->
             if (normalized_search == null || aircraft.matches_search(normalized_search)) {
@@ -220,6 +229,10 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
                         viewport_generation = viewport.generation
                     )
                     latest = next
+                    Log.d(
+                        TAG,
+                        "Globe binCraft source: ${next.aircraft.size} aircraft, partial=${next.partial_coverage}"
+                    )
                     on_snapshot_updated?.invoke()
                     schedule_fetch(next_cadence_delay_ms(fetch_started_elapsed_ms))
                 }
@@ -250,8 +263,8 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
 
     private fun FeedAircraft.matches_search(search: String): Boolean {
         return icao24.uppercase(Locale.US).contains(search) ||
-            callsign.uppercase(Locale.US).replace(" ", "").contains(search.replace(" ", "")) ||
-            registration?.uppercase(Locale.US)?.contains(search) == true
+                callsign.uppercase(Locale.US).replace(" ", "").contains(search.replace(" ", "")) ||
+                registration?.uppercase(Locale.US)?.contains(search) == true
     }
 
     private data class GlobeSnapshot(
@@ -272,15 +285,16 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
 
     private fun GlobeViewport.matches(other: GlobeViewport): Boolean {
         return abs(center_lat - other.center_lat) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(center_lon - other.center_lon) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(zoom - other.zoom) < VIEWPORT_ZOOM_EPSILON &&
-            abs(bounds.min_lat - other.bounds.min_lat) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(bounds.max_lat - other.bounds.max_lat) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(bounds.min_lon - other.bounds.min_lon) < VIEWPORT_LAT_LON_EPSILON &&
-            abs(bounds.max_lon - other.bounds.max_lon) < VIEWPORT_LAT_LON_EPSILON
+                abs(center_lon - other.center_lon) < VIEWPORT_LAT_LON_EPSILON &&
+                abs(zoom - other.zoom) < VIEWPORT_ZOOM_EPSILON &&
+                abs(bounds.min_lat - other.bounds.min_lat) < VIEWPORT_LAT_LON_EPSILON &&
+                abs(bounds.max_lat - other.bounds.max_lat) < VIEWPORT_LAT_LON_EPSILON &&
+                abs(bounds.min_lon - other.bounds.min_lon) < VIEWPORT_LAT_LON_EPSILON &&
+                abs(bounds.max_lon - other.bounds.max_lon) < VIEWPORT_LAT_LON_EPSILON
     }
 
     private companion object {
+        private const val TAG = "FlightAlert"
         private const val EXTRACT_INTERVAL_MS = 1000L
         private const val STARTUP_RETRY_MS = 450L
         private const val MAX_SNAPSHOT_AGE_MS = 9000L
@@ -293,27 +307,22 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
     }
 }
 
-
 internal fun globe_distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
     val lat_distance = Math.toRadians(lat2 - lat1)
     val lon_distance = Math.toRadians(lon2 - lon1)
     val a = sin(lat_distance / 2) * sin(lat_distance / 2) +
-        cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
-        sin(lon_distance / 2) * sin(lon_distance / 2)
+            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
+            sin(lon_distance / 2) * sin(lon_distance / 2)
     return 2.0 * GLOBE_EARTH_RADIUS_M * atan2(sqrt(a), sqrt(max(0.0, 1.0 - a)))
 }
 
-
 internal const val GLOBE_EARTH_RADIUS_M = 6371000.0
-
-
 
 internal data class GlobeBinCraftSnapshot(
     val aircraft: List<FeedAircraft>,
     val epoch_sec: Double,
     val partial_coverage: Boolean
 )
-
 
 internal class GlobeBinCraftClient(private val user_agent: String) {
     fun fetch(bounds: FeedBounds): GlobeBinCraftSnapshot? {
@@ -372,7 +381,14 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val parsed = ArrayList<FeedAircraft>(global_with_position.coerceIn(512, 32768))
         var offset = stride
         while (offset + stride <= bytes.size) {
-            parse_aircraft(buffer, offset, stride, bin_craft_version, use_message_rate, now_sec)?.let(parsed::add)
+            parse_aircraft(
+                buffer,
+                offset,
+                stride,
+                bin_craft_version,
+                use_message_rate,
+                now_sec
+            )?.let(parsed::add)
             offset += stride
         }
         return GlobeBinCraftSnapshot(
@@ -395,7 +411,10 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val hex = (raw_hex and ((1 shl 24) - 1)).toString(16).padStart(6, '0').let {
             if (non_icao) "~$it" else it
         }
-        val seen = if (version >= 20240218) int(buffer, offset + 4) / 10.0 else u16(buffer, offset + 6) / 10.0
+        val seen = if (version >= 20240218) int(buffer, offset + 4) / 10.0 else u16(
+            buffer,
+            offset + 6
+        ) / 10.0
         val seen_pos = if (version >= 20240218 && stride >= 112) {
             int(buffer, offset + 27 * 4) / 10.0
         } else {
@@ -415,7 +434,8 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val valid_75 = u8(buffer, offset + 75)
         val valid_76 = u8(buffer, offset + 76)
         val valid_77 = u8(buffer, offset + 77)
-        val category = u8(buffer, offset + 64).takeIf { it != 0 }?.toString(16)?.uppercase(Locale.US)
+        val category =
+            u8(buffer, offset + 64).takeIf { it != 0 }?.toString(16)?.uppercase(Locale.US)
         val type_code = ascii(buffer, offset + 88, 4)
         val registration = ascii(buffer, offset + 92, 12)
         val flight = ascii(buffer, offset + 78, 8)
@@ -448,33 +468,82 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val telemetry = AircraftTelemetry(
             source_type = source_type_label(u8(buffer, offset + 67) ushr 4),
             squawk = if (valid_76 and 4 != 0) squawk(buffer, offset + 32) else null,
-            baro_altitude_m = if (validity_73 and 16 != 0 || on_ground) (if (on_ground) 0.0 else s16(buffer, offset + 20) * 25.0 / FEET_PER_METER) else null,
-            geom_altitude_m = if (validity_73 and 32 != 0) s16(buffer, offset + 22) * 25.0 / FEET_PER_METER else null,
+            baro_altitude_m = if (validity_73 and 16 != 0 || on_ground) (if (on_ground) 0.0 else s16(
+                buffer,
+                offset + 20
+            ) * 25.0 / FEET_PER_METER) else null,
+            geom_altitude_m = if (validity_73 and 32 != 0) s16(
+                buffer,
+                offset + 22
+            ) * 25.0 / FEET_PER_METER else null,
             ground_speed_ms = speed_kt?.let { it * KNOTS_TO_METERS_PER_SECOND },
-            true_speed_ms = if (valid_74 and 2 != 0) u16(buffer, offset + 56) * KNOTS_TO_METERS_PER_SECOND else null,
-            indicated_speed_ms = if (valid_74 and 1 != 0) u16(buffer, offset + 58) * KNOTS_TO_METERS_PER_SECOND else null,
+            true_speed_ms = if (valid_74 and 2 != 0) u16(
+                buffer,
+                offset + 56
+            ) * KNOTS_TO_METERS_PER_SECOND else null,
+            indicated_speed_ms = if (valid_74 and 1 != 0) u16(
+                buffer,
+                offset + 58
+            ) * KNOTS_TO_METERS_PER_SECOND else null,
             mach = if (valid_74 and 4 != 0) s16(buffer, offset + 36) / 1000.0 else null,
-            baro_rate_ms = if (valid_75 and 1 != 0) s16(buffer, offset + 16) * 8.0 / FEET_PER_METER / 60.0 else null,
-            geom_rate_ms = if (valid_75 and 2 != 0) s16(buffer, offset + 18) * 8.0 / FEET_PER_METER / 60.0 else null,
+            baro_rate_ms = if (valid_75 and 1 != 0) s16(
+                buffer,
+                offset + 16
+            ) * 8.0 / FEET_PER_METER / 60.0 else null,
+            geom_rate_ms = if (valid_75 and 2 != 0) s16(
+                buffer,
+                offset + 18
+            ) * 8.0 / FEET_PER_METER / 60.0 else null,
             selected_altitude_m = selected_altitude_m(buffer, offset, valid_76),
-            selected_heading_deg = if (valid_77 and 2 != 0) s16(buffer, offset + 30) / 90.0 else null,
-            wind_speed_ms = if (valid_77 and 16 != 0) s16(buffer, offset + 50) * KNOTS_TO_METERS_PER_SECOND else null,
-            wind_direction_deg = if (valid_77 and 16 != 0) s16(buffer, offset + 48).toDouble() else null,
+            selected_heading_deg = if (valid_77 and 2 != 0) s16(
+                buffer,
+                offset + 30
+            ) / 90.0 else null,
+            wind_speed_ms = if (valid_77 and 16 != 0) s16(
+                buffer,
+                offset + 50
+            ) * KNOTS_TO_METERS_PER_SECOND else null,
+            wind_direction_deg = if (valid_77 and 16 != 0) s16(
+                buffer,
+                offset + 48
+            ).toDouble() else null,
             tat_c = if (valid_77 and 32 != 0) s16(buffer, offset + 54).toDouble() else null,
             oat_c = if (valid_77 and 32 != 0) s16(buffer, offset + 52).toDouble() else null,
             qnh_hpa = if (valid_76 and 32 != 0) s16(buffer, offset + 28) / 10.0 else null,
             true_heading_deg = if (valid_74 and 128 != 0) s16(buffer, offset + 46) / 90.0 else null,
-            magnetic_heading_deg = if (valid_74 and 64 != 0) s16(buffer, offset + 44) / 90.0 else null,
-            track_rate_deg_per_sec = if (valid_74 and 16 != 0) s16(buffer, offset + 42) / 100.0 else null,
+            magnetic_heading_deg = if (valid_74 and 64 != 0) s16(
+                buffer,
+                offset + 44
+            ) / 90.0 else null,
+            track_rate_deg_per_sec = if (valid_74 and 16 != 0) s16(
+                buffer,
+                offset + 42
+            ) / 100.0 else null,
             roll_deg = if (valid_74 and 32 != 0) s16(buffer, offset + 38) / 100.0 else null,
-            nav_modes = if (valid_77 and 4 != 0) nav_modes(u8(buffer, offset + 66)) else emptyList(),
+            nav_modes = if (valid_77 and 4 != 0) nav_modes(
+                u8(
+                    buffer,
+                    offset + 66
+                )
+            ) else emptyList(),
             adsb_version = adsb_version_label(buffer, offset),
             nac_p = if (valid_75 and 32 != 0) u8(buffer, offset + 71) and 15 else null,
             nac_v = if (valid_75 and 64 != 0) (u8(buffer, offset + 71) and 240) ushr 4 else null,
             sil = if (valid_75 and 128 != 0) u8(buffer, offset + 72) and 3 else null,
-            sil_type = if (valid_75 and 128 != 0) sil_type_label(u8(buffer, offset + 69) and 15) else null,
-            nic_baro = if (valid_75 and 16 != 0) (u8(buffer, offset + 73) and 1).toString() else null,
-            rc_m = if (u8(buffer, offset + 71) and 15 != 0) u16(buffer, offset + 60).toDouble() else null,
+            sil_type = if (valid_75 and 128 != 0) sil_type_label(
+                u8(
+                    buffer,
+                    offset + 69
+                ) and 15
+            ) else null,
+            nic_baro = if (valid_75 and 16 != 0) (u8(
+                buffer,
+                offset + 73
+            ) and 1).toString() else null,
+            rc_m = if (u8(buffer, offset + 71) and 15 != 0) u16(
+                buffer,
+                offset + 60
+            ).toDouble() else null,
             rssi = rssi,
             message_rate = if (use_message_rate) u16(buffer, offset + 62) / 10.0 else null,
             receiver_count_label = receiver_count?.toString(),
@@ -603,11 +672,13 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
 
     private fun int(buffer: ByteBuffer, offset: Int): Int = buffer.getInt(offset)
 
-    private fun u32(buffer: ByteBuffer, offset: Int): Long = int(buffer, offset).toLong() and 0xffffffffL
+    private fun u32(buffer: ByteBuffer, offset: Int): Long =
+        int(buffer, offset).toLong() and 0xffffffffL
 
     private fun s16(buffer: ByteBuffer, offset: Int): Short = buffer.getShort(offset)
 
-    private fun u16(buffer: ByteBuffer, offset: Int): Int = buffer.getShort(offset).toInt() and 0xffff
+    private fun u16(buffer: ByteBuffer, offset: Int): Int =
+        buffer.getShort(offset).toInt() and 0xffff
 
     private fun u8(buffer: ByteBuffer, offset: Int): Int = buffer.get(offset).toInt() and 0xff
 
@@ -619,9 +690,3 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         const val KNOTS_TO_METERS_PER_SECOND = 0.514444
     }
 }
-
-// endregion
-
-// region ANDROID LIFECYCLE AND SAFETY
-
-// Activity stays intentionally thin: permissions, lifecycle, and the single custom map surface.
