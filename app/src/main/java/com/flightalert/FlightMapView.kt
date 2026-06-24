@@ -33,6 +33,7 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.SystemClock
 import android.text.InputType
+import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -139,6 +140,7 @@ import com.flightalert.traffic.FilterStats
 import com.flightalert.traffic.FlightStatusFilter
 import com.flightalert.traffic.GlobeBinCraftAircraftSource
 import com.flightalert.traffic.OwnshipOverlayState
+import com.flightalert.traffic.PannableRetainedRenderLayer
 import com.flightalert.traffic.ReportAgeFilter
 import com.flightalert.traffic.RetainedRenderLayer
 import com.flightalert.traffic.TrafficCacheController
@@ -181,6 +183,7 @@ import com.flightalert.ui.safe_smooth_step
 import com.flightalert.ui.with_alpha
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -192,6 +195,8 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+
+private const val PERF_DRAW_TAG = "FlightAlertPerfDraw"
 
 @SuppressLint("ViewConstructor")
 class FlightMapView(
@@ -543,6 +548,11 @@ class FlightMapView(
     private var following_location = true
     private var manual_center_lat: Double? = null
     private var manual_center_lon: Double? = null
+    private var perf_location_override: Location? = null
+    private var perf_zoom_override: Double? = null
+    private var perf_run_id: String = ""
+    private var perf_map_detail_timing = false
+    private var perf_traffic_detail_timing = false
 
     // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
@@ -554,6 +564,8 @@ class FlightMapView(
     private var drag_started = false
     private var drag_blocked = false
     private var drag_start_center: WorldPoint? = null
+    private var drag_slop_offset_x = 0f
+    private var drag_slop_offset_y = 0f
     private var map_touch_active = false
     private var pinch_in_progress = false
     private var last_pinch_span = 0f
@@ -568,8 +580,6 @@ class FlightMapView(
     private var deferred_aircraft_feed_publish_scheduled = false
 
     private data class RetainedCameraKey(
-        val center_x_bits: Long,
-        val center_y_bits: Long,
         val zoom_bits: Long,
         val width_px: Int,
         val height_px: Int
@@ -635,10 +645,12 @@ class FlightMapView(
     private var safe_inset_top = 0f
     private var safe_inset_right = 0f
     private var safe_inset_bottom = 0f
-    private val retained_map_layer = RetainedRenderLayer("FlightAlert.mapReferenceLayer")
-    private val retained_route_layer = RetainedRenderLayer("FlightAlert.selectedPathLayer")
+    private val retained_map_layer = PannableRetainedRenderLayer("FlightAlert.mapReferenceLayer")
+    private val retained_route_layer = PannableRetainedRenderLayer("FlightAlert.selectedPathLayer")
     private val retained_chrome_layer = RetainedRenderLayer("FlightAlert.chromeLayer")
     private val retained_map_layer_generation = AtomicLong()
+    private val retained_map_layer_pending_redraw = AtomicBoolean(false)
+    private val retained_map_layer_redraw_check_scheduled = AtomicBoolean(false)
     private var retained_traffic_motion_generation = 0L
 
     private val ticker = object : Runnable {
@@ -678,7 +690,9 @@ class FlightMapView(
 
     // MainActivity calls this from onResume; live location and the frame ticker start here.
     fun start() {
-        start_location_updates()
+        if (!apply_perf_location_override_if_active()) {
+            start_location_updates()
+        }
         removeCallbacks(ticker)
         postOnAnimation(ticker)
     }
@@ -733,6 +747,8 @@ class FlightMapView(
         location_permission_granted = granted
         if (granted) {
             start_location_updates()
+        } else if (apply_perf_location_override_if_active()) {
+            // Debug instrumentation supplies a synthetic location so deterministic map tests do not need GPS.
         } else {
             latest_location = null
             aircraft.clear()
@@ -741,6 +757,124 @@ class FlightMapView(
             map_status = "Location permission required"
         }
         invalidate()
+    }
+
+    fun apply_perf_intent(intent: Intent?) {
+        if (!context.is_flightalert_debuggable() || intent == null || !has_perf_intent_extra(intent)) return
+
+        intent.getStringExtra("com.flightalert.PERF_RUN_ID")?.let { perf_run_id = it }
+        if (intent.hasExtra("com.flightalert.PERF_MAP_DETAIL_TIMING")) {
+            perf_map_detail_timing = intent.getBooleanExtra("com.flightalert.PERF_MAP_DETAIL_TIMING", false)
+        }
+        if (intent.hasExtra("com.flightalert.PERF_TRAFFIC_DETAIL_TIMING")) {
+            perf_traffic_detail_timing = intent.getBooleanExtra("com.flightalert.PERF_TRAFFIC_DETAIL_TIMING", false)
+        }
+
+        if (intent.getBooleanExtra("com.flightalert.PERF_FOCUS_OPEN_MAP", false)) {
+            close_perf_blocking_panels()
+        }
+        if (intent.getBooleanExtra("com.flightalert.PERF_CLEAR_SELECTION", false)) {
+            selected_path_controller.clear_selection()
+            clear_selected_flight_path()
+            selected_restricted_airspace = null
+        }
+
+        var request_aircraft = false
+        val perf_lat = intent.getStringExtra("com.flightalert.PERF_LAT")?.toDoubleOrNull()
+        val perf_lon = intent.getStringExtra("com.flightalert.PERF_LON")?.toDoubleOrNull()
+        if (perf_lat != null && perf_lon != null && perf_lat in -90.0..90.0 && perf_lon in -180.0..180.0) {
+            val location = Location("flightalert-perf").apply {
+                latitude = perf_lat
+                longitude = perf_lon
+                accuracy = 5f
+                time = System.currentTimeMillis()
+                elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+            }
+            perf_location_override = location
+            latest_location = Location(location)
+            following_location = true
+            manual_center_lat = null
+            manual_center_lon = null
+            map_status = "Loading map"
+            request_aircraft = true
+        }
+
+        intent.getStringExtra("com.flightalert.PERF_ZOOM")?.toDoubleOrNull()?.let { requested_zoom ->
+            val next_zoom = requested_zoom.coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
+            if (zoom != next_zoom) {
+                zoom = next_zoom
+                perf_zoom_override = next_zoom
+                postInvalidateOnAnimation()
+            }
+        }
+
+        intent.getStringExtra("com.flightalert.PERF_MAP_SOURCE")?.let { requested_source ->
+            val next_source = TileSource.entries.firstOrNull { it.name.equals(requested_source, ignoreCase = true) }
+            if (next_source != null && next_source != map_source) {
+                map_source = next_source
+                map_tile_renderer.reset_transitions()
+                map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
+            }
+        }
+        apply_perf_map_label_extra(intent, "com.flightalert.PERF_MAP_ROADS_ENABLED", roads = true)
+        apply_perf_map_label_extra(intent, "com.flightalert.PERF_MAP_BORDERS_ENABLED", roads = false)
+
+        if (request_aircraft) {
+            mark_traffic_cache_dirty()
+            request_visible_aircraft_if_needed(force = true)
+        }
+        postInvalidateOnAnimation()
+    }
+
+    private fun has_perf_intent_extra(intent: Intent): Boolean {
+        return intent.hasExtra("com.flightalert.PERF_LAT") ||
+            intent.hasExtra("com.flightalert.PERF_LON") ||
+            intent.hasExtra("com.flightalert.PERF_ZOOM") ||
+            intent.hasExtra("com.flightalert.PERF_MAP_SOURCE") ||
+            intent.hasExtra("com.flightalert.PERF_MAP_ROADS_ENABLED") ||
+            intent.hasExtra("com.flightalert.PERF_MAP_BORDERS_ENABLED") ||
+            intent.hasExtra("com.flightalert.PERF_RUN_ID") ||
+            intent.hasExtra("com.flightalert.PERF_MAP_DETAIL_TIMING") ||
+            intent.hasExtra("com.flightalert.PERF_TRAFFIC_DETAIL_TIMING") ||
+            intent.hasExtra("com.flightalert.PERF_CLEAR_SELECTION") ||
+            intent.hasExtra("com.flightalert.PERF_FOCUS_OPEN_MAP")
+    }
+
+    private fun apply_perf_map_label_extra(intent: Intent, key: String, roads: Boolean) {
+        if (!intent.hasExtra(key)) return
+        val enabled = intent.getBooleanExtra(key, false)
+        if (roads) {
+            if (map_labels_enabled == enabled) return
+            map_labels_enabled = enabled
+        } else {
+            if (map_borders_enabled == enabled) return
+            map_borders_enabled = enabled
+        }
+        map_tile_renderer.reset_transitions()
+        map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
+    }
+
+    private fun apply_perf_location_override_if_active(): Boolean {
+        val location = perf_location_override ?: return false
+        location_permission_granted = true
+        latest_location = Location(location)
+        map_status = "Loading map"
+        request_visible_aircraft_if_needed(force = true)
+        return true
+    }
+
+    private fun close_perf_blocking_panels() {
+        settings_open = false
+        map_labels_open = false
+        aviation_layers_open = false
+        priority_tracker_open = false
+        filters_open = false
+        filter_search_focused = false
+        impact_methodology_open = false
+        selected_restricted_airspace = null
+        details_session.close_photo_evidence()
+        details_session.close_photo_gallery()
+        details_session.close_details_shell()
     }
 
     // Close the top-most map overlay first. If nothing is open, let Android handle Back normally.
@@ -821,6 +955,7 @@ class FlightMapView(
 
     // Android's LocationManager calls this with the device's real location fix.
     override fun onLocationChanged(location: Location) {
+        if (perf_location_override != null) return
         latest_location = location
         mark_traffic_cache_dirty()
         map_status = "Loading map"
@@ -877,13 +1012,23 @@ class FlightMapView(
 
             val chrome_width_px = retained_layer_width(w)
             val chrome_height_px = retained_layer_height(h)
-            retained_chrome_layer.draw(
+            val chrome_start_ns = if (perf_map_detail_timing) SystemClock.elapsedRealtimeNanos() else 0L
+            val chrome_recorded = retained_chrome_layer.draw(
                 canvas = this,
                 key = chrome_retained_layer_key(w, h, modal_open),
                 width = chrome_width_px,
                 height = chrome_height_px
             ) { layer_canvas ->
                 draw_chrome_layers(layer_canvas, w, h, modal_open, location)
+            }
+            if (perf_map_detail_timing) {
+                log_perf_draw_segment(
+                    label = "chrome",
+                    start_ns = chrome_start_ns,
+                    end_ns = SystemClock.elapsedRealtimeNanos(),
+                    enabled = true,
+                    extra = "recorded=$chrome_recorded width=$chrome_width_px height=$chrome_height_px"
+                )
             }
         }
     }
@@ -895,30 +1040,84 @@ class FlightMapView(
         w: Float,
         h: Float
     ) {
-        val layer_width = retained_layer_width(w)
-        val layer_height = retained_layer_height(h)
-        retained_map_layer.draw(
+        val pan_padding = retained_layer_pan_padding(viewport)
+        val layer_width = retained_layer_width(w + pan_padding * 2f)
+        val layer_height = retained_layer_height(h + pan_padding * 2f)
+        val perf_enabled = perf_map_detail_timing
+        val start_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
+        var section_start_ns = start_ns
+        val map_recorded = retained_map_layer.draw(
             canvas = canvas,
+            viewport = viewport,
             key = map_retained_layer_key(viewport, layer_width, layer_height),
-            width = layer_width,
-            height = layer_height
-        ) { layer_canvas ->
-            draw_map_tiles(layer_canvas, viewport)
+            padding_px = pan_padding
+        ) { layer_canvas, layer_viewport ->
+            draw_map_tiles(layer_canvas, layer_viewport)
+        }
+        val map_done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
+        if (perf_enabled) {
+            section_start_ns = log_perf_draw_segment(
+                label = "mapLayer",
+                start_ns = section_start_ns,
+                end_ns = map_done_ns,
+                enabled = true,
+                extra = "recorded=$map_recorded zoom=${format_perf_double(viewport.zoom)} width=$layer_width height=$layer_height"
+            )
         }
 
         request_aviation_layers_if_needed(viewport)
         draw_aviation_layers(canvas, viewport)
-        retained_route_layer.draw(
+        val aviation_done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
+        if (perf_enabled) {
+            section_start_ns = log_perf_draw_segment(
+                label = "aviation",
+                start_ns = section_start_ns,
+                end_ns = aviation_done_ns,
+                enabled = true,
+                extra = "zoom=${format_perf_double(viewport.zoom)}"
+            )
+        }
+        val route_recorded = retained_route_layer.draw(
             canvas = canvas,
+            viewport = viewport,
             key = route_retained_layer_key(viewport, location, layer_width, layer_height),
-            width = layer_width,
-            height = layer_height
-        ) { layer_canvas ->
-            draw_priority_range_circle(layer_canvas, viewport, location)
-            draw_selected_flight_path(layer_canvas, viewport)
+            padding_px = pan_padding
+        ) { layer_canvas, layer_viewport ->
+            draw_priority_range_circle(layer_canvas, layer_viewport, location)
+            draw_selected_flight_path(layer_canvas, layer_viewport)
+        }
+        val route_done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
+        if (perf_enabled) {
+            section_start_ns = log_perf_draw_segment(
+                label = "routeLayer",
+                start_ns = section_start_ns,
+                end_ns = route_done_ns,
+                enabled = true,
+                extra = "recorded=$route_recorded zoom=${format_perf_double(viewport.zoom)}"
+            )
         }
         draw_traffic_overlay(canvas, viewport)
+        val traffic_done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
+        if (perf_enabled) {
+            section_start_ns = log_perf_draw_segment(
+                label = "trafficFromMap",
+                start_ns = section_start_ns,
+                end_ns = traffic_done_ns,
+                enabled = true,
+                extra = "zoom=${format_perf_double(viewport.zoom)} aircraft=${cached_traffic().total}"
+            )
+        }
         draw_ownship_overlay(canvas, viewport, location)
+        val ownship_done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
+        if (perf_enabled) {
+            log_perf_draw_segment(
+                label = "ownship",
+                start_ns = section_start_ns,
+                end_ns = ownship_done_ns,
+                enabled = true,
+                extra = "zoom=${format_perf_double(viewport.zoom)} totalMs=${format_perf_ms(start_ns, ownship_done_ns)}"
+            )
+        }
     }
 
     private fun draw_chrome_layers(
@@ -967,10 +1166,13 @@ class FlightMapView(
 
     private fun retained_layer_height(height: Float): Int = ceil(height).toInt().coerceAtLeast(1)
 
+    private fun retained_layer_pan_padding(viewport: Viewport): Float {
+        val screen_span = max(viewport.width, viewport.height)
+        return max(dp(120), min(screen_span * 0.42f, dp(320)))
+    }
+
     private fun retained_camera_key(viewport: Viewport, width_px: Int, height_px: Int): RetainedCameraKey {
         return RetainedCameraKey(
-            center_x_bits = java.lang.Double.doubleToLongBits(viewport.center_x),
-            center_y_bits = java.lang.Double.doubleToLongBits(viewport.center_y),
             zoom_bits = java.lang.Double.doubleToLongBits(viewport.zoom),
             width_px = width_px,
             height_px = height_px
@@ -978,12 +1180,15 @@ class FlightMapView(
     }
 
     private fun map_retained_layer_key(viewport: Viewport, width_px: Int, height_px: Int): MapRetainedLayerKey {
+        val now = SystemClock.elapsedRealtime()
+        val interaction_active = map_tile_interaction_active(now)
+        if (!interaction_active) apply_pending_map_layer_redraw_if_idle()
         return MapRetainedLayerKey(
             camera = retained_camera_key(viewport, width_px, height_px),
             map_source = map_source,
             labels_enabled = map_labels_enabled,
             borders_enabled = map_borders_enabled,
-            interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime()),
+            interaction_active = interaction_active,
             theme_key = visual_theme.hashCode(),
             generation = retained_map_layer_generation.get()
         )
@@ -1007,7 +1212,7 @@ class FlightMapView(
             trace_identity = System.identityHashCode(selected_path_controller.trace),
             path_visible = selected_path_controller.path_visible,
             theme_key = visual_theme.hashCode(),
-            motion_generation = retained_traffic_motion_generation
+            motion_generation = route_layer_motion_generation()
         )
     }
 
@@ -1045,8 +1250,35 @@ class FlightMapView(
     }
 
     private fun request_map_layer_redraw() {
-        retained_map_layer_generation.incrementAndGet()
+        if (map_tile_interaction_active(SystemClock.elapsedRealtime())) {
+            retained_map_layer_pending_redraw.set(true)
+            schedule_pending_map_layer_redraw_check()
+        } else {
+            retained_map_layer_pending_redraw.set(false)
+            retained_map_layer_generation.incrementAndGet()
+        }
         postInvalidateOnAnimation()
+    }
+
+    private fun schedule_pending_map_layer_redraw_check() {
+        if (!retained_map_layer_redraw_check_scheduled.compareAndSet(false, true)) return
+        postDelayed({
+            retained_map_layer_redraw_check_scheduled.set(false)
+            if (!retained_map_layer_pending_redraw.get()) return@postDelayed
+            if (map_tile_interaction_active(SystemClock.elapsedRealtime())) {
+                schedule_pending_map_layer_redraw_check()
+                return@postDelayed
+            }
+            apply_pending_map_layer_redraw_if_idle()
+            postInvalidateOnAnimation()
+        }, MAP_TILE_INTERACTION_SETTLE_MS + 32L)
+    }
+
+    private fun apply_pending_map_layer_redraw_if_idle() {
+        if (map_tile_interaction_active(SystemClock.elapsedRealtime())) return
+        if (retained_map_layer_pending_redraw.getAndSet(false)) {
+            retained_map_layer_generation.incrementAndGet()
+        }
     }
 
     private fun advance_retained_traffic_motion_generation() {
@@ -1055,6 +1287,12 @@ class FlightMapView(
         } else {
             retained_traffic_motion_generation + 1L
         }
+    }
+
+    private fun route_layer_motion_generation(): Long {
+        if (!selected_path_controller.path_visible || selected_path_controller.selected_aircraft_snapshot == null) return 0L
+        if (map_touch_active || pinch_in_progress || drag_started) return 0L
+        return retained_traffic_motion_generation
     }
 
     // Android sends every touch here. Convert through safe insets, then route to pinch, drag, or tap.
@@ -1096,6 +1334,8 @@ class FlightMapView(
                 details_scroll_start_offset = details_scroll_y
                 drag_started = false
                 drag_blocked = !map_touch_active
+                drag_slop_offset_x = 0f
+                drag_slop_offset_y = 0f
                 drag_start_center = if (map_touch_active) current_interaction_viewport()?.let {
                     WorldPoint(it.center_x, it.center_y)
                 } else null
@@ -1118,11 +1358,16 @@ class FlightMapView(
                     val dy = y - down_y
                     if (!drag_started && (abs(dx) > dp(8) || abs(dy) > dp(8))) {
                         drag_started = true
+                        val slop = dp(8)
+                        drag_slop_offset_x = dx - drag_delta_after_slop(dx, slop)
+                        drag_slop_offset_y = dy - drag_delta_after_slop(dy, slop)
                     }
                     if (drag_started) {
                         mark_map_interaction()
                         val start = drag_start_center ?: return true
-                        set_manual_center_from_world(start.x - dx, start.y - dy)
+                        val pan_dx = dx - drag_slop_offset_x
+                        val pan_dy = dy - drag_slop_offset_y
+                        set_manual_center_from_world(start.x - pan_dx, start.y - pan_dy)
                         postInvalidateOnAnimation()
                     }
                 }
@@ -1135,6 +1380,8 @@ class FlightMapView(
                 val was_dragging_map = drag_started && !drag_blocked
                 drag_started = false
                 drag_start_center = null
+                drag_slop_offset_x = 0f
+                drag_slop_offset_y = 0f
                 if (finish_priority_adjust_hold(x, y)) return true
                 if (was_dragging) {
                     if (was_dragging_map) {
@@ -1155,6 +1402,8 @@ class FlightMapView(
                 cancel_priority_adjust_hold()
                 drag_started = false
                 drag_start_center = null
+                drag_slop_offset_x = 0f
+                drag_slop_offset_y = 0f
                 return true
             }
         }
@@ -1167,6 +1416,14 @@ class FlightMapView(
 
     private fun map_gesture_blocked_by_overlay(): Boolean {
         return settings_open || details_block_map_interaction() || priority_tracker_open || filters_open
+    }
+
+    private fun drag_delta_after_slop(delta: Float, slop: Float): Float {
+        return when {
+            delta > slop -> delta - slop
+            delta < -slop -> delta + slop
+            else -> 0f
+        }
     }
 
     private fun details_block_map_interaction(): Boolean {
@@ -1462,6 +1719,7 @@ class FlightMapView(
 
     // Ask Android for available providers, seed from last known fixes, then subscribe to live fixes.
     private fun start_location_updates() {
+        if (apply_perf_location_override_if_active()) return
         if (!has_location_permission()) {
             location_permission_granted = false
             return
@@ -2104,12 +2362,16 @@ class FlightMapView(
     }
 
     private fun draw_traffic_overlay(canvas: Canvas, viewport: Viewport) {
+        val perf_enabled = perf_traffic_detail_timing
+        val start_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
         val state = traffic_overlay_state(viewport)
+        val state_done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
         traffic_overlay_renderer.draw_aircraft(
             canvas = canvas,
             state = state,
             style = TrafficOverlayStyle(visual_theme)
         )
+        val draw_done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
         last_traffic_draw_elapsed_ms = SystemClock.elapsedRealtime()
         aircraft_details_prefetch_planner.schedule(
             state = state,
@@ -2118,6 +2380,18 @@ class FlightMapView(
             drag_started = drag_started,
             last_map_interaction_ms = last_map_interaction_ms
         )
+        val done_ns = if (perf_enabled) SystemClock.elapsedRealtimeNanos() else 0L
+        if (perf_enabled) {
+            Log.i(
+                PERF_DRAW_TAG,
+                "runId=${perf_run_id.ifBlank { "unknown" }} label=trafficOverlay " +
+                    "zoom=${format_perf_double(viewport.zoom)} aircraft=${state.aircraft.size} total=${cached_traffic().total} " +
+                    "stateMs=${format_perf_ms(start_ns, state_done_ns)} " +
+                    "drawMs=${format_perf_ms(state_done_ns, draw_done_ns)} " +
+                    "prefetchMs=${format_perf_ms(draw_done_ns, done_ns)} " +
+                    "totalMs=${format_perf_ms(start_ns, done_ns)}"
+            )
+        }
     }
 
     private fun draw_ownship_overlay(canvas: Canvas, viewport: Viewport, location: Location) {
@@ -3360,6 +3634,7 @@ class FlightMapView(
     }
 
     private fun apply_initial_mavic_range_zoom_if_needed() {
+        if (perf_zoom_override != null) return
         if (prefs.contains(FlightAlertAppSettings.KEY_ZOOM) || width <= 0 || height <= 0) return
         val focus_area = largest_unblocked_map_rect(content_width(), content_height()).inset_by(dp(12))
         val target_span_meters = DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M * INITIAL_RANGE_MULTIPLIER
@@ -3886,6 +4161,32 @@ class FlightMapView(
 
     private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float =
         safe_smooth_step(edge0, edge1, value)
+
+    private fun log_perf_draw_segment(
+        label: String,
+        start_ns: Long,
+        end_ns: Long,
+        enabled: Boolean,
+        extra: String = ""
+    ): Long {
+        if (!enabled) return end_ns
+        val actual_start_ns = if (start_ns > 0L) start_ns else SystemClock.elapsedRealtimeNanos()
+        val actual_end_ns = if (end_ns > 0L) end_ns else SystemClock.elapsedRealtimeNanos()
+        Log.i(
+            PERF_DRAW_TAG,
+            "runId=${perf_run_id.ifBlank { "unknown" }} label=$label " +
+                "ms=${format_perf_ms(actual_start_ns, actual_end_ns)} $extra"
+        )
+        return actual_end_ns
+    }
+
+    private fun format_perf_ms(start_ns: Long, end_ns: Long): String {
+        return String.format(Locale.US, "%.3f", (end_ns - start_ns).coerceAtLeast(0L) / 1_000_000.0)
+    }
+
+    private fun format_perf_double(value: Double): String {
+        return String.format(Locale.US, "%.3f", value)
+    }
 
 
 

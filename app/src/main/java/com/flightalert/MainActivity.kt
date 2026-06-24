@@ -18,6 +18,7 @@ package com.flightalert
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -31,6 +32,10 @@ import com.flightalert.traffic.GlobeBinCraftAircraftSource
 internal fun Context.has_flight_location_permission(): Boolean {
     return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
         checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+}
+
+internal fun Context.is_flightalert_debuggable(): Boolean {
+    return (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 }
 
 
@@ -84,6 +89,7 @@ class MainActivity : ComponentActivity() {
 
         setContentView(view)
         view.post { configure_high_refresh_rate(view) }
+        apply_perf_intent_if_allowed(intent)
 
         // Put keyboard focus on FlightMapView so emulator keys and filter typing land in the map controller.
         view.requestFocus()
@@ -94,6 +100,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        apply_perf_intent_if_allowed(intent)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -128,6 +135,11 @@ class MainActivity : ComponentActivity() {
         globe_bin_craft_aircraft_source?.destroy()
         globe_bin_craft_aircraft_source = null
         super.onDestroy()
+    }
+
+    private fun apply_perf_intent_if_allowed(intent: Intent?) {
+        if (!is_flightalert_debuggable()) return
+        flight_map_view?.apply_perf_intent(intent)
     }
 
     // The map view handles insets; opaque bars keep Android chrome from blending into app UI.

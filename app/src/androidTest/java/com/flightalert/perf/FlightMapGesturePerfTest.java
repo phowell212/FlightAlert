@@ -45,8 +45,10 @@ public class FlightMapGesturePerfTest {
     private static final double COUNTRY_CONTINUITY_CONTINENT_ZOOM = 4.25;
     private static final double COUNTRY_CONTINUITY_COUNTRY_ZOOM = 5.4;
     private static final double COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM = 7.55;
+    private static final double TEN_TWENTY_MI_ZOOM = 9.55;
     private static final String COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND = "regional100mi";
     private static final String COUNTRY_CONTINUITY_FULL_RANGE_BAND = "fullRange";
+    private static final String TEN_TWENTY_MI_BAND = "tenTwentyMi";
     private static final float MAP_FOCUS_SAFE_INSET_DP = 96f;
     private static final MajorTrafficCity[] MAJOR_TRAFFIC_CITIES = new MajorTrafficCity[] {
             new MajorTrafficCity("Dallas-Fort Worth", 32.90, -97.04),
@@ -260,6 +262,11 @@ public class FlightMapGesturePerfTest {
     @Test
     public void closeScaleZoomContinuitySatellitePerf() throws Exception {
         runCloseScaleZoomContinuity("SATELLITE", "closeScaleZoomContinuitySatellitePerf", false);
+    }
+
+    @Test
+    public void satelliteTenTwentyMileZoomContinuityPerf() throws Exception {
+        runTenTwentyMileZoomContinuity("satelliteTenTwentyMileZoomContinuityPerf", false);
     }
 
     @Test
@@ -608,6 +615,33 @@ public class FlightMapGesturePerfTest {
         }
         requireFlightAlertForeground();
         markPerfPhase(artifactName, "close", "close", "phase_capture_artifacts");
+        capturePerfArtifacts(artifactName);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
+        }
+    }
+
+    private void runTenTwentyMileZoomContinuity(String artifactName, boolean captureScreenshots) throws Exception {
+        MajorTrafficCity city = randomFullRangeLandSafeTrafficCity();
+        UiObject2 app = startAppAtMajorTraffic(city, TEN_TWENTY_MI_ZOOM, "SATELLITE", false, false, true);
+        sleep(TRAFFIC_LOAD_WAIT_MS);
+        if (captureScreenshots) {
+            captureActiveDisplay("flightalert-perf-" + artifactName + "-rest.png");
+        }
+        setPerfPhaseMetadata(
+                TEN_TWENTY_MI_BAND,
+                "launch_zoom=" + TEN_TWENTY_MI_ZOOM + "; app_focus_open_map=true; timetable_target=" + city.name,
+                "10-20 mi scale-bar continuity uses brief human-like pan plus overlapping zoom-out/zoom-in gestures through the suspected feed-boundary band"
+        );
+        clearPerfCounters();
+        markPerfPhase(artifactName, TEN_TWENTY_MI_BAND, TEN_TWENTY_MI_BAND, "phase_start");
+        runHumanLikeBandMotion(app, artifactName, TEN_TWENTY_MI_BAND, false, captureScreenshots);
+        sleep(700);
+        if (captureScreenshots) {
+            waitForScheduledCaptures();
+        }
+        requireFlightAlertForeground();
+        markPerfPhase(artifactName, TEN_TWENTY_MI_BAND, TEN_TWENTY_MI_BAND, "phase_capture_artifacts");
         capturePerfArtifacts(artifactName);
         if (captureScreenshots) {
             captureActiveDisplay("flightalert-perf-" + artifactName + ".png");
@@ -1080,6 +1114,10 @@ public class FlightMapGesturePerfTest {
             if (!open) return quick ? 0.30f : 0.32f;
             return quick ? 0.42f : 0.46f;
         }
+        if (band.contains(TEN_TWENTY_MI_BAND.toLowerCase(java.util.Locale.US))) {
+            if (!open) return quick ? 0.34f : 0.36f;
+            return quick ? 0.42f : 0.44f;
+        }
         if (!open) return quick ? 0.26f : 0.28f;
         return quick ? 0.36f : 0.40f;
     }
@@ -1278,6 +1316,9 @@ public class FlightMapGesturePerfTest {
         if (band.contains(COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND.toLowerCase(java.util.Locale.US))) {
             return new PanEnvelope(0.105f, 0.074f, 32f, 104f, 78f);
         }
+        if (band.contains(TEN_TWENTY_MI_BAND.toLowerCase(java.util.Locale.US))) {
+            return new PanEnvelope(0.120f, 0.086f, 34f, 112f, 84f);
+        }
         return new PanEnvelope(0.140f, 0.100f, 38f, 132f, 96f);
     }
 
@@ -1429,6 +1470,7 @@ public class FlightMapGesturePerfTest {
         builder.append("scale_bands=continent,country,").append(COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND).append(',').append(COUNTRY_CONTINUITY_FULL_RANGE_BAND).append('\n');
         builder.append("country_phase_note=country launch zoom ").append(COUNTRY_CONTINUITY_COUNTRY_ZOOM).append(" intentionally pinches closed first, so active/quick screenshots can show country-to-global stress frames; do not treat those frames as pure city-centered country visual proof.\n");
         builder.append("regional100mi_phase_note=").append(COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND).append(" launch zoom ").append(COUNTRY_CONTINUITY_REGIONAL_100_MI_ZOOM).append(" targets the 100 mi scale-bar neighborhood and pinches open first so the first active frames stay in the regional transition band before reversing.\n");
+        builder.append("ten_twenty_mi_phase_note=").append(TEN_TWENTY_MI_BAND).append(" launch zoom ").append(TEN_TWENTY_MI_ZOOM).append(" targets the UI 10-20 mi scale-bar neighborhood and crosses the suspected globe/API handoff band with human-like zoom-out then zoom-in gestures.\n");
         builder.append("full_range_phase_note=").append(COUNTRY_CONTINUITY_FULL_RANGE_BAND).append(" sweeps through the zoom range in/out with anchored pinches, bounded pan checkpoints, and a relaunch/re-anchor over the selected US/EU target before reversing direction so zooming back in/out does not drift to unrelated terrain.\n");
         builder.append("fast_zoom_out_tile_load_note=fast tile-load tests start at close map detail, quickly pinch out to country/wide scale, then record the tile-load recovery window so unloaded-tile duration can be compared in logcat.\n");
         return builder.toString();
@@ -1439,6 +1481,7 @@ public class FlightMapGesturePerfTest {
         if (testName.endsWith("-country")) return "country";
         if (testName.endsWith("-" + COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND)) return COUNTRY_CONTINUITY_REGIONAL_100_MI_BAND;
         if (testName.endsWith("-" + COUNTRY_CONTINUITY_FULL_RANGE_BAND)) return COUNTRY_CONTINUITY_FULL_RANGE_BAND;
+        if (testName.contains("TenTwentyMile")) return TEN_TWENTY_MI_BAND;
         if (testName.contains("satelliteFastZoomOutTileLoad")) return "fastZoomOutTileLoad";
         return PERF_BAND_NOT_APPLICABLE;
     }
