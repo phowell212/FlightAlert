@@ -14,7 +14,7 @@
     "unused"
 )
 
-package com.flightalert.traffic
+package com.flightalert.sources
 
 import com.flightalert.FlightAlertAppSettings
 

@@ -20,7 +20,7 @@ import com.flightalert.FlightAlertAppSettings
 import android.util.Log
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
-import com.flightalert.traffic.AirplanesLiveHttp
+import com.flightalert.sources.AirplanesLiveHttp
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder

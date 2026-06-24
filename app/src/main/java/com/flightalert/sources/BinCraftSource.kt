@@ -14,7 +14,7 @@
     "unused"
 )
 
-package com.flightalert.traffic
+package com.flightalert.sources
 
 import android.os.Handler
 import android.os.Looper

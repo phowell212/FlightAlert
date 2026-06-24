@@ -27,7 +27,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import com.flightalert.alerts.AircraftAlertService
-import com.flightalert.traffic.GlobeBinCraftAircraftSource
+import com.flightalert.sources.GlobeBinCraftAircraftSource
 import com.flightalert.ui.FlightAlertSettings
 
 internal fun Context.has_flight_location_permission(): Boolean {

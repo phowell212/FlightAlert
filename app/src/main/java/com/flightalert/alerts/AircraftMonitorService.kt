@@ -39,10 +39,10 @@ import com.flightalert.MainActivity
 import com.flightalert.has_flight_location_permission
 import com.flightalert.map.Bounds
 import com.flightalert.map.bounds_around_location
-import com.flightalert.traffic.AircraftFeedClient
-import com.flightalert.traffic.FeedAircraft
-import com.flightalert.traffic.FeedBounds
-import com.flightalert.traffic.FeedStatus
+import com.flightalert.sources.AircraftFeedClient
+import com.flightalert.sources.FeedAircraft
+import com.flightalert.sources.FeedBounds
+import com.flightalert.sources.FeedStatus
 import com.flightalert.ui.FlightAlertSettings
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -74,6 +74,7 @@ class AircraftAlertService : Service(), LocationListener {
     private var foreground_active = false
     private var priority_notification_showing = false
     private var next_poll_delay_ms = POLL_MS
+
     @Volatile
     private var latest_priority_snapshot: List<AlertAircraft> = emptyList()
 

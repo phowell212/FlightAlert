@@ -19,7 +19,7 @@ package com.flightalert.details
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.flightalert.aircraft.Aircraft
-import com.flightalert.traffic.AirplanesLiveHttp
+import com.flightalert.sources.AirplanesLiveHttp
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection

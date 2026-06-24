@@ -21,7 +21,7 @@ import com.flightalert.FlightAlertAppSettings
 import com.flightalert.details.json_int_or_null
 import com.flightalert.details.json_number_or_null
 import com.flightalert.map.clamped_haversine_distance_meters
-import com.flightalert.traffic.AirplanesLiveHttp
+import com.flightalert.sources.AirplanesLiveHttp
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
