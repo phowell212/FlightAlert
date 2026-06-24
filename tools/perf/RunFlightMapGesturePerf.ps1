@@ -11,6 +11,7 @@ param(
     [int]$MaxRunSeconds = 150,
     [string]$VideoDisplayId = "",
     [string]$City = "",
+    [int]$GestureVariant = 0,
     [ValidateSet("Current", "On", "Off")]
     [string]$MapRoads = "Current",
     [ValidateSet("Current", "On", "Off")]
@@ -1167,6 +1168,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($City)) {
         $instrumentationArgs.targetCity = $City
     }
+    $instrumentationArgs.gestureVariant = "$GestureVariant"
     if ($MapRoads -ne "Current") {
         $mapRoadsValue = if ($MapRoads -eq "On") { "true" } else { "false" }
         $instrumentationArgs.mapRoads = $mapRoadsValue
@@ -1409,6 +1411,7 @@ $routeProof += "device_build_sdk=$($deviceEvidence.DeviceBuildSdk)"
 $routeProof += "device_art_evidence=$($deviceEvidence.DeviceArtEvidence)"
 $routeProof += "device_evidence_error=$($deviceEvidence.Error)"
 $routeProof += "city_argument=$City"
+$routeProof += "gesture_variant_argument=$GestureVariant"
 $routeProof += "map_roads_argument=$MapRoads"
 $routeProof += "map_borders_argument=$MapBorders"
 $routeProof += "skip_chrome=$SkipChrome"

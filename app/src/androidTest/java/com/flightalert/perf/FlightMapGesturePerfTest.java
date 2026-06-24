@@ -109,6 +109,7 @@ public class FlightMapGesturePerfTest {
     private boolean centeredPerfGestureFocus = false;
     private boolean currentPerfFocusOpenMap = false;
     private boolean currentPerfTargetOptimizerSafe = true;
+    private int currentPerfGestureVariant = 0;
 
     @After
     public void holdForegroundForVideoEvidence() throws Exception {
@@ -810,6 +811,7 @@ public class FlightMapGesturePerfTest {
         boolean trafficDetailTiming = instrumentationBooleanArgument("trafficDetailTiming");
         boolean mapDetailTiming = instrumentationBooleanArgument("mapDetailTiming");
         boolean frameMetricsProbe = instrumentationBooleanArgument("frameMetricsProbe");
+        currentPerfGestureVariant = instrumentationIntArgument("gestureVariant", 0);
         Boolean mapRoads = instrumentationOptionalBooleanArgument("mapRoads");
         Boolean mapBorders = instrumentationOptionalBooleanArgument("mapBorders");
         requireCompleteMapReferenceArguments(mapRoads, mapBorders);
@@ -1021,13 +1023,15 @@ public class FlightMapGesturePerfTest {
         android.graphics.Point focus = mapFocusForBounds(bounds);
         float shortSide = Math.max(1f, Math.min(bounds.width(), bounds.height()));
         float innerRadius = Math.max(42f, shortSide * 0.055f);
-        float percent = pinchPercentForScaleBand(scaleBand, quick, open) * percentScale;
+        float variantScale = 1f + gestureVariantCentered() * 0.025f;
+        float percent = pinchPercentForScaleBand(scaleBand, quick, open) * percentScale * variantScale;
         float outerRadius = boundedHorizontalPinchRadius(focus, mapBounds, Math.max(innerRadius + 42f, shortSide * percent * 0.42f), innerRadius);
         float startRadius = open ? innerRadius : outerRadius;
         float endRadius = open ? outerRadius : innerRadius;
-        int clampedSteps = Math.max(10, steps);
+        int clampedSteps = Math.max(10, steps + gestureVariantCentered());
         float maxShiftX = Math.min(dp(26f), Math.max(0f, Math.min(focus.x - mapBounds.left - outerRadius, mapBounds.right - focus.x - outerRadius) - dp(8f)));
         float maxShiftY = Math.min(dp(18f), Math.max(0f, Math.min(focus.y - mapBounds.top, mapBounds.bottom - focus.y) - dp(8f)));
+        float phase = gestureVariantPhase();
         long downTime = SystemClock.uptimeMillis();
 
         MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[] {
@@ -1045,8 +1049,10 @@ public class FlightMapGesturePerfTest {
             float eased = t * t * (3f - 2f * t);
             float radius = startRadius + (endRadius - startRadius) * eased;
             float envelope = (float) Math.sin(Math.PI * eased);
-            float centerX = focus.x + envelope * maxShiftX * (open ? -0.7f : 0.7f);
-            float centerY = focus.y + envelope * maxShiftY * 0.45f * (float) Math.sin(Math.PI * 1.5f * eased);
+            float centerX = focus.x + envelope * maxShiftX * (open ? -0.7f : 0.7f) *
+                    (0.94f + 0.03f * (currentPerfGestureVariant % 5));
+            float centerY = focus.y + envelope * maxShiftY * 0.45f *
+                    (float) Math.sin(Math.PI * 1.5f * eased + phase);
             centerX = Math.max(mapBounds.left + radius, Math.min(mapBounds.right - radius, centerX));
             centerY = Math.max(mapBounds.top + dp(8f), Math.min(mapBounds.bottom - dp(8f), centerY));
             coords[0].x = centerX - radius;
@@ -1230,8 +1236,9 @@ public class FlightMapGesturePerfTest {
         float centerX = bounds.centerX();
         float centerY = bounds.centerY();
         recordGestureAnchor("elliptical_pan", new android.graphics.Point(Math.round(centerX), Math.round(centerY)), bounds);
-        float radiusX = Math.max(dp(minRadiusDp), Math.min(bounds.width() * widthFraction, dp(maxRadiusXDp)));
-        float radiusY = Math.max(dp(Math.max(18f, minRadiusDp * 0.72f)), Math.min(bounds.height() * heightFraction, dp(maxRadiusYDp)));
+        float variant = gestureVariantCentered();
+        float radiusX = Math.max(dp(minRadiusDp), Math.min(bounds.width() * widthFraction * (1f + variant * 0.025f), dp(maxRadiusXDp)));
+        float radiusY = Math.max(dp(Math.max(18f, minRadiusDp * 0.72f)), Math.min(bounds.height() * heightFraction * (1f - variant * 0.018f), dp(maxRadiusYDp)));
         long downTime = SystemClock.uptimeMillis();
         MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[] {
                 pointerProperties(0)
@@ -1240,12 +1247,13 @@ public class FlightMapGesturePerfTest {
                 pointerCoords(centerX + radiusX, centerY)
         };
         injectMotion(downTime, downTime, MotionEvent.ACTION_DOWN, properties, coords, 1);
-        int clampedSteps = Math.max(20, steps);
-        float direction = clockwise ? 1f : -1f;
+        int clampedSteps = Math.max(20, steps + gestureVariantCentered());
+        float direction = (clockwise ^ (currentPerfGestureVariant % 2 == 1)) ? 1f : -1f;
+        float phase = gestureVariantPhase();
         for (int step = 1; step <= clampedSteps; step++) {
             float t = step / (float) clampedSteps;
-            float angle = direction * (float) (Math.PI * 2.0 * t);
-            float wobble = 1f + 0.035f * (float) Math.sin(Math.PI * 4.0 * t);
+            float angle = phase + direction * (float) (Math.PI * 2.0 * t);
+            float wobble = 1f + 0.035f * (float) Math.sin(Math.PI * 4.0 * t + phase);
             coords[0].x = centerX + radiusX * wobble * (float) Math.cos(angle);
             coords[0].y = centerY + radiusY * (float) Math.sin(angle);
             coords[0].x = Math.max(bounds.left, Math.min(bounds.right, coords[0].x));
@@ -1271,6 +1279,14 @@ public class FlightMapGesturePerfTest {
             return new PanEnvelope(0.105f, 0.074f, 32f, 104f, 78f);
         }
         return new PanEnvelope(0.140f, 0.100f, 38f, 132f, 96f);
+    }
+
+    private int gestureVariantCentered() {
+        return Math.floorMod(currentPerfGestureVariant, 5) - 2;
+    }
+
+    private float gestureVariantPhase() {
+        return (float) (Math.floorMod(currentPerfGestureVariant, 5) * Math.PI / 12.0);
     }
 
     private void clearPerfCounters() throws Exception {
@@ -1388,6 +1404,7 @@ public class FlightMapGesturePerfTest {
         builder.append("traffic_detail_timing=").append(currentPerfTrafficDetailTiming).append('\n');
         builder.append("map_detail_timing=").append(currentPerfMapDetailTiming).append('\n');
         builder.append("frame_metrics_probe=").append(currentPerfFrameMetricsProbe).append('\n');
+        builder.append("gesture_variant=").append(currentPerfGestureVariant).append('\n');
         builder.append("gesture_focus=").append(centeredPerfGestureFocus ? "screen-center" : "open-map").append('\n');
         builder.append("app_focus_open_map=").append(currentPerfFocusOpenMap).append('\n');
         builder.append("debug_focus_x_fraction=").append(Float.isNaN(currentPerfFocusXFraction) ? "unavailable" : currentPerfFocusXFraction).append('\n');
