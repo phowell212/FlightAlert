@@ -845,6 +845,13 @@ class FlightMapView(
             if (!enabled) selected_restricted_airspace = null
             aviation_layer_controller.on_visibility_changed(aviation_layer_visibility())
         }
+        intent.perf_boolean(PERF_TRAFFIC_DETAIL_TIMING)?.let { enabled ->
+            traffic_overlay_renderer.debug_collect_detail_timing = enabled
+            traffic_overlay_state_builder.debug_collect_detail_timing = enabled
+        }
+        intent.perf_boolean(PERF_MAP_DETAIL_TIMING)?.let { enabled ->
+            map_tile_renderer.debug_collect_detail_timing = enabled
+        }
         if (intent.perf_boolean(PERF_CLEAR_SELECTION) == true) {
             details_session.close_details_shell()
             selected_path_controller.clear_selection()
@@ -982,13 +989,13 @@ class FlightMapView(
                 draw_no_location_state(this, w, h)
             } else {
                 val viewport = viewport_for(location, w, h)
-                log_perf_viewport_if_needed(viewport)
                 draw_map_tiles(this, viewport)
                 request_aviation_layers_if_needed(viewport)
                 draw_aviation_layers(this, viewport)
                 draw_priority_range_circle(this, viewport, location)
                 draw_selected_flight_path(this, viewport)
                 draw_traffic_overlay(this, viewport)
+                log_perf_viewport_if_needed(viewport)
                 draw_ownship_overlay(this, viewport, location)
             }
 
@@ -1520,7 +1527,10 @@ class FlightMapView(
         perf_last_log_ms = now
         perf_draw_sequence++
         val center = world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
-        val aircraft_count = cached_traffic().aircraft.size
+        val aircraft_count = traffic_overlay_renderer.debug_last_render_aircraft_count
+        val dot_count = traffic_overlay_renderer.debug_last_dot_count
+        val direct_count = traffic_overlay_renderer.debug_last_direct_input_count
+        val direct_drawn_count = traffic_overlay_renderer.debug_last_direct_drawn_count
         val focus_lat = perf_number(center.lat)
         val focus_lon = perf_number(center.lon)
         val zoom_text = perf_number(viewport.zoom)
@@ -1531,10 +1541,26 @@ class FlightMapView(
         Log.d(
             TAG,
             "Debug draw perf runId=$run_id frames=1 avg=0 max=0 map=0 traffic=0 chrome=0 " +
-                    "drawSeqFirst=$perf_draw_sequence drawSeq=$perf_draw_sequence symbols=$aircraft_count dots=0 " +
-                    "direct=$aircraft_count directDrawn=$aircraft_count focusLat=$focus_lat focusLon=$focus_lon " +
+                    "drawSeqFirst=$perf_draw_sequence drawSeq=$perf_draw_sequence symbols=$aircraft_count dots=$dot_count " +
+                    "direct=$direct_count directDrawn=$direct_drawn_count focusLat=$focus_lat focusLon=$focus_lon " +
                     "camera centerLat=$focus_lat centerLon=$focus_lon zoom=$zoom_text"
         )
+        val map_summary = map_tile_renderer.debug_last_tile_summary
+        if (map_summary.isNotBlank()) {
+            Log.d(TAG, "Debug map tile perf runId=$run_id$map_summary")
+        }
+        val symbol_summary = traffic_overlay_renderer.debug_last_symbol_cache_summary
+        if (symbol_summary.isNotBlank() && symbol_summary != "symbolCache=none") {
+            Log.d(TAG, "Debug traffic symbol perf runId=$run_id $symbol_summary")
+        }
+        val traffic_detail = traffic_overlay_renderer.debug_last_detail_timing_summary
+        if (traffic_detail.isNotBlank()) {
+            Log.d(TAG, "Debug traffic detail perf runId=$run_id $traffic_detail")
+        }
+        val state_detail = traffic_overlay_state_builder.debug_last_detail_timing_summary
+        if (state_detail.isNotBlank()) {
+            Log.d(TAG, "Debug traffic state perf runId=$run_id $state_detail")
+        }
     }
 
     private fun perf_number(value: Double): String {
@@ -4448,6 +4474,8 @@ class FlightMapView(
         const val PERF_RESTRICTED_AIRSPACES_ENABLED =
             "com.flightalert.PERF_RESTRICTED_AIRSPACES_ENABLED"
         const val PERF_CLEAR_SELECTION = "com.flightalert.PERF_CLEAR_SELECTION"
+        const val PERF_TRAFFIC_DETAIL_TIMING = "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING"
+        const val PERF_MAP_DETAIL_TIMING = "com.flightalert.PERF_MAP_DETAIL_TIMING"
         const val PERF_LOG_INTERVAL_MS = 1000L
     }
 

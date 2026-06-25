@@ -97,6 +97,9 @@ public class FlightMapGesturePerfTest {
         if (optionalBoolean(args.getString("trafficDetailTiming")) == Boolean.TRUE) {
             intent.putExtra("com.flightalert.PERF_TRAFFIC_DETAIL_TIMING", "true");
         }
+        if (optionalBoolean(args.getString("mapDetailTiming")) == Boolean.TRUE) {
+            intent.putExtra("com.flightalert.PERF_MAP_DETAIL_TIMING", "true");
+        }
 
         InstrumentationRegistry.getInstrumentation().startActivitySync(intent);
         UiDevice device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());

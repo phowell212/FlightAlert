@@ -252,6 +252,14 @@ class TrafficOverlayRenderer(
         private set
     var debug_last_detail_timing_summary: String = ""
         private set
+    var debug_last_render_aircraft_count = 0
+        private set
+    var debug_last_dot_count = 0
+        private set
+    var debug_last_direct_input_count = 0
+        private set
+    var debug_last_direct_drawn_count = 0
+        private set
     private var debug_detail_dot_batch_ns = 0L
     private var debug_detail_dot_cache_clear_ns = 0L
     private var debug_detail_dot_cache_record_ns = 0L
@@ -332,6 +340,10 @@ class TrafficOverlayRenderer(
         style: TrafficOverlayStyle
     ) {
         debug_last_symbol_cache_summary = "symbolCache=none"
+        debug_last_render_aircraft_count = state.aircraft.size
+        debug_last_dot_count = state.dot_batch?.visible_count ?: 0
+        debug_last_direct_input_count = 0
+        debug_last_direct_drawn_count = 0
         rotorcraft_animation_frame_requested = false
         reset_debug_detail_timing()
         state.dot_batch?.let { batch ->
@@ -515,6 +527,7 @@ class TrafficOverlayRenderer(
             if (exclude_centers_in != null) debug_detail_direct_partial_call_count++
             debug_detail_direct_input_count += aircraft.size
         }
+        debug_last_direct_input_count += aircraft.size
         for (item in aircraft) {
             val cull_start_ns = debug_detail_start_ns()
             val selected = has_selected_aircraft && item.appearance_key == normalized_selected_id
@@ -567,6 +580,7 @@ class TrafficOverlayRenderer(
                 if (debug_collect_detail_timing) debug_detail_labels_drawn++
             }
             drawn_count++
+            debug_last_direct_drawn_count++
             if (collect_detail) debug_detail_direct_drawn_count++
         }
         if (collect_detail) finish_batch_run()
