@@ -177,6 +177,7 @@ internal data class ChildTileFallback(
 )
 
 internal data class InterimRasterTile(
+    val key: String,
     val cache_key: String,
     val z: Int,
     val x: Int,

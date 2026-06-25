@@ -80,6 +80,8 @@ internal class SatelliteMapTileRenderer(
     private val tile_cache = LinkedHashMap<String, Bitmap>(MAX_MEMORY_TILES, 0.75f, true)
     private val tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
     private val interim_tiles = linkedMapOf<String, InterimRasterTile>()
+    private val loaded_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
+    private val visible_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
     private val requested_tiles = mutableSetOf<String>()
     private val current_tile_request_generations = mutableMapOf<String, Long>()
     private var current_tile_request_generation = 0L
@@ -190,6 +192,8 @@ internal class SatelliteMapTileRenderer(
     @Volatile
     var debug_collect_detail_timing = false
     private var debug_detail_interim_ns = 0L
+    private var debug_detail_interim_retain_new_count = 0
+    private var debug_detail_interim_retain_reuse_count = 0
     private var debug_detail_lower_ns = 0L
     private var debug_detail_upper_ns = 0L
     private var debug_detail_merge_ns = 0L
@@ -341,7 +345,7 @@ internal class SatelliteMapTileRenderer(
         } else {
             false
         }
-        val loaded_interim_tiles = ArrayList<InterimRasterTile>()
+        loaded_interim_tile_buffer.clear()
 
         val lower_detail_start_ns = detail_timing_start_ns()
         val lower_stats = draw_tile_grid_layer(
@@ -356,7 +360,7 @@ internal class SatelliteMapTileRenderer(
             allow_parent_fallback = true,
             allow_child_fallback = true,
             retain_as_interim = true,
-            loaded_interim_tiles = loaded_interim_tiles,
+            loaded_interim_tiles = loaded_interim_tile_buffer,
             request_generation = request_generation
         ).also { debug_detail_lower_ns += detail_timing_elapsed_ns(lower_detail_start_ns) }
 
@@ -374,7 +378,7 @@ internal class SatelliteMapTileRenderer(
                 allow_parent_fallback = false,
                 allow_child_fallback = true,
                 retain_as_interim = true,
-                loaded_interim_tiles = loaded_interim_tiles,
+                loaded_interim_tiles = loaded_interim_tile_buffer,
                 request_generation = request_generation
             )
         } else {
@@ -399,12 +403,12 @@ internal class SatelliteMapTileRenderer(
         val required_tiles_ready = lower_stats.requested == 0 &&
                 (!has_upper_lod || upper_lod_alpha <= MIN_LAYER_ALPHA || upper_stats.requested == 0)
 
-        if (loaded_interim_tiles.isNotEmpty()) {
+        if (loaded_interim_tile_buffer.isNotEmpty()) {
             val merge_detail_start_ns = detail_timing_start_ns()
             if (blend_active || !required_tiles_ready) {
-                merge_interim_tiles(loaded_interim_tiles)
+                merge_interim_tiles(loaded_interim_tile_buffer)
             } else {
-                replace_interim_tiles(loaded_interim_tiles)
+                replace_interim_tiles(loaded_interim_tile_buffer)
             }
             debug_detail_merge_ns += detail_timing_elapsed_ns(merge_detail_start_ns)
         }
@@ -475,6 +479,8 @@ internal class SatelliteMapTileRenderer(
     private fun reset_detail_timing() {
         if (!debug_collect_detail_timing) return
         debug_detail_interim_ns = 0L
+        debug_detail_interim_retain_new_count = 0
+        debug_detail_interim_retain_reuse_count = 0
         debug_detail_lower_ns = 0L
         debug_detail_upper_ns = 0L
         debug_detail_merge_ns = 0L
@@ -601,7 +607,10 @@ internal class SatelliteMapTileRenderer(
             (debug_detail_reference_ns - reference_bucketed_ns).coerceAtLeast(0L)
         val satellite_cache_size = synchronized(tile_cache) { tile_cache.size }
         val reference_cache_size = synchronized(reference_tile_cache) { reference_tile_cache.size }
-        return " mapDetail interim=${debug_detail_interim_ns.ms_debug()} lower=${debug_detail_lower_ns.ms_debug()} " +
+        return " mapDetail interim=${debug_detail_interim_ns.ms_debug()} " +
+                "interimKeepNew=$debug_detail_interim_retain_new_count " +
+                "interimKeepReuse=$debug_detail_interim_retain_reuse_count " +
+                "lower=${debug_detail_lower_ns.ms_debug()} " +
                 "upper=${debug_detail_upper_ns.ms_debug()} merge=${debug_detail_merge_ns.ms_debug()} " +
                 "reference=${debug_detail_reference_ns.ms_debug()} refPlan=${debug_detail_reference_plan_ns.ms_debug()} " +
                 "refDraw=${debug_detail_reference_draw_ns.ms_debug()} refPrefetch=${debug_detail_reference_prefetch_ns.ms_debug()} " +
@@ -798,13 +807,15 @@ internal class SatelliteMapTileRenderer(
                 val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
                 if (bitmap != null) {
                     if (retain_as_interim) {
-                        loaded_interim_tiles += InterimRasterTile(
+                        record_loaded_interim_tile(
+                            key = key,
                             cache_key = state.cache_key,
                             z = tile_zoom,
                             x = tx,
                             y = ty,
                             bitmap = bitmap,
-                            last_used_ms = now_ms
+                            now_ms = now_ms,
+                            loaded_interim_tiles = loaded_interim_tiles
                         )
                     }
                     loaded++
@@ -3044,7 +3055,8 @@ internal class SatelliteMapTileRenderer(
         now_ms: Long
     ): Boolean {
         prune_interim_tiles(now_ms)
-        val visible_tiles = ArrayList<InterimRasterTile>()
+        val visible_tiles = visible_interim_tile_buffer
+        visible_tiles.clear()
         for (tile in interim_tiles.values) {
             if (tile.cache_key != state.cache_key) continue
             if (!interim_tile_intersects_viewport(tile, viewport)) continue
@@ -3152,21 +3164,57 @@ internal class SatelliteMapTileRenderer(
 
     private fun replace_interim_tiles(tiles: List<InterimRasterTile>) {
         interim_tiles.clear()
-        for (tile in tiles.takeLast(MAX_INTERIM_TILES)) {
-            val key = "${tile.cache_key}/${tile.z}/${tile.x}/${tile.y}"
-            interim_tiles[key] = tile
+        val start_index = (tiles.size - MAX_INTERIM_TILES).coerceAtLeast(0)
+        for (index in start_index until tiles.size) {
+            val tile = tiles[index]
+            interim_tiles[tile.key] = tile
         }
     }
 
     private fun merge_interim_tiles(tiles: List<InterimRasterTile>) {
         for (tile in tiles) {
-            val key = "${tile.cache_key}/${tile.z}/${tile.x}/${tile.y}"
-            interim_tiles[key] = tile
+            interim_tiles[tile.key] = tile
         }
         while (interim_tiles.size > MAX_INTERIM_TILES) {
             val first_key = interim_tiles.keys.firstOrNull() ?: break
             interim_tiles.remove(first_key)
         }
+    }
+
+    private fun record_loaded_interim_tile(
+        key: String,
+        cache_key: String,
+        z: Int,
+        x: Int,
+        y: Int,
+        bitmap: Bitmap,
+        now_ms: Long,
+        loaded_interim_tiles: MutableList<InterimRasterTile>
+    ) {
+        val existing = interim_tiles[key]
+        if (
+            existing != null &&
+            existing.bitmap === bitmap &&
+            existing.cache_key == cache_key &&
+            existing.z == z &&
+            existing.x == x &&
+            existing.y == y
+        ) {
+            existing.last_used_ms = now_ms
+            loaded_interim_tiles += existing
+            debug_detail_interim_retain_reuse_count++
+            return
+        }
+        loaded_interim_tiles += InterimRasterTile(
+            key = key,
+            cache_key = cache_key,
+            z = z,
+            x = x,
+            y = y,
+            bitmap = bitmap,
+            last_used_ms = now_ms
+        )
+        debug_detail_interim_retain_new_count++
     }
 
     private fun prune_interim_tiles(now_ms: Long) {
