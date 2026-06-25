@@ -1643,7 +1643,7 @@ class FlightMapView(
             perf_draw_window_max_focus_lon = focus_lon
             perf_draw_window_max_zoom = zoom_text
         }
-        if (now - perf_last_log_ms < PERF_LOG_INTERVAL_MS) return
+        if (now - perf_last_log_ms < PERF_DETAIL_LOG_INTERVAL_MS) return
         perf_last_log_ms = now
         val window_frames = perf_draw_window_frames.coerceAtLeast(1)
         val draw_sequence_first =
@@ -4652,7 +4652,8 @@ class FlightMapView(
         const val PERF_CLEAR_SELECTION = "com.flightalert.PERF_CLEAR_SELECTION"
         const val PERF_TRAFFIC_DETAIL_TIMING = "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING"
         const val PERF_MAP_DETAIL_TIMING = "com.flightalert.PERF_MAP_DETAIL_TIMING"
-        const val PERF_LOG_INTERVAL_MS = 1000L
+        const val PERF_LOG_INTERVAL_MS = 3000L
+        const val PERF_DETAIL_LOG_INTERVAL_MS = 1000L
     }
 
 }
