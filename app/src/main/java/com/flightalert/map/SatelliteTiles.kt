@@ -55,7 +55,12 @@ internal data class ReferencePrefetchDrainStats(
     var queued_count: Long = 0L,
     var memory_recheck_count: Long = 0L,
     var stale_count: Long = 0L,
-    var superseded_count: Long = 0L
+    var superseded_count: Long = 0L,
+    var budget_exhausted_count: Long = 0L
+)
+
+internal data class ReferencePrefetchBudget(
+    var remaining_submissions: Int
 )
 
 // Satellite renderer restored behind the Satellite toggle, with continuous LOD blending.
@@ -228,6 +233,9 @@ internal class SatelliteMapTileRenderer(
     private var debug_detail_reference_prefetch_memory_recheck_count = 0
     private var debug_detail_reference_prefetch_denied_count = 0
     private var debug_detail_reference_prefetch_max_grid_count = 0
+    private var debug_detail_reference_prefetch_budget_count = 0
+    private var debug_detail_reference_prefetch_pan_budget_count = 0
+    private var debug_detail_reference_prefetch_lod_budget_count = 0
     private val debug_reference_lod_prefetch_async_offered_count = AtomicLong()
     private val debug_reference_lod_prefetch_async_coalesced_count = AtomicLong()
     private val debug_reference_lod_prefetch_async_batch_count = AtomicLong()
@@ -241,6 +249,7 @@ internal class SatelliteMapTileRenderer(
     private val debug_reference_lod_prefetch_async_stale_count = AtomicLong()
     private val debug_reference_lod_prefetch_async_superseded_count = AtomicLong()
     private val debug_reference_lod_prefetch_async_denied_count = AtomicLong()
+    private val debug_reference_lod_prefetch_async_budget_count = AtomicLong()
     private val debug_reference_lod_prefetch_async_ns = AtomicLong()
     private val debug_reference_lod_prefetch_async_max_ns = AtomicLong()
     private var debug_detail_reference_lod_prefetch_async_offered_count = 0L
@@ -256,6 +265,7 @@ internal class SatelliteMapTileRenderer(
     private var debug_detail_reference_lod_prefetch_async_stale_count = 0L
     private var debug_detail_reference_lod_prefetch_async_superseded_count = 0L
     private var debug_detail_reference_lod_prefetch_async_denied_count = 0L
+    private var debug_detail_reference_lod_prefetch_async_budget_count = 0L
     private var debug_detail_reference_lod_prefetch_async_ns = 0L
     private var debug_detail_reference_lod_prefetch_async_max_ns = 0L
     private var debug_detail_reference_protected_count = 0
@@ -265,6 +275,22 @@ internal class SatelliteMapTileRenderer(
     private var debug_detail_reference_history_stale_removed_count = 0
     private var debug_detail_reference_history_overflow_removed_count = 0
     private var debug_detail_local_reference_ns = 0L
+    private var debug_detail_satellite_request_call_count = 0
+    private var debug_detail_satellite_request_exact_count = 0
+    private var debug_detail_satellite_request_prefetch_count = 0
+    private var debug_detail_satellite_request_buffer_count = 0
+    private var debug_detail_satellite_request_parent_count = 0
+    private var debug_detail_satellite_request_memory_hit_count = 0
+    private var debug_detail_satellite_request_queued_count = 0
+    private var debug_detail_satellite_request_admitted_count = 0
+    private val debug_satellite_decode_file_count = AtomicLong()
+    private val debug_satellite_decode_network_count = AtomicLong()
+    private val debug_satellite_cache_put_count = AtomicLong()
+    private val debug_satellite_cache_evict_count = AtomicLong()
+    private var debug_detail_satellite_decode_file_count = 0L
+    private var debug_detail_satellite_decode_network_count = 0L
+    private var debug_detail_satellite_cache_put_count = 0L
+    private var debug_detail_satellite_cache_evict_count = 0L
 
     fun draw_tiles(
         canvas: Canvas,
@@ -492,6 +518,9 @@ internal class SatelliteMapTileRenderer(
         debug_detail_reference_prefetch_memory_recheck_count = 0
         debug_detail_reference_prefetch_denied_count = 0
         debug_detail_reference_prefetch_max_grid_count = 0
+        debug_detail_reference_prefetch_budget_count = 0
+        debug_detail_reference_prefetch_pan_budget_count = 0
+        debug_detail_reference_prefetch_lod_budget_count = 0
         debug_detail_reference_lod_prefetch_async_offered_count =
             debug_reference_lod_prefetch_async_offered_count.getAndSet(0L)
         debug_detail_reference_lod_prefetch_async_coalesced_count =
@@ -518,6 +547,8 @@ internal class SatelliteMapTileRenderer(
             debug_reference_lod_prefetch_async_superseded_count.getAndSet(0L)
         debug_detail_reference_lod_prefetch_async_denied_count =
             debug_reference_lod_prefetch_async_denied_count.getAndSet(0L)
+        debug_detail_reference_lod_prefetch_async_budget_count =
+            debug_reference_lod_prefetch_async_budget_count.getAndSet(0L)
         debug_detail_reference_lod_prefetch_async_ns =
             debug_reference_lod_prefetch_async_ns.getAndSet(0L)
         debug_detail_reference_lod_prefetch_async_max_ns =
@@ -529,6 +560,19 @@ internal class SatelliteMapTileRenderer(
         debug_detail_reference_history_stale_removed_count = 0
         debug_detail_reference_history_overflow_removed_count = 0
         debug_detail_local_reference_ns = 0L
+        debug_detail_satellite_request_call_count = 0
+        debug_detail_satellite_request_exact_count = 0
+        debug_detail_satellite_request_prefetch_count = 0
+        debug_detail_satellite_request_buffer_count = 0
+        debug_detail_satellite_request_parent_count = 0
+        debug_detail_satellite_request_memory_hit_count = 0
+        debug_detail_satellite_request_queued_count = 0
+        debug_detail_satellite_request_admitted_count = 0
+        debug_detail_satellite_decode_file_count = debug_satellite_decode_file_count.getAndSet(0L)
+        debug_detail_satellite_decode_network_count =
+            debug_satellite_decode_network_count.getAndSet(0L)
+        debug_detail_satellite_cache_put_count = debug_satellite_cache_put_count.getAndSet(0L)
+        debug_detail_satellite_cache_evict_count = debug_satellite_cache_evict_count.getAndSet(0L)
     }
 
     private fun detail_timing_start_ns(): Long {
@@ -554,6 +598,8 @@ internal class SatelliteMapTileRenderer(
                 debug_detail_reference_protection_ns
         val reference_other_ns =
             (debug_detail_reference_ns - reference_bucketed_ns).coerceAtLeast(0L)
+        val satellite_cache_size = synchronized(tile_cache) { tile_cache.size }
+        val reference_cache_size = synchronized(reference_tile_cache) { reference_tile_cache.size }
         return " mapDetail interim=${debug_detail_interim_ns.ms_debug()} lower=${debug_detail_lower_ns.ms_debug()} " +
                 "upper=${debug_detail_upper_ns.ms_debug()} merge=${debug_detail_merge_ns.ms_debug()} " +
                 "reference=${debug_detail_reference_ns.ms_debug()} refPlan=${debug_detail_reference_plan_ns.ms_debug()} " +
@@ -593,6 +639,9 @@ internal class SatelliteMapTileRenderer(
                 "refPfMem2=$debug_detail_reference_prefetch_memory_recheck_count " +
                 "refPfDeny=$debug_detail_reference_prefetch_denied_count " +
                 "refPfMaxGrid=$debug_detail_reference_prefetch_max_grid_count " +
+                "refPfBudget=$debug_detail_reference_prefetch_budget_count " +
+                "refPfPanBudget=$debug_detail_reference_prefetch_pan_budget_count " +
+                "refPfLodBudget=$debug_detail_reference_prefetch_lod_budget_count " +
                 "refPfAsyncOffer=$debug_detail_reference_lod_prefetch_async_offered_count " +
                 "refPfAsyncCoalesce=$debug_detail_reference_lod_prefetch_async_coalesced_count " +
                 "refPfAsyncBatch=$debug_detail_reference_lod_prefetch_async_batch_count " +
@@ -606,12 +655,26 @@ internal class SatelliteMapTileRenderer(
                 "refPfAsyncStale=$debug_detail_reference_lod_prefetch_async_stale_count " +
                 "refPfAsyncSuper=$debug_detail_reference_lod_prefetch_async_superseded_count " +
                 "refPfAsyncDeny=$debug_detail_reference_lod_prefetch_async_denied_count " +
+                "refPfAsyncBudget=$debug_detail_reference_lod_prefetch_async_budget_count " +
                 "refPfAsyncNs=${debug_detail_reference_lod_prefetch_async_ns.ms_debug()} " +
                 "refPfAsyncMaxNs=${debug_detail_reference_lod_prefetch_async_max_ns.ms_debug()} " +
                 "refPrev=$debug_detail_reference_previous_protected_count " +
                 "refHistStart=$debug_detail_reference_history_start_count refHist=$debug_detail_reference_history_count " +
                 "refStale=$debug_detail_reference_history_stale_removed_count " +
                 "refOverflow=$debug_detail_reference_history_overflow_removed_count " +
+                "satReq=$debug_detail_satellite_request_call_count " +
+                "satReqExact=$debug_detail_satellite_request_exact_count " +
+                "satReqPrefetch=$debug_detail_satellite_request_prefetch_count " +
+                "satReqBuffer=$debug_detail_satellite_request_buffer_count " +
+                "satReqParent=$debug_detail_satellite_request_parent_count " +
+                "satReqMem=$debug_detail_satellite_request_memory_hit_count " +
+                "satReqQueued=$debug_detail_satellite_request_queued_count " +
+                "satReqAdmit=$debug_detail_satellite_request_admitted_count " +
+                "satDecodeFile=$debug_detail_satellite_decode_file_count " +
+                "satDecodeNet=$debug_detail_satellite_decode_network_count " +
+                "satCachePut=$debug_detail_satellite_cache_put_count " +
+                "satCacheEvict=$debug_detail_satellite_cache_evict_count " +
+                "satCache=$satellite_cache_size refCache=$reference_cache_size " +
                 "localRef=${debug_detail_local_reference_ns.ms_debug()}"
     }
 
@@ -1223,6 +1286,9 @@ internal class SatelliteMapTileRenderer(
         } else {
             null
         }
+        val budget = ReferencePrefetchBudget(
+            remaining_submissions = REFERENCE_LOD_PREFETCH_MAX_ADMITTED_PER_BATCH
+        )
         for (plan in plans) {
             if (!reference_lod_prefetch_epoch_current(plan.epoch)) {
                 stats?.let { it.superseded_count++ }
@@ -1236,7 +1302,7 @@ internal class SatelliteMapTileRenderer(
                 stats?.let { it.stale_count++ }
                 continue
             }
-            if (!request_reference_lod_prefetch_grid_from_plan(plan, stats)) break
+            if (!request_reference_lod_prefetch_grid_from_plan(plan, stats, budget)) break
         }
         if (collect_detail && stats != null) {
             val elapsed_ns = (SystemClock.elapsedRealtimeNanos() - batch_start_ns).coerceAtLeast(0L)
@@ -1246,7 +1312,8 @@ internal class SatelliteMapTileRenderer(
 
     private fun request_reference_lod_prefetch_grid_from_plan(
         plan: ReferencePrefetchGridPlan,
-        stats: ReferencePrefetchDrainStats?
+        stats: ReferencePrefetchDrainStats?,
+        budget: ReferencePrefetchBudget
     ): Boolean {
         for (ty in plan.first_tile_y..plan.last_tile_y) {
             if (ty !in 0 until plan.max_tile) continue
@@ -1263,6 +1330,10 @@ internal class SatelliteMapTileRenderer(
                 return true
             }
             for (tx_raw in plan.first_tile_x..plan.last_tile_x) {
+                if (budget.remaining_submissions <= 0) {
+                    stats?.let { it.budget_exhausted_count++ }
+                    return false
+                }
                 stats?.let { it.tile_count++ }
                 val tx = ((tx_raw % plan.max_tile) + plan.max_tile) % plan.max_tile
                 val key = "${plan.cache_key}/${plan.tile_zoom}/$tx/$ty"
@@ -1284,19 +1355,23 @@ internal class SatelliteMapTileRenderer(
                     request_stale_generation_tolerance = plan.request_stale_generation_tolerance,
                     redraw_when_loaded = false
                 )
-                if (stats != null) {
-                    when (admission) {
-                        REFERENCE_TILE_REQUEST_ADMITTED ->
-                            stats.submitted_count++
-
-                        REFERENCE_TILE_REQUEST_QUEUED,
-                        REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION,
-                        REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION ->
-                            stats.queued_count++
-
-                        REFERENCE_TILE_REQUEST_MEMORY_HIT ->
-                            stats.memory_recheck_count++
+                when (admission) {
+                    REFERENCE_TILE_REQUEST_ADMITTED -> {
+                        stats?.let { it.submitted_count++ }
+                        budget.remaining_submissions--
+                        if (budget.remaining_submissions <= 0) {
+                            stats?.let { it.budget_exhausted_count++ }
+                            return false
+                        }
                     }
+
+                    REFERENCE_TILE_REQUEST_QUEUED,
+                    REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION,
+                    REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION ->
+                        stats?.let { it.queued_count++ }
+
+                    REFERENCE_TILE_REQUEST_MEMORY_HIT ->
+                        stats?.let { it.memory_recheck_count++ }
                 }
             }
         }
@@ -1317,6 +1392,7 @@ internal class SatelliteMapTileRenderer(
         debug_reference_lod_prefetch_async_memory_recheck_count.addAndGet(stats.memory_recheck_count)
         debug_reference_lod_prefetch_async_stale_count.addAndGet(stats.stale_count)
         debug_reference_lod_prefetch_async_superseded_count.addAndGet(stats.superseded_count)
+        debug_reference_lod_prefetch_async_budget_count.addAndGet(stats.budget_exhausted_count)
         debug_reference_lod_prefetch_async_ns.addAndGet(elapsed_ns)
         update_reference_lod_prefetch_async_max_ns(elapsed_ns)
     }
@@ -2036,7 +2112,14 @@ internal class SatelliteMapTileRenderer(
         var grid_memory_lookup_ns = 0L
         var grid_url_ns = 0L
         var grid_submit_ns = 0L
-        for (ty in first_tile_y..last_tile_y) {
+        var remaining_prefetch_admissions =
+            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
+                REFERENCE_PAN_PREFETCH_MAX_ADMITTED_PER_GRID
+            } else {
+                Int.MAX_VALUE
+            }
+        var prefetch_budget_exhausted = false
+        prefetch_loop@ for (ty in first_tile_y..last_tile_y) {
             if (ty !in 0 until max_tile) continue
             for (tx_raw in first_tile_x..last_tile_x) {
                 if (collect_detail) {
@@ -2061,6 +2144,10 @@ internal class SatelliteMapTileRenderer(
                 if (memory_bitmap != null) {
                     if (collect_detail) debug_detail_reference_prefetch_memory_hit_count++
                     continue
+                }
+                if (remaining_prefetch_admissions <= 0) {
+                    prefetch_budget_exhausted = true
+                    break@prefetch_loop
                 }
                 if (collect_detail) debug_detail_reference_prefetch_miss_count++
                 val url_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
@@ -2128,6 +2215,21 @@ internal class SatelliteMapTileRenderer(
                         REFERENCE_TILE_REQUEST_MEMORY_HIT -> debug_detail_reference_prefetch_memory_recheck_count++
                     }
                 }
+                if (admission == REFERENCE_TILE_REQUEST_ADMITTED) {
+                    remaining_prefetch_admissions--
+                    if (remaining_prefetch_admissions <= 0) {
+                        prefetch_budget_exhausted = true
+                        break@prefetch_loop
+                    }
+                }
+            }
+        }
+        if (collect_detail && prefetch_budget_exhausted) {
+            debug_detail_reference_prefetch_budget_count++
+            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
+                debug_detail_reference_prefetch_pan_budget_count++
+            } else {
+                debug_detail_reference_prefetch_lod_budget_count++
             }
         }
         if (collect_detail) {
@@ -3284,11 +3386,37 @@ internal class SatelliteMapTileRenderer(
         request_generation: Long,
         request_priority: Int
     ) {
-        if (tile_bitmap(z, x, y, key, state) != null) return
+        if (debug_collect_detail_timing) {
+            debug_detail_satellite_request_call_count++
+            when (request_priority) {
+                SATELLITE_TILE_REQUEST_PRIORITY_EXACT ->
+                    debug_detail_satellite_request_exact_count++
+
+                SATELLITE_TILE_REQUEST_PRIORITY_PREFETCH ->
+                    debug_detail_satellite_request_prefetch_count++
+
+                SATELLITE_TILE_REQUEST_PRIORITY_BUFFER ->
+                    debug_detail_satellite_request_buffer_count++
+
+                else -> {
+                    if (request_priority < SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE) {
+                        debug_detail_satellite_request_parent_count++
+                    }
+                }
+            }
+        }
+        if (tile_bitmap(z, x, y, key, state) != null) {
+            if (debug_collect_detail_timing) debug_detail_satellite_request_memory_hit_count++
+            return
+        }
         synchronized(requested_tiles) {
-            if (requested_tiles.contains(key)) return
+            if (requested_tiles.contains(key)) {
+                if (debug_collect_detail_timing) debug_detail_satellite_request_queued_count++
+                return
+            }
             requested_tiles += key
         }
+        if (debug_collect_detail_timing) debug_detail_satellite_request_admitted_count++
         satellite_tile_executor.execute(
             SatelliteTileRequestTask(
                 generation = request_generation,
@@ -3312,6 +3440,9 @@ internal class SatelliteMapTileRenderer(
                             val bitmap =
                                 BitmapFactory.decodeFile(file.absolutePath, decode_options())
                             if (bitmap != null) {
+                                if (debug_collect_detail_timing) {
+                                    debug_satellite_decode_file_count.incrementAndGet()
+                                }
                                 synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
                                 return@tileTask
                             }
@@ -3342,6 +3473,9 @@ internal class SatelliteMapTileRenderer(
                                 decode_options()
                             )
                             if (bitmap != null) {
+                                if (debug_collect_detail_timing) {
+                                    debug_satellite_decode_network_count.incrementAndGet()
+                                }
                                 synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
                                 redrew_when_loaded = true
                                 request_redraw()
@@ -3402,11 +3536,13 @@ internal class SatelliteMapTileRenderer(
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
         val is_new = !tile_cache.containsKey(key)
         tile_cache[key] = bitmap
+        if (debug_collect_detail_timing) debug_satellite_cache_put_count.incrementAndGet()
         if (is_new) tile_loaded_elapsed_ms[key] = SystemClock.elapsedRealtime()
         while (tile_cache.size > MAX_MEMORY_TILES) {
             val first_key = tile_cache.keys.firstOrNull() ?: break
             tile_cache.remove(first_key)
             tile_loaded_elapsed_ms.remove(first_key)
+            if (debug_collect_detail_timing) debug_satellite_cache_evict_count.incrementAndGet()
         }
     }
 
@@ -3515,6 +3651,8 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_LOD_PREFETCH_REQUEST_THROTTLE_MS = 120L
         const val REFERENCE_PAN_PREFETCH_REQUEST_THROTTLE_MS = 120L
         const val REFERENCE_PAN_PREFETCH_THROTTLE_HISTORY_MAX = 96
+        const val REFERENCE_LOD_PREFETCH_MAX_ADMITTED_PER_BATCH = 96
+        const val REFERENCE_PAN_PREFETCH_MAX_ADMITTED_PER_GRID = 24
         const val REFERENCE_LOD_SWITCH_ALPHA = 0.5f
         const val REFERENCE_PARENT_FALLBACK_MIN_ALPHA = 0.03f
         const val REFERENCE_TRANSPORTATION_MIN_ZOOM = 6
