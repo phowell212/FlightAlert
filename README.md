@@ -2,11 +2,11 @@
 
 Flight Alert is a Kotlin Android app for drone pilots who want live, map-first awareness of nearby aircraft. It is supplemental situational awareness only, not a certified detect-and-avoid system.
 
-Current version: **1.6**
+Current version: **1.7**
 
 ## Highlights
 
-- Live aircraft map with real street, no-label, or satellite tiles.
+- Live aircraft map with real street, no-label, or satellite tiles; fresh installs default to satellite with borders and street labels off.
 - Smooth retained tile handoff for satellite imagery and street-map zoom transitions.
 - ADS-B/MLAT traffic from live public feeds, with source status shown when data is missing.
 - Traffic/details source modes for API-only, Airplanes.Live web-only, or hybrid enrichment.
@@ -71,9 +71,10 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 - Filters only change visible map traffic; alert monitoring continues against the full live feed.
 - CO2/impact values are estimates, not measured fuel burn.
 
-## 1.6 Verification
+## 1.7 Verification
 
-- `assembleDebug` passes on the v1.6 tree.
-- v1.6 promotes the optimizer branch into `master`, preserving the feature-complete map, traffic, details, alert, aviation-layer, and settings behavior.
+- `assembleDebug` passes on the v1.7 tree.
+- v1.7 promotes the current `test` branch into `master`, preserving the feature-complete map, traffic, details, alert, aviation-layer, and settings behavior.
+- Fresh installs default to satellite view with borders enabled and street labels disabled; saved user preferences still win.
 - The release keeps the no-pretending data policy: unavailable live data remains labeled rather than invented.
-- The release notes and agent rules were cleaned to remove stale optimizer chatter, private test artifacts, and obsolete branch guidance.
+- The README and agent rules were cleaned so release notes stay current and detailed optimization workflow stays in the performance workbook.
