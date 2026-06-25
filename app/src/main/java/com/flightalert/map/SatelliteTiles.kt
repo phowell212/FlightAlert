@@ -228,9 +228,6 @@ internal class SatelliteMapTileRenderer(
     private var debug_detail_reference_prefetch_memory_recheck_count = 0
     private var debug_detail_reference_prefetch_denied_count = 0
     private var debug_detail_reference_prefetch_max_grid_count = 0
-    private var debug_detail_reference_coverage_tile_count = 0
-    private var debug_detail_reference_parent_probe_count = 0
-    private var debug_detail_reference_parent_hit_count = 0
     private val debug_reference_lod_prefetch_async_offered_count = AtomicLong()
     private val debug_reference_lod_prefetch_async_coalesced_count = AtomicLong()
     private val debug_reference_lod_prefetch_async_batch_count = AtomicLong()
@@ -495,9 +492,6 @@ internal class SatelliteMapTileRenderer(
         debug_detail_reference_prefetch_memory_recheck_count = 0
         debug_detail_reference_prefetch_denied_count = 0
         debug_detail_reference_prefetch_max_grid_count = 0
-        debug_detail_reference_coverage_tile_count = 0
-        debug_detail_reference_parent_probe_count = 0
-        debug_detail_reference_parent_hit_count = 0
         debug_detail_reference_lod_prefetch_async_offered_count =
             debug_reference_lod_prefetch_async_offered_count.getAndSet(0L)
         debug_detail_reference_lod_prefetch_async_coalesced_count =
@@ -599,9 +593,6 @@ internal class SatelliteMapTileRenderer(
                 "refPfMem2=$debug_detail_reference_prefetch_memory_recheck_count " +
                 "refPfDeny=$debug_detail_reference_prefetch_denied_count " +
                 "refPfMaxGrid=$debug_detail_reference_prefetch_max_grid_count " +
-                "refCovTiles=$debug_detail_reference_coverage_tile_count " +
-                "refParentProbe=$debug_detail_reference_parent_probe_count " +
-                "refParentHit=$debug_detail_reference_parent_hit_count " +
                 "refPfAsyncOffer=$debug_detail_reference_lod_prefetch_async_offered_count " +
                 "refPfAsyncCoalesce=$debug_detail_reference_lod_prefetch_async_coalesced_count " +
                 "refPfAsyncBatch=$debug_detail_reference_lod_prefetch_async_batch_count " +
@@ -1928,17 +1919,6 @@ internal class SatelliteMapTileRenderer(
                 visible++
                 if (covers_center) center_visible++
                 val key = "${overlay.cache_key}/$tile_zoom/$tx/$ty"
-                if (debug_collect_detail_timing) debug_detail_reference_coverage_tile_count++
-                val bitmap = reference_tile_bitmap(key)
-                if (bitmap != null) {
-                    loaded++
-                    if (covers_center) center_loaded++
-                    if (reference_tile_load_alpha(key, now_ms) >= 0.999f) {
-                        ready++
-                        if (covers_center) center_ready++
-                        continue
-                    }
-                }
                 val has_parent_fallback = parent_fallback_allowed &&
                         reference_parent_fallback_available(
                             z = tile_zoom,
@@ -1946,7 +1926,18 @@ internal class SatelliteMapTileRenderer(
                             y = ty,
                             overlay = overlay
                         )
-                if (has_parent_fallback) {
+                val bitmap = reference_tile_bitmap(key)
+                if (bitmap != null) {
+                    loaded++
+                    if (covers_center) center_loaded++
+                    if (reference_tile_load_alpha(key, now_ms) >= 0.999f) {
+                        ready++
+                        if (covers_center) center_ready++
+                    } else if (has_parent_fallback) {
+                        fallback_ready++
+                        if (covers_center) center_fallback_ready++
+                    }
+                } else if (has_parent_fallback) {
                     fallback_ready++
                     if (covers_center) center_fallback_ready++
                 }
@@ -2804,23 +2795,7 @@ internal class SatelliteMapTileRenderer(
         y: Int,
         overlay: ReferenceTileOverlay
     ): Boolean {
-        if (debug_collect_detail_timing) debug_detail_reference_parent_probe_count++
-        val min_parent_zoom = reference_parent_min_zoom(overlay)
-        if (z <= min_parent_zoom) return false
-        val max_depth = (z - min_parent_zoom).coerceAtMost(reference_parent_fallback_depth(overlay))
-        if (max_depth <= 0) return false
-        for (depth in 1..max_depth) {
-            val fallback_z = z - depth
-            val scale = 1 shl depth
-            val parent_x = x / scale
-            val parent_y = y / scale
-            val parent_key = "${overlay.cache_key}/$fallback_z/$parent_x/$parent_y"
-            if (reference_tile_bitmap(parent_key) == null) continue
-            protect_visible_reference_tile(parent_key)
-            if (debug_collect_detail_timing) debug_detail_reference_parent_hit_count++
-            return true
-        }
-        return false
+        return reference_parent_tile_fallback(z, x, y, overlay) != null
     }
 
     private fun reference_parent_tile_fallback(
