@@ -133,12 +133,16 @@ public class FlightMapGesturePerfTest {
     }
 
     private void holdForEvidence(Bundle args, String method) {
-        int defaultHold = method.toLowerCase(Locale.US).contains("benchmark") ? 60 : 8;
+        int defaultHold = defaultHoldMs(method) / 1000;
         int holdSeconds = Math.max(defaultHold, parseInt(args.getString("videoEvidenceHoldSeconds"), 0));
         long deadline = SystemClock.elapsedRealtime() + holdSeconds * 1000L;
         while (SystemClock.elapsedRealtime() < deadline) {
             SystemClock.sleep(250L);
         }
+    }
+
+    private int defaultHoldMs(String method) {
+        return method.toLowerCase(Locale.US).contains("benchmark") ? 60000 : 8000;
     }
 
     private void grantRuntimePermissions() throws Exception {
@@ -170,6 +174,10 @@ public class FlightMapGesturePerfTest {
         out.append("map_borders=").append(mapBorders == null ? "current" : mapBorders.toString()).append('\n');
         out.append("app_focus_open_map=true\n");
         out.append("gesture_focus=open-map\n");
+        out.append("scale_bands=benchmark-pan-zoom\n");
+        out.append("phase_name=").append(method).append('\n');
+        out.append("phase_zoom_plan=target_motion_ms=").append(defaultHoldMs(method)).append('\n');
+        out.append("phase_gesture_plan=swipe-pan-plus-minus-key-zoom\n");
         out.append("traffic_detail_timing=").append(args.getString("trafficDetailTiming", "false")).append('\n');
         out.append("map_detail_timing=").append(args.getString("mapDetailTiming", "false")).append('\n');
         out.append("frame_metrics_probe=").append(args.getString("frameMetricsProbe", "false")).append('\n');
