@@ -48,6 +48,7 @@ const DETAIL_KEYS = [
   "avg",
   "max",
   "map",
+  "aviation",
   "traffic",
   "chrome",
   "last",
