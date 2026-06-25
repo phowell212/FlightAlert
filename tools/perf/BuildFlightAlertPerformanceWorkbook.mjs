@@ -35,6 +35,13 @@ const CHART_EXCLUSION_PATTERNS = [
   ["sample-only run", /directionsample|sample\b/i],
 ];
 
+const KNOWN_INVALID_CHART_RUNS = new Map([
+  [
+    "workbook-replayharness-baseline-atlanta-20260625-r5",
+    "invalid aircraft evidence: captured before renderer-side draw counts were logged",
+  ],
+]);
+
 const DETAIL_KEYS = [
   "frames",
   "detailBlock",
@@ -514,6 +521,8 @@ function buildAircraftEvidenceByRun(auditRows) {
 
 function chartExclusionReason(row, workloadLevel, aircraftEvidence) {
   const reasons = [];
+  const knownInvalidReason = KNOWN_INVALID_CHART_RUNS.get(row.runId);
+  if (knownInvalidReason) reasons.push(knownInvalidReason);
   if (!workloadLevel) reasons.push("not a holistic benchmark workload");
   const gitReason = gitCleanExclusionReason(row);
   if (gitReason) reasons.push(gitReason);
