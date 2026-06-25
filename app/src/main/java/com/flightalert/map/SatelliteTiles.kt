@@ -56,6 +56,7 @@ internal data class ReferencePrefetchDrainStats(
     var memory_recheck_count: Long = 0L,
     var stale_count: Long = 0L,
     var superseded_count: Long = 0L,
+    var denied_count: Long = 0L,
     var budget_exhausted_count: Long = 0L
 )
 
@@ -1353,7 +1354,8 @@ internal class SatelliteMapTileRenderer(
                     request_generation = plan.request_generation,
                     request_priority = plan.request_priority,
                     request_stale_generation_tolerance = plan.request_stale_generation_tolerance,
-                    redraw_when_loaded = false
+                    redraw_when_loaded = false,
+                    speculative = true
                 )
                 when (admission) {
                     REFERENCE_TILE_REQUEST_ADMITTED -> {
@@ -1372,6 +1374,9 @@ internal class SatelliteMapTileRenderer(
 
                     REFERENCE_TILE_REQUEST_MEMORY_HIT ->
                         stats?.let { it.memory_recheck_count++ }
+
+                    REFERENCE_TILE_REQUEST_DENIED ->
+                        stats?.let { it.denied_count++ }
                 }
             }
         }
@@ -1392,6 +1397,7 @@ internal class SatelliteMapTileRenderer(
         debug_reference_lod_prefetch_async_memory_recheck_count.addAndGet(stats.memory_recheck_count)
         debug_reference_lod_prefetch_async_stale_count.addAndGet(stats.stale_count)
         debug_reference_lod_prefetch_async_superseded_count.addAndGet(stats.superseded_count)
+        debug_reference_lod_prefetch_async_denied_count.addAndGet(stats.denied_count)
         debug_reference_lod_prefetch_async_budget_count.addAndGet(stats.budget_exhausted_count)
         debug_reference_lod_prefetch_async_ns.addAndGet(elapsed_ns)
         update_reference_lod_prefetch_async_max_ns(elapsed_ns)
@@ -2167,7 +2173,8 @@ internal class SatelliteMapTileRenderer(
                     request_generation = request_generation,
                     request_priority = request_priority,
                     request_stale_generation_tolerance = request_stale_generation_tolerance,
-                    redraw_when_loaded = false
+                    redraw_when_loaded = false,
+                    speculative = true
                 )
                 if (collect_detail) {
                     grid_submit_ns += detail_timing_elapsed_ns(submit_start_ns)
@@ -2213,6 +2220,8 @@ internal class SatelliteMapTileRenderer(
                         }
 
                         REFERENCE_TILE_REQUEST_MEMORY_HIT -> debug_detail_reference_prefetch_memory_recheck_count++
+
+                        REFERENCE_TILE_REQUEST_DENIED -> debug_detail_reference_prefetch_denied_count++
                     }
                 }
                 if (admission == REFERENCE_TILE_REQUEST_ADMITTED) {
@@ -2473,6 +2482,13 @@ internal class SatelliteMapTileRenderer(
         return synchronized(reference_tile_cache) { reference_tile_cache[key] }
     }
 
+    private fun reference_tile_cache_has_speculative_room(key: String): Boolean {
+        return synchronized(reference_tile_cache) {
+            reference_tile_cache.containsKey(key) ||
+                    reference_tile_cache.size < MAX_REFERENCE_MEMORY_TILES
+        }
+    }
+
     private fun reference_tile_load_alpha(key: String, now_ms: Long): Float {
         val loaded_at = reference_tile_loaded_elapsed_ms[key] ?: 0L
         return if (loaded_at > 0L) {
@@ -2591,10 +2607,14 @@ internal class SatelliteMapTileRenderer(
         request_generation: Long,
         request_priority: Int,
         request_stale_generation_tolerance: Long,
-        redraw_when_loaded: Boolean
+        redraw_when_loaded: Boolean,
+        speculative: Boolean = false
     ): Int {
         mark_current_reference_tile_request(key, request_generation)
         if (reference_tile_bitmap(key) != null) return REFERENCE_TILE_REQUEST_MEMORY_HIT
+        if (speculative && !reference_tile_cache_has_speculative_room(key)) {
+            return REFERENCE_TILE_REQUEST_DENIED
+        }
         var task_generation = request_generation
         synchronized(requested_reference_tiles) {
             if (redraw_when_loaded) requested_reference_tile_redraws += key
@@ -2638,6 +2658,10 @@ internal class SatelliteMapTileRenderer(
                             skipped_request = true
                             return@tileTask
                         }
+                        if (speculative && !reference_tile_cache_has_speculative_room(key)) {
+                            skipped_request = true
+                            return@tileTask
+                        }
                         val file = reference_tile_file(z, x, y, cache_key)
                         if (file.exists() && file.length() > 0L) {
                             val fresh =
@@ -2645,12 +2669,16 @@ internal class SatelliteMapTileRenderer(
                             val bitmap =
                                 BitmapFactory.decodeFile(file.absolutePath, decode_options())
                             if (bitmap != null && reference_overlay_tile_is_safe(bitmap)) {
-                                synchronized(reference_tile_cache) {
-                                    put_reference_tile_in_memory(
-                                        key,
-                                        bitmap,
-                                        fade = false
-                                    )
+                                val published = put_reference_tile_in_memory_if_allowed(
+                                    key = key,
+                                    bitmap = bitmap,
+                                    fade = false,
+                                    speculative = speculative
+                                )
+                                if (!published) {
+                                    if (!bitmap.isRecycled) bitmap.recycle()
+                                    skipped_request = true
+                                    return@tileTask
                                 }
                                 if (should_redraw_reference_tile_request(key, redraw_when_loaded)) {
                                     redrew_when_loaded = true
@@ -2681,12 +2709,16 @@ internal class SatelliteMapTileRenderer(
                                 decode_options()
                             )
                             if (bitmap != null && reference_overlay_tile_is_safe(bitmap)) {
-                                synchronized(reference_tile_cache) {
-                                    put_reference_tile_in_memory(
-                                        key,
-                                        bitmap,
-                                        fade = false
-                                    )
+                                val published = put_reference_tile_in_memory_if_allowed(
+                                    key = key,
+                                    bitmap = bitmap,
+                                    fade = false,
+                                    speculative = speculative
+                                )
+                                if (!published) {
+                                    if (!bitmap.isRecycled) bitmap.recycle()
+                                    skipped_request = true
+                                    return@tileTask
                                 }
                                 if (should_redraw_reference_tile_request(key, redraw_when_loaded)) {
                                     redrew_when_loaded = true
@@ -2816,6 +2848,25 @@ internal class SatelliteMapTileRenderer(
                     ?: break
             reference_tile_cache.remove(first_key)
             reference_tile_loaded_elapsed_ms.remove(first_key)
+        }
+    }
+
+    private fun put_reference_tile_in_memory_if_allowed(
+        key: String,
+        bitmap: Bitmap,
+        fade: Boolean,
+        speculative: Boolean
+    ): Boolean {
+        synchronized(reference_tile_cache) {
+            if (
+                speculative &&
+                !reference_tile_cache.containsKey(key) &&
+                reference_tile_cache.size >= MAX_REFERENCE_MEMORY_TILES
+            ) {
+                return false
+            }
+            put_reference_tile_in_memory(key, bitmap, fade)
+            return true
         }
     }
 
@@ -3676,6 +3727,7 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TILE_REQUEST_ADMITTED = 2
         const val REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION = 3
         const val REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION = 4
+        const val REFERENCE_TILE_REQUEST_DENIED = 5
         const val REFERENCE_PREFETCH_KIND_LOD = 0
         const val REFERENCE_PREFETCH_KIND_PAN = 1
         const val REFERENCE_PREFETCH_TRACE_SECTION = "FlightAlert.refPrefetch"
