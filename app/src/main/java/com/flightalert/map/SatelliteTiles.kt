@@ -325,23 +325,15 @@ internal class SatelliteMapTileRenderer(
         val blend_active = has_upper_lod &&
                 upper_lod_alpha > MIN_LAYER_ALPHA &&
                 upper_lod_alpha < 1f - MIN_LAYER_ALPHA
-        val upper_lod_opaque = has_upper_lod && upper_lod_alpha >= 1f - MIN_LAYER_ALPHA
 
         val request_generation = begin_tile_request_generation()
 
-        val upper_lod_grid_fully_available = upper_lod_opaque &&
-                satellite_tile_grid_fully_available(
-                    viewport = viewport,
-                    state = state,
-                    tile_zoom = upper_tile_zoom
-                )
-        val lower_lod_hidden_by_upper = upper_lod_opaque && upper_lod_grid_fully_available
         val interim_draw_needed = blend_active ||
-                (!lower_lod_hidden_by_upper && !satellite_tile_grid_fully_available(
+                !satellite_tile_grid_fully_available(
                     viewport = viewport,
                     state = state,
                     tile_zoom = lower_tile_zoom
-                ))
+                )
         val interim_drawn = if (interim_draw_needed) {
             val detail_start_ns = detail_timing_start_ns()
             draw_interim_tiles(
@@ -356,31 +348,21 @@ internal class SatelliteMapTileRenderer(
         loaded_interim_tile_buffer.clear()
 
         val lower_detail_start_ns = detail_timing_start_ns()
-        val lower_stats = if (lower_lod_hidden_by_upper) {
-            TileLayerDrawStats(
-                visible = 0,
-                loaded = 0,
-                requested = 0,
-                fallback_drawn = 0,
-                fading = false
-            )
-        } else {
-            draw_tile_grid_layer(
-                canvas = canvas,
-                viewport = viewport,
-                state = state,
-                style = style,
-                tile_zoom = lower_tile_zoom,
-                now_ms = now_ms,
-                layer_alpha = 1f,
-                draw_unavailable_if_missing = true,
-                allow_parent_fallback = true,
-                allow_child_fallback = true,
-                retain_as_interim = true,
-                loaded_interim_tiles = loaded_interim_tile_buffer,
-                request_generation = request_generation
-            )
-        }.also { debug_detail_lower_ns += detail_timing_elapsed_ns(lower_detail_start_ns) }
+        val lower_stats = draw_tile_grid_layer(
+            canvas = canvas,
+            viewport = viewport,
+            state = state,
+            style = style,
+            tile_zoom = lower_tile_zoom,
+            now_ms = now_ms,
+            layer_alpha = 1f,
+            draw_unavailable_if_missing = true,
+            allow_parent_fallback = true,
+            allow_child_fallback = true,
+            retain_as_interim = true,
+            loaded_interim_tiles = loaded_interim_tile_buffer,
+            request_generation = request_generation
+        ).also { debug_detail_lower_ns += detail_timing_elapsed_ns(lower_detail_start_ns) }
 
         val upper_detail_start_ns = detail_timing_start_ns()
         val upper_stats = if (has_upper_lod && upper_lod_alpha > MIN_LAYER_ALPHA) {
