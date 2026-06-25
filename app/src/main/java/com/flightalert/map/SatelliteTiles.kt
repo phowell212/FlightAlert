@@ -163,6 +163,10 @@ internal class SatelliteMapTileRenderer(
     private var last_satellite_buffer_request_ms = 0L
     private var last_satellite_prefetch_request_key: String? = null
     private var last_satellite_prefetch_request_ms = 0L
+    private var last_reference_lod_prefetch_batch_key: String? = null
+    private var last_reference_lod_prefetch_batch_ms = 0L
+    private val last_reference_pan_prefetch_request_ms =
+        LinkedHashMap<String, Long>(REFERENCE_PAN_PREFETCH_THROTTLE_HISTORY_MAX, 0.75f, true)
     private val local_reference_renderer = LocalReferenceOverlayRenderer(
         context = context,
         paint = paint,
@@ -208,6 +212,9 @@ internal class SatelliteMapTileRenderer(
     private var debug_detail_reference_prefetch_queued_count = 0
     private var debug_detail_reference_prefetch_queued_same_generation_count = 0
     private var debug_detail_reference_prefetch_queued_recent_generation_count = 0
+    private var debug_detail_reference_prefetch_throttled_count = 0
+    private var debug_detail_reference_prefetch_lod_throttled_count = 0
+    private var debug_detail_reference_prefetch_pan_throttled_count = 0
     private var debug_detail_reference_prefetch_lod_call_count = 0
     private var debug_detail_reference_prefetch_pan_call_count = 0
     private var debug_detail_reference_prefetch_lod_tile_count = 0
@@ -469,6 +476,9 @@ internal class SatelliteMapTileRenderer(
         debug_detail_reference_prefetch_queued_count = 0
         debug_detail_reference_prefetch_queued_same_generation_count = 0
         debug_detail_reference_prefetch_queued_recent_generation_count = 0
+        debug_detail_reference_prefetch_throttled_count = 0
+        debug_detail_reference_prefetch_lod_throttled_count = 0
+        debug_detail_reference_prefetch_pan_throttled_count = 0
         debug_detail_reference_prefetch_lod_call_count = 0
         debug_detail_reference_prefetch_pan_call_count = 0
         debug_detail_reference_prefetch_lod_tile_count = 0
@@ -567,6 +577,9 @@ internal class SatelliteMapTileRenderer(
                 "refPfQueued=$debug_detail_reference_prefetch_queued_count " +
                 "refPfQSame=$debug_detail_reference_prefetch_queued_same_generation_count " +
                 "refPfQRecent=$debug_detail_reference_prefetch_queued_recent_generation_count " +
+                "refPfThrot=$debug_detail_reference_prefetch_throttled_count " +
+                "refPfLodThrot=$debug_detail_reference_prefetch_lod_throttled_count " +
+                "refPfPanThrot=$debug_detail_reference_prefetch_pan_throttled_count " +
                 "refPfLod=$debug_detail_reference_prefetch_lod_call_count " +
                 "refPfPan=$debug_detail_reference_prefetch_pan_call_count " +
                 "refPfLodTiles=$debug_detail_reference_prefetch_lod_tile_count " +
@@ -617,6 +630,9 @@ internal class SatelliteMapTileRenderer(
         }
         interim_tiles.clear()
         synchronized(requested_tiles) { requested_tiles.clear() }
+        last_reference_lod_prefetch_batch_key = null
+        last_reference_lod_prefetch_batch_ms = 0L
+        last_reference_pan_prefetch_request_ms.clear()
         synchronized(requested_reference_tiles) {
             requested_reference_tiles.clear()
             requested_reference_tile_redraws.clear()
@@ -1097,6 +1113,7 @@ internal class SatelliteMapTileRenderer(
 
     private fun offer_reference_lod_prefetch_batch(plans: List<ReferencePrefetchGridPlan>) {
         if (plans.isEmpty()) return
+        if (should_throttle_reference_lod_prefetch_batch(plans)) return
         val should_schedule = synchronized(reference_lod_prefetch_lock) {
             val epoch = reference_lod_prefetch_epoch + 1L
             reference_lod_prefetch_epoch = epoch
@@ -1118,6 +1135,44 @@ internal class SatelliteMapTileRenderer(
         }
         if (should_schedule) {
             enqueue_reference_lod_prefetch_drain()
+        }
+    }
+
+    private fun should_throttle_reference_lod_prefetch_batch(
+        plans: List<ReferencePrefetchGridPlan>
+    ): Boolean {
+        val now_ms = SystemClock.elapsedRealtime()
+        val key = reference_lod_prefetch_batch_key(plans)
+        if (key == last_reference_lod_prefetch_batch_key &&
+            now_ms - last_reference_lod_prefetch_batch_ms < REFERENCE_LOD_PREFETCH_REQUEST_THROTTLE_MS
+        ) {
+            if (debug_collect_detail_timing) {
+                debug_detail_reference_prefetch_throttled_count++
+                debug_detail_reference_prefetch_lod_throttled_count += plans.size
+            }
+            return true
+        }
+        last_reference_lod_prefetch_batch_key = key
+        last_reference_lod_prefetch_batch_ms = now_ms
+        return false
+    }
+
+    private fun reference_lod_prefetch_batch_key(plans: List<ReferencePrefetchGridPlan>): String {
+        return buildString(plans.size * 48) {
+            for (plan in plans) {
+                append(plan.cache_key)
+                append('/')
+                append(plan.tile_zoom)
+                append(':')
+                append(plan.first_tile_x)
+                append(',')
+                append(plan.first_tile_y)
+                append('-')
+                append(plan.last_tile_x)
+                append(',')
+                append(plan.last_tile_y)
+                append(';')
+            }
         }
     }
 
@@ -1963,6 +2018,18 @@ internal class SatelliteMapTileRenderer(
                 range_detail_start_ns
             )
         }
+        if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN &&
+            should_throttle_reference_pan_prefetch_grid(
+                overlay = overlay,
+                tile_zoom = tile_zoom,
+                first_tile_x = first_tile_x,
+                first_tile_y = first_tile_y,
+                last_tile_x = last_tile_x,
+                last_tile_y = last_tile_y
+            )
+        ) {
+            return
+        }
 
         var grid_tile_count = 0
         val grid_detail_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
@@ -2086,6 +2153,39 @@ internal class SatelliteMapTileRenderer(
         ) {
             debug_detail_reference_prefetch_lod_max_grid_count = grid_tile_count
         }
+    }
+
+    private fun should_throttle_reference_pan_prefetch_grid(
+        overlay: ReferenceTileOverlay,
+        tile_zoom: Int,
+        first_tile_x: Int,
+        first_tile_y: Int,
+        last_tile_x: Int,
+        last_tile_y: Int
+    ): Boolean {
+        val now_ms = SystemClock.elapsedRealtime()
+        val key = "${overlay.cache_key}/$tile_zoom:$first_tile_x,$first_tile_y-$last_tile_x,$last_tile_y"
+        val last_ms = last_reference_pan_prefetch_request_ms[key]
+        if (last_ms != null &&
+            now_ms - last_ms < REFERENCE_PAN_PREFETCH_REQUEST_THROTTLE_MS
+        ) {
+            if (debug_collect_detail_timing) {
+                debug_detail_reference_prefetch_throttled_count++
+                debug_detail_reference_prefetch_pan_throttled_count++
+            }
+            return true
+        }
+        last_reference_pan_prefetch_request_ms[key] = now_ms
+        while (
+            last_reference_pan_prefetch_request_ms.size >
+            REFERENCE_PAN_PREFETCH_THROTTLE_HISTORY_MAX
+        ) {
+            val iterator = last_reference_pan_prefetch_request_ms.entries.iterator()
+            if (!iterator.hasNext()) break
+            iterator.next()
+            iterator.remove()
+        }
+        return false
     }
 
     private fun draw_reference_overlay_grid(
@@ -3412,6 +3512,9 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TILE_CACHE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
         const val REFERENCE_TILE_FADE_MS = 280f
         const val REFERENCE_TILE_NETWORK_THREADS = 4
+        const val REFERENCE_LOD_PREFETCH_REQUEST_THROTTLE_MS = 120L
+        const val REFERENCE_PAN_PREFETCH_REQUEST_THROTTLE_MS = 120L
+        const val REFERENCE_PAN_PREFETCH_THROTTLE_HISTORY_MAX = 96
         const val REFERENCE_LOD_SWITCH_ALPHA = 0.5f
         const val REFERENCE_PARENT_FALLBACK_MIN_ALPHA = 0.03f
         const val REFERENCE_TRANSPORTATION_MIN_ZOOM = 6
