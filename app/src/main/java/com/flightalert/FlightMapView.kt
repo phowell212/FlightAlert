@@ -989,7 +989,9 @@ class FlightMapView(
     // Android calls this whenever the View is invalidated. Draw the whole cockpit in one ordered pass.
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val collect_draw_perf = perf_run_id != null
+        val collect_draw_perf = perf_run_id != null &&
+                (map_tile_renderer.debug_collect_detail_timing ||
+                        traffic_overlay_renderer.debug_collect_detail_timing)
         val perf_frame_start_ns =
             if (collect_draw_perf) SystemClock.elapsedRealtimeNanos() else 0L
         var perf_viewport: Viewport? = null
@@ -1072,6 +1074,7 @@ class FlightMapView(
         perf_viewport?.let {
             record_perf_viewport_if_needed(
                 viewport = it,
+                collect_draw_perf = collect_draw_perf,
                 frame_start_ns = perf_frame_start_ns,
                 map_ns = perf_map_ns,
                 aviation_ns = perf_aviation_ns,
@@ -1567,6 +1570,7 @@ class FlightMapView(
 
     private fun record_perf_viewport_if_needed(
         viewport: Viewport,
+        collect_draw_perf: Boolean,
         frame_start_ns: Long,
         map_ns: Long,
         aviation_ns: Long,
@@ -1575,6 +1579,32 @@ class FlightMapView(
     ) {
         val run_id = perf_run_id ?: return
         val now = SystemClock.elapsedRealtime()
+        if (!collect_draw_perf) {
+            if (now - perf_last_log_ms < PERF_LOG_INTERVAL_MS) return
+            perf_last_log_ms = now
+            perf_draw_sequence++
+            val center = world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
+            val aircraft_count = traffic_overlay_renderer.debug_last_render_aircraft_count
+            val dot_count = traffic_overlay_renderer.debug_last_dot_count
+            val direct_count = traffic_overlay_renderer.debug_last_direct_input_count
+            val direct_drawn_count = traffic_overlay_renderer.debug_last_direct_drawn_count
+            val focus_lat = perf_number(center.lat)
+            val focus_lon = perf_number(center.lon)
+            val zoom_text = perf_number(viewport.zoom)
+            Log.d(
+                TAG,
+                "Debug perf viewport runId=$run_id focusLat=$focus_lat focusLon=$focus_lon zoom=$zoom_text mapSource=${map_source.name}"
+            )
+            Log.d(
+                TAG,
+                "Debug draw perf runId=$run_id frames=1 avg=0 max=0 map=0 aviation=0 traffic=0 chrome=0 " +
+                        "drawSeqFirst=$perf_draw_sequence drawSeq=$perf_draw_sequence symbols=$aircraft_count dots=$dot_count " +
+                        "direct=$direct_count directDrawn=$direct_drawn_count focusLat=$focus_lat focusLon=$focus_lon " +
+                        "camera centerLat=$focus_lat centerLon=$focus_lon zoom=$zoom_text"
+            )
+            log_perf_detail_summaries(run_id)
+            return
+        }
         val total_ns =
             if (frame_start_ns > 0L) {
                 (SystemClock.elapsedRealtimeNanos() - frame_start_ns).coerceAtLeast(0L)
@@ -1647,6 +1677,10 @@ class FlightMapView(
                     "camera centerLat=$focus_lat centerLon=$focus_lon zoom=$zoom_text maxFrameDetail=$max_frame_detail"
         )
         reset_perf_draw_window()
+        log_perf_detail_summaries(run_id)
+    }
+
+    private fun log_perf_detail_summaries(run_id: String) {
         val map_summary = map_tile_renderer.debug_last_tile_summary
         if (map_summary.isNotBlank()) {
             Log.d(TAG, "Debug map tile perf runId=$run_id$map_summary")
