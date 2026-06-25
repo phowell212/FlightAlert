@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
         view.keepScreenOn = true
         configure_high_refresh_rate(view)
         flight_map_view = view
+        view.apply_perf_intent(intent)
 
         setContentView(view)
         view.post { configure_high_refresh_rate(view) }
@@ -96,6 +97,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        flight_map_view?.apply_perf_intent(intent)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

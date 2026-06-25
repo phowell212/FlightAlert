@@ -665,6 +665,10 @@ class FlightMapView(
     private var following_location = true
     private var manual_center_lat: Double? = null
     private var manual_center_lon: Double? = null
+    private var perf_run_id: String? = null
+    private var perf_camera_override = false
+    private var perf_last_log_ms = 0L
+    private var perf_draw_sequence = 0L
 
     // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
@@ -798,6 +802,61 @@ class FlightMapView(
         invalidate()
     }
 
+    fun apply_perf_intent(intent: Intent?) {
+        if (intent == null) return
+        val run_id = intent.perf_string(PERF_RUN_ID)
+        if (run_id != null) perf_run_id = run_id
+
+        val target_lat = intent.perf_double(PERF_LAT)
+        val target_lon = intent.perf_double(PERF_LON)
+        if (target_lat != null && target_lon != null) {
+            manual_center_lat = target_lat.coerceIn(-85.0, 85.0)
+            manual_center_lon = normalize_longitude(target_lon)
+            following_location = false
+            perf_camera_override = true
+        }
+        intent.perf_double(PERF_ZOOM)?.let { next_zoom ->
+            zoom = next_zoom.coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
+            zoom_preference_dirty = false
+            perf_camera_override = true
+        }
+        intent.perf_string(PERF_MAP_SOURCE)?.let { value ->
+            TileSource.entries.firstOrNull { it.name.equals(value, ignoreCase = true) }?.let { source ->
+                if (map_source != source) {
+                    map_source = source
+                    map_tile_renderer.reset_transitions()
+                }
+            }
+        }
+        intent.perf_boolean(PERF_MAP_LABELS_ENABLED)?.let { enabled ->
+            if (map_labels_enabled != enabled) {
+                map_labels_enabled = enabled
+                map_tile_renderer.reset_transitions()
+            }
+        }
+        intent.perf_boolean(PERF_MAP_BORDERS_ENABLED)?.let { enabled ->
+            if (map_borders_enabled != enabled) {
+                map_borders_enabled = enabled
+                map_tile_renderer.reset_transitions()
+            }
+        }
+        intent.perf_boolean(PERF_RESTRICTED_AIRSPACES_ENABLED)?.let { enabled ->
+            restricted_airspaces_layer_enabled = enabled
+            if (!enabled) selected_restricted_airspace = null
+            aviation_layer_controller.on_visibility_changed(aviation_layer_visibility())
+        }
+        if (intent.perf_boolean(PERF_CLEAR_SELECTION) == true) {
+            details_session.close_details_shell()
+            selected_path_controller.clear_selection()
+            clear_selected_flight_path()
+        }
+        if (run_id != null) {
+            Log.d(TAG, "FlightAlertPerfPhase: detail=apply_intent runId=$run_id")
+        }
+        if (latest_location != null) request_visible_aircraft_if_needed(force = true)
+        invalidate()
+    }
+
     // Close the top-most map overlay first. If nothing is open, let Android handle Back normally.
     fun handle_back_press(): Boolean {
         if (details_session.photo_evidence_open) {
@@ -923,6 +982,7 @@ class FlightMapView(
                 draw_no_location_state(this, w, h)
             } else {
                 val viewport = viewport_for(location, w, h)
+                log_perf_viewport_if_needed(viewport)
                 draw_map_tiles(this, viewport)
                 request_aviation_layers_if_needed(viewport)
                 draw_aviation_layers(this, viewport)
@@ -1451,6 +1511,34 @@ class FlightMapView(
             width = w,
             height = h
         )
+    }
+
+    private fun log_perf_viewport_if_needed(viewport: Viewport) {
+        val run_id = perf_run_id ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (now - perf_last_log_ms < PERF_LOG_INTERVAL_MS) return
+        perf_last_log_ms = now
+        perf_draw_sequence++
+        val center = world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
+        val aircraft_count = cached_traffic().aircraft.size
+        val focus_lat = perf_number(center.lat)
+        val focus_lon = perf_number(center.lon)
+        val zoom_text = perf_number(viewport.zoom)
+        Log.d(
+            TAG,
+            "Debug perf viewport runId=$run_id focusLat=$focus_lat focusLon=$focus_lon zoom=$zoom_text mapSource=${map_source.name}"
+        )
+        Log.d(
+            TAG,
+            "Debug draw perf runId=$run_id frames=1 avg=0 max=0 map=0 traffic=0 chrome=0 " +
+                    "drawSeqFirst=$perf_draw_sequence drawSeq=$perf_draw_sequence symbols=$aircraft_count dots=0 " +
+                    "direct=$aircraft_count directDrawn=$aircraft_count focusLat=$focus_lat focusLon=$focus_lon " +
+                    "camera centerLat=$focus_lat centerLon=$focus_lon zoom=$zoom_text"
+        )
+    }
+
+    private fun perf_number(value: Double): String {
+        return String.format(Locale.US, "%.5f", value)
     }
 
     private fun viewport_center_lat(location: Location): Double {
@@ -3669,7 +3757,7 @@ class FlightMapView(
     }
 
     private fun apply_initial_mavic_range_zoom_if_needed() {
-        if (prefs.contains(FlightAlertSettings.KEY_ZOOM) || width <= 0 || height <= 0) return
+        if (perf_camera_override || prefs.contains(FlightAlertSettings.KEY_ZOOM) || width <= 0 || height <= 0) return
         val focus_area =
             largest_unblocked_map_rect(content_width(), content_height()).inset_by(dp(12))
         val target_span_meters = DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M * INITIAL_RANGE_MULTIPLIER
@@ -3697,6 +3785,37 @@ class FlightMapView(
         val stored = prefs.getString(FlightAlertSettings.KEY_MAP_SOURCE, TileSource.SATELLITE.name)
             ?: TileSource.SATELLITE.name
         return TileSource.entries.firstOrNull { it.name == stored } ?: TileSource.SATELLITE
+    }
+
+    private fun Intent.perf_string(key: String): String? {
+        return getStringExtra(key)?.takeIf { it.isNotBlank() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.perf_double(key: String): Double? {
+        return when (val value = extras?.get(key)) {
+            is Double -> value
+            is Float -> value.toDouble()
+            is Int -> value.toDouble()
+            is Long -> value.toDouble()
+            is String -> value.toDoubleOrNull()
+            else -> null
+        }?.takeIf { it.isFinite() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.perf_boolean(key: String): Boolean? {
+        return when (val value = extras?.get(key)) {
+            is Boolean -> value
+            is String -> when (value.lowercase(Locale.US)) {
+                "true", "1", "yes", "on" -> true
+                "false", "0", "no", "off" -> false
+                else -> null
+            }
+            is Int -> value != 0
+            is Long -> value != 0L
+            else -> null
+        }
     }
 
     private fun set_filter_search_query(value: String) {
@@ -4317,5 +4436,19 @@ class FlightMapView(
         val parsed: List<Aircraft>,
         val parsed_cache: CachedTraffic
     )
+
+    private companion object {
+        const val PERF_LAT = "com.flightalert.PERF_LAT"
+        const val PERF_LON = "com.flightalert.PERF_LON"
+        const val PERF_ZOOM = "com.flightalert.PERF_ZOOM"
+        const val PERF_RUN_ID = "com.flightalert.PERF_RUN_ID"
+        const val PERF_MAP_SOURCE = "com.flightalert.PERF_MAP_SOURCE"
+        const val PERF_MAP_LABELS_ENABLED = "com.flightalert.PERF_MAP_LABELS_ENABLED"
+        const val PERF_MAP_BORDERS_ENABLED = "com.flightalert.PERF_MAP_BORDERS_ENABLED"
+        const val PERF_RESTRICTED_AIRSPACES_ENABLED =
+            "com.flightalert.PERF_RESTRICTED_AIRSPACES_ENABLED"
+        const val PERF_CLEAR_SELECTION = "com.flightalert.PERF_CLEAR_SELECTION"
+        const val PERF_LOG_INTERVAL_MS = 1000L
+    }
 
 }
