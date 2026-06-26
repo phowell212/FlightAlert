@@ -187,14 +187,17 @@ class MainActivity : ComponentActivity() {
 
     // Keep the background watcher alive only when alerts need it and Android has granted location.
     private fun update_alert_service() {
-        val prefs = FlightAlertSettings.prefs(this)
-        val enabled = prefs.getBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true) ||
-                prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
-        if (enabled && has_location_permission()) {
+        if (monitoring_requested() && has_location_permission()) {
             AircraftAlertService.start(this)
         } else {
             AircraftAlertService.stop(this)
         }
+    }
+
+    private fun monitoring_requested(): Boolean {
+        val prefs = FlightAlertSettings.prefs(this)
+        return prefs.getBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true) ||
+                prefs.getBoolean(FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED, false)
     }
 
     private companion object {

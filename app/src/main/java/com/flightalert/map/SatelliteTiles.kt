@@ -445,7 +445,8 @@ internal class SatelliteMapTileRenderer(
             canvas = canvas,
             viewport = viewport,
             enabled = state.map_borders_enabled && !settings_border_overlay_enabled,
-            interaction_active = state.interaction_active
+            interaction_active = state.interaction_active,
+            label_text_scale = state.map_label_text_scale
         )
         debug_detail_local_reference_ns += detail_timing_elapsed_ns(local_reference_detail_start_ns)
 

@@ -408,8 +408,14 @@ internal class SelectedFlightPathViewportController(
 
         val top_left = MapProjection.lat_lon_to_world(bounds.max_lat, bounds.min_lon, 0.0)
         val bottom_right = MapProjection.lat_lon_to_world(bounds.min_lat, bounds.max_lon, 0.0)
-        val path_width_at_zoom_zero = max(1.0, abs(bottom_right.x - top_left.x))
-        val path_height_at_zoom_zero = max(1.0, abs(bottom_right.y - top_left.y))
+        val path_width_at_zoom_zero = max(
+            MIN_PATH_FIT_SPAN_ZOOM_ZERO_PX,
+            abs(bottom_right.x - top_left.x)
+        )
+        val path_height_at_zoom_zero = max(
+            MIN_PATH_FIT_SPAN_ZOOM_ZERO_PX,
+            abs(bottom_right.y - top_left.y)
+        )
         val width_fit = usable.width() / (path_width_at_zoom_zero * PATH_FIT_CONTEXT_MULTIPLIER)
         val height_fit = usable.height() / (path_height_at_zoom_zero * PATH_FIT_CONTEXT_MULTIPLIER)
         val zoom = (ln(min(width_fit, height_fit)) / ln(2.0)).coerceIn(
@@ -449,5 +455,9 @@ internal class SelectedFlightPathViewportController(
             val sy = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
             usable.contains(sx, sy)
         }
+    }
+
+    private companion object {
+        const val MIN_PATH_FIT_SPAN_ZOOM_ZERO_PX = 0.03
     }
 }

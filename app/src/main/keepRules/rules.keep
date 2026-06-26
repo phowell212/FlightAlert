@@ -11,8 +11,8 @@
 # - Never invent aircraft, route, altitude, photo, map, alert, or source data.
 # - Live traffic, map tiles, traces, photos, registry data, and aviation layers
 #   must stay tied to real/documented sources or be shown as Unavailable.
-# - Alert decisions must be based on reported horizontal position plus supported
-#   vertical separation, not on visual-only projected sprite positions.
+# - Alert decisions may use the supported live-position estimator plus supported
+#   vertical separation, but never visual-only projected sprite positions.
 # - Refactors must keep the existing styling, layout feel, interaction rhythm,
 #   and user experience unless a visible difference is an explicit bug fix.
 # - Release work must build, lint where tooling allows, verify on emulator/device,

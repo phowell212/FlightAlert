@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Flight Alert</string>
+    <string name="notification_listener_label">Flight Alert watcher hider</string>
 </resources>

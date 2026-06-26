@@ -4573,7 +4573,7 @@ internal class TrafficOverlayStateBuilder(
         return traffic_overlay_state_from_entries(frame, states)
     }
 
-    // Path focus narrows the map to selected and extreme-priority aircraft without losing selected fallback.
+    // Path focus keeps the selected aircraft isolated while alerts still monitor the full feed.
     fun visible_aircraft_snapshot(
         cache: CachedTraffic,
         selection: TrafficOverlaySelection,
@@ -4585,9 +4585,7 @@ internal class TrafficOverlayStateBuilder(
         }
         val selected_id = selection.selected_aircraft_key ?: return snapshot
         return snapshot.filter { item ->
-            screen_projector.aircraft_icao_key(item) == selected_id || cache.extreme_priority_keys.contains(
-                screen_projector.aircraft_icao_key(item)
-            )
+            screen_projector.aircraft_icao_key(item) == selected_id
         }.let { with_selected_fallback(it, selection, filters_restrict_aircraft) }
     }
 
@@ -4642,12 +4640,7 @@ internal class TrafficOverlayStateBuilder(
         var selected_aircraft: TrafficAircraftOverlayState? = null
         for (entry in query) {
             val item = entry.aircraft
-            if (path_focus && !should_draw_aircraft_with_path_focus(
-                    item,
-                    selected_key,
-                    frame.cache.extreme_priority_keys
-                )
-            ) continue
+            if (path_focus && !should_draw_aircraft_with_path_focus(item, selected_key)) continue
             val added_selected = add_aircraft_dense_dot(
                 aircraft = item,
                 entry = entry,
@@ -5337,7 +5330,6 @@ internal class TrafficOverlayStateBuilder(
         extra_padding_px: Float
     ): List<TrafficAircraftOverlayState> {
         val selected_key = frame.selection.selected_aircraft_key
-        val extreme_keys = frame.cache.extreme_priority_keys
         val path_focus = frame.selection.path_visible && frame.selection.has_selected_flight_path
         val scale = 2.0.pow(frame.viewport.zoom)
         val query_start_ns = debug_detail_start_ns()
@@ -5352,12 +5344,7 @@ internal class TrafficOverlayStateBuilder(
         val filter_start_ns = debug_detail_start_ns()
         for (entry in query) {
             val item = entry.aircraft
-            if (path_focus && !should_draw_aircraft_with_path_focus(
-                    item,
-                    selected_key,
-                    extreme_keys
-                )
-            ) continue
+            if (path_focus && !should_draw_aircraft_with_path_focus(item, selected_key)) continue
             val screen =
                 screen_projector.screen_point_for(entry, frame.viewport, scale, frame.now_epoch_sec)
             val selected =
@@ -5625,12 +5612,7 @@ internal class TrafficOverlayStateBuilder(
         )
         for (entry in query) {
             val item = entry.aircraft
-            if (path_focus && !should_draw_aircraft_with_path_focus(
-                    item,
-                    selected_key,
-                    frame.cache.extreme_priority_keys
-                )
-            ) continue
+            if (path_focus && !should_draw_aircraft_with_path_focus(item, selected_key)) continue
             add_aircraft_overlay_state(
                 result = result,
                 aircraft = item,
@@ -5953,11 +5935,10 @@ internal class TrafficOverlayStateBuilder(
 
     private fun should_draw_aircraft_with_path_focus(
         aircraft: Aircraft,
-        selected_key: String?,
-        extreme_priority_keys: Set<String>
+        selected_key: String?
     ): Boolean {
         val key = screen_projector.aircraft_icao_key(aircraft)
-        return key == selected_key || extreme_priority_keys.contains(key)
+        return key == selected_key
     }
 
     private fun with_selected_fallback(
@@ -6219,8 +6200,7 @@ internal class TrafficSelectionHitTester(
         selected_key: String?,
         selected_aircraft: Aircraft?,
         path_focus: Boolean,
-        filters_restrict_aircraft: Boolean,
-        is_extreme_priority: (Aircraft) -> Boolean
+        filters_restrict_aircraft: Boolean
     ): Aircraft? {
         val selected_fallback_hit = selected_aircraft_hit_fallback(
             viewport = viewport,
@@ -6236,9 +6216,7 @@ internal class TrafficSelectionHitTester(
             .query(viewport, radius_squared.sqrt() + query_padding_px)
             .asSequence()
             .filter { entry ->
-                !path_focus ||
-                        aircraft_icao_key(entry.aircraft) == selected_key ||
-                        is_extreme_priority(entry.aircraft)
+                !path_focus || aircraft_icao_key(entry.aircraft) == selected_key
             }
             .mapNotNull { entry ->
                 aircraft_hit_for_screen_point(

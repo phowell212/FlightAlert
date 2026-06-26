@@ -150,6 +150,8 @@ data class MapTileRenderState(
     val map_source: TileSource,
     val map_labels_enabled: Boolean,
     val map_borders_enabled: Boolean,
+    val map_label_text_scale: Float,
+    val map_label_transition_alpha: Float = 1f,
     val user_agent: String,
     val interaction_active: Boolean = false
 ) {

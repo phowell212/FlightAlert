@@ -34,17 +34,22 @@ import com.flightalert.traffic.AltitudeFilter
 import com.flightalert.traffic.DistanceFilter
 import com.flightalert.traffic.FlightStatusFilter
 import com.flightalert.traffic.ReportAgeFilter
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.round
 import kotlin.math.sqrt
 
+private const val MAP_LABEL_TEXT_SCALE_MIN = 1f
+private const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
+
 data class FlightMapPanelStyle(val visual_theme: VisualTheme)
 
 data class MapLabelsPanelState(
     val street_labels_enabled: Boolean,
-    val borders_enabled: Boolean
+    val borders_enabled: Boolean,
+    val label_text_scale: Float
 )
 
 data class AviationLayersPanelState(
@@ -220,11 +225,17 @@ class FlightMapPanelRenderer(
             "Notification range and tracker",
             state.priority_tracking_enabled
         )
+        chrome.draw_choice_button(
+            canvas,
+            chrome.layout.monitoring_notification_hider_button_bounds(rect),
+            if (state.watcher_notification_hider_enabled) "Watcher notice hidden" else "Hide watcher notice",
+            state.watcher_notification_hider_enabled
+        )
 
         draw_settings_section_label(
             canvas,
             rect.left + dp(18),
-            rect.top + dp(566),
+            rect.top + dp(606),
             "Reference",
             style
         )
@@ -299,12 +310,18 @@ class FlightMapPanelRenderer(
             if (compact) "Borders" else "Countries + borders",
             state.borders_enabled
         )
+        draw_map_label_text_slider(
+            canvas,
+            chrome.layout.map_label_text_slider_bounds(rect),
+            state,
+            style
+        )
 
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = false
         text_paint.textSize = if (compact) sp(10) else sp(11)
         text_paint.color = style.visual_theme.colors.muted
-        val source_y = if (compact) rect.top + dp(154) else rect.top + dp(216)
+        val source_y = if (compact) rect.top + dp(206) else rect.top + dp(274)
         val source_text = when {
             state.street_labels_enabled && state.borders_enabled -> "Current: street labels plus countries and borders"
             state.street_labels_enabled -> "Current: street labels only"
@@ -687,8 +704,14 @@ class FlightMapPanelRenderer(
             "Notification range",
             state.priority_tracking_enabled
         )
+        chrome.draw_choice_button(
+            canvas,
+            chrome.layout.monitoring_notification_hider_button_bounds(rect),
+            if (state.watcher_notification_hider_enabled) "Watcher hidden" else "Hide watcher",
+            state.watcher_notification_hider_enabled
+        )
 
-        draw_settings_section_label(canvas, safety.left, rect.top + dp(158), "Reference", style)
+        draw_settings_section_label(canvas, safety.left, rect.top + dp(196), "Reference", style)
         chrome.draw_choice_button(
             canvas,
             chrome.layout.impact_methodology_button_bounds(rect),
@@ -704,6 +727,45 @@ class FlightMapPanelRenderer(
             state.map_labels_enabled || state.map_borders_enabled -> "$prefix mixed"
             else -> "$prefix off"
         }
+    }
+
+    private fun draw_map_label_text_slider(
+        canvas: Canvas,
+        rect: RectF,
+        state: MapLabelsPanelState,
+        style: FlightMapPanelStyle
+    ) {
+        val colors = style.visual_theme.colors
+        val progress = ((state.label_text_scale - MAP_LABEL_TEXT_SCALE_MIN) /
+                (MAP_LABEL_TEXT_SCALE_MAX - MAP_LABEL_TEXT_SCALE_MIN)).coerceIn(0f, 1f)
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(11)
+        text_paint.color = colors.muted
+        canvas.drawText("Map text size", rect.left, rect.top + dp(12), text_paint)
+        text_paint.textAlign = Paint.Align.RIGHT
+        text_paint.isFakeBoldText = true
+        text_paint.color = colors.text
+        canvas.drawText(
+            String.format(Locale.US, "%.2fx", state.label_text_scale),
+            rect.right,
+            rect.top + dp(12),
+            text_paint
+        )
+
+        val track_left = rect.left
+        val track_right = rect.right
+        val track_y = rect.bottom - dp(14)
+        val track_height = dp(5)
+        val track = RectF(track_left, track_y - track_height / 2f, track_right, track_y + track_height / 2f)
+        paint.style = Paint.Style.FILL
+        paint.color = with_alpha(colors.muted, 72)
+        canvas.drawRoundRect(track, track_height, track_height, paint)
+        val fill = RectF(track.left, track.top, track.left + track.width() * progress, track.bottom)
+        paint.color = colors.accent_green
+        canvas.drawRoundRect(fill, track_height, track_height, paint)
+        paint.color = colors.text
+        canvas.drawCircle(track.left + track.width() * progress, track_y, dp(8), paint)
     }
 
     private fun draw_settings_section_label(

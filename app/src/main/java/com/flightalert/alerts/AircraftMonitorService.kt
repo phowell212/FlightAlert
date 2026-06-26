@@ -50,7 +50,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-// Foreground watcher for drone-flight safety: live position plus live aircraft feed, no stored tracks.
+// Foreground-backed watcher for drone-flight safety: live position plus live aircraft feed, no stored tracks.
 class AircraftAlertService : Service(), LocationListener {
     private val executor = Executors.newSingleThreadExecutor()
     private val aircraft_feed_client = AircraftFeedClient(USER_AGENT)
@@ -86,6 +86,7 @@ class AircraftAlertService : Service(), LocationListener {
         prefs.registerOnSharedPreferenceChangeListener(preference_listener)
         ensure_channels()
         clear_legacy_notifications()
+        if (monitoring_enabled()) enter_monitoring_foreground()
         start_location_updates()
         schedule_poll(1000L)
     }
@@ -104,6 +105,7 @@ class AircraftAlertService : Service(), LocationListener {
             stopSelf()
             return START_NOT_STICKY
         }
+        enter_monitoring_foreground()
         return START_STICKY
     }
 
@@ -124,7 +126,7 @@ class AircraftAlertService : Service(), LocationListener {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        stopSelf()
+        if (!monitoring_enabled()) stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
@@ -349,9 +351,12 @@ class AircraftAlertService : Service(), LocationListener {
             alert_radius * ALERT_QUERY_RADIUS_MULTIPLIER,
             alert_radius + ALERT_QUERY_MIN_PADDING_FEET
         )
+        val predictive_radius = alert_radius + meters_to_feet(
+            AlertPositionProjector.MAX_PROJECTABLE_ALERT_SPEED_MS * ALERT_ENTRY_LOOKAHEAD_SECONDS
+        )
         val queue_radius =
             if (priority_enabled) priority_range_feet.toDouble() else MIN_QUERY_RADIUS_FEET
-        return max(alert_radius_with_margin, queue_radius)
+        return max(max(alert_radius_with_margin, predictive_radius), queue_radius)
     }
 
     // The persistent notification is tied directly to the non-empty extreme-priority list.
@@ -368,7 +373,7 @@ class AircraftAlertService : Service(), LocationListener {
         ) {
             manager.cancel(PRIORITY_NOTIFICATION_ID)
             priority_notification_showing = false
-            leave_foreground()
+            enter_monitoring_foreground()
             return
         }
         val is_update = priority_notification_showing
@@ -380,12 +385,9 @@ class AircraftAlertService : Service(), LocationListener {
             silent = is_update
         )
         try {
-            if (foreground_active) {
-                notify_priority_fallback(manager, notification)
-            } else {
-                startForeground(PRIORITY_NOTIFICATION_ID, notification)
-                foreground_active = true
-            }
+            startForeground(PRIORITY_NOTIFICATION_ID, notification)
+            foreground_active = true
+            manager.cancel(ONGOING_NOTIFICATION_ID)
             priority_notification_showing = true
         } catch (_: Exception) {
             notify_priority_fallback(manager, notification)
@@ -467,7 +469,17 @@ class AircraftAlertService : Service(), LocationListener {
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setPublicVersion(build_public_notification(channel_id, title, ongoing, silent))
+            .setPublicVersion(build_public_notification(channel_id, title, body, ongoing, silent))
+        if (channel_id == MONITORING_CHANNEL_ID) {
+            builder
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .setLocalOnly(true)
+                .setPriority(Notification.PRIORITY_MIN)
+                .setShowWhen(false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_DEFERRED)
+            }
+        }
         if (silent) {
             builder
                 .setDefaults(0)
@@ -481,16 +493,26 @@ class AircraftAlertService : Service(), LocationListener {
     private fun build_public_notification(
         channel_id: String,
         title: String,
+        body: String,
         ongoing: Boolean,
         silent: Boolean
     ): Notification {
+        val public_body =
+            if (channel_id == MONITORING_CHANNEL_ID) "Background aircraft checks are active." else body
         val builder = Notification.Builder(this, channel_id)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle(title)
-            .setContentText("Flight Alert is monitoring live aircraft traffic.")
+            .setContentText(public_body)
             .setOnlyAlertOnce(true)
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
+        if (channel_id == MONITORING_CHANNEL_ID) {
+            builder
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .setLocalOnly(true)
+                .setPriority(Notification.PRIORITY_MIN)
+                .setShowWhen(false)
+        }
         if (silent) {
             builder
                 .setDefaults(0)
@@ -502,6 +524,20 @@ class AircraftAlertService : Service(), LocationListener {
 
     private fun ensure_channels() {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(
+            NotificationChannel(
+                MONITORING_CHANNEL_ID,
+                "Silent background monitor",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description =
+                    "Required foreground service guard for background aircraft monitoring"
+                setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
+            }
+        )
         manager.createNotificationChannel(
             NotificationChannel(
                 PRIORITY_CHANNEL_ID,
@@ -517,9 +553,6 @@ class AircraftAlertService : Service(), LocationListener {
     // Clean old notification IDs before using the new extreme-priority foreground notification.
     private fun clear_legacy_notifications() {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        if (manager.activeNotifications.any { it.id == ONGOING_NOTIFICATION_ID }) {
-            take_over_legacy_foreground_notification()
-        }
         remove_foreground_notification()
         manager.cancel(ONGOING_NOTIFICATION_ID)
         manager.cancel(PRIORITY_NOTIFICATION_ID)
@@ -528,30 +561,37 @@ class AircraftAlertService : Service(), LocationListener {
         }
     }
 
-    private fun take_over_legacy_foreground_notification() {
-        if (!has_notification_permission()) return
-        try {
-            startForeground(
-                ONGOING_NOTIFICATION_ID,
-                build_notification(
-                    PRIORITY_CHANNEL_ID,
-                    "Flight Alert",
-                    "Updating alert notifications.",
-                    true
-                )
-            )
-            foreground_active = true
-        } catch (_: Exception) {
-        }
-    }
-
     private fun leave_foreground() {
         if (!foreground_active) return
         remove_foreground_notification()
     }
 
+    private fun enter_monitoring_foreground() {
+        if (!monitoring_enabled()) return
+        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val notification = build_notification(
+            MONITORING_CHANNEL_ID,
+            "Flight Alert",
+            "Background aircraft checks are active.",
+            ongoing = true,
+            silent = true
+        )
+        try {
+            startForeground(ONGOING_NOTIFICATION_ID, notification)
+            foreground_active = true
+            priority_notification_showing = false
+            manager.cancel(PRIORITY_NOTIFICATION_ID)
+            MonitoringNotificationHiderService.request_rebind_if_enabled(this)
+        } catch (_: Exception) {
+            foreground_active = false
+        }
+    }
+
     private fun remove_foreground_notification() {
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Exception) {
+        }
         foreground_active = false
         priority_notification_showing = false
     }
@@ -697,7 +737,7 @@ class AircraftAlertService : Service(), LocationListener {
     )
 
     companion object {
-        const val MONITORING_CHANNEL_ID = "aircraft_monitoring_status"
+        const val MONITORING_CHANNEL_ID = "aircraft_monitoring_background_service"
         const val HAZARD_CHANNEL_ID = "aircraft_range_events"
         const val PRIORITY_CHANNEL_ID = "extreme_priority_aircraft"
         const val ACTION_PRIORITY_SNAPSHOT = "com.flightalert.service.ACTION_PRIORITY_SNAPSHOT"
@@ -748,7 +788,8 @@ class AircraftAlertService : Service(), LocationListener {
         )
 
         fun start(context: Context) {
-            context.startService(Intent(context, AircraftAlertService::class.java))
+            val intent = Intent(context, AircraftAlertService::class.java)
+            start_service(context, intent)
         }
 
         fun publish_priority_snapshot(context: Context, priority_aircraft: List<AlertAircraft>) {
@@ -785,15 +826,23 @@ class AircraftAlertService : Service(), LocationListener {
                     priority_aircraft.map { it.is_estimated_position }.toBooleanArray()
                 )
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && priority_aircraft.isNotEmpty()) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            start_service(context, intent)
         }
 
         fun stop(context: Context) {
             context.stopService(Intent(context, AircraftAlertService::class.java))
+        }
+
+        private fun start_service(context: Context, intent: Intent) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (_: Exception) {
+                context.startService(intent)
+            }
         }
     }
 }

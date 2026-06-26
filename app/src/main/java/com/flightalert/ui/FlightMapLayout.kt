@@ -250,8 +250,11 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
     fun priority_tracker_button_bounds(panel: RectF): RectF =
         safety_setting_button_bounds(panel, compact_top_dp = 102, portrait_top_dp = 492)
 
+    fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
+        safety_setting_button_bounds(panel, compact_top_dp = 138, portrait_top_dp = 532)
+
     fun impact_methodology_button_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 166, portrait_top_dp = 580)
+        safety_setting_button_bounds(panel, compact_top_dp = 204, portrait_top_dp = 620)
 
     fun impact_source_button_bounds(panel: RectF, index: Int, source_count: Int): RectF {
         val gap = dp(8)
@@ -299,6 +302,14 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
             panel.right - dp(18),
             panel.top + dp(184)
         )
+    }
+
+    fun map_label_text_slider_bounds(panel: RectF): RectF {
+        return if (is_compact_settings_panel(panel)) {
+            RectF(panel.left + dp(18), panel.top + dp(136), panel.right - dp(18), panel.top + dp(178))
+        } else {
+            RectF(panel.left + dp(18), panel.top + dp(194), panel.right - dp(18), panel.top + dp(244))
+        }
     }
 
     fun aviation_layer_status_bounds(panel: RectF): RectF {

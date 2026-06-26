@@ -146,10 +146,10 @@ object FlightAlertAppSettings {
         const val PRIORITY_NOTIFICATION_ID = 2002
         const val EVENT_NOTIFICATION_BASE_ID = 2100
         const val EVENT_NOTIFICATION_ID_WINDOW = 200
-        const val POLL_MS = 30000L
+        const val POLL_MS = 10000L
         const val PRIORITY_CONTACT_MAX_AGE_SECONDS = 10.0
         const val STALE_CONTACT_RETRY_MS = 1000L
-        const val ALERT_ENTRY_LOOKAHEAD_SECONDS = 20
+        const val ALERT_ENTRY_LOOKAHEAD_SECONDS = 30
         const val ALERT_ENTRY_POLL_LEAD_MS = 1200L
         const val MIN_QUERY_RADIUS_FEET = MapTuning.SAFETY_API_MIN_RADIUS_FEET
         const val ALERT_QUERY_MIN_PADDING_FEET = MapTuning.SAFETY_API_MIN_PADDING_FEET
@@ -158,7 +158,7 @@ object FlightAlertAppSettings {
     }
 
     object AlertProjection {
-        const val MAX_SECONDS = 8.0
+        const val MAX_SECONDS = 30.0
         const val MIN_SECONDS = 0.2
         const val MIN_PROJECTABLE_SPEED_MS = 8.0
         const val MAX_PROJECTABLE_SPEED_MS = 600.0

@@ -60,6 +60,7 @@ import com.flightalert.alerts.AlertAircraft
 import com.flightalert.alerts.AlertAircraftClassifier
 import com.flightalert.alerts.AlertMonitoringController
 import com.flightalert.alerts.AlertPositionProjector
+import com.flightalert.alerts.MonitoringNotificationHiderService
 import com.flightalert.alerts.ProjectedAlertPosition
 import com.flightalert.details.AircraftDetails
 import com.flightalert.details.AircraftDetailsClient
@@ -553,6 +554,7 @@ class FlightMapView(
         FlightAlertSettings.KEY_MAP_BORDERS_ENABLED,
         FlightAlertSettings.DEFAULT_MAP_BORDERS_ENABLED
     )
+    private var map_label_text_scale = read_map_label_text_scale()
     private var aircraft_feed_mode = FlightAlertSettings.read_aircraft_feed_mode(prefs)
     private var globe_bin_craft_source_enabled = aircraft_feed_mode.uses_globe
     private var atc_boundaries_layer_enabled = prefs.getBoolean(
@@ -601,6 +603,7 @@ class FlightMapView(
     private var filter_search_focused = false
     private var impact_methodology_open = false
     private var priority_adjust_hold: PriorityAdjustHold? = null
+    private var map_label_text_slider_dragging = false
 
     private val aircraft_details_warm_requester = AircraftDetailsWarmRequester(
         coordinator = aircraft_details_coordinator,
@@ -736,6 +739,17 @@ class FlightMapView(
     private val save_zoom_preference = Runnable {
         persist_zoom_preference_if_dirty()
     }
+    private val map_interaction_settle_redraw = object : Runnable {
+        override fun run() {
+            val remaining_ms =
+                MAP_TILE_INTERACTION_SETTLE_MS - (SystemClock.elapsedRealtime() - last_map_interaction_ms)
+            if (remaining_ms > 0L) {
+                postDelayed(this, remaining_ms + MAP_INTERACTION_SETTLE_REDRAW_PADDING_MS)
+            } else {
+                postInvalidateOnAnimation()
+            }
+        }
+    }
 
     // Init the custom View settings Android needs before it can route keys, touches, and insets here.
     init {
@@ -762,6 +776,7 @@ class FlightMapView(
     // MainActivity calls this from onPause; stop listeners that only matter while the map is visible.
     fun stop() {
         removeCallbacks(ticker)
+        removeCallbacks(map_interaction_settle_redraw)
         persist_zoom_preference_if_dirty()
         if (location_permission_granted) {
             try {
@@ -776,7 +791,8 @@ class FlightMapView(
         return if (map_touch_active || pinch_in_progress || drag_started) {
             true
         } else {
-            has_active_aircraft_appearance(now_elapsed_ms) || should_redraw_for_aircraft_motion(
+            should_redraw_for_map_label_transition(now_elapsed_ms) ||
+                    has_active_aircraft_appearance(now_elapsed_ms) || should_redraw_for_aircraft_motion(
                 now_elapsed_ms
             )
         }
@@ -1127,10 +1143,12 @@ class FlightMapView(
                     WorldPoint(it.center_x, it.center_y)
                 } else null
                 begin_priority_adjust_hold_if_needed(x, y)
+                begin_map_label_text_slider_drag_if_needed(x, y)
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
+                if (update_map_label_text_slider_drag(x, y)) return true
                 if (update_priority_adjust_hold(x, y)) return true
                 if (details_session.details_open && !settings_open && !priority_tracker_open && !filters_open && details_max_scroll_y > 0f) {
                     val dy = y - details_scroll_start_y
@@ -1165,6 +1183,7 @@ class FlightMapView(
                 val was_dragging_map = drag_started && !drag_blocked
                 drag_started = false
                 drag_start_center = null
+                if (finish_map_label_text_slider_drag(x, y)) return true
                 if (finish_priority_adjust_hold(x, y)) return true
                 if (was_dragging) {
                     if (was_dragging_map) {
@@ -1188,6 +1207,7 @@ class FlightMapView(
                 parent?.requestDisallowInterceptTouchEvent(false)
                 map_touch_active = false
                 cancel_priority_adjust_hold()
+                map_label_text_slider_dragging = false
                 drag_started = false
                 drag_start_center = null
                 return true
@@ -1767,9 +1787,27 @@ class FlightMapView(
             map_source = map_source,
             map_labels_enabled = map_labels_enabled,
             map_borders_enabled = map_borders_enabled,
+            map_label_text_scale = map_label_text_scale,
+            map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
             user_agent = USER_AGENT,
             interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime())
         )
+    }
+
+    private fun map_label_transition_alpha(now: Long): Float {
+        if (pinch_in_progress || drag_started || map_touch_active) return 0f
+        if (last_map_interaction_ms <= 0L) return 1f
+        val settled_elapsed = now - last_map_interaction_ms - MAP_TILE_INTERACTION_SETTLE_MS
+        if (settled_elapsed <= 0L) return 0f
+        return smooth_step(0f, MAP_LABEL_SETTLED_FADE_MS.toFloat(), settled_elapsed.toFloat())
+    }
+
+    private fun should_redraw_for_map_label_transition(now: Long): Boolean {
+        if (last_map_interaction_ms <= 0L || pinch_in_progress || drag_started || map_touch_active) {
+            return false
+        }
+        val settled_elapsed = now - last_map_interaction_ms - MAP_TILE_INTERACTION_SETTLE_MS
+        return settled_elapsed in 0L..MAP_LABEL_SETTLED_FADE_MS
     }
 
     private fun map_tile_interaction_active(now: Long): Boolean {
@@ -2824,6 +2862,10 @@ class FlightMapView(
         runCatching { context.startActivity(intent) }
     }
 
+    private fun open_notification_listener_settings() {
+        runCatching { context.startActivity(MonitoringNotificationHiderService.settings_intent()) }
+    }
+
     private fun loading_or_unavailable(loading: Boolean): String {
         return if (loading) "Loading" else "Unavailable"
     }
@@ -2965,6 +3007,9 @@ class FlightMapView(
             aviation_layers_enabled = has_aviation_layers_enabled(),
             alerts_enabled = alerts_enabled,
             priority_tracking_enabled = priority_tracking_enabled,
+            watcher_notification_hider_enabled = MonitoringNotificationHiderService.is_enabled(
+                context
+            ),
             map_attribution = map_source.attribution_text(map_labels_enabled, map_borders_enabled),
             aircraft_source_label = aircraft_source_preference_label()
         )
@@ -2973,7 +3018,8 @@ class FlightMapView(
     private fun map_labels_panel_state(): MapLabelsPanelState {
         return MapLabelsPanelState(
             street_labels_enabled = map_labels_enabled,
-            borders_enabled = map_borders_enabled
+            borders_enabled = map_borders_enabled,
+            label_text_scale = map_label_text_scale
         )
     }
 
@@ -3518,6 +3564,11 @@ class FlightMapView(
             aviation_layers_button_bounds(panel).contains(x, y) -> aviation_layers_open = true
             theme_button_bounds(panel).contains(x, y) -> set_visual_theme(next_visual_theme())
             alerts_toggle_bounds(panel).contains(x, y) -> set_alerts_enabled(!alerts_enabled)
+            monitoring_notification_hider_button_bounds(panel).contains(
+                x,
+                y
+            ) -> open_notification_listener_settings()
+
             impact_methodology_button_bounds(panel).contains(x, y) -> impact_methodology_open = true
             priority_tracker_button_bounds(panel).contains(x, y) -> {
                 settings_open = false
@@ -3583,11 +3634,20 @@ class FlightMapView(
     private fun mark_map_interaction() {
         val now = SystemClock.elapsedRealtime()
         last_map_interaction_ms = now
+        schedule_map_interaction_settle_redraw()
         if (traffic_cache_controller.total >= BINCRAFT_FEED_READY_AIRCRAFT_MIN) {
             globe_bin_craft_aircraft_source?.pause_inventory_extraction(
                 MAP_INTERACTION_BINCRAFT_EXTRACTION_PAUSE_MS
             )
         }
+    }
+
+    private fun schedule_map_interaction_settle_redraw() {
+        removeCallbacks(map_interaction_settle_redraw)
+        postDelayed(
+            map_interaction_settle_redraw,
+            MAP_TILE_INTERACTION_SETTLE_MS + MAP_INTERACTION_SETTLE_REDRAW_PADDING_MS
+        )
     }
 
     private fun aircraft_projection_epoch_seconds(): Double {
@@ -3615,8 +3675,7 @@ class FlightMapView(
             selected_key = selected_key,
             selected_aircraft = selected_path_controller.selected_aircraft_snapshot,
             path_focus = path_focus,
-            filters_restrict_aircraft = filters_restrict_aircraft(),
-            is_extreme_priority = ::is_extreme_priority
+            filters_restrict_aircraft = filters_restrict_aircraft()
         ) ?: return
         select_aircraft(hit)
     }
@@ -3839,6 +3898,49 @@ class FlightMapView(
         invalidate()
     }
 
+    private fun set_map_label_text_scale(next: Float) {
+        val clamped = next.coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
+        val snapped =
+            (clamped / MAP_LABEL_TEXT_SCALE_STEP).roundToInt() * MAP_LABEL_TEXT_SCALE_STEP
+        if (abs(map_label_text_scale - snapped) < 0.001f) return
+        map_label_text_scale = snapped.coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
+        prefs.edit { putFloat(FlightAlertSettings.KEY_MAP_LABEL_TEXT_SCALE, map_label_text_scale) }
+        invalidate()
+    }
+
+    private fun begin_map_label_text_slider_drag_if_needed(x: Float, y: Float): Boolean {
+        if (!settings_open || !map_labels_open) return false
+        val panel = settings_panel_bounds(content_width(), content_height())
+        val bounds = map_label_text_slider_bounds(panel)
+        if (!bounds.contains(x, y)) return false
+        map_label_text_slider_dragging = true
+        set_map_label_text_scale(map_label_text_scale_for_x(x, bounds))
+        parent?.requestDisallowInterceptTouchEvent(true)
+        return true
+    }
+
+    private fun update_map_label_text_slider_drag(x: Float, y: Float): Boolean {
+        if (!map_label_text_slider_dragging) return false
+        val panel = settings_panel_bounds(content_width(), content_height())
+        val bounds = map_label_text_slider_bounds(panel)
+        set_map_label_text_scale(map_label_text_scale_for_x(x, bounds))
+        return true
+    }
+
+    private fun finish_map_label_text_slider_drag(x: Float, y: Float): Boolean {
+        if (!map_label_text_slider_dragging) return false
+        map_label_text_slider_dragging = false
+        val panel = settings_panel_bounds(content_width(), content_height())
+        val bounds = map_label_text_slider_bounds(panel)
+        set_map_label_text_scale(map_label_text_scale_for_x(x, bounds))
+        return true
+    }
+
+    private fun map_label_text_scale_for_x(x: Float, bounds: RectF): Float {
+        val progress = ((x - bounds.left) / bounds.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
+        return MAP_LABEL_TEXT_SCALE_MIN + progress * (MAP_LABEL_TEXT_SCALE_MAX - MAP_LABEL_TEXT_SCALE_MIN)
+    }
+
     // Changing feed mode resets live source state so stale source snapshots do not carry across modes.
     private fun set_aircraft_feed_mode(mode: AircraftFeedMode) {
         if (aircraft_feed_mode == mode) return
@@ -3987,6 +4089,13 @@ class FlightMapView(
         val stored = prefs.getString(FlightAlertSettings.KEY_MAP_SOURCE, TileSource.SATELLITE.name)
             ?: TileSource.SATELLITE.name
         return TileSource.entries.firstOrNull { it.name == stored } ?: TileSource.SATELLITE
+    }
+
+    private fun read_map_label_text_scale(): Float {
+        return prefs.getFloat(
+            FlightAlertSettings.KEY_MAP_LABEL_TEXT_SCALE,
+            FlightAlertSettings.DEFAULT_MAP_LABEL_TEXT_SCALE
+        ).coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
     }
 
     private fun Intent.perf_string(key: String): String? {
@@ -4321,6 +4430,9 @@ class FlightMapView(
     private fun priority_tracker_button_bounds(panel: RectF): RectF =
         layout.priority_tracker_button_bounds(panel)
 
+    private fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
+        layout.monitoring_notification_hider_button_bounds(panel)
+
     private fun impact_methodology_button_bounds(panel: RectF): RectF =
         layout.impact_methodology_button_bounds(panel)
 
@@ -4332,6 +4444,9 @@ class FlightMapView(
 
     private fun map_borders_button_bounds(panel: RectF): RectF =
         layout.map_borders_button_bounds(panel)
+
+    private fun map_label_text_slider_bounds(panel: RectF): RectF =
+        layout.map_label_text_slider_bounds(panel)
 
     private fun layer_atc_button_bounds(panel: RectF): RectF = layout.layer_atc_button_bounds(panel)
     private fun layer_restricted_button_bounds(panel: RectF): RectF =
@@ -4654,6 +4769,11 @@ class FlightMapView(
         const val PERF_MAP_DETAIL_TIMING = "com.flightalert.PERF_MAP_DETAIL_TIMING"
         const val PERF_LOG_INTERVAL_MS = 3000L
         const val PERF_DETAIL_LOG_INTERVAL_MS = 1000L
+        const val MAP_LABEL_TEXT_SCALE_MIN = 1.0f
+        const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
+        const val MAP_LABEL_TEXT_SCALE_STEP = 0.05f
+        const val MAP_INTERACTION_SETTLE_REDRAW_PADDING_MS = 16L
+        const val MAP_LABEL_SETTLED_FADE_MS = 140L
     }
 
 }

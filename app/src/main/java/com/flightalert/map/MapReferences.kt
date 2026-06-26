@@ -75,7 +75,8 @@ internal data class LocalReferenceOverlayCacheKey(
     val center_x: Int,
     val center_y: Int,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val label_text_scale: Int
 )
 
 internal data class LocalReferenceOverlayCache(
@@ -156,7 +157,8 @@ internal class LocalReferenceOverlayRenderer(
         canvas: Canvas,
         viewport: Viewport,
         enabled: Boolean,
-        interaction_active: Boolean
+        interaction_active: Boolean,
+        label_text_scale: Float = 1f
     ): LocalReferenceOverlayStats {
         if (!enabled) {
             return LocalReferenceOverlayStats(
@@ -180,8 +182,12 @@ internal class LocalReferenceOverlayRenderer(
                 labels_drawn = 0
             )
         }
+        val safe_label_text_scale = label_text_scale.coerceIn(
+            MAP_LABEL_TEXT_SCALE_MIN,
+            MAP_LABEL_TEXT_SCALE_MAX
+        )
         if (!interaction_active) {
-            val cache_key = cache_key_for(viewport)
+            val cache_key = cache_key_for(viewport, safe_label_text_scale)
             val cache = overlay_cache
             if (cache != null && cache.key == cache_key && !cache.bitmap.isRecycled) {
                 canvas.drawBitmap(cache.bitmap, 0f, 0f, null)
@@ -209,7 +215,8 @@ internal class LocalReferenceOverlayRenderer(
                 cache_canvas,
                 viewport,
                 local_dataset.labels,
-                LocalReferenceDetail.SETTLED
+                LocalReferenceDetail.SETTLED,
+                safe_label_text_scale
             )
             overlay_cache = LocalReferenceOverlayCache(
                 key = cache_key,
@@ -227,7 +234,13 @@ internal class LocalReferenceOverlayRenderer(
         val lines =
             draw_lines(canvas, viewport, local_dataset.lines, LocalReferenceDetail.INTERACTION)
         val labels =
-            draw_labels(canvas, viewport, local_dataset.labels, LocalReferenceDetail.INTERACTION)
+            draw_labels(
+                canvas,
+                viewport,
+                local_dataset.labels,
+                LocalReferenceDetail.INTERACTION,
+                safe_label_text_scale
+            )
         return LocalReferenceOverlayStats(
             status = LocalReferenceOverlayStatus.LOADED,
             lines_drawn = lines,
@@ -242,13 +255,17 @@ internal class LocalReferenceOverlayRenderer(
         overlay_cache_canvas = null
     }
 
-    private fun cache_key_for(viewport: Viewport): LocalReferenceOverlayCacheKey {
+    private fun cache_key_for(
+        viewport: Viewport,
+        label_text_scale: Float
+    ): LocalReferenceOverlayCacheKey {
         return LocalReferenceOverlayCacheKey(
             zoom = (viewport.zoom * 1000.0).roundToInt(),
             center_x = viewport.center_x.roundToInt(),
             center_y = viewport.center_y.roundToInt(),
             width = viewport.width.roundToInt(),
-            height = viewport.height.roundToInt()
+            height = viewport.height.roundToInt(),
+            label_text_scale = (label_text_scale * 1000f).roundToInt()
         )
     }
 
@@ -532,7 +549,8 @@ internal class LocalReferenceOverlayRenderer(
         canvas: Canvas,
         viewport: Viewport,
         labels: List<LocalReferenceLabel>,
-        detail: LocalReferenceDetail
+        detail: LocalReferenceDetail,
+        label_text_scale: Float
     ): Int {
         label_bounds.clear()
         var drawn = 0
@@ -552,7 +570,7 @@ internal class LocalReferenceOverlayRenderer(
                 val x =
                     (world.x + repeat * world_width - viewport.center_x + viewport.width / 2.0).toFloat()
                 val y = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
-                if (draw_label(canvas, viewport, label, x, y, alpha)) {
+                if (draw_label(canvas, viewport, label, x, y, alpha, label_text_scale)) {
                     drawn++
                     break
                 }
@@ -614,13 +632,14 @@ internal class LocalReferenceOverlayRenderer(
         label: LocalReferenceLabel,
         x: Float,
         y: Float,
-        alpha: Float
+        alpha: Float,
+        label_text_scale: Float
     ): Boolean {
         val label_text = when (label.kind) {
             LocalReferenceKind.COUNTRY -> label.text.uppercase(Locale.US)
             else -> label.text
         }
-        val size = label_text_size(label, viewport.zoom)
+        val size = label_text_size(label, viewport.zoom, label_text_scale)
         text_paint.textSize = size
         text_paint.typeface = when (label.kind) {
             LocalReferenceKind.COUNTRY -> Typeface.DEFAULT_BOLD
@@ -630,12 +649,13 @@ internal class LocalReferenceOverlayRenderer(
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.isFakeBoldText = false
         val text_width = text_paint.measureText(label_text)
-        val text_y = if (label.kind == LocalReferenceKind.PLACE) y - dp(5f) else y
+        val text_y =
+            if (label.kind == LocalReferenceKind.PLACE) y - dp(5f * label_text_scale) else y
         val bounds = RectF(
-            x - text_width / 2f - label_horizontal_padding(label),
-            text_y - size - label_vertical_padding(label),
-            x + text_width / 2f + label_horizontal_padding(label),
-            text_y + dp(6f)
+            x - text_width / 2f - label_horizontal_padding(label, label_text_scale),
+            text_y - size - label_vertical_padding(label, label_text_scale),
+            x + text_width / 2f + label_horizontal_padding(label, label_text_scale),
+            text_y + dp(6f * label_text_scale)
         )
         if (!RectF.intersects(bounds, RectF(0f, 0f, viewport.width, viewport.height))) return false
         if (label_bounds.any { RectF.intersects(it, bounds) }) return false
@@ -643,31 +663,33 @@ internal class LocalReferenceOverlayRenderer(
             paint.style = Paint.Style.FILL
             paint.color =
                 with_alpha(0xFF07100D.toInt(), (190f * alpha).roundToInt().coerceIn(0, 255))
-            canvas.drawCircle(x, y, dp(3.1f), paint)
+            canvas.drawCircle(x, y, dp(3.1f * place_marker_scale(label_text_scale)), paint)
             paint.color =
                 with_alpha(0xFFFFF7DB.toInt(), (235f * alpha).roundToInt().coerceIn(0, 255))
-            canvas.drawCircle(x, y, dp(1.65f), paint)
+            canvas.drawCircle(x, y, dp(1.65f * place_marker_scale(label_text_scale)), paint)
         }
-        draw_outlined_text(canvas, label_text, x, text_y, label, alpha)
+        draw_outlined_text(canvas, label_text, x, text_y, label, alpha, label_text_scale)
         label_bounds += bounds
         return true
     }
 
-    private fun label_text_size(label: LocalReferenceLabel, zoom: Double): Float {
-        return when (label.kind) {
-            LocalReferenceKind.COUNTRY -> sp(
+    private fun label_text_size(
+        label: LocalReferenceLabel,
+        zoom: Double,
+        label_text_scale: Float
+    ): Float {
+        val base_size_sp = when (label.kind) {
+            LocalReferenceKind.COUNTRY ->
                 (14.2f + (7 - label.rank).coerceAtLeast(0) * 0.95f + ((zoom - 3.7).coerceIn(
                     0.0,
                     2.4
                 ) * 1.2).toFloat()).coerceIn(14.2f, 23.0f)
-            )
 
-            LocalReferenceKind.REGION -> sp(
+            LocalReferenceKind.REGION ->
                 (10.8f + (6 - label.rank).coerceAtLeast(0) * 0.6f + ((zoom - 4.3).coerceIn(
                     0.0,
                     2.5
                 ) * 0.85).toFloat()).coerceIn(10.8f, 16.2f)
-            )
 
             LocalReferenceKind.PLACE -> {
                 val pop_boost = when {
@@ -676,30 +698,41 @@ internal class LocalReferenceOverlayRenderer(
                     label.population >= 250_000 -> 1.35f
                     else -> 0.0f
                 }
-                sp(
-                    (9.8f + pop_boost + ((zoom - label.min_zoom).coerceIn(
-                        0.0,
-                        2.0
-                    ) * 0.75).toFloat()).coerceIn(9.8f, 17.5f)
-                )
+                (9.8f + pop_boost + ((zoom - label.min_zoom).coerceIn(
+                    0.0,
+                    2.0
+                ) * 0.75).toFloat()).coerceIn(9.8f, 17.5f)
             }
         }
+        return sp(base_size_sp) * label_text_scale
     }
 
-    private fun label_horizontal_padding(label: LocalReferenceLabel): Float {
-        return when (label.kind) {
+    private fun label_horizontal_padding(
+        label: LocalReferenceLabel,
+        label_text_scale: Float
+    ): Float {
+        val base_padding = when (label.kind) {
             LocalReferenceKind.COUNTRY -> dp(9f)
             LocalReferenceKind.REGION -> dp(7f)
             LocalReferenceKind.PLACE -> dp(6f)
         }
+        return base_padding * label_text_scale
     }
 
-    private fun label_vertical_padding(label: LocalReferenceLabel): Float {
-        return when (label.kind) {
+    private fun label_vertical_padding(
+        label: LocalReferenceLabel,
+        label_text_scale: Float
+    ): Float {
+        val base_padding = when (label.kind) {
             LocalReferenceKind.COUNTRY -> dp(7f)
             LocalReferenceKind.REGION -> dp(5f)
             LocalReferenceKind.PLACE -> dp(4f)
         }
+        return base_padding * label_text_scale
+    }
+
+    private fun place_marker_scale(label_text_scale: Float): Float {
+        return (0.85f + label_text_scale * 0.15f).coerceIn(1f, 1.12f)
     }
 
     private fun country_line_width(zoom: Double): Float {
@@ -726,7 +759,8 @@ internal class LocalReferenceOverlayRenderer(
         x: Float,
         y: Float,
         label: LocalReferenceLabel,
-        alpha: Float
+        alpha: Float,
+        label_text_scale: Float
     ) {
         val fill_alpha = when (label.kind) {
             LocalReferenceKind.COUNTRY -> 238
@@ -738,7 +772,7 @@ internal class LocalReferenceOverlayRenderer(
             LocalReferenceKind.COUNTRY -> dp(4.0f)
             LocalReferenceKind.REGION -> dp(3.2f)
             LocalReferenceKind.PLACE -> dp(3.4f)
-        }
+        } * label_text_scale.coerceAtMost(1.35f)
         text_paint.color =
             with_alpha(0xFF07100D.toInt(), (225f * alpha).roundToInt().coerceIn(0, 255))
         canvas.drawText(text, x, y, text_paint)
@@ -791,5 +825,7 @@ internal class LocalReferenceOverlayRenderer(
         const val INTERACTION_REGION_LABEL_MIN_ZOOM = 5.7
         const val INTERACTION_PLACE_POPULATION_MIN = 1_000_000
         const val INTERACTION_LABEL_DENSITY = 0.55f
+        const val MAP_LABEL_TEXT_SCALE_MIN = 1f
+        const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
     }
 }

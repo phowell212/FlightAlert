@@ -51,6 +51,7 @@ object FlightAlertSettings {
     const val KEY_MAP_SOURCE = "map_source"
     const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
     const val KEY_MAP_BORDERS_ENABLED = "map_borders_enabled"
+    const val KEY_MAP_LABEL_TEXT_SCALE = "map_label_text_scale"
     const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
     const val KEY_GLOBE_BINCRAFT_SOURCE_ENABLED = "globe_bin_craft_source_enabled"
     const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
@@ -72,6 +73,7 @@ object FlightAlertSettings {
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
     const val DEFAULT_MAP_LABELS_ENABLED = false
     const val DEFAULT_MAP_BORDERS_ENABLED = true
+    const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1.25f
     const val DEFAULT_GLOBE_BINCRAFT_SOURCE_ENABLED = true
     const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
     const val DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED = false
@@ -107,6 +109,7 @@ data class SettingsPanelState(
     val aviation_layers_enabled: Boolean,
     val alerts_enabled: Boolean,
     val priority_tracking_enabled: Boolean,
+    val watcher_notification_hider_enabled: Boolean,
     val map_attribution: String,
     val aircraft_source_label: String
 )

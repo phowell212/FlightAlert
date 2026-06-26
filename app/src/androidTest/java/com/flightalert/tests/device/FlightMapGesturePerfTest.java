@@ -1,4 +1,4 @@
-package com.flightalert.perf;
+package com.flightalert.tests.device;
 
 import android.Manifest;
 import android.content.Context;

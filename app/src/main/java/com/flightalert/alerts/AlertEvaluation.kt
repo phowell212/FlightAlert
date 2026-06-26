@@ -98,7 +98,8 @@ object AlertAircraftClassifier {
 
     private fun meters_to_feet(meters: Double): Double = meters * FEET_PER_METER
 
-    const val EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS = 3.0
+    const val EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS =
+        FlightAlertAppSettings.AlertProjection.MAX_SECONDS
 
     private const val FEET_PER_METER = 3.28084
 }

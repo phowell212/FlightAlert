@@ -160,6 +160,10 @@ enum class TileSource(
         }
     }
 
+    fun street_label_tile_url(z: Int, x: Int, y: Int): String {
+        return "https://basemaps.cartocdn.com/rastertiles/voyager_only_labels/$z/$x/$y.png"
+    }
+
 }
 
 enum class UnitSystem(

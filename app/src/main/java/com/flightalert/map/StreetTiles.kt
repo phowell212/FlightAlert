@@ -49,6 +49,7 @@ internal class StreetMapTileRenderer(
     private val request_redraw: () -> Unit
 ) {
     private val tile_cache = LinkedHashMap<String, Bitmap>(MAX_MEMORY_TILES, 0.75f, true)
+    private val label_tile_cache = LinkedHashMap<String, Bitmap>(MAX_LABEL_MEMORY_TILES, 0.75f, true)
     private val requested_tiles_lock = Any()
     private val requested_tiles = mutableSetOf<String>()
     private val worker_id = AtomicInteger()
@@ -86,6 +87,7 @@ internal class StreetMapTileRenderer(
     }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val tile_destination = RectF()
+    private val label_boost_destination = RectF()
     private val child_destination = RectF()
     private val parent_source = Rect()
     private val tile_decode_options = ThreadLocal.withInitial {
@@ -106,6 +108,74 @@ internal class StreetMapTileRenderer(
         paint.color = style.map_empty
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
 
+        val request_generation = tile_request_generation.incrementAndGet()
+        val base_cache_key = TileSource.STREET.cache_key(labels_enabled = state.map_labels_enabled)
+        val base_stats = draw_tile_grid(
+            canvas = canvas,
+            viewport = viewport,
+            state = state,
+            style = style,
+            cache_key = base_cache_key,
+            tile_url = { z, x, y ->
+                TileSource.STREET.tile_url(z, x, y, labels_enabled = state.map_labels_enabled)
+            },
+            label_scale = 1f,
+            draw_unavailable_if_missing = true,
+            request_generation = request_generation
+        )
+        val label_stats = if (
+            state.map_labels_enabled &&
+            state.map_label_transition_alpha > MIN_LABEL_TRANSITION_ALPHA &&
+            base_stats.requested == 0 &&
+            state.map_label_text_scale > 1.01f
+        ) {
+            draw_tile_grid(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                style = style,
+                cache_key = STREET_LABEL_CACHE_KEY,
+                tile_url = { z, x, y -> TileSource.STREET.street_label_tile_url(z, x, y) },
+                label_scale = state.map_label_text_scale,
+                label_alpha = state.map_label_transition_alpha,
+                draw_unavailable_if_missing = false,
+                defer_until_exact_tiles_loaded = true,
+                request_generation = request_generation
+            )
+        } else {
+            TileLayerDrawStats(
+                visible = 0,
+                loaded = 0,
+                requested = 0,
+                fallback_drawn = 0,
+                fading = false
+            )
+        }
+        debug_last_tile_summary =
+            " mapTiles=${base_stats.visible} loaded=${base_stats.loaded} requested=${base_stats.requested} " +
+                    "street=1 labelTiles=${label_stats.loaded}/${label_stats.visible} " +
+                    "labelReq=${label_stats.requested} labelBoost=${state.map_label_text_scale}"
+        val label_note = if (!state.map_labels_enabled) " no-label" else ""
+        return if (base_stats.requested == 0 && base_stats.loaded > 0) {
+            "${TileSource.STREET.display_name}$label_note loaded"
+        } else {
+            "Loading ${TileSource.STREET.display_name.lowercase(Locale.US)}$label_note tiles"
+        }
+    }
+
+    private fun draw_tile_grid(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: MapTileRenderState,
+        style: MapTileRenderStyle,
+        cache_key: String,
+        tile_url: (Int, Int, Int) -> String,
+        label_scale: Float,
+        label_alpha: Float = 1f,
+        draw_unavailable_if_missing: Boolean,
+        defer_until_exact_tiles_loaded: Boolean = false,
+        request_generation: Long
+    ): TileLayerDrawStats {
         val left_world = viewport.center_x - viewport.width / 2.0
         val top_world = viewport.center_y - viewport.height / 2.0
         val tile_zoom = viewport.zoom.toInt().coerceIn(MIN_ZOOM, TileSource.STREET.max_native_zoom)
@@ -119,16 +189,64 @@ internal class StreetMapTileRenderer(
             floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
         val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
-        val request_generation = tile_request_generation.incrementAndGet()
         var visible = 0
         var loaded = 0
         var requested = 0
+        var fallback_drawn = 0
+
+        if (defer_until_exact_tiles_loaded) {
+            var exact_visible = 0
+            var exact_loaded = 0
+            var exact_requested = 0
+            for (ty in first_tile_y..last_tile_y) {
+                if (ty !in 0 until max_tile) continue
+                for (tx_raw in first_tile_x..last_tile_x) {
+                    val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                    val key = "$cache_key/$tile_zoom/$tx/$ty"
+                    exact_visible++
+                    if (tile_bitmap(
+                            tile_zoom,
+                            tx,
+                            ty,
+                            key,
+                            cache_key,
+                            allow_disk_decode = !state.interaction_active
+                        ) != null
+                    ) {
+                        exact_loaded++
+                    } else {
+                        exact_requested++
+                        request_tile(
+                            tile_zoom,
+                            tx,
+                            ty,
+                            key,
+                            state,
+                            cache_key,
+                            tile_url,
+                            allow_ui_disk_decode = !state.interaction_active,
+                            request_generation = request_generation,
+                            request_priority = TILE_REQUEST_PRIORITY_EXACT
+                        )
+                    }
+                }
+            }
+            if (exact_requested > 0) {
+                return TileLayerDrawStats(
+                    exact_visible,
+                    exact_loaded,
+                    exact_requested,
+                    fallback_drawn = 0,
+                    fading = false
+                )
+            }
+        }
 
         for (ty in first_tile_y..last_tile_y) {
             if (ty !in 0 until max_tile) continue
             for (tx_raw in first_tile_x..last_tile_x) {
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
-                val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
+                val key = "$cache_key/$tile_zoom/$tx/$ty"
                 val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
                 val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
                 tile_destination.set(
@@ -142,13 +260,13 @@ internal class StreetMapTileRenderer(
                     tx,
                     ty,
                     key,
-                    state,
+                    cache_key,
                     allow_disk_decode = !state.interaction_active
                 )
                 visible++
                 if (bitmap != null) {
                     loaded++
-                    draw_tile_bitmap(canvas, bitmap, tile_destination)
+                    draw_tile_bitmap(canvas, bitmap, tile_destination, label_scale, label_alpha)
                 } else {
                     requested++
                     request_parent_tiles(
@@ -156,6 +274,8 @@ internal class StreetMapTileRenderer(
                         tx,
                         ty,
                         state,
+                        cache_key,
+                        tile_url,
                         allow_ui_disk_decode = !state.interaction_active,
                         request_generation = request_generation
                     )
@@ -165,28 +285,31 @@ internal class StreetMapTileRenderer(
                         ty,
                         key,
                         state,
+                        cache_key,
+                        tile_url,
                         allow_ui_disk_decode = !state.interaction_active,
                         request_generation = request_generation,
                         request_priority = TILE_REQUEST_PRIORITY_EXACT
                     )
-                    if (!draw_parent_tile_fallback(
-                            canvas,
-                            tile_zoom,
-                            tx,
-                            ty,
-                            state.cache_key,
-                            tile_destination,
-                            !state.interaction_active
-                        ) &&
-                        !draw_child_tile_fallback(
-                            canvas,
-                            tile_zoom,
-                            tx,
-                            ty,
-                            state.cache_key,
-                            tile_destination
-                        )
-                    ) {
+                    val drew_fallback = draw_unavailable_if_missing &&
+                            (draw_parent_tile_fallback(
+                                canvas,
+                                tile_zoom,
+                                tx,
+                                ty,
+                                cache_key,
+                                tile_destination,
+                                !state.interaction_active
+                            ) || draw_child_tile_fallback(
+                                canvas,
+                                tile_zoom,
+                                tx,
+                                ty,
+                                cache_key,
+                                tile_destination
+                            ))
+                    if (drew_fallback) fallback_drawn++
+                    if (!drew_fallback && draw_unavailable_if_missing) {
                         draw_unavailable_tile(
                             canvas,
                             screen_x,
@@ -198,18 +321,15 @@ internal class StreetMapTileRenderer(
                 }
             }
         }
-        debug_last_tile_summary = " mapTiles=$visible loaded=$loaded requested=$requested street=1"
-        val label_note = if (!state.map_labels_enabled) " no-label" else ""
-        return if (requested == 0 && loaded > 0) {
-            "${TileSource.STREET.display_name}$label_note loaded"
-        } else {
-            "Loading ${TileSource.STREET.display_name.lowercase(Locale.US)}$label_note tiles"
-        }
+        return TileLayerDrawStats(visible, loaded, requested, fallback_drawn, fading = false)
     }
 
     fun clear() {
         synchronized(tile_cache) {
             tile_cache.clear()
+        }
+        synchronized(label_tile_cache) {
+            label_tile_cache.clear()
         }
         synchronized(requested_tiles_lock) {
             requested_tiles.clear()
@@ -233,6 +353,8 @@ internal class StreetMapTileRenderer(
         x: Int,
         y: Int,
         state: MapTileRenderState,
+        cache_key: String,
+        tile_url: (Int, Int, Int) -> String,
         allow_ui_disk_decode: Boolean,
         request_generation: Long
     ) {
@@ -243,13 +365,13 @@ internal class StreetMapTileRenderer(
             val parent_z = z - depth
             val parent_x = x / scale
             val parent_y = y / scale
-            val parent_key = "${state.cache_key}/$parent_z/$parent_x/$parent_y"
+            val parent_key = "$cache_key/$parent_z/$parent_x/$parent_y"
             if (tile_bitmap(
                     parent_z,
                     parent_x,
                     parent_y,
                     parent_key,
-                    state,
+                    cache_key,
                     allow_ui_disk_decode
                 ) == null
             ) {
@@ -259,6 +381,8 @@ internal class StreetMapTileRenderer(
                     parent_y,
                     parent_key,
                     state,
+                    cache_key,
+                    tile_url,
                     allow_ui_disk_decode,
                     request_generation = request_generation,
                     request_priority = TILE_REQUEST_PRIORITY_PARENT_BASE - depth
@@ -273,6 +397,8 @@ internal class StreetMapTileRenderer(
         y: Int,
         key: String,
         state: MapTileRenderState,
+        cache_key: String,
+        tile_url: (Int, Int, Int) -> String,
         allow_ui_disk_decode: Boolean,
         request_generation: Long,
         request_priority: Int
@@ -282,7 +408,7 @@ internal class StreetMapTileRenderer(
                 x,
                 y,
                 key,
-                state
+                cache_key
             ) != null else memory_tile_bitmap(key) != null
         ) return
         synchronized(requested_tiles_lock) {
@@ -298,21 +424,21 @@ internal class StreetMapTileRenderer(
                     var redrew_when_loaded = false
                     var skipped_loaded_request = false
                     try {
-                        if (tile_bitmap(z, x, y, key, state, allow_disk_decode = false) != null) {
+                        if (tile_bitmap(z, x, y, key, cache_key, allow_disk_decode = false) != null) {
                             skipped_loaded_request = true
                             return@tileTask
                         }
-                        val file = tile_file(z, x, y, state.cache_key)
+                        val file = tile_file(z, x, y, cache_key)
                         if (is_fresh_tile_file(file)) {
                             val bitmap =
                                 BitmapFactory.decodeFile(file.absolutePath, decode_options())
                             if (bitmap != null) {
-                                synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
+                                put_tile_in_memory(key, bitmap)
                                 return@tileTask
                             }
                         }
                         val url =
-                            https_url(TileSource.STREET.tile_url(z, x, y, state.map_labels_enabled))
+                            https_url(tile_url(z, x, y))
                                 ?: run {
                                     report_status("Map tiles unavailable")
                                     return@tileTask
@@ -332,7 +458,7 @@ internal class StreetMapTileRenderer(
                                 decode_options()
                             )
                             if (bitmap != null) {
-                                synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
+                                put_tile_in_memory(key, bitmap)
                                 redrew_when_loaded = true
                                 request_redraw()
                                 write_tile_file_async(file, bytes)
@@ -361,33 +487,58 @@ internal class StreetMapTileRenderer(
         x: Int,
         y: Int,
         key: String,
-        state: MapTileRenderState,
+        cache_key: String,
         allow_disk_decode: Boolean = true
     ): Bitmap? {
         memory_tile_bitmap(key)?.let { return it }
         if (!allow_disk_decode) return null
-        val file = tile_file(z, x, y, state.cache_key)
+        val file = tile_file(z, x, y, cache_key)
         if (!is_fresh_tile_file(file)) return null
         val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options()) ?: return null
-        synchronized(tile_cache) {
-            tile_cache[key]?.let { existing ->
+        val cache = memory_cache_for_key(key)
+        synchronized(cache) {
+            cache[key]?.let { existing ->
                 if (existing !== bitmap && !bitmap.isRecycled) bitmap.recycle()
                 return existing
             }
-            put_tile_in_memory(key, bitmap)
+            put_tile_in_memory_locked(cache, key, bitmap)
         }
         return bitmap
     }
 
     private fun memory_tile_bitmap(key: String): Bitmap? {
-        return synchronized(tile_cache) { tile_cache[key] }
+        val cache = memory_cache_for_key(key)
+        return synchronized(cache) { cache[key] }
     }
 
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
-        tile_cache[key] = bitmap
-        while (tile_cache.size > MAX_MEMORY_TILES) {
-            val first_key = tile_cache.keys.firstOrNull() ?: break
-            tile_cache.remove(first_key)
+        val cache = memory_cache_for_key(key)
+        synchronized(cache) {
+            put_tile_in_memory_locked(cache, key, bitmap)
+        }
+    }
+
+    private fun put_tile_in_memory_locked(
+        cache: LinkedHashMap<String, Bitmap>,
+        key: String,
+        bitmap: Bitmap
+    ) {
+        cache[key] = bitmap
+        while (cache.size > max_memory_tiles_for_key(key)) {
+            val first_key = cache.keys.firstOrNull() ?: break
+            cache.remove(first_key)
+        }
+    }
+
+    private fun memory_cache_for_key(key: String): LinkedHashMap<String, Bitmap> {
+        return if (key.startsWith("$STREET_LABEL_CACHE_KEY/")) label_tile_cache else tile_cache
+    }
+
+    private fun max_memory_tiles_for_key(key: String): Int {
+        return if (key.startsWith("$STREET_LABEL_CACHE_KEY/")) {
+            MAX_LABEL_MEMORY_TILES
+        } else {
+            MAX_MEMORY_TILES
         }
     }
 
@@ -451,12 +602,13 @@ internal class StreetMapTileRenderer(
         val file = tile_file(z, x, y, cache_key)
         if (!is_fresh_tile_file(file)) return null
         val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options()) ?: return null
-        synchronized(tile_cache) {
-            tile_cache[key]?.let { existing ->
+        val cache = memory_cache_for_key(key)
+        synchronized(cache) {
+            cache[key]?.let { existing ->
                 if (existing !== bitmap && !bitmap.isRecycled) bitmap.recycle()
                 return existing
             }
-            put_tile_in_memory(key, bitmap)
+            put_tile_in_memory_locked(cache, key, bitmap)
         }
         return bitmap
     }
@@ -513,9 +665,53 @@ internal class StreetMapTileRenderer(
         return false
     }
 
-    private fun draw_tile_bitmap(canvas: Canvas, bitmap: Bitmap, destination: RectF) {
-        bitmap_paint.alpha = 255
+    private fun draw_tile_bitmap(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        destination: RectF,
+        label_scale: Float = 1f,
+        label_alpha: Float = 1f
+    ) {
+        val safe_alpha = label_alpha.coerceIn(0f, 1f)
+        val scale = label_scale.coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
+        if (scale <= 1.01f) {
+            bitmap_paint.alpha = (255f * safe_alpha).toInt().coerceIn(0, 255)
+            canvas.drawBitmap(bitmap, null, destination, bitmap_paint)
+            bitmap_paint.alpha = 255
+            return
+        }
+        val progress = ((scale - 1f) / (MAP_LABEL_TEXT_SCALE_MAX - 1f)).coerceIn(0f, 1f)
+        bitmap_paint.alpha = (LABEL_BOOST_CENTER_ALPHA * progress * safe_alpha)
+            .toInt()
+            .coerceIn(0, 255)
         canvas.drawBitmap(bitmap, null, destination, bitmap_paint)
+        val offset = LABEL_BOOST_MAX_OFFSET_PX * progress
+        if (offset >= 0.35f) {
+            bitmap_paint.alpha = (LABEL_BOOST_OFFSET_ALPHA * progress * safe_alpha)
+                .toInt()
+                .coerceIn(0, 255)
+            draw_label_boost_offset(canvas, bitmap, destination, -offset, 0f)
+            draw_label_boost_offset(canvas, bitmap, destination, offset, 0f)
+            draw_label_boost_offset(canvas, bitmap, destination, 0f, -offset)
+            draw_label_boost_offset(canvas, bitmap, destination, 0f, offset)
+        }
+        bitmap_paint.alpha = 255
+    }
+
+    private fun draw_label_boost_offset(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        destination: RectF,
+        dx: Float,
+        dy: Float
+    ) {
+        label_boost_destination.set(
+            destination.left + dx,
+            destination.top + dy,
+            destination.right + dx,
+            destination.bottom + dy
+        )
+        canvas.drawBitmap(bitmap, null, label_boost_destination, bitmap_paint)
     }
 
     private fun draw_unavailable_tile(
@@ -579,11 +775,19 @@ internal class StreetMapTileRenderer(
         const val TILE_SIZE = 256
         const val MIN_ZOOM = 3
         const val MAX_MEMORY_TILES = 320
+        const val MAX_LABEL_MEMORY_TILES = 192
         const val TILE_NETWORK_THREADS = 6
         const val TILE_WORKER_KEEP_ALIVE_MS = 15_000L
         const val STREET_PARENT_REQUEST_DEPTH = 3
         const val STREET_CHILD_FALLBACK_DEPTH = 2
         const val TILE_REQUEST_PRIORITY_PARENT_BASE = 3
         const val TILE_REQUEST_PRIORITY_EXACT = 4
+        const val STREET_LABEL_CACHE_KEY = "carto_voyager_only_labels"
+        const val MAP_LABEL_TEXT_SCALE_MIN = 1f
+        const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
+        const val MIN_LABEL_TRANSITION_ALPHA = 0.01f
+        const val LABEL_BOOST_CENTER_ALPHA = 135
+        const val LABEL_BOOST_OFFSET_ALPHA = 70
+        const val LABEL_BOOST_MAX_OFFSET_PX = 1.4f
     }
 }
