@@ -95,9 +95,6 @@ internal class StreetMapTileRenderer(
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
     }
-    var debug_last_tile_summary: String = ""
-        private set
-
     fun draw_tiles(
         canvas: Canvas,
         viewport: Viewport,
@@ -151,10 +148,6 @@ internal class StreetMapTileRenderer(
                 fading = false
             )
         }
-        debug_last_tile_summary =
-            " mapTiles=${base_stats.visible} loaded=${base_stats.loaded} requested=${base_stats.requested} " +
-                    "street=1 labelTiles=${label_stats.loaded}/${label_stats.visible} " +
-                    "labelReq=${label_stats.requested} labelBoost=${state.map_label_text_scale}"
         val label_note = if (!state.map_labels_enabled) " no-label" else ""
         return if (base_stats.requested == 0 && base_stats.loaded > 0) {
             "${TileSource.STREET.display_name}$label_note loaded"

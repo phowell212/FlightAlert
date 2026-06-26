@@ -34,7 +34,6 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.SystemClock
 import android.text.InputType
-import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -399,8 +398,7 @@ class FlightMapView(
                 aircraft
             )
         },
-        aircraft_feed_mode = { aircraft_feed_mode },
-        log_route_diagnostic = ::log_route_diagnostic
+        aircraft_feed_mode = { aircraft_feed_mode }
     )
     private val traffic_panel_renderer = TrafficPanelRenderer(
         text_paint = text_paint,
@@ -660,7 +658,6 @@ class FlightMapView(
         request_redraw = { invalidate() },
         request_animation_frame = { postInvalidateOnAnimation() }
     )
-    private var route_diagnostic_key: String? = null
     private var last_ticker_fetch_ms = 0L
     private var last_aircraft_data_epoch_sec: Double? = null
     private var aircraft_status = "Waiting for location"
@@ -668,29 +665,6 @@ class FlightMapView(
     private var following_location = true
     private var manual_center_lat: Double? = null
     private var manual_center_lon: Double? = null
-    private var perf_run_id: String? = null
-    private var perf_camera_override = false
-    private var perf_last_log_ms = 0L
-    private var perf_draw_sequence = 0L
-    private var perf_draw_window_first_sequence = 0L
-    private var perf_draw_window_frames = 0
-    private var perf_draw_window_total_ns = 0L
-    private var perf_draw_window_map_ns = 0L
-    private var perf_draw_window_aviation_ns = 0L
-    private var perf_draw_window_traffic_ns = 0L
-    private var perf_draw_window_chrome_ns = 0L
-    private var perf_draw_window_max_total_ns = 0L
-    private var perf_draw_window_max_map_ns = 0L
-    private var perf_draw_window_max_aviation_ns = 0L
-    private var perf_draw_window_max_traffic_ns = 0L
-    private var perf_draw_window_max_chrome_ns = 0L
-    private var perf_draw_window_max_symbols = 0
-    private var perf_draw_window_max_dots = 0
-    private var perf_draw_window_max_direct = 0
-    private var perf_draw_window_max_direct_drawn = 0
-    private var perf_draw_window_max_focus_lat = ""
-    private var perf_draw_window_max_focus_lon = ""
-    private var perf_draw_window_max_zoom = ""
 
     // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
@@ -837,68 +811,6 @@ class FlightMapView(
         invalidate()
     }
 
-    fun apply_perf_intent(intent: Intent?) {
-        if (intent == null) return
-        val run_id = intent.perf_string(PERF_RUN_ID)
-        if (run_id != null) perf_run_id = run_id
-
-        val target_lat = intent.perf_double(PERF_LAT)
-        val target_lon = intent.perf_double(PERF_LON)
-        if (target_lat != null && target_lon != null) {
-            manual_center_lat = target_lat.coerceIn(-85.0, 85.0)
-            manual_center_lon = normalize_longitude(target_lon)
-            following_location = false
-            perf_camera_override = true
-        }
-        intent.perf_double(PERF_ZOOM)?.let { next_zoom ->
-            zoom = next_zoom.coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
-            zoom_preference_dirty = false
-            perf_camera_override = true
-        }
-        intent.perf_string(PERF_MAP_SOURCE)?.let { value ->
-            TileSource.entries.firstOrNull { it.name.equals(value, ignoreCase = true) }?.let { source ->
-                if (map_source != source) {
-                    map_source = source
-                    map_tile_renderer.reset_transitions()
-                }
-            }
-        }
-        intent.perf_boolean(PERF_MAP_LABELS_ENABLED)?.let { enabled ->
-            if (map_labels_enabled != enabled) {
-                map_labels_enabled = enabled
-                map_tile_renderer.reset_transitions()
-            }
-        }
-        intent.perf_boolean(PERF_MAP_BORDERS_ENABLED)?.let { enabled ->
-            if (map_borders_enabled != enabled) {
-                map_borders_enabled = enabled
-                map_tile_renderer.reset_transitions()
-            }
-        }
-        intent.perf_boolean(PERF_RESTRICTED_AIRSPACES_ENABLED)?.let { enabled ->
-            restricted_airspaces_layer_enabled = enabled
-            if (!enabled) selected_restricted_airspace = null
-            aviation_layer_controller.on_visibility_changed(aviation_layer_visibility())
-        }
-        intent.perf_boolean(PERF_TRAFFIC_DETAIL_TIMING)?.let { enabled ->
-            traffic_overlay_renderer.debug_collect_detail_timing = enabled
-            traffic_overlay_state_builder.debug_collect_detail_timing = enabled
-        }
-        intent.perf_boolean(PERF_MAP_DETAIL_TIMING)?.let { enabled ->
-            map_tile_renderer.debug_collect_detail_timing = enabled
-        }
-        if (intent.perf_boolean(PERF_CLEAR_SELECTION) == true) {
-            details_session.close_details_shell()
-            selected_path_controller.clear_selection()
-            clear_selected_flight_path()
-        }
-        if (run_id != null) {
-            Log.d(TAG, "FlightAlertPerfPhase: detail=apply_intent runId=$run_id")
-        }
-        if (latest_location != null) request_visible_aircraft_if_needed(force = true)
-        invalidate()
-    }
-
     // Close the top-most map overlay first. If nothing is open, let Android handle Back normally.
     fun handle_back_press(): Boolean {
         if (details_session.photo_evidence_open) {
@@ -1005,16 +917,6 @@ class FlightMapView(
     // Android calls this whenever the View is invalidated. Draw the whole cockpit in one ordered pass.
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val collect_draw_perf = perf_run_id != null &&
-                (map_tile_renderer.debug_collect_detail_timing ||
-                        traffic_overlay_renderer.debug_collect_detail_timing)
-        val perf_frame_start_ns =
-            if (collect_draw_perf) SystemClock.elapsedRealtimeNanos() else 0L
-        var perf_viewport: Viewport? = null
-        var perf_map_ns = 0L
-        var perf_aviation_ns = 0L
-        var perf_traffic_ns = 0L
-        var perf_chrome_ns = 0L
         paint.style = Paint.Style.FILL
         paint.color = theme_colors.system_bar
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
@@ -1034,69 +936,49 @@ class FlightMapView(
                 draw_no_location_state(this, w, h)
             } else {
                 val viewport = viewport_for(location, w, h)
-                perf_viewport = viewport
-                perf_map_ns = measure_perf_draw_section(collect_draw_perf) {
-                    draw_map_tiles(this, viewport)
-                }
-                perf_aviation_ns = measure_perf_draw_section(collect_draw_perf) {
-                    request_aviation_layers_if_needed(viewport)
-                    draw_aviation_layers(this, viewport)
-                    draw_priority_range_circle(this, viewport, location)
-                    draw_selected_flight_path(this, viewport)
-                }
-                perf_traffic_ns = measure_perf_draw_section(collect_draw_perf) {
-                    draw_traffic_overlay(this, viewport)
-                    draw_ownship_overlay(this, viewport, location)
-                }
+                draw_map_tiles(this, viewport)
+                request_aviation_layers_if_needed(viewport)
+                draw_aviation_layers(this, viewport)
+                draw_priority_range_circle(this, viewport, location)
+                draw_selected_flight_path(this, viewport)
+                draw_traffic_overlay(this, viewport)
+                draw_ownship_overlay(this, viewport, location)
             }
 
-            perf_chrome_ns = measure_perf_draw_section(collect_draw_perf) {
-                if (!modal_open) {
-                    draw_top_status(this, w, h)
-                    draw_recenter_button(this, w, h)
-                    location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
-                    draw_settings_button(this, w, h)
-                    draw_filters_button(this, w, h)
-                    draw_traffic_panel(this, w, h)
+            if (!modal_open) {
+                draw_top_status(this, w, h)
+                draw_recenter_button(this, w, h)
+                location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
+                draw_settings_button(this, w, h)
+                draw_filters_button(this, w, h)
+                draw_traffic_panel(this, w, h)
+            } else {
+                draw_modal_backdrop(this, w, h)
+            }
+            selected_restricted_airspace?.let {
+                draw_restricted_airspace_details_panel(this, w, h, it)
+            }
+            if (details_session.details_open) {
+                // Draw only the open overlay branch so the visible panel matches the current state object.
+                draw_aircraft_details_panel(this, w, h)
+            }
+            if (settings_open) {
+                if (map_labels_open) {
+                    draw_map_labels_panel(this, w, h)
+                } else if (aviation_layers_open) {
+                    draw_aviation_layers_panel(this, w, h)
+                } else if (impact_methodology_open) {
+                    draw_impact_methodology_panel(this, w, h)
                 } else {
-                    draw_modal_backdrop(this, w, h)
-                }
-                selected_restricted_airspace?.let {
-                    draw_restricted_airspace_details_panel(this, w, h, it)
-                }
-                if (details_session.details_open) {
-                    // Draw only the open overlay branch so the visible panel matches the current state object.
-                    draw_aircraft_details_panel(this, w, h)
-                }
-                if (settings_open) {
-                    if (map_labels_open) {
-                        draw_map_labels_panel(this, w, h)
-                    } else if (aviation_layers_open) {
-                        draw_aviation_layers_panel(this, w, h)
-                    } else if (impact_methodology_open) {
-                        draw_impact_methodology_panel(this, w, h)
-                    } else {
-                        draw_settings_panel(this, w, h)
-                    }
-                }
-                if (priority_tracker_open) {
-                    draw_priority_tracker_panel(this, w, h)
-                }
-                if (filters_open) {
-                    draw_filters_panel(this, w, h)
+                    draw_settings_panel(this, w, h)
                 }
             }
-        }
-        perf_viewport?.let {
-            record_perf_viewport_if_needed(
-                viewport = it,
-                collect_draw_perf = collect_draw_perf,
-                frame_start_ns = perf_frame_start_ns,
-                map_ns = perf_map_ns,
-                aviation_ns = perf_aviation_ns,
-                traffic_ns = perf_traffic_ns,
-                chrome_ns = perf_chrome_ns
-            )
+            if (priority_tracker_open) {
+                draw_priority_tracker_panel(this, w, h)
+            }
+            if (filters_open) {
+                draw_filters_panel(this, w, h)
+            }
         }
     }
 
@@ -1588,181 +1470,6 @@ class FlightMapView(
         )
     }
 
-    private fun record_perf_viewport_if_needed(
-        viewport: Viewport,
-        collect_draw_perf: Boolean,
-        frame_start_ns: Long,
-        map_ns: Long,
-        aviation_ns: Long,
-        traffic_ns: Long,
-        chrome_ns: Long
-    ) {
-        val run_id = perf_run_id ?: return
-        val now = SystemClock.elapsedRealtime()
-        if (!collect_draw_perf) {
-            if (now - perf_last_log_ms < PERF_LOG_INTERVAL_MS) return
-            perf_last_log_ms = now
-            perf_draw_sequence++
-            val center = world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
-            val aircraft_count = traffic_overlay_renderer.debug_last_render_aircraft_count
-            val dot_count = traffic_overlay_renderer.debug_last_dot_count
-            val direct_count = traffic_overlay_renderer.debug_last_direct_input_count
-            val direct_drawn_count = traffic_overlay_renderer.debug_last_direct_drawn_count
-            val focus_lat = perf_number(center.lat)
-            val focus_lon = perf_number(center.lon)
-            val zoom_text = perf_number(viewport.zoom)
-            Log.d(
-                TAG,
-                "Debug perf viewport runId=$run_id focusLat=$focus_lat focusLon=$focus_lon zoom=$zoom_text mapSource=${map_source.name}"
-            )
-            Log.d(
-                TAG,
-                "Debug draw perf runId=$run_id frames=1 avg=0 max=0 map=0 aviation=0 traffic=0 chrome=0 " +
-                        "drawSeqFirst=$perf_draw_sequence drawSeq=$perf_draw_sequence symbols=$aircraft_count dots=$dot_count " +
-                        "direct=$direct_count directDrawn=$direct_drawn_count focusLat=$focus_lat focusLon=$focus_lon " +
-                        "camera centerLat=$focus_lat centerLon=$focus_lon zoom=$zoom_text"
-            )
-            log_perf_detail_summaries(run_id)
-            return
-        }
-        val total_ns =
-            if (frame_start_ns > 0L) {
-                (SystemClock.elapsedRealtimeNanos() - frame_start_ns).coerceAtLeast(0L)
-            } else {
-                map_ns + aviation_ns + traffic_ns + chrome_ns
-            }
-        val center = world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
-        val aircraft_count = traffic_overlay_renderer.debug_last_render_aircraft_count
-        val dot_count = traffic_overlay_renderer.debug_last_dot_count
-        val direct_count = traffic_overlay_renderer.debug_last_direct_input_count
-        val direct_drawn_count = traffic_overlay_renderer.debug_last_direct_drawn_count
-        val focus_lat = perf_number(center.lat)
-        val focus_lon = perf_number(center.lon)
-        val zoom_text = perf_number(viewport.zoom)
-        perf_draw_sequence++
-        if (perf_draw_window_frames == 0) {
-            perf_draw_window_first_sequence = perf_draw_sequence
-        }
-        perf_draw_window_frames++
-        perf_draw_window_total_ns += total_ns
-        perf_draw_window_map_ns += map_ns
-        perf_draw_window_aviation_ns += aviation_ns
-        perf_draw_window_traffic_ns += traffic_ns
-        perf_draw_window_chrome_ns += chrome_ns
-        if (total_ns >= perf_draw_window_max_total_ns) {
-            perf_draw_window_max_total_ns = total_ns
-            perf_draw_window_max_map_ns = map_ns
-            perf_draw_window_max_aviation_ns = aviation_ns
-            perf_draw_window_max_traffic_ns = traffic_ns
-            perf_draw_window_max_chrome_ns = chrome_ns
-            perf_draw_window_max_symbols = aircraft_count
-            perf_draw_window_max_dots = dot_count
-            perf_draw_window_max_direct = direct_count
-            perf_draw_window_max_direct_drawn = direct_drawn_count
-            perf_draw_window_max_focus_lat = focus_lat
-            perf_draw_window_max_focus_lon = focus_lon
-            perf_draw_window_max_zoom = zoom_text
-        }
-        if (now - perf_last_log_ms < PERF_DETAIL_LOG_INTERVAL_MS) return
-        perf_last_log_ms = now
-        val window_frames = perf_draw_window_frames.coerceAtLeast(1)
-        val draw_sequence_first =
-            if (perf_draw_window_first_sequence > 0L) perf_draw_window_first_sequence else perf_draw_sequence
-        val draw_sequence_last = perf_draw_sequence
-        val max_frame_detail =
-            "frames=1 avg=${perf_ms(perf_draw_window_max_total_ns)} max=${perf_ms(perf_draw_window_max_total_ns)} " +
-                    "map=${perf_ms(perf_draw_window_max_map_ns)} aviation=${perf_ms(perf_draw_window_max_aviation_ns)} " +
-                    "traffic=${perf_ms(perf_draw_window_max_traffic_ns)} chrome=${perf_ms(perf_draw_window_max_chrome_ns)} " +
-                    "symbols=$perf_draw_window_max_symbols dots=$perf_draw_window_max_dots " +
-                    "direct=$perf_draw_window_max_direct directDrawn=$perf_draw_window_max_direct_drawn " +
-                    "focusLat=$perf_draw_window_max_focus_lat focusLon=$perf_draw_window_max_focus_lon " +
-                    "camera centerLat=$perf_draw_window_max_focus_lat centerLon=$perf_draw_window_max_focus_lon " +
-                    "zoom=$perf_draw_window_max_zoom"
-        Log.d(
-            TAG,
-            "Debug perf viewport runId=$run_id focusLat=$focus_lat focusLon=$focus_lon zoom=$zoom_text mapSource=${map_source.name}"
-        )
-        Log.d(
-            TAG,
-            "Debug draw perf runId=$run_id frames=$window_frames " +
-                    "avg=${perf_ms_average(perf_draw_window_total_ns, window_frames)} " +
-                    "max=${perf_ms(perf_draw_window_max_total_ns)} " +
-                    "map=${perf_ms_average(perf_draw_window_map_ns, window_frames)} " +
-                    "aviation=${perf_ms_average(perf_draw_window_aviation_ns, window_frames)} " +
-                    "traffic=${perf_ms_average(perf_draw_window_traffic_ns, window_frames)} " +
-                    "chrome=${perf_ms_average(perf_draw_window_chrome_ns, window_frames)} " +
-                    "last=${perf_ms(total_ns)} lastMap=${perf_ms(map_ns)} lastTraffic=${perf_ms(traffic_ns)} " +
-                    "drawSeqFirst=$draw_sequence_first drawSeq=$draw_sequence_last symbols=$aircraft_count dots=$dot_count " +
-                    "direct=$direct_count directDrawn=$direct_drawn_count focusLat=$focus_lat focusLon=$focus_lon " +
-                    "camera centerLat=$focus_lat centerLon=$focus_lon zoom=$zoom_text maxFrameDetail=$max_frame_detail"
-        )
-        reset_perf_draw_window()
-        log_perf_detail_summaries(run_id)
-    }
-
-    private fun log_perf_detail_summaries(run_id: String) {
-        val map_summary = map_tile_renderer.debug_last_tile_summary
-        if (map_summary.isNotBlank()) {
-            Log.d(TAG, "Debug map tile perf runId=$run_id$map_summary")
-        }
-        val symbol_summary = traffic_overlay_renderer.debug_last_symbol_cache_summary
-        if (symbol_summary.isNotBlank() && symbol_summary != "symbolCache=none") {
-            Log.d(TAG, "Debug traffic symbol perf runId=$run_id $symbol_summary")
-        }
-        val traffic_detail = traffic_overlay_renderer.debug_last_detail_timing_summary
-        if (traffic_detail.isNotBlank()) {
-            Log.d(TAG, "Debug traffic detail perf runId=$run_id $traffic_detail")
-        }
-        val state_detail = traffic_overlay_state_builder.debug_last_detail_timing_summary
-        if (state_detail.isNotBlank()) {
-            Log.d(TAG, "Debug traffic state perf runId=$run_id $state_detail")
-        }
-    }
-
-    private fun perf_number(value: Double): String {
-        return String.format(Locale.US, "%.5f", value)
-    }
-
-    private inline fun measure_perf_draw_section(collect: Boolean, block: () -> Unit): Long {
-        if (!collect) {
-            block()
-            return 0L
-        }
-        val started_ns = SystemClock.elapsedRealtimeNanos()
-        block()
-        return (SystemClock.elapsedRealtimeNanos() - started_ns).coerceAtLeast(0L)
-    }
-
-    private fun perf_ms(nanos: Long): String {
-        return String.format(Locale.US, "%.3f", nanos / 1_000_000.0)
-    }
-
-    private fun perf_ms_average(nanos: Long, frames: Int): String {
-        return String.format(Locale.US, "%.3f", nanos / frames.coerceAtLeast(1).toDouble() / 1_000_000.0)
-    }
-
-    private fun reset_perf_draw_window() {
-        perf_draw_window_first_sequence = 0L
-        perf_draw_window_frames = 0
-        perf_draw_window_total_ns = 0L
-        perf_draw_window_map_ns = 0L
-        perf_draw_window_aviation_ns = 0L
-        perf_draw_window_traffic_ns = 0L
-        perf_draw_window_chrome_ns = 0L
-        perf_draw_window_max_total_ns = 0L
-        perf_draw_window_max_map_ns = 0L
-        perf_draw_window_max_aviation_ns = 0L
-        perf_draw_window_max_traffic_ns = 0L
-        perf_draw_window_max_chrome_ns = 0L
-        perf_draw_window_max_symbols = 0
-        perf_draw_window_max_dots = 0
-        perf_draw_window_max_direct = 0
-        perf_draw_window_max_direct_drawn = 0
-        perf_draw_window_max_focus_lat = ""
-        perf_draw_window_max_focus_lon = ""
-        perf_draw_window_max_zoom = ""
-    }
-
     private fun viewport_center_lat(location: Location): Double {
         return if (following_location) location.latitude else manual_center_lat ?: location.latitude
     }
@@ -2050,10 +1757,6 @@ class FlightMapView(
         if (!is_current_aircraft_fetch(fetch_token, fetch_signature)) return
         if (should_keep_current_aircraft_for_partial_result(result, parsed_cache)) {
             val coverage = aircraft_traffic_feed.coverage_label(result)
-            Log.d(
-                TAG,
-                "Aircraft feed ${result.source.display_name}: ${parsed.size} aircraft$coverage; keeping ${traffic_cache_controller.total} displayed aircraft"
-            )
             aircraft_status = "Live aircraft updating via ${result.source.display_name}$coverage"
             visible_aircraft_feed_controller.schedule_hybrid_supplement_refresh()
             postInvalidateOnAnimation()
@@ -2081,7 +1784,6 @@ class FlightMapView(
         }
         prune_selection_for_filters()
         val coverage = aircraft_traffic_feed.coverage_label(result)
-        Log.d(TAG, "Aircraft feed ${result.source.display_name}: ${parsed.size} aircraft$coverage")
         synchronized(aircraft) {
             aircraft.clear()
             aircraft.addAll(parsed)
@@ -2216,10 +1918,6 @@ class FlightMapView(
         if (result.source == FeedSource.AIRPLANES_LIVE_GLOBE && result.partial_coverage) {
             visible_aircraft_feed_controller.schedule_hybrid_supplement_refresh()
         }
-        Log.d(
-            TAG,
-            "Aircraft feed ${result.source.display_name}: ${result.status} http=${result.http_code ?: "none"}"
-        )
         postInvalidateOnAnimation()
     }
 
@@ -2290,7 +1988,6 @@ class FlightMapView(
                 post {
                     if (selected_path_controller.is_selected_key(key)) {
                         selected_path_controller.apply_trace_result(key, trace)
-                        Log.d(TAG, "Flight trace icao=$key ${flight_trace_diagnostic(trace)}")
                         displayed_traffic().aircraft?.let { aircraft ->
                             origin_lookup_controller.request_military_origin_if_needed(aircraft)
                             origin_lookup_controller.request_trace_origin_airport_if_needed(aircraft)
@@ -2888,16 +2585,6 @@ class FlightMapView(
         return trace_details_presenter.current_flight_route_details(details, aircraft)
     }
 
-    private fun log_route_diagnostic(diagnostic: String) {
-        if (route_diagnostic_key == diagnostic) return
-        route_diagnostic_key = diagnostic
-        Log.d(TAG, diagnostic)
-    }
-
-    private fun flight_trace_diagnostic(trace: FlightTrace?): String {
-        return trace_details_presenter.flight_trace_diagnostic(trace)
-    }
-
     private fun current_flight_route_loading(
         aircraft: Aircraft,
         details_loading: Boolean
@@ -3165,7 +2852,6 @@ class FlightMapView(
         if (selected_path_controller.selected_aircraft_id == null) return false
         details_session.close_details_shell()
         selected_path_controller.clear_selection()
-        route_diagnostic_key = null
         invalidate()
         return true
     }
@@ -3716,7 +3402,6 @@ class FlightMapView(
     // Selecting aircraft updates the path controller first, then details, path, and military-origin work fan out from it.
     private fun select_aircraft(aircraft: Aircraft) {
         selected_path_controller.select_aircraft(aircraft)
-        route_diagnostic_key = null
         details_session.usage_open = false
         details_session.environmental_impact_open = false
         origin_lookup_controller.reset_for_selection(aircraft)
@@ -4061,7 +3746,7 @@ class FlightMapView(
     }
 
     private fun apply_initial_mavic_range_zoom_if_needed() {
-        if (perf_camera_override || prefs.contains(FlightAlertSettings.KEY_ZOOM) || width <= 0 || height <= 0) return
+        if (prefs.contains(FlightAlertSettings.KEY_ZOOM) || width <= 0 || height <= 0) return
         val focus_area =
             largest_unblocked_map_rect(content_width(), content_height()).inset_by(dp(12))
         val target_span_meters = DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M * INITIAL_RANGE_MULTIPLIER
@@ -4096,37 +3781,6 @@ class FlightMapView(
             FlightAlertSettings.KEY_MAP_LABEL_TEXT_SCALE,
             FlightAlertSettings.DEFAULT_MAP_LABEL_TEXT_SCALE
         ).coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
-    }
-
-    private fun Intent.perf_string(key: String): String? {
-        return getStringExtra(key)?.takeIf { it.isNotBlank() }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun Intent.perf_double(key: String): Double? {
-        return when (val value = extras?.get(key)) {
-            is Double -> value
-            is Float -> value.toDouble()
-            is Int -> value.toDouble()
-            is Long -> value.toDouble()
-            is String -> value.toDoubleOrNull()
-            else -> null
-        }?.takeIf { it.isFinite() }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun Intent.perf_boolean(key: String): Boolean? {
-        return when (val value = extras?.get(key)) {
-            is Boolean -> value
-            is String -> when (value.lowercase(Locale.US)) {
-                "true", "1", "yes", "on" -> true
-                "false", "0", "no", "off" -> false
-                else -> null
-            }
-            is Int -> value != 0
-            is Long -> value != 0L
-            else -> null
-        }
     }
 
     private fun set_filter_search_query(value: String) {
@@ -4755,20 +4409,6 @@ class FlightMapView(
     )
 
     private companion object {
-        const val PERF_LAT = "com.flightalert.PERF_LAT"
-        const val PERF_LON = "com.flightalert.PERF_LON"
-        const val PERF_ZOOM = "com.flightalert.PERF_ZOOM"
-        const val PERF_RUN_ID = "com.flightalert.PERF_RUN_ID"
-        const val PERF_MAP_SOURCE = "com.flightalert.PERF_MAP_SOURCE"
-        const val PERF_MAP_LABELS_ENABLED = "com.flightalert.PERF_MAP_LABELS_ENABLED"
-        const val PERF_MAP_BORDERS_ENABLED = "com.flightalert.PERF_MAP_BORDERS_ENABLED"
-        const val PERF_RESTRICTED_AIRSPACES_ENABLED =
-            "com.flightalert.PERF_RESTRICTED_AIRSPACES_ENABLED"
-        const val PERF_CLEAR_SELECTION = "com.flightalert.PERF_CLEAR_SELECTION"
-        const val PERF_TRAFFIC_DETAIL_TIMING = "com.flightalert.PERF_TRAFFIC_DETAIL_TIMING"
-        const val PERF_MAP_DETAIL_TIMING = "com.flightalert.PERF_MAP_DETAIL_TIMING"
-        const val PERF_LOG_INTERVAL_MS = 3000L
-        const val PERF_DETAIL_LOG_INTERVAL_MS = 1000L
         const val MAP_LABEL_TEXT_SCALE_MIN = 1.0f
         const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
         const val MAP_LABEL_TEXT_SCALE_STEP = 0.05f

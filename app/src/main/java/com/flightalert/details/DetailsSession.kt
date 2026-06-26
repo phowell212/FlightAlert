@@ -1567,8 +1567,7 @@ internal class AircraftTraceDetailsPresenter(
     private val is_flight_path_loading: (Aircraft) -> Boolean,
     private val trace_origin_airport_for: (Aircraft) -> AirportDetails?,
     private val trace_origin_loading_for: (Aircraft) -> Boolean,
-    private val aircraft_feed_mode: () -> AircraftFeedMode,
-    private val log_route_diagnostic: (String) -> Unit
+    private val aircraft_feed_mode: () -> AircraftFeedMode
 ) {
     fun current_flight_route_details(
         details: AircraftDetails?,
@@ -1579,21 +1578,10 @@ internal class AircraftTraceDetailsPresenter(
         val validation = CurrentRouteValidator.evaluate(
             details = route_details,
             aircraft_icao24 = aircraft.icao24,
-            aircraft_callsign = aircraft.callsign,
             selected_trace_aircraft_id = selected_trace_aircraft_id(),
             trace_segments = selected_segments(false)
         )
-        log_route_diagnostic(validation.diagnostic)
         return route_details.takeIf { validation.accepted }
-    }
-
-    fun flight_trace_diagnostic(trace: FlightTrace?): String {
-        if (trace == null) return "source=none points=0"
-        val points = trace.all_points.sortedBy { it.epoch_sec }
-        val first = points.firstOrNull()
-        val last = points.lastOrNull()
-        return "source=${trace.source.ifBlank { "unknown" }} points=${trace.point_count} previous=${trace.previous_point_count} " +
-                "first=${first?.lat_lon_label() ?: "none"} last=${last?.lat_lon_label() ?: "none"}"
     }
 
     fun current_flight_route_loading(aircraft: Aircraft, details_loading: Boolean): Boolean {

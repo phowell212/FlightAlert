@@ -103,41 +103,26 @@ class MapTileRenderer(
         request_redraw = request_redraw
     )
 
-    var debug_last_tile_summary: String = ""
-        private set
-    var debug_collect_detail_timing: Boolean
-        get() = satellite_renderer.debug_collect_detail_timing
-        set(value) {
-            satellite_renderer.debug_collect_detail_timing = value
-        }
-
     fun draw_tiles(
         canvas: Canvas,
         viewport: Viewport,
         state: MapTileRenderState,
         style: MapTileRenderStyle
     ): String {
-        val status = when (state.map_source) {
+        return when (state.map_source) {
             TileSource.STREET -> street_renderer.draw_tiles(canvas, viewport, state, style)
             TileSource.SATELLITE -> satellite_renderer.draw_tiles(canvas, viewport, state, style)
         }
-        debug_last_tile_summary = when (state.map_source) {
-            TileSource.STREET -> street_renderer.debug_last_tile_summary
-            TileSource.SATELLITE -> satellite_renderer.debug_last_tile_summary
-        }
-        return status
     }
 
     fun clear() {
         street_renderer.clear()
         satellite_renderer.clear()
-        debug_last_tile_summary = ""
     }
 
     fun reset_transitions() {
         street_renderer.reset_transitions()
         satellite_renderer.reset_transitions()
-        debug_last_tile_summary = ""
     }
 
     fun shutdown() {
@@ -193,8 +178,7 @@ internal data class TileLayerDrawStats(
     val loaded: Int,
     val requested: Int,
     val fallback_drawn: Int,
-    val fading: Boolean,
-    val debug_summary: String = ""
+    val fading: Boolean
 )
 
 internal data class ReferenceTileCoverage(

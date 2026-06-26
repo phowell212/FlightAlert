@@ -45,21 +45,6 @@ import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
-internal data class ReferencePrefetchDrainStats(
-    var batch_count: Long = 0L,
-    var plan_count: Long = 0L,
-    var tile_count: Long = 0L,
-    var memory_hit_count: Long = 0L,
-    var miss_count: Long = 0L,
-    var submitted_count: Long = 0L,
-    var queued_count: Long = 0L,
-    var memory_recheck_count: Long = 0L,
-    var stale_count: Long = 0L,
-    var superseded_count: Long = 0L,
-    var denied_count: Long = 0L,
-    var budget_exhausted_count: Long = 0L
-)
-
 internal data class ReferencePrefetchBudget(
     var remaining_submissions: Int
 )
@@ -186,124 +171,12 @@ internal class SatelliteMapTileRenderer(
         request_redraw = request_redraw
     )
 
-    var debug_last_tile_summary: String = ""
-        private set
-
-    @Volatile
-    var debug_collect_detail_timing = false
-    private var debug_detail_interim_ns = 0L
-    private var debug_detail_interim_retain_new_count = 0
-    private var debug_detail_interim_retain_reuse_count = 0
-    private var debug_detail_lower_ns = 0L
-    private var debug_detail_upper_ns = 0L
-    private var debug_detail_merge_ns = 0L
-    private var debug_detail_reference_ns = 0L
-    private var debug_detail_reference_plan_ns = 0L
-    private var debug_detail_reference_draw_ns = 0L
-    private var debug_detail_reference_prefetch_ns = 0L
-    private var debug_detail_reference_alpha_ns = 0L
-    private var debug_detail_reference_bookkeeping_ns = 0L
-    private var debug_detail_reference_generation_ns = 0L
-    private var debug_detail_reference_protection_ns = 0L
-    private var debug_detail_reference_overlay_count = 0
-    private var debug_detail_reference_prefetch_call_count = 0
-    private var debug_detail_reference_prefetch_cpu_ns = 0L
-    private var debug_detail_reference_prefetch_wait_ns = 0L
-    private var debug_detail_reference_prefetch_cpu_missing_count = 0
-    private var debug_detail_reference_prefetch_range_ns = 0L
-    private var debug_detail_reference_prefetch_enum_ns = 0L
-    private var debug_detail_reference_prefetch_memory_lookup_ns = 0L
-    private var debug_detail_reference_prefetch_url_ns = 0L
-    private var debug_detail_reference_prefetch_submit_ns = 0L
-    private var debug_detail_reference_prefetch_tile_count = 0
-    private var debug_detail_reference_prefetch_memory_hit_count = 0
-    private var debug_detail_reference_prefetch_miss_count = 0
-    private var debug_detail_reference_prefetch_submitted_count = 0
-    private var debug_detail_reference_prefetch_queued_count = 0
-    private var debug_detail_reference_prefetch_queued_same_generation_count = 0
-    private var debug_detail_reference_prefetch_queued_recent_generation_count = 0
-    private var debug_detail_reference_prefetch_throttled_count = 0
-    private var debug_detail_reference_prefetch_lod_throttled_count = 0
-    private var debug_detail_reference_prefetch_pan_throttled_count = 0
-    private var debug_detail_reference_prefetch_lod_call_count = 0
-    private var debug_detail_reference_prefetch_pan_call_count = 0
-    private var debug_detail_reference_prefetch_lod_tile_count = 0
-    private var debug_detail_reference_prefetch_pan_tile_count = 0
-    private var debug_detail_reference_prefetch_lod_submitted_count = 0
-    private var debug_detail_reference_prefetch_pan_submitted_count = 0
-    private var debug_detail_reference_prefetch_lod_queued_count = 0
-    private var debug_detail_reference_prefetch_pan_queued_count = 0
-    private var debug_detail_reference_prefetch_lod_max_grid_count = 0
-    private var debug_detail_reference_prefetch_pan_max_grid_count = 0
-    private var debug_detail_reference_prefetch_memory_recheck_count = 0
-    private var debug_detail_reference_prefetch_denied_count = 0
-    private var debug_detail_reference_prefetch_max_grid_count = 0
-    private var debug_detail_reference_prefetch_budget_count = 0
-    private var debug_detail_reference_prefetch_pan_budget_count = 0
-    private var debug_detail_reference_prefetch_lod_budget_count = 0
-    private val debug_reference_lod_prefetch_async_offered_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_coalesced_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_batch_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_plan_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_tile_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_memory_hit_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_miss_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_submitted_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_queued_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_memory_recheck_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_stale_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_superseded_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_denied_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_budget_count = AtomicLong()
-    private val debug_reference_lod_prefetch_async_ns = AtomicLong()
-    private val debug_reference_lod_prefetch_async_max_ns = AtomicLong()
-    private var debug_detail_reference_lod_prefetch_async_offered_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_coalesced_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_batch_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_plan_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_tile_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_memory_hit_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_miss_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_submitted_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_queued_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_memory_recheck_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_stale_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_superseded_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_denied_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_budget_count = 0L
-    private var debug_detail_reference_lod_prefetch_async_ns = 0L
-    private var debug_detail_reference_lod_prefetch_async_max_ns = 0L
-    private var debug_detail_reference_protected_count = 0
-    private var debug_detail_reference_previous_protected_count = 0
-    private var debug_detail_reference_history_start_count = 0
-    private var debug_detail_reference_history_count = 0
-    private var debug_detail_reference_history_stale_removed_count = 0
-    private var debug_detail_reference_history_overflow_removed_count = 0
-    private var debug_detail_local_reference_ns = 0L
-    private var debug_detail_satellite_request_call_count = 0
-    private var debug_detail_satellite_request_exact_count = 0
-    private var debug_detail_satellite_request_prefetch_count = 0
-    private var debug_detail_satellite_request_buffer_count = 0
-    private var debug_detail_satellite_request_parent_count = 0
-    private var debug_detail_satellite_request_memory_hit_count = 0
-    private var debug_detail_satellite_request_queued_count = 0
-    private var debug_detail_satellite_request_admitted_count = 0
-    private val debug_satellite_decode_file_count = AtomicLong()
-    private val debug_satellite_decode_network_count = AtomicLong()
-    private val debug_satellite_cache_put_count = AtomicLong()
-    private val debug_satellite_cache_evict_count = AtomicLong()
-    private var debug_detail_satellite_decode_file_count = 0L
-    private var debug_detail_satellite_decode_network_count = 0L
-    private var debug_detail_satellite_cache_put_count = 0L
-    private var debug_detail_satellite_cache_evict_count = 0L
-
     fun draw_tiles(
         canvas: Canvas,
         viewport: Viewport,
         state: MapTileRenderState,
         style: MapTileRenderStyle
     ): String {
-        reset_detail_timing()
         val now_ms = SystemClock.elapsedRealtime()
         paint.style = Paint.Style.FILL
         paint.color = style.map_empty
@@ -335,19 +208,17 @@ internal class SatelliteMapTileRenderer(
                     tile_zoom = lower_tile_zoom
                 )
         val interim_drawn = if (interim_draw_needed) {
-            val detail_start_ns = detail_timing_start_ns()
             draw_interim_tiles(
                 canvas = canvas,
                 viewport = viewport,
                 state = state,
                 now_ms = now_ms
-            ).also { debug_detail_interim_ns += detail_timing_elapsed_ns(detail_start_ns) }
+            )
         } else {
             false
         }
         loaded_interim_tile_buffer.clear()
 
-        val lower_detail_start_ns = detail_timing_start_ns()
         val lower_stats = draw_tile_grid_layer(
             canvas = canvas,
             viewport = viewport,
@@ -362,9 +233,8 @@ internal class SatelliteMapTileRenderer(
             retain_as_interim = true,
             loaded_interim_tiles = loaded_interim_tile_buffer,
             request_generation = request_generation
-        ).also { debug_detail_lower_ns += detail_timing_elapsed_ns(lower_detail_start_ns) }
+        )
 
-        val upper_detail_start_ns = detail_timing_start_ns()
         val upper_stats = if (has_upper_lod && upper_lod_alpha > MIN_LAYER_ALPHA) {
             draw_tile_grid_layer(
                 canvas = canvas,
@@ -398,32 +268,21 @@ internal class SatelliteMapTileRenderer(
                 fallback_drawn = 0,
                 fading = false
             )
-        }.also { debug_detail_upper_ns += detail_timing_elapsed_ns(upper_detail_start_ns) }
+        }
 
         val required_tiles_ready = lower_stats.requested == 0 &&
                 (!has_upper_lod || upper_lod_alpha <= MIN_LAYER_ALPHA || upper_stats.requested == 0)
 
         if (loaded_interim_tile_buffer.isNotEmpty()) {
-            val merge_detail_start_ns = detail_timing_start_ns()
             if (blend_active || !required_tiles_ready) {
                 merge_interim_tiles(loaded_interim_tile_buffer)
             } else {
                 replace_interim_tiles(loaded_interim_tile_buffer)
             }
-            debug_detail_merge_ns += detail_timing_elapsed_ns(merge_detail_start_ns)
         }
 
-        val reference_detail_start_ns = detail_timing_start_ns()
-        val reference_generation_detail_start_ns = detail_timing_start_ns()
         val reference_request_generation = begin_reference_tile_request_generation()
-        debug_detail_reference_generation_ns += detail_timing_elapsed_ns(
-            reference_generation_detail_start_ns
-        )
-        val reference_protection_detail_start_ns = detail_timing_start_ns()
         begin_reference_tile_protection_frame()
-        debug_detail_reference_protection_ns += detail_timing_elapsed_ns(
-            reference_protection_detail_start_ns
-        )
         val label_stats = draw_reference_overlay_layers(
             canvas = canvas,
             viewport = viewport,
@@ -437,260 +296,25 @@ internal class SatelliteMapTileRenderer(
             allow_exact_requests = true,
             request_generation = reference_request_generation
         )
-        debug_detail_reference_ns += detail_timing_elapsed_ns(reference_detail_start_ns)
         val settings_border_overlay_enabled =
             state.reference_overlay_layers.contains(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
-        val local_reference_detail_start_ns = detail_timing_start_ns()
-        val local_reference_stats = local_reference_renderer.draw(
+        local_reference_renderer.draw(
             canvas = canvas,
             viewport = viewport,
             enabled = state.map_borders_enabled && !settings_border_overlay_enabled,
             interaction_active = state.interaction_active,
             label_text_scale = state.map_label_text_scale
         )
-        debug_detail_local_reference_ns += detail_timing_elapsed_ns(local_reference_detail_start_ns)
 
         if (lower_stats.fading || upper_stats.fading || label_stats.fading) {
             request_redraw()
         }
-
-        val visible = lower_stats.visible + upper_stats.visible
-        val loaded = lower_stats.loaded + upper_stats.loaded
-        val requested = lower_stats.requested + upper_stats.requested
-        val fallback_drawn = lower_stats.fallback_drawn + upper_stats.fallback_drawn
-        debug_last_tile_summary =
-            " mapTiles=$visible loaded=$loaded requested=$requested fallback=$fallback_drawn " +
-                    "satLod=${lower_tile_zoom}->${upper_tile_zoom} lodAlpha=${
-                        "%.2f".format(
-                            Locale.US,
-                            upper_lod_alpha
-                        )
-                    } " +
-                    "blend=$blend_active interim=${interim_tiles.size} interimDraw=$interim_drawn labels=${label_stats.loaded}/${label_stats.visible} " +
-                    "labelReq=${label_stats.requested} labelFallback=${label_stats.fallback_drawn}" +
-                    label_stats.debug_summary + local_reference_stats.summary() + detail_timing_summary() + " "
 
         return if (lower_stats.requested == 0 && lower_stats.loaded > 0) {
             "${TileSource.SATELLITE.display_name} loaded"
         } else {
             "Loading ${TileSource.SATELLITE.display_name.lowercase(Locale.US)} tiles"
         }
-    }
-
-    private fun reset_detail_timing() {
-        if (!debug_collect_detail_timing) return
-        debug_detail_interim_ns = 0L
-        debug_detail_interim_retain_new_count = 0
-        debug_detail_interim_retain_reuse_count = 0
-        debug_detail_lower_ns = 0L
-        debug_detail_upper_ns = 0L
-        debug_detail_merge_ns = 0L
-        debug_detail_reference_ns = 0L
-        debug_detail_reference_plan_ns = 0L
-        debug_detail_reference_draw_ns = 0L
-        debug_detail_reference_prefetch_ns = 0L
-        debug_detail_reference_alpha_ns = 0L
-        debug_detail_reference_bookkeeping_ns = 0L
-        debug_detail_reference_generation_ns = 0L
-        debug_detail_reference_protection_ns = 0L
-        debug_detail_reference_overlay_count = 0
-        debug_detail_reference_prefetch_call_count = 0
-        debug_detail_reference_prefetch_cpu_ns = 0L
-        debug_detail_reference_prefetch_wait_ns = 0L
-        debug_detail_reference_prefetch_cpu_missing_count = 0
-        debug_detail_reference_prefetch_range_ns = 0L
-        debug_detail_reference_prefetch_enum_ns = 0L
-        debug_detail_reference_prefetch_memory_lookup_ns = 0L
-        debug_detail_reference_prefetch_url_ns = 0L
-        debug_detail_reference_prefetch_submit_ns = 0L
-        debug_detail_reference_prefetch_tile_count = 0
-        debug_detail_reference_prefetch_memory_hit_count = 0
-        debug_detail_reference_prefetch_miss_count = 0
-        debug_detail_reference_prefetch_submitted_count = 0
-        debug_detail_reference_prefetch_queued_count = 0
-        debug_detail_reference_prefetch_queued_same_generation_count = 0
-        debug_detail_reference_prefetch_queued_recent_generation_count = 0
-        debug_detail_reference_prefetch_throttled_count = 0
-        debug_detail_reference_prefetch_lod_throttled_count = 0
-        debug_detail_reference_prefetch_pan_throttled_count = 0
-        debug_detail_reference_prefetch_lod_call_count = 0
-        debug_detail_reference_prefetch_pan_call_count = 0
-        debug_detail_reference_prefetch_lod_tile_count = 0
-        debug_detail_reference_prefetch_pan_tile_count = 0
-        debug_detail_reference_prefetch_lod_submitted_count = 0
-        debug_detail_reference_prefetch_pan_submitted_count = 0
-        debug_detail_reference_prefetch_lod_queued_count = 0
-        debug_detail_reference_prefetch_pan_queued_count = 0
-        debug_detail_reference_prefetch_lod_max_grid_count = 0
-        debug_detail_reference_prefetch_pan_max_grid_count = 0
-        debug_detail_reference_prefetch_memory_recheck_count = 0
-        debug_detail_reference_prefetch_denied_count = 0
-        debug_detail_reference_prefetch_max_grid_count = 0
-        debug_detail_reference_prefetch_budget_count = 0
-        debug_detail_reference_prefetch_pan_budget_count = 0
-        debug_detail_reference_prefetch_lod_budget_count = 0
-        debug_detail_reference_lod_prefetch_async_offered_count =
-            debug_reference_lod_prefetch_async_offered_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_coalesced_count =
-            debug_reference_lod_prefetch_async_coalesced_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_batch_count =
-            debug_reference_lod_prefetch_async_batch_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_plan_count =
-            debug_reference_lod_prefetch_async_plan_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_tile_count =
-            debug_reference_lod_prefetch_async_tile_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_memory_hit_count =
-            debug_reference_lod_prefetch_async_memory_hit_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_miss_count =
-            debug_reference_lod_prefetch_async_miss_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_submitted_count =
-            debug_reference_lod_prefetch_async_submitted_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_queued_count =
-            debug_reference_lod_prefetch_async_queued_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_memory_recheck_count =
-            debug_reference_lod_prefetch_async_memory_recheck_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_stale_count =
-            debug_reference_lod_prefetch_async_stale_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_superseded_count =
-            debug_reference_lod_prefetch_async_superseded_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_denied_count =
-            debug_reference_lod_prefetch_async_denied_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_budget_count =
-            debug_reference_lod_prefetch_async_budget_count.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_ns =
-            debug_reference_lod_prefetch_async_ns.getAndSet(0L)
-        debug_detail_reference_lod_prefetch_async_max_ns =
-            debug_reference_lod_prefetch_async_max_ns.getAndSet(0L)
-        debug_detail_reference_protected_count = 0
-        debug_detail_reference_previous_protected_count = 0
-        debug_detail_reference_history_start_count = 0
-        debug_detail_reference_history_count = 0
-        debug_detail_reference_history_stale_removed_count = 0
-        debug_detail_reference_history_overflow_removed_count = 0
-        debug_detail_local_reference_ns = 0L
-        debug_detail_satellite_request_call_count = 0
-        debug_detail_satellite_request_exact_count = 0
-        debug_detail_satellite_request_prefetch_count = 0
-        debug_detail_satellite_request_buffer_count = 0
-        debug_detail_satellite_request_parent_count = 0
-        debug_detail_satellite_request_memory_hit_count = 0
-        debug_detail_satellite_request_queued_count = 0
-        debug_detail_satellite_request_admitted_count = 0
-        debug_detail_satellite_decode_file_count = debug_satellite_decode_file_count.getAndSet(0L)
-        debug_detail_satellite_decode_network_count =
-            debug_satellite_decode_network_count.getAndSet(0L)
-        debug_detail_satellite_cache_put_count = debug_satellite_cache_put_count.getAndSet(0L)
-        debug_detail_satellite_cache_evict_count = debug_satellite_cache_evict_count.getAndSet(0L)
-    }
-
-    private fun detail_timing_start_ns(): Long {
-        return if (debug_collect_detail_timing) SystemClock.elapsedRealtimeNanos() else 0L
-    }
-
-    private fun detail_timing_elapsed_ns(start_ns: Long): Long {
-        return if (debug_collect_detail_timing && start_ns > 0L) {
-            SystemClock.elapsedRealtimeNanos() - start_ns
-        } else {
-            0L
-        }
-    }
-
-    private fun detail_timing_summary(): String {
-        if (!debug_collect_detail_timing) return ""
-        val reference_bucketed_ns = debug_detail_reference_plan_ns +
-                debug_detail_reference_draw_ns +
-                debug_detail_reference_prefetch_ns +
-                debug_detail_reference_alpha_ns +
-                debug_detail_reference_bookkeeping_ns +
-                debug_detail_reference_generation_ns +
-                debug_detail_reference_protection_ns
-        val reference_other_ns =
-            (debug_detail_reference_ns - reference_bucketed_ns).coerceAtLeast(0L)
-        val satellite_cache_size = synchronized(tile_cache) { tile_cache.size }
-        val reference_cache_size = synchronized(reference_tile_cache) { reference_tile_cache.size }
-        return " mapDetail interim=${debug_detail_interim_ns.ms_debug()} " +
-                "interimKeepNew=$debug_detail_interim_retain_new_count " +
-                "interimKeepReuse=$debug_detail_interim_retain_reuse_count " +
-                "lower=${debug_detail_lower_ns.ms_debug()} " +
-                "upper=${debug_detail_upper_ns.ms_debug()} merge=${debug_detail_merge_ns.ms_debug()} " +
-                "reference=${debug_detail_reference_ns.ms_debug()} refPlan=${debug_detail_reference_plan_ns.ms_debug()} " +
-                "refDraw=${debug_detail_reference_draw_ns.ms_debug()} refPrefetch=${debug_detail_reference_prefetch_ns.ms_debug()} " +
-                "refAlpha=${debug_detail_reference_alpha_ns.ms_debug()} refBook=${debug_detail_reference_bookkeeping_ns.ms_debug()} " +
-                "refGen=${debug_detail_reference_generation_ns.ms_debug()} refProtect=${debug_detail_reference_protection_ns.ms_debug()} " +
-                "refOther=${reference_other_ns.ms_debug()} refOvl=$debug_detail_reference_overlay_count " +
-                "refPf=$debug_detail_reference_prefetch_call_count refProt=$debug_detail_reference_protected_count " +
-                "refPfCpu=${debug_detail_reference_prefetch_cpu_ns.ms_debug()} " +
-                "refPfWait=${debug_detail_reference_prefetch_wait_ns.ms_debug()} " +
-                "refPfCpuMiss=$debug_detail_reference_prefetch_cpu_missing_count " +
-                "refPfRange=${debug_detail_reference_prefetch_range_ns.ms_debug()} " +
-                "refPfEnum=${debug_detail_reference_prefetch_enum_ns.ms_debug()} " +
-                "refPfMemLookup=${debug_detail_reference_prefetch_memory_lookup_ns.ms_debug()} " +
-                "refPfUrl=${debug_detail_reference_prefetch_url_ns.ms_debug()} " +
-                "refPfSubmitNs=${debug_detail_reference_prefetch_submit_ns.ms_debug()} " +
-                "refPfTiles=$debug_detail_reference_prefetch_tile_count " +
-                "refPfMem=$debug_detail_reference_prefetch_memory_hit_count " +
-                "refPfMiss=$debug_detail_reference_prefetch_miss_count " +
-                "refPfSubmit=$debug_detail_reference_prefetch_submitted_count " +
-                "refPfQueued=$debug_detail_reference_prefetch_queued_count " +
-                "refPfQSame=$debug_detail_reference_prefetch_queued_same_generation_count " +
-                "refPfQRecent=$debug_detail_reference_prefetch_queued_recent_generation_count " +
-                "refPfThrot=$debug_detail_reference_prefetch_throttled_count " +
-                "refPfLodThrot=$debug_detail_reference_prefetch_lod_throttled_count " +
-                "refPfPanThrot=$debug_detail_reference_prefetch_pan_throttled_count " +
-                "refPfLod=$debug_detail_reference_prefetch_lod_call_count " +
-                "refPfPan=$debug_detail_reference_prefetch_pan_call_count " +
-                "refPfLodTiles=$debug_detail_reference_prefetch_lod_tile_count " +
-                "refPfPanTiles=$debug_detail_reference_prefetch_pan_tile_count " +
-                "refPfLodSub=$debug_detail_reference_prefetch_lod_submitted_count " +
-                "refPfPanSub=$debug_detail_reference_prefetch_pan_submitted_count " +
-                "refPfLodQ=$debug_detail_reference_prefetch_lod_queued_count " +
-                "refPfPanQ=$debug_detail_reference_prefetch_pan_queued_count " +
-                "refPfLodMaxGrid=$debug_detail_reference_prefetch_lod_max_grid_count " +
-                "refPfPanMaxGrid=$debug_detail_reference_prefetch_pan_max_grid_count " +
-                "refPfMem2=$debug_detail_reference_prefetch_memory_recheck_count " +
-                "refPfDeny=$debug_detail_reference_prefetch_denied_count " +
-                "refPfMaxGrid=$debug_detail_reference_prefetch_max_grid_count " +
-                "refPfBudget=$debug_detail_reference_prefetch_budget_count " +
-                "refPfPanBudget=$debug_detail_reference_prefetch_pan_budget_count " +
-                "refPfLodBudget=$debug_detail_reference_prefetch_lod_budget_count " +
-                "refPfAsyncOffer=$debug_detail_reference_lod_prefetch_async_offered_count " +
-                "refPfAsyncCoalesce=$debug_detail_reference_lod_prefetch_async_coalesced_count " +
-                "refPfAsyncBatch=$debug_detail_reference_lod_prefetch_async_batch_count " +
-                "refPfAsyncPlan=$debug_detail_reference_lod_prefetch_async_plan_count " +
-                "refPfAsyncTiles=$debug_detail_reference_lod_prefetch_async_tile_count " +
-                "refPfAsyncMem=$debug_detail_reference_lod_prefetch_async_memory_hit_count " +
-                "refPfAsyncMiss=$debug_detail_reference_lod_prefetch_async_miss_count " +
-                "refPfAsyncSubmit=$debug_detail_reference_lod_prefetch_async_submitted_count " +
-                "refPfAsyncQueued=$debug_detail_reference_lod_prefetch_async_queued_count " +
-                "refPfAsyncMem2=$debug_detail_reference_lod_prefetch_async_memory_recheck_count " +
-                "refPfAsyncStale=$debug_detail_reference_lod_prefetch_async_stale_count " +
-                "refPfAsyncSuper=$debug_detail_reference_lod_prefetch_async_superseded_count " +
-                "refPfAsyncDeny=$debug_detail_reference_lod_prefetch_async_denied_count " +
-                "refPfAsyncBudget=$debug_detail_reference_lod_prefetch_async_budget_count " +
-                "refPfAsyncNs=${debug_detail_reference_lod_prefetch_async_ns.ms_debug()} " +
-                "refPfAsyncMaxNs=${debug_detail_reference_lod_prefetch_async_max_ns.ms_debug()} " +
-                "refPrev=$debug_detail_reference_previous_protected_count " +
-                "refHistStart=$debug_detail_reference_history_start_count refHist=$debug_detail_reference_history_count " +
-                "refStale=$debug_detail_reference_history_stale_removed_count " +
-                "refOverflow=$debug_detail_reference_history_overflow_removed_count " +
-                "satReq=$debug_detail_satellite_request_call_count " +
-                "satReqExact=$debug_detail_satellite_request_exact_count " +
-                "satReqPrefetch=$debug_detail_satellite_request_prefetch_count " +
-                "satReqBuffer=$debug_detail_satellite_request_buffer_count " +
-                "satReqParent=$debug_detail_satellite_request_parent_count " +
-                "satReqMem=$debug_detail_satellite_request_memory_hit_count " +
-                "satReqQueued=$debug_detail_satellite_request_queued_count " +
-                "satReqAdmit=$debug_detail_satellite_request_admitted_count " +
-                "satDecodeFile=$debug_detail_satellite_decode_file_count " +
-                "satDecodeNet=$debug_detail_satellite_decode_network_count " +
-                "satCachePut=$debug_detail_satellite_cache_put_count " +
-                "satCacheEvict=$debug_detail_satellite_cache_evict_count " +
-                "satCache=$satellite_cache_size refCache=$reference_cache_size " +
-                "localRef=${debug_detail_local_reference_ns.ms_debug()}"
-    }
-
-    private fun Long.ms_debug(): String {
-        return String.format(Locale.US, "%.2fms", this / 1_000_000.0)
     }
 
     fun clear() {
@@ -724,7 +348,6 @@ internal class SatelliteMapTileRenderer(
         last_satellite_buffer_request_ms = 0L
         last_satellite_prefetch_request_key = null
         last_satellite_prefetch_request_ms = 0L
-        debug_last_tile_summary = ""
     }
 
     fun reset_transitions() {
@@ -732,7 +355,6 @@ internal class SatelliteMapTileRenderer(
         last_satellite_buffer_request_ms = 0L
         last_satellite_prefetch_request_key = null
         last_satellite_prefetch_request_ms = 0L
-        debug_last_tile_summary = ""
     }
 
     fun shutdown() {
@@ -958,11 +580,9 @@ internal class SatelliteMapTileRenderer(
         var requested = 0
         var fallback_drawn = 0
         var fading = false
-        val debug_parts = ArrayList<String>(overlays.size)
         val deferred_lod_prefetch_plans = ArrayList<ReferencePrefetchGridPlan>(overlays.size)
 
         for (overlay in overlays) {
-            val plan_detail_start_ns = detail_timing_start_ns()
             val plan = reference_overlay_draw_plan(
                 overlay = overlay,
                 viewport = viewport,
@@ -973,10 +593,7 @@ internal class SatelliteMapTileRenderer(
                 upper_lod_alpha = upper_lod_alpha,
                 prefetch_upper_lod = prefetch_upper_lod
             )
-            debug_detail_reference_plan_ns += detail_timing_elapsed_ns(plan_detail_start_ns)
             if (plan == null) continue
-            debug_detail_reference_overlay_count++
-            val alpha_detail_start_ns = detail_timing_start_ns()
             val overlay_alpha = reference_overlay_zoom_alpha(
                 overlay = overlay,
                 viewport_zoom = viewport.zoom
@@ -999,7 +616,6 @@ internal class SatelliteMapTileRenderer(
                 viewport_zoom = viewport.zoom,
                 overlay_alpha = overlay_alpha
             )
-            debug_detail_reference_alpha_ns += detail_timing_elapsed_ns(alpha_detail_start_ns)
             if (!requests_allowed_for_zoom && overlay_alpha <= MIN_LAYER_ALPHA) {
                 continue
             }
@@ -1007,7 +623,6 @@ internal class SatelliteMapTileRenderer(
             var overlay_loaded = 0
             var overlay_requested = 0
             var overlay_fallback_drawn = 0
-            val draw_detail_start_ns = detail_timing_start_ns()
             val draw_stats = draw_reference_overlay_grid(
                 canvas = canvas,
                 viewport = viewport,
@@ -1022,14 +637,12 @@ internal class SatelliteMapTileRenderer(
                 request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
                 request_generation = request_generation
             )
-            debug_detail_reference_draw_ns += detail_timing_elapsed_ns(draw_detail_start_ns)
             overlay_visible += draw_stats.visible
             overlay_loaded += draw_stats.loaded
             overlay_requested += draw_stats.requested
             overlay_fallback_drawn += draw_stats.fallback_drawn
             fading = fading || draw_stats.fading
 
-            val prefetch_detail_start_ns = detail_timing_start_ns()
             request_reference_overlay_prefetches(
                 viewport = viewport,
                 state = state,
@@ -1040,23 +653,10 @@ internal class SatelliteMapTileRenderer(
                 request_generation = request_generation,
                 deferred_lod_prefetch_plans = deferred_lod_prefetch_plans
             )
-            debug_detail_reference_prefetch_ns += detail_timing_elapsed_ns(prefetch_detail_start_ns)
-            val bookkeeping_detail_start_ns = detail_timing_start_ns()
             visible += overlay_visible
             loaded += overlay_loaded
             requested += overlay_requested
             fallback_drawn += overlay_fallback_drawn
-            debug_parts += " ${reference_overlay_debug_name(overlay)}=$overlay_loaded/$overlay_visible" +
-                    " req=$overlay_requested fallback=$overlay_fallback_drawn lod=${plan.draw_tile_zoom}" +
-                    " ready=${plan.coverage.ready}/${plan.coverage.visible}" +
-                    " center=${plan.coverage.center_ready}/${plan.coverage.center_visible}" +
-                    " visual=${plan.coverage.visual_ready}/${plan.coverage.visible}" +
-                    " centerVisual=${plan.coverage.center_visual_ready}/${plan.coverage.center_visible}" +
-                    " alpha=${draw_alpha.alpha_debug()} coverageAlpha=${coverage_alpha.alpha_debug()}" +
-                    " rawCoverageAlpha=${raw_coverage_alpha.alpha_debug()}"
-            debug_detail_reference_bookkeeping_ns += detail_timing_elapsed_ns(
-                bookkeeping_detail_start_ns
-            )
         }
         offer_reference_lod_prefetch_batch(deferred_lod_prefetch_plans)
 
@@ -1065,8 +665,7 @@ internal class SatelliteMapTileRenderer(
             loaded = loaded,
             requested = requested,
             fallback_drawn = fallback_drawn,
-            fading = fading,
-            debug_summary = debug_parts.joinToString(separator = "")
+            fading = fading
         )
     }
 
@@ -1081,8 +680,6 @@ internal class SatelliteMapTileRenderer(
         deferred_lod_prefetch_plans: MutableList<ReferencePrefetchGridPlan>?
     ) {
         for (prefetch_tile_zoom in plan.prefetch_tile_zooms) {
-            debug_detail_reference_prefetch_call_count++
-            debug_detail_reference_prefetch_lod_call_count++
             val prefetch_plan = build_reference_prefetch_grid_plan(
                 viewport = viewport,
                 state = state,
@@ -1112,8 +709,6 @@ internal class SatelliteMapTileRenderer(
             viewport_zoom = viewport.zoom
         )
         if (pan_prefetch_buffer > 0) {
-            debug_detail_reference_prefetch_call_count++
-            debug_detail_reference_prefetch_pan_call_count++
             request_reference_overlay_prefetch_grid(
                 viewport = viewport,
                 state = state,
@@ -1142,14 +737,8 @@ internal class SatelliteMapTileRenderer(
         request_generation: Long
     ): ReferencePrefetchGridPlan? {
         if (!allow_exact_requests) {
-            if (debug_collect_detail_timing) {
-                debug_detail_reference_prefetch_denied_count++
-                debug_reference_lod_prefetch_async_denied_count.incrementAndGet()
-            }
             return null
         }
-        val collect_detail = debug_collect_detail_timing
-        val range_detail_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
         val left_world = viewport.center_x - viewport.width / 2.0
@@ -1165,11 +754,6 @@ internal class SatelliteMapTileRenderer(
             overlay = overlay,
             base_priority = request_priority_base
         )
-        if (collect_detail) {
-            debug_detail_reference_prefetch_range_ns += detail_timing_elapsed_ns(
-                range_detail_start_ns
-            )
-        }
         return ReferencePrefetchGridPlan(
             epoch = 0L,
             overlay = overlay,
@@ -1193,14 +777,6 @@ internal class SatelliteMapTileRenderer(
         val should_schedule = synchronized(reference_lod_prefetch_lock) {
             val epoch = reference_lod_prefetch_epoch + 1L
             reference_lod_prefetch_epoch = epoch
-            if (debug_collect_detail_timing) {
-                debug_reference_lod_prefetch_async_offered_count.addAndGet(plans.size.toLong())
-                if (reference_lod_prefetch_latest_plans.isNotEmpty()) {
-                    debug_reference_lod_prefetch_async_coalesced_count.addAndGet(
-                        reference_lod_prefetch_latest_plans.size.toLong()
-                    )
-                }
-            }
             reference_lod_prefetch_latest_plans = plans.map { it.copy(epoch = epoch) }
             if (reference_lod_prefetch_scheduled) {
                 false
@@ -1222,10 +798,6 @@ internal class SatelliteMapTileRenderer(
         if (key == last_reference_lod_prefetch_batch_key &&
             now_ms - last_reference_lod_prefetch_batch_ms < REFERENCE_LOD_PREFETCH_REQUEST_THROTTLE_MS
         ) {
-            if (debug_collect_detail_timing) {
-                debug_detail_reference_prefetch_throttled_count++
-                debug_detail_reference_prefetch_lod_throttled_count += plans.size
-            }
             return true
         }
         last_reference_lod_prefetch_batch_key = key
@@ -1289,22 +861,11 @@ internal class SatelliteMapTileRenderer(
     }
 
     private fun drain_reference_lod_prefetch_batch(plans: List<ReferencePrefetchGridPlan>) {
-        val collect_detail = debug_collect_detail_timing
-        val batch_start_ns = if (collect_detail) SystemClock.elapsedRealtimeNanos() else 0L
-        val stats = if (collect_detail) {
-            ReferencePrefetchDrainStats(
-                batch_count = 1L,
-                plan_count = plans.size.toLong()
-            )
-        } else {
-            null
-        }
         val budget = ReferencePrefetchBudget(
             remaining_submissions = REFERENCE_LOD_PREFETCH_MAX_ADMITTED_PER_BATCH
         )
         for (plan in plans) {
             if (!reference_lod_prefetch_epoch_current(plan.epoch)) {
-                stats?.let { it.superseded_count++ }
                 break
             }
             if (!reference_request_generation_recent(
@@ -1312,26 +873,19 @@ internal class SatelliteMapTileRenderer(
                     max_generation_age = plan.request_stale_generation_tolerance
                 )
             ) {
-                stats?.let { it.stale_count++ }
                 continue
             }
-            if (!request_reference_lod_prefetch_grid_from_plan(plan, stats, budget)) break
-        }
-        if (collect_detail && stats != null) {
-            val elapsed_ns = (SystemClock.elapsedRealtimeNanos() - batch_start_ns).coerceAtLeast(0L)
-            publish_reference_lod_prefetch_async_stats(stats, elapsed_ns)
+            if (!request_reference_lod_prefetch_grid_from_plan(plan, budget)) break
         }
     }
 
     private fun request_reference_lod_prefetch_grid_from_plan(
         plan: ReferencePrefetchGridPlan,
-        stats: ReferencePrefetchDrainStats?,
         budget: ReferencePrefetchBudget
     ): Boolean {
         for (ty in plan.first_tile_y..plan.last_tile_y) {
             if (ty !in 0 until plan.max_tile) continue
             if (!reference_lod_prefetch_epoch_current(plan.epoch)) {
-                stats?.let { it.superseded_count++ }
                 return false
             }
             if (!reference_request_generation_recent(
@@ -1339,22 +893,17 @@ internal class SatelliteMapTileRenderer(
                     max_generation_age = plan.request_stale_generation_tolerance
                 )
             ) {
-                stats?.let { it.stale_count++ }
                 return true
             }
             for (tx_raw in plan.first_tile_x..plan.last_tile_x) {
                 if (budget.remaining_submissions <= 0) {
-                    stats?.let { it.budget_exhausted_count++ }
                     return false
                 }
-                stats?.let { it.tile_count++ }
                 val tx = ((tx_raw % plan.max_tile) + plan.max_tile) % plan.max_tile
                 val key = "${plan.cache_key}/${plan.tile_zoom}/$tx/$ty"
                 if (reference_tile_bitmap(key) != null) {
-                    stats?.let { it.memory_hit_count++ }
                     continue
                 }
-                stats?.let { it.miss_count++ }
                 val admission = request_reference_tile(
                     z = plan.tile_zoom,
                     x = tx,
@@ -1371,48 +920,17 @@ internal class SatelliteMapTileRenderer(
                 )
                 when (admission) {
                     REFERENCE_TILE_REQUEST_ADMITTED -> {
-                        stats?.let { it.submitted_count++ }
                         budget.remaining_submissions--
                         if (budget.remaining_submissions <= 0) {
-                            stats?.let { it.budget_exhausted_count++ }
                             return false
                         }
                     }
 
-                    REFERENCE_TILE_REQUEST_QUEUED,
-                    REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION,
-                    REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION ->
-                        stats?.let { it.queued_count++ }
-
-                    REFERENCE_TILE_REQUEST_MEMORY_HIT ->
-                        stats?.let { it.memory_recheck_count++ }
-
-                    REFERENCE_TILE_REQUEST_DENIED ->
-                        stats?.let { it.denied_count++ }
+                    else -> Unit
                 }
             }
         }
         return true
-    }
-
-    private fun publish_reference_lod_prefetch_async_stats(
-        stats: ReferencePrefetchDrainStats,
-        elapsed_ns: Long
-    ) {
-        debug_reference_lod_prefetch_async_batch_count.addAndGet(stats.batch_count)
-        debug_reference_lod_prefetch_async_plan_count.addAndGet(stats.plan_count)
-        debug_reference_lod_prefetch_async_tile_count.addAndGet(stats.tile_count)
-        debug_reference_lod_prefetch_async_memory_hit_count.addAndGet(stats.memory_hit_count)
-        debug_reference_lod_prefetch_async_miss_count.addAndGet(stats.miss_count)
-        debug_reference_lod_prefetch_async_submitted_count.addAndGet(stats.submitted_count)
-        debug_reference_lod_prefetch_async_queued_count.addAndGet(stats.queued_count)
-        debug_reference_lod_prefetch_async_memory_recheck_count.addAndGet(stats.memory_recheck_count)
-        debug_reference_lod_prefetch_async_stale_count.addAndGet(stats.stale_count)
-        debug_reference_lod_prefetch_async_superseded_count.addAndGet(stats.superseded_count)
-        debug_reference_lod_prefetch_async_denied_count.addAndGet(stats.denied_count)
-        debug_reference_lod_prefetch_async_budget_count.addAndGet(stats.budget_exhausted_count)
-        debug_reference_lod_prefetch_async_ns.addAndGet(elapsed_ns)
-        update_reference_lod_prefetch_async_max_ns(elapsed_ns)
     }
 
     private fun reference_lod_prefetch_epoch_current(epoch: Long): Boolean {
@@ -1427,14 +945,6 @@ internal class SatelliteMapTileRenderer(
     ): Boolean {
         return synchronized(requested_reference_tiles) {
             current_reference_tile_request_generation - generation <= max_generation_age
-        }
-    }
-
-    private fun update_reference_lod_prefetch_async_max_ns(elapsed_ns: Long) {
-        while (true) {
-            val current = debug_reference_lod_prefetch_async_max_ns.get()
-            if (elapsed_ns <= current) return
-            if (debug_reference_lod_prefetch_async_max_ns.compareAndSet(current, elapsed_ns)) return
         }
     }
 
@@ -2087,11 +1597,8 @@ internal class SatelliteMapTileRenderer(
         request_generation: Long
     ) {
         if (!allow_exact_requests) {
-            if (debug_collect_detail_timing) debug_detail_reference_prefetch_denied_count++
             return
         }
-        val collect_detail = debug_collect_detail_timing
-        val range_detail_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
         val left_world = viewport.center_x - viewport.width / 2.0
@@ -2107,11 +1614,6 @@ internal class SatelliteMapTileRenderer(
             overlay = overlay,
             base_priority = request_priority_base
         )
-        if (collect_detail) {
-            debug_detail_reference_prefetch_range_ns += detail_timing_elapsed_ns(
-                range_detail_start_ns
-            )
-        }
         if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN &&
             should_throttle_reference_pan_prefetch_grid(
                 overlay = overlay,
@@ -2125,55 +1627,25 @@ internal class SatelliteMapTileRenderer(
             return
         }
 
-        var grid_tile_count = 0
-        val grid_detail_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
-        var grid_memory_lookup_ns = 0L
-        var grid_url_ns = 0L
-        var grid_submit_ns = 0L
         var remaining_prefetch_admissions =
             if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
                 REFERENCE_PAN_PREFETCH_MAX_ADMITTED_PER_GRID
             } else {
                 Int.MAX_VALUE
             }
-        var prefetch_budget_exhausted = false
         prefetch_loop@ for (ty in first_tile_y..last_tile_y) {
             if (ty !in 0 until max_tile) continue
             for (tx_raw in first_tile_x..last_tile_x) {
-                if (collect_detail) {
-                    debug_detail_reference_prefetch_tile_count++
-                    grid_tile_count++
-                    if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
-                        debug_detail_reference_prefetch_pan_tile_count++
-                    } else {
-                        debug_detail_reference_prefetch_lod_tile_count++
-                    }
-                }
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${overlay.cache_key}/$tile_zoom/$tx/$ty"
-                val memory_bitmap = if (collect_detail) {
-                    val memory_lookup_start_ns = detail_timing_start_ns()
-                    reference_tile_bitmap(key).also {
-                        grid_memory_lookup_ns += detail_timing_elapsed_ns(memory_lookup_start_ns)
-                    }
-                } else {
-                    reference_tile_bitmap(key)
-                }
+                val memory_bitmap = reference_tile_bitmap(key)
                 if (memory_bitmap != null) {
-                    if (collect_detail) debug_detail_reference_prefetch_memory_hit_count++
                     continue
                 }
                 if (remaining_prefetch_admissions <= 0) {
-                    prefetch_budget_exhausted = true
                     break@prefetch_loop
                 }
-                if (collect_detail) debug_detail_reference_prefetch_miss_count++
-                val url_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
                 val url = overlay.tile_url(tile_zoom, tx, ty)
-                if (collect_detail) {
-                    grid_url_ns += detail_timing_elapsed_ns(url_start_ns)
-                }
-                val submit_start_ns = if (collect_detail) detail_timing_start_ns() else 0L
                 val admission = request_reference_tile(
                     z = tile_zoom,
                     x = tx,
@@ -2188,93 +1660,13 @@ internal class SatelliteMapTileRenderer(
                     redraw_when_loaded = false,
                     speculative = true
                 )
-                if (collect_detail) {
-                    grid_submit_ns += detail_timing_elapsed_ns(submit_start_ns)
-                }
-                if (collect_detail) {
-                    when (admission) {
-                        REFERENCE_TILE_REQUEST_ADMITTED -> {
-                            debug_detail_reference_prefetch_submitted_count++
-                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
-                                debug_detail_reference_prefetch_pan_submitted_count++
-                            } else {
-                                debug_detail_reference_prefetch_lod_submitted_count++
-                            }
-                        }
-
-                        REFERENCE_TILE_REQUEST_QUEUED -> {
-                            debug_detail_reference_prefetch_queued_count++
-                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
-                                debug_detail_reference_prefetch_pan_queued_count++
-                            } else {
-                                debug_detail_reference_prefetch_lod_queued_count++
-                            }
-                        }
-
-                        REFERENCE_TILE_REQUEST_QUEUED_SAME_GENERATION -> {
-                            debug_detail_reference_prefetch_queued_count++
-                            debug_detail_reference_prefetch_queued_same_generation_count++
-                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
-                                debug_detail_reference_prefetch_pan_queued_count++
-                            } else {
-                                debug_detail_reference_prefetch_lod_queued_count++
-                            }
-                        }
-
-                        REFERENCE_TILE_REQUEST_QUEUED_RECENT_GENERATION -> {
-                            debug_detail_reference_prefetch_queued_count++
-                            debug_detail_reference_prefetch_queued_recent_generation_count++
-                            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
-                                debug_detail_reference_prefetch_pan_queued_count++
-                            } else {
-                                debug_detail_reference_prefetch_lod_queued_count++
-                            }
-                        }
-
-                        REFERENCE_TILE_REQUEST_MEMORY_HIT -> debug_detail_reference_prefetch_memory_recheck_count++
-
-                        REFERENCE_TILE_REQUEST_DENIED -> debug_detail_reference_prefetch_denied_count++
-                    }
-                }
                 if (admission == REFERENCE_TILE_REQUEST_ADMITTED) {
                     remaining_prefetch_admissions--
                     if (remaining_prefetch_admissions <= 0) {
-                        prefetch_budget_exhausted = true
                         break@prefetch_loop
                     }
                 }
             }
-        }
-        if (collect_detail && prefetch_budget_exhausted) {
-            debug_detail_reference_prefetch_budget_count++
-            if (prefetch_kind == REFERENCE_PREFETCH_KIND_PAN) {
-                debug_detail_reference_prefetch_pan_budget_count++
-            } else {
-                debug_detail_reference_prefetch_lod_budget_count++
-            }
-        }
-        if (collect_detail) {
-            val grid_total_ns = detail_timing_elapsed_ns(grid_detail_start_ns)
-            debug_detail_reference_prefetch_memory_lookup_ns += grid_memory_lookup_ns
-            debug_detail_reference_prefetch_url_ns += grid_url_ns
-            debug_detail_reference_prefetch_submit_ns += grid_submit_ns
-            debug_detail_reference_prefetch_enum_ns +=
-                (grid_total_ns - grid_memory_lookup_ns - grid_url_ns - grid_submit_ns).coerceAtLeast(
-                    0L
-                )
-        }
-        if (collect_detail && grid_tile_count > debug_detail_reference_prefetch_max_grid_count) {
-            debug_detail_reference_prefetch_max_grid_count = grid_tile_count
-        }
-        if (collect_detail && prefetch_kind == REFERENCE_PREFETCH_KIND_PAN &&
-            grid_tile_count > debug_detail_reference_prefetch_pan_max_grid_count
-        ) {
-            debug_detail_reference_prefetch_pan_max_grid_count = grid_tile_count
-        }
-        if (collect_detail && prefetch_kind == REFERENCE_PREFETCH_KIND_LOD &&
-            grid_tile_count > debug_detail_reference_prefetch_lod_max_grid_count
-        ) {
-            debug_detail_reference_prefetch_lod_max_grid_count = grid_tile_count
         }
     }
 
@@ -2292,10 +1684,6 @@ internal class SatelliteMapTileRenderer(
         if (last_ms != null &&
             now_ms - last_ms < REFERENCE_PAN_PREFETCH_REQUEST_THROTTLE_MS
         ) {
-            if (debug_collect_detail_timing) {
-                debug_detail_reference_prefetch_throttled_count++
-                debug_detail_reference_prefetch_pan_throttled_count++
-            }
             return true
         }
         last_reference_pan_prefetch_request_ms[key] = now_ms
@@ -2477,17 +1865,6 @@ internal class SatelliteMapTileRenderer(
                 if (zoom_alpha >= REFERENCE_FULL_ALPHA_SNAP) 1f else zoom_alpha
             }
         }
-    }
-
-    private fun reference_overlay_debug_name(overlay: ReferenceTileOverlay): String {
-        return when (overlay) {
-            ReferenceTileOverlay.WORLD_TRANSPORTATION -> "roads"
-            ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES -> "borders"
-        }
-    }
-
-    private fun Float.alpha_debug(): String {
-        return String.format(Locale.US, "%.2f", this)
     }
 
     private fun reference_tile_bitmap(key: String): Bitmap? {
@@ -2773,9 +2150,6 @@ internal class SatelliteMapTileRenderer(
     private fun begin_reference_tile_request_generation(): Long {
         synchronized(requested_reference_tiles) {
             current_reference_tile_request_generation++
-            val history_start_count = current_reference_tile_request_generations.size
-            var stale_removed_count = 0
-            var overflow_removed_count = 0
             if (current_reference_tile_request_generations.size > REFERENCE_TILE_REQUEST_HISTORY_MAX) {
                 val stale_before =
                     current_reference_tile_request_generation - REFERENCE_TILE_REQUEST_HISTORY_AGE
@@ -2783,7 +2157,6 @@ internal class SatelliteMapTileRenderer(
                 while (iterator.hasNext()) {
                     if (iterator.next().value < stale_before) {
                         iterator.remove()
-                        stale_removed_count++
                     }
                 }
                 val overflow_count =
@@ -2794,18 +2167,9 @@ internal class SatelliteMapTileRenderer(
                         .take(overflow_count)
                         .map { it.key }
                     for (oldest_key in oldest_keys) {
-                        if (current_reference_tile_request_generations.remove(oldest_key) != null) {
-                            overflow_removed_count++
-                        }
+                        current_reference_tile_request_generations.remove(oldest_key)
                     }
                 }
-            }
-            if (debug_collect_detail_timing) {
-                debug_detail_reference_history_start_count = history_start_count
-                debug_detail_reference_history_count =
-                    current_reference_tile_request_generations.size
-                debug_detail_reference_history_stale_removed_count = stale_removed_count
-                debug_detail_reference_history_overflow_removed_count = overflow_removed_count
             }
             return current_reference_tile_request_generation
         }
@@ -2884,14 +2248,8 @@ internal class SatelliteMapTileRenderer(
 
     private fun begin_reference_tile_protection_frame() {
         synchronized(protected_reference_tile_keys) {
-            val protected_count = protected_reference_tile_keys.size
             previous_protected_reference_tile_keys.clear()
             previous_protected_reference_tile_keys.addAll(protected_reference_tile_keys)
-            if (debug_collect_detail_timing) {
-                debug_detail_reference_protected_count = protected_count
-                debug_detail_reference_previous_protected_count =
-                    previous_protected_reference_tile_keys.size
-            }
             protected_reference_tile_keys.clear()
         }
     }
@@ -3203,7 +2561,6 @@ internal class SatelliteMapTileRenderer(
         ) {
             existing.last_used_ms = now_ms
             loaded_interim_tiles += existing
-            debug_detail_interim_retain_reuse_count++
             return
         }
         loaded_interim_tiles += InterimRasterTile(
@@ -3215,7 +2572,6 @@ internal class SatelliteMapTileRenderer(
             bitmap = bitmap,
             last_used_ms = now_ms
         )
-        debug_detail_interim_retain_new_count++
     }
 
     private fun prune_interim_tiles(now_ms: Long) {
@@ -3486,37 +2842,15 @@ internal class SatelliteMapTileRenderer(
         request_generation: Long,
         request_priority: Int
     ) {
-        if (debug_collect_detail_timing) {
-            debug_detail_satellite_request_call_count++
-            when (request_priority) {
-                SATELLITE_TILE_REQUEST_PRIORITY_EXACT ->
-                    debug_detail_satellite_request_exact_count++
-
-                SATELLITE_TILE_REQUEST_PRIORITY_PREFETCH ->
-                    debug_detail_satellite_request_prefetch_count++
-
-                SATELLITE_TILE_REQUEST_PRIORITY_BUFFER ->
-                    debug_detail_satellite_request_buffer_count++
-
-                else -> {
-                    if (request_priority < SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE) {
-                        debug_detail_satellite_request_parent_count++
-                    }
-                }
-            }
-        }
         if (tile_bitmap(z, x, y, key, state) != null) {
-            if (debug_collect_detail_timing) debug_detail_satellite_request_memory_hit_count++
             return
         }
         synchronized(requested_tiles) {
             if (requested_tiles.contains(key)) {
-                if (debug_collect_detail_timing) debug_detail_satellite_request_queued_count++
                 return
             }
             requested_tiles += key
         }
-        if (debug_collect_detail_timing) debug_detail_satellite_request_admitted_count++
         satellite_tile_executor.execute(
             SatelliteTileRequestTask(
                 generation = request_generation,
@@ -3540,9 +2874,6 @@ internal class SatelliteMapTileRenderer(
                             val bitmap =
                                 BitmapFactory.decodeFile(file.absolutePath, decode_options())
                             if (bitmap != null) {
-                                if (debug_collect_detail_timing) {
-                                    debug_satellite_decode_file_count.incrementAndGet()
-                                }
                                 synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
                                 return@tileTask
                             }
@@ -3573,9 +2904,6 @@ internal class SatelliteMapTileRenderer(
                                 decode_options()
                             )
                             if (bitmap != null) {
-                                if (debug_collect_detail_timing) {
-                                    debug_satellite_decode_network_count.incrementAndGet()
-                                }
                                 synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
                                 redrew_when_loaded = true
                                 request_redraw()
@@ -3636,13 +2964,11 @@ internal class SatelliteMapTileRenderer(
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
         val is_new = !tile_cache.containsKey(key)
         tile_cache[key] = bitmap
-        if (debug_collect_detail_timing) debug_satellite_cache_put_count.incrementAndGet()
         if (is_new) tile_loaded_elapsed_ms[key] = SystemClock.elapsedRealtime()
         while (tile_cache.size > MAX_MEMORY_TILES) {
             val first_key = tile_cache.keys.firstOrNull() ?: break
             tile_cache.remove(first_key)
             tile_loaded_elapsed_ms.remove(first_key)
-            if (debug_collect_detail_timing) debug_satellite_cache_evict_count.incrementAndGet()
         }
     }
 
@@ -3779,7 +3105,6 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_TILE_REQUEST_DENIED = 5
         const val REFERENCE_PREFETCH_KIND_LOD = 0
         const val REFERENCE_PREFETCH_KIND_PAN = 1
-        const val REFERENCE_PREFETCH_TRACE_SECTION = "FlightAlert.refPrefetch"
         const val REFERENCE_BOUNDARIES_REQUEST_PRIORITY_OFFSET = 0
         const val REFERENCE_TRANSPORTATION_REQUEST_PRIORITY_OFFSET = 0
         const val REFERENCE_BOUNDARY_PARENT_REQUEST_DEPTH = 4

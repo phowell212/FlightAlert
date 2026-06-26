@@ -17,7 +17,6 @@
 package com.flightalert.details
 
 import com.flightalert.FlightAlertAppSettings
-import android.util.Log
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
 import com.flightalert.sources.AirplanesLiveHttp
@@ -253,18 +252,6 @@ class AircraftDetailsClient(private val user_agent: String) {
             adsb_im_route != null -> AircraftRouteSource.ADSBIM_ROUTESET
             route_codes != null -> AircraftRouteSource.HEXDB_CALLSIGN
             else -> null
-        }
-        if (clean_callsign.isNotEmpty()) {
-            Log.d(
-                DETAILS_TAG,
-                "Route lookup hex=$normalized_hex callsign=$clean_callsign " +
-                        "adsb=${adsb_route?.route ?: "none"} adsbim=${adsb_im_route?.route ?: "none"} hexdb=${
-                            route?.details_json_string_or_null(
-                                "route"
-                            ) ?: "none"
-                        } " +
-                        "origin=${origin?.icao ?: "none"} destination=${destination?.icao ?: "none"}"
-            )
         }
         val feed_type = airplanes_live?.description ?: static_airplanes_live?.description
         val api_manufacturer = faa?.manufacturer ?: adsb_aircraft?.manufacturer
@@ -636,10 +623,7 @@ class AircraftDetailsClient(private val user_agent: String) {
         val route = fetch_json("https://api.adsbdb.com/v0/callsign/$encoded")
             ?.optJSONObject("response")
             ?.optJSONObject("flightroute")
-            ?: run {
-                Log.d(DETAILS_TAG, "ADSBdb route unavailable callsign=${callsign.trim()}")
-                return null
-            }
+            ?: return null
         val origin = route.optJSONObject("origin")?.details_to_adsb_db_airport()
         val destination = route.optJSONObject("destination")?.details_to_adsb_db_airport()
         if (origin == null && destination == null) return null

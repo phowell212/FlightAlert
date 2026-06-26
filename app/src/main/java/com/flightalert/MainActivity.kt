@@ -18,7 +18,6 @@ package com.flightalert
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -83,7 +82,6 @@ class MainActivity : ComponentActivity() {
         view.keepScreenOn = true
         configure_high_refresh_rate(view)
         flight_map_view = view
-        view.apply_perf_intent(intent)
 
         setContentView(view)
         view.post { configure_high_refresh_rate(view) }
@@ -92,12 +90,6 @@ class MainActivity : ComponentActivity() {
         view.requestFocus()
         request_location_permission_if_needed()
         request_notification_permission_if_needed()
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        flight_map_view?.apply_perf_intent(intent)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

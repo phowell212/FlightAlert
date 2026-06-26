@@ -26,7 +26,6 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
-import android.util.Log
 import androidx.core.graphics.createBitmap
 import java.io.FileNotFoundException
 import java.util.Locale
@@ -45,19 +44,7 @@ data class LocalReferenceOverlayStats(
     val lines_drawn: Int,
     val labels_drawn: Int,
     val cached: Boolean = false
-) {
-    fun summary(): String {
-        return when (status) {
-            LocalReferenceOverlayStatus.LOADED -> {
-                val cache_note = if (cached) " cached" else ""
-                " localRef=lines:$lines_drawn labels:$labels_drawn$cache_note"
-            }
-
-            LocalReferenceOverlayStatus.LOADING -> " localRef=loading"
-            LocalReferenceOverlayStatus.FAILED -> " localRef=failed"
-        }
-    }
-}
+)
 
 enum class LocalReferenceOverlayStatus {
     LOADING,
@@ -289,18 +276,9 @@ internal class LocalReferenceOverlayRenderer(
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
                 val loaded_dataset = load_dataset()
                 dataset = loaded_dataset
-                Log.i(
-                    FlightAlertAppSettings.App.TAG,
-                    "Local reference overlay loaded lines=${loaded_dataset.lines.size} labels=${loaded_dataset.labels.size}"
-                )
             } catch (error: Exception) {
                 load_error = error.javaClass.simpleName + ": " + (error.message ?: "unknown")
                 load_failed = true
-                Log.w(
-                    FlightAlertAppSettings.App.TAG,
-                    "Local reference overlay failed to load: $load_error",
-                    error
-                )
             } finally {
                 request_redraw()
             }

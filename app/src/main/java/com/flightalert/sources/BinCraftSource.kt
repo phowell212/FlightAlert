@@ -19,7 +19,6 @@ package com.flightalert.sources
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
 import com.github.luben.zstd.ZstdInputStream
@@ -229,10 +228,6 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
                         viewport_generation = viewport.generation
                     )
                     latest = next
-                    Log.d(
-                        TAG,
-                        "Globe binCraft source: ${next.aircraft.size} aircraft, partial=${next.partial_coverage}"
-                    )
                     on_snapshot_updated?.invoke()
                     schedule_fetch(next_cadence_delay_ms(fetch_started_elapsed_ms))
                 }

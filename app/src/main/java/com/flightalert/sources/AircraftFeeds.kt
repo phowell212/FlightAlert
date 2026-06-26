@@ -19,7 +19,6 @@ package com.flightalert.sources
 import com.flightalert.FlightAlertAppSettings
 
 import android.os.SystemClock
-import android.util.Log
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
@@ -1203,7 +1202,6 @@ class VisibleAircraftFeedController(
                     post_to_main {
                         if (is_current_token(token)) {
                             set_aircraft_status("Aircraft feed unavailable")
-                            Log.d(TAG, "Aircraft feed request failed")
                         }
                     }
                 }

@@ -204,48 +204,22 @@ object CurrentRouteValidator {
     fun evaluate(
         details: AircraftDetails,
         aircraft_icao24: String,
-        aircraft_callsign: String,
         selected_trace_aircraft_id: String?,
         trace_segments: List<TraceSegment>?
     ): CurrentRouteValidation {
         val id = aircraft_icao24.lowercase(Locale.US)
         if (selected_trace_aircraft_id != id) {
-            return rejected(
-                "trace_not_ready selected_trace=${selected_trace_aircraft_id ?: "none"}",
-                details,
-                aircraft_icao24,
-                aircraft_callsign
-            )
+            return rejected()
         }
-        val origin = details.origin_airport ?: return rejected(
-            "missing_origin",
-            details,
-            aircraft_icao24,
-            aircraft_callsign
-        )
-        val origin_lat = origin.latitude ?: return rejected(
-            "missing_origin_lat",
-            details,
-            aircraft_icao24,
-            aircraft_callsign
-        )
-        val origin_lon = origin.longitude ?: return rejected(
-            "missing_origin_lon",
-            details,
-            aircraft_icao24,
-            aircraft_callsign
-        )
+        val origin = details.origin_airport ?: return rejected()
+        val origin_lat = origin.latitude ?: return rejected()
+        val origin_lon = origin.longitude ?: return rejected()
         val points = trace_segments
             ?.flatMap { it.points }
             ?.sortedBy { it.epoch_sec }
             ?.takeIf { it.size >= 2 }
-            ?: return rejected("no_trace_points", details, aircraft_icao24, aircraft_callsign)
-        val first = points.firstOrNull() ?: return rejected(
-            "empty_trace",
-            details,
-            aircraft_icao24,
-            aircraft_callsign
-        )
+            ?: return rejected()
+        val first = points.firstOrNull() ?: return rejected()
         val destination = details.destination_airport
         val dest_lat = destination?.latitude
         val dest_lon = destination?.longitude
@@ -274,28 +248,18 @@ object CurrentRouteValidator {
                     direct_route_meters
                 )
             ) {
-                return accepted(
-                    "partial_trace distance_m=${first_distance_meters.toInt()} tolerance_m=${origin_tolerance.toInt()}",
-                    details,
-                    aircraft_icao24,
-                    aircraft_callsign
-                )
+                return accepted()
             }
-            return rejected(
-                "origin_mismatch distance_m=${first_distance_meters.toInt()} tolerance_m=${origin_tolerance.toInt()}",
-                details,
-                aircraft_icao24,
-                aircraft_callsign
-            )
+            return rejected()
         }
         if (
             dest_lat != null &&
             dest_lon != null &&
             !trace_direction_matches_route(points, origin_lat, origin_lon, dest_lat, dest_lon)
         ) {
-            return rejected("direction_mismatch", details, aircraft_icao24, aircraft_callsign)
+            return rejected()
         }
-        return accepted("current_flight", details, aircraft_icao24, aircraft_callsign)
+        return accepted()
     }
 
     private fun AircraftDetails.is_trusted_current_callsign_route(): Boolean {
@@ -400,39 +364,12 @@ object CurrentRouteValidator {
         ) <= FlightAlertAppSettings.CurrentRoute.MAX_BEARING_DELTA_DEG
     }
 
-    private fun accepted(
-        reason: String,
-        details: AircraftDetails,
-        aircraft_icao24: String,
-        aircraft_callsign: String
-    ): CurrentRouteValidation {
-        return CurrentRouteValidation(
-            true,
-            diagnostic("accepted $reason", details, aircraft_icao24, aircraft_callsign)
-        )
+    private fun accepted(): CurrentRouteValidation {
+        return CurrentRouteValidation(true)
     }
 
-    private fun rejected(
-        reason: String,
-        details: AircraftDetails,
-        aircraft_icao24: String,
-        aircraft_callsign: String
-    ): CurrentRouteValidation {
-        return CurrentRouteValidation(
-            false,
-            diagnostic("rejected $reason", details, aircraft_icao24, aircraft_callsign)
-        )
-    }
-
-    private fun diagnostic(
-        result: String,
-        details: AircraftDetails,
-        aircraft_icao24: String,
-        aircraft_callsign: String
-    ): String {
-        return "Current route $result icao=$aircraft_icao24 callsign=${aircraft_callsign.ifBlank { "none" }} " +
-                "route=${details.route ?: "none"} origin=${details.origin_airport?.icao ?: "none"} " +
-                "destination=${details.destination_airport?.icao ?: "none"} source=${details.route_source ?: "none"}"
+    private fun rejected(): CurrentRouteValidation {
+        return CurrentRouteValidation(false)
     }
 
     private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
@@ -458,7 +395,4 @@ object CurrentRouteValidator {
 
 }
 
-data class CurrentRouteValidation(
-    val accepted: Boolean,
-    val diagnostic: String
-)
+data class CurrentRouteValidation(val accepted: Boolean)
