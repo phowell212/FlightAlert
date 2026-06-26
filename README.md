@@ -74,7 +74,4 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 ## 1.7 Verification
 
 - `assembleDebug` passes on the v1.7 tree.
-- v1.7 promotes the current `test` branch into `master`, preserving the feature-complete map, traffic, details, alert, aviation-layer, and settings behavior.
 - Fresh installs default to satellite view with borders enabled and street labels disabled; saved user preferences still win.
-- The release keeps the no-pretending data policy: unavailable live data remains labeled rather than invented.
-- The README and agent rules were cleaned so release notes stay current and detailed optimization workflow stays in the performance workbook.
