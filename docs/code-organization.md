@@ -16,21 +16,16 @@ FlightAlert should read like objects doing jobs.
 - Do not add comments that restate the line below them.
 - New features should start as a new object/file with a narrow public method, then be called by the coordinator.
 
-## Target Packages
+## Current Packages
 
-- `data`: shared DTOs and source-neutral models used across the app.
-- `data.api`: REST/API clients for aircraft traffic, details, traces, and aviation layers.
-- `data.web`: hidden WebView-backed sources and parsers that mirror live provider web state.
-- `data.airplaneslive`: Airplanes.Live-specific shared HTTP constants, headers, and pacing helpers.
-- `settings`: persisted app preferences and defaults.
-- `service`: Android background service orchestration.
-- `ui.map`: the map coordinator, shared map models, projection math, map display settings, and small root-level controllers.
-- `ui.map.route`: current-flight route checks and route presentation rules.
-- `ui.map.traffic`: live traffic presentation rules, filtering, symbol classification, registry labels, and motion projection.
-- `ui.map.details`: aircraft details, usage, military-origin explanation, photo state, and detail formatting.
-- `ui.map.panels`: panel renderers and panel layout math.
-- `ui.map.render`: canvas drawing helpers for aircraft, labels, paths, tiles, map chrome, and map layers.
-- `ui.map.impact`: environmental impact estimates and comparisons.
+- `aircraft`: aircraft models, symbol choices, and type-aware drawing inputs.
+- `alerts`: alert-volume evaluation, monitor service orchestration, and notification presentation.
+- `details`: selected-aircraft profile, photo, usage, route, and impact panels.
+- `flight`: route, trace, origin, and path data.
+- `map`: map geometry, raster tiles, satellite/street rendering, reference labels, and aviation layers.
+- `sources`: live aircraft feed clients and source-specific parsing.
+- `traffic`: live traffic filtering, caching, motion projection, and overlay rendering.
+- `ui`: settings, layout, chrome, and panel drawing.
 
 ## Refactor Order
 

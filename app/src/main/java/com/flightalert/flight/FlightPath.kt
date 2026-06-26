@@ -205,6 +205,8 @@ class SelectedFlightPathController(
     var selected_aircraft_id: String? = null
         private set
 
+    private var selected_aircraft_key_cache: String? = null
+
     var selected_aircraft_snapshot: Aircraft? = null
         private set
 
@@ -221,43 +223,47 @@ class SelectedFlightPathController(
         private set
 
     val selected_aircraft_key: String?
-        get() = selected_aircraft_id?.lowercase(Locale.US)
+        get() = selected_aircraft_key_cache
 
     fun trace_request_key(icao24: String): String? {
-        return icao24.trim().lowercase(Locale.US).takeIf { it.isNotEmpty() }
+        return normalized_aircraft_key(icao24).takeIf { it.isNotEmpty() }
     }
 
     fun is_selected_key(key: String): Boolean {
-        return selected_aircraft_key == key.lowercase(Locale.US)
+        return selected_aircraft_key == normalized_aircraft_key(key)
     }
 
     // Selection clears visible path state first; a path returns only after a matching real trace is fetched.
     fun select_aircraft(aircraft: Aircraft) {
         selected_aircraft_id = aircraft.icao24
+        selected_aircraft_key_cache = aircraft.icao_key
         selected_aircraft_snapshot = aircraft
         clear_trace()
     }
 
     fun clear_selection() {
         selected_aircraft_id = null
+        selected_aircraft_key_cache = null
         selected_aircraft_snapshot = null
         clear_trace()
     }
 
     fun update_selected_aircraft(aircraft: Aircraft) {
-        if (selected_aircraft_key == aircraft.icao24.lowercase(Locale.US)) {
+        if (selected_aircraft_key == aircraft.icao_key) {
             selected_aircraft_snapshot = aircraft
         }
     }
 
     fun selected_snapshot_for_key(key: String): Aircraft? {
-        return selected_aircraft_snapshot?.takeIf { it.icao24.equals(key, ignoreCase = true) }
+        val normalized = normalized_aircraft_key(key)
+        return selected_aircraft_snapshot?.takeIf { it.icao_key == normalized }
     }
 
     // Accept trace responses only for the current key so old aircraft paths cannot appear.
     fun apply_trace_result(key: String, next_trace: FlightTrace?) {
-        if (!is_selected_key(key)) return
-        selected_trace_aircraft_id = if (next_trace != null) key.lowercase(Locale.US) else null
+        val normalized = normalized_aircraft_key(key)
+        if (selected_aircraft_key != normalized) return
+        selected_trace_aircraft_id = if (next_trace != null) normalized else null
         trace = next_trace
         path_visible = false
         previous_flights_visible = false
@@ -350,7 +356,7 @@ class SelectedFlightPathController(
 
     fun projected_endpoint(): GeoPoint? {
         val aircraft = selected_aircraft_snapshot?.takeIf {
-            selected_aircraft_key == it.icao24.lowercase(Locale.US)
+            selected_aircraft_key == it.icao_key
         } ?: return null
         if (!path_visible || !has_path()) return null
         val report_sec = aircraft.position_time_sec ?: aircraft.last_contact_sec ?: return null
@@ -372,7 +378,7 @@ class SelectedFlightPathController(
     }
 
     private fun selected_path_display_endpoint(aircraft: Aircraft): GeoPoint? {
-        if (!path_visible || selected_aircraft_key != aircraft.icao24.lowercase(Locale.US) || !has_path()) return null
+        if (!path_visible || selected_aircraft_key != aircraft.icao_key || !has_path()) return null
         val last = selected_segment_points()?.maxByOrNull { it.epoch_sec } ?: return null
         val report_sec = (aircraft.position_time_sec ?: aircraft.last_contact_sec)?.toLong()
         if (report_sec == null || last.epoch_sec > report_sec + path_trace_newer_than_feed_seconds) {
@@ -385,6 +391,10 @@ class SelectedFlightPathController(
         return selected_segments(visible_only = false)
             ?.flatMap { it.points }
             ?.takeIf { it.size >= 2 }
+    }
+
+    private fun normalized_aircraft_key(value: String): String {
+        return value.trim().lowercase(Locale.US)
     }
 
     private fun projected_aircraft_position(aircraft: Aircraft): GeoPoint {

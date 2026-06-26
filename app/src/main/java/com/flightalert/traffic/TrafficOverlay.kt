@@ -2182,8 +2182,7 @@ class TrafficOverlayRenderer(
         state: TrafficOverlayState,
         style: TrafficOverlayStyle
     ) {
-        val callsign =
-            item.aircraft.callsign.trim().ifBlank { item.aircraft.icao24.uppercase(Locale.US) }
+        val callsign = item.aircraft.callsign_label
         val detail = chrome.aircraft_label_detail(item.aircraft)
         if (state.map_source != TileSource.STREET) {
             draw_satellite_aircraft_label(canvas, x, y, callsign, detail, state, style)
@@ -4664,7 +4663,7 @@ internal class TrafficScreenProjector(
     }
 
     fun aircraft_icao_key(aircraft: Aircraft): String {
-        return aircraft.icao24.trim().lowercase(Locale.US)
+        return aircraft.icao_key
     }
 
     fun screen_neighborhood_contains(

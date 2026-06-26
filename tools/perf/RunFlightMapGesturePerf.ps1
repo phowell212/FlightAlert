@@ -49,7 +49,7 @@ $summarizer = Join-Path $PSScriptRoot "SummarizeFrameStats.ps1"
 $outRoot = Join-Path $PSScriptRoot "out"
 $packageName = "com.flightalert"
 $testPackageName = "com.flightalert.test"
-$testClass = "com.flightalert.perf.FlightMapGesturePerfTest"
+$testClass = "com.flightalert.tests.device.FlightMapGesturePerfTest"
 $instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 $landSafeTargets = @{
     "dallasfortworth" = [pscustomobject]@{ Name = "Dallas-Fort Worth"; Lat = 32.90; Lon = -97.04; MinLat = 29.7; MaxLat = 35.8; MinLon = -101.6; MaxLon = -92.8; MaxDistanceKm = 620.0 }

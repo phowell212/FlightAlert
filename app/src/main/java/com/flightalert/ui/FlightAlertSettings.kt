@@ -73,7 +73,7 @@ object FlightAlertSettings {
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
     const val DEFAULT_MAP_LABELS_ENABLED = false
     const val DEFAULT_MAP_BORDERS_ENABLED = true
-    const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1.25f
+    const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1.35f
     const val DEFAULT_GLOBE_BINCRAFT_SOURCE_ENABLED = true
     const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
     const val DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED = false

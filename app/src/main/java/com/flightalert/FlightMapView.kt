@@ -2574,8 +2574,7 @@ class FlightMapView(
     }
 
     private fun is_flight_path_loading(aircraft: Aircraft): Boolean {
-        val id = aircraft.icao24.lowercase(Locale.US)
-        return synchronized(flight_path_requests) { id in flight_path_requests }
+        return synchronized(flight_path_requests) { aircraft.icao_key in flight_path_requests }
     }
 
     private fun current_flight_route_details(
@@ -4011,9 +4010,9 @@ class FlightMapView(
         if (!filters_restrict_aircraft()) return
         val selected_id = selected_path_controller.selected_aircraft_key ?: return
         val selected_live =
-            all_aircraft_snapshot().firstOrNull { it.icao24.lowercase(Locale.US) == selected_id }
+            all_aircraft_snapshot().firstOrNull { it.icao_key == selected_id }
         if (selected_live == null) {
-            selected_path_controller.selected_aircraft_snapshot?.takeIf { it.icao24.lowercase(Locale.US) == selected_id }
+            selected_path_controller.selected_aircraft_snapshot?.takeIf { it.icao_key == selected_id }
                 ?.let { snapshot ->
                     if (passes_aircraft_filters(snapshot)) return
                 }

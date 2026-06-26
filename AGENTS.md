@@ -108,6 +108,8 @@ Flight Alert code should read like objects doing jobs.
 
 Prefer small objects/files with narrow public methods. Keep settings and tuning values in explicit settings files. See `docs/code-organization.md`.
 
+In hot paths, prefer typed fields, numeric keys, sets/maps, arrays, or cached normalized values over parsing/composing strings. Strings are fine at source boundaries such as binCraft/feed parsing, for user-facing text/status labels, or where design notes explicitly call strings the right representation; otherwise do not organize runtime state around fresh string processing.
+
 ## 16. Agent Workflow
 
 Before changing code, read this file and `docs/code-organization.md`.

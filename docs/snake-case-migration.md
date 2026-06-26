@@ -1,8 +1,8 @@
 # Snake Case Migration Status
 
-Status date: 2026-06-12
+Status date: 2026-06-26
 
-Branch scanned: `test`
+Branch scanned: `master`
 
 The app-owned Kotlin function, property, parameter, and local-variable migration is substantially complete.
 

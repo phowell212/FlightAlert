@@ -193,8 +193,12 @@ data class Aircraft(
     val distance_m: Double,
     val telemetry: AircraftTelemetry? = null
 ) {
-    fun appearance_key(): String =
+    val icao_key: String = icao24.trim().lowercase(Locale.US)
+    val callsign_label: String = callsign.trim().ifBlank { icao24.uppercase(Locale.US) }
+    private val cached_appearance_key: String =
         aircraft_identity_key(icao24, registration, callsign, lat, lon)
+
+    fun appearance_key(): String = cached_appearance_key
 }
 
 data class AircraftAppearance(val first_seen_ms: Long, val delay_ms: Long, val last_seen_ms: Long)
