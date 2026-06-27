@@ -13,6 +13,7 @@ import android.content.SharedPreferences
 import com.flightalert.FlightAlertAppSettings
 import com.flightalert.VisualTheme
 import com.flightalert.alerts.MonitoringNotificationHiderStatus
+import com.flightalert.map.MapReferenceMode
 import com.flightalert.map.TileSource
 import com.flightalert.map.UnitSystem
 
@@ -86,6 +87,27 @@ object FlightAlertSettings {
     }
 
     fun read_visual_theme(context: Context): VisualTheme = read_visual_theme(prefs(context))
+
+    fun read_unit_system(prefs: SharedPreferences): UnitSystem {
+        val stored = prefs.getString(KEY_UNITS, UnitSystem.IMPERIAL.name)
+            ?: UnitSystem.IMPERIAL.name
+        return UnitSystem.entries.firstOrNull { it.name == stored } ?: UnitSystem.IMPERIAL
+    }
+
+    fun read_map_source(prefs: SharedPreferences): TileSource {
+        val stored = prefs.getString(KEY_MAP_SOURCE, TileSource.SATELLITE.name)
+            ?: TileSource.SATELLITE.name
+        return TileSource.entries.firstOrNull { it.name == stored } ?: TileSource.SATELLITE
+    }
+
+    fun read_map_reference_mode(prefs: SharedPreferences): MapReferenceMode {
+        val stored = prefs.getString(KEY_MAP_REFERENCE_MODE, DEFAULT_MAP_REFERENCE_MODE)
+        return MapReferenceMode.entries.firstOrNull { it.name == stored } ?: MapReferenceMode.RASTER
+    }
+
+    fun read_map_label_text_scale(prefs: SharedPreferences, min: Float, max: Float): Float {
+        return prefs.getFloat(KEY_MAP_LABEL_TEXT_SCALE, DEFAULT_MAP_LABEL_TEXT_SCALE).coerceIn(min, max)
+    }
 
     fun read_aircraft_feed_mode(prefs: SharedPreferences): AircraftFeedMode {
         val stored = prefs.getString(KEY_AIRCRAFT_FEED_MODE, null)

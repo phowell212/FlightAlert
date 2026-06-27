@@ -154,6 +154,7 @@ import com.flightalert.traffic.TrafficScreenProjector
 import com.flightalert.traffic.TrafficSelectionHitTester
 import com.flightalert.traffic.TrafficSpatialEntry
 import com.flightalert.ui.AviationLayersPanelState
+import com.flightalert.ui.FilterPanelAction
 import com.flightalert.ui.FiltersPanelState
 import com.flightalert.ui.FlightAlertSettings
 import com.flightalert.ui.FlightMapChromeBridge
@@ -165,19 +166,29 @@ import com.flightalert.ui.FlightMapPanelRenderer
 import com.flightalert.ui.FlightMapPanelStyle
 import com.flightalert.ui.ImpactMethodologyPanelState
 import com.flightalert.ui.MapLabelsPanelState
+import com.flightalert.ui.MapSurfaceAction
 import com.flightalert.ui.PriorityAircraftPanelRow
 import com.flightalert.ui.PriorityRangeAdjustButton
 import com.flightalert.ui.PriorityRangeAdjuster
 import com.flightalert.ui.PriorityRangeButtonFillState
 import com.flightalert.ui.PriorityRangeValue
+import com.flightalert.ui.PriorityTrackerPanelAction
 import com.flightalert.ui.PriorityTrackerPanelState
+import com.flightalert.ui.SettingsPanelAction
+import com.flightalert.ui.SettingsPanelHitState
 import com.flightalert.ui.SettingsPanelState
 import com.flightalert.ui.TrafficPanelRenderer
 import com.flightalert.ui.TrafficPanelState
 import com.flightalert.ui.TrafficPanelStateBuilder
 import com.flightalert.ui.TrafficPanelStyle
 import com.flightalert.ui.draw_wrapped_text
+import com.flightalert.ui.filter_panel_action_at
+import com.flightalert.ui.map_label_text_scale_for_x
+import com.flightalert.ui.priority_adjust_button_at
+import com.flightalert.ui.priority_adjust_button_bounds
+import com.flightalert.ui.priority_tracker_panel_hit_result
 import com.flightalert.ui.safe_smooth_step
+import com.flightalert.ui.settings_panel_hit_result
 import com.flightalert.ui.with_alpha
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -541,11 +552,8 @@ class FlightMapView(
     private var location_permission_granted = false
     private var latest_location: Location? = null
     private var zoom = read_stored_zoom()
-    private var units = UnitSystem.valueOf(
-        prefs.getString(FlightAlertSettings.KEY_UNITS, UnitSystem.IMPERIAL.name)
-            ?: UnitSystem.IMPERIAL.name
-    )
-    private var map_source = read_map_source()
+    private var units = FlightAlertSettings.read_unit_system(prefs)
+    private var map_source = FlightAlertSettings.read_map_source(prefs)
     private var map_labels_enabled = prefs.getBoolean(
         FlightAlertSettings.KEY_MAP_LABELS_ENABLED,
         FlightAlertSettings.DEFAULT_MAP_LABELS_ENABLED
@@ -558,8 +566,12 @@ class FlightMapView(
         FlightAlertSettings.KEY_MAP_BORDERS_ENABLED,
         FlightAlertSettings.DEFAULT_MAP_BORDERS_ENABLED
     )
-    private var map_reference_mode = read_map_reference_mode()
-    private var map_label_text_scale = read_map_label_text_scale()
+    private var map_reference_mode = FlightAlertSettings.read_map_reference_mode(prefs)
+    private var map_label_text_scale = FlightAlertSettings.read_map_label_text_scale(
+        prefs,
+        MAP_LABEL_TEXT_SCALE_MIN,
+        MAP_LABEL_TEXT_SCALE_MAX
+    )
     private var aircraft_feed_mode = FlightAlertSettings.read_aircraft_feed_mode(prefs)
     private var globe_bin_craft_source_enabled = aircraft_feed_mode.uses_globe
     private val app_opened_elapsed_ms = SystemClock.elapsedRealtime()
@@ -2247,15 +2259,7 @@ class FlightMapView(
     }
 
     private fun traffic_label_avoid_rects(): List<RectF> {
-        val w = content_width()
-        val h = content_height()
-        val padding = dp(8)
-        return listOf(
-            top_status_bounds(w, h).padded_copy(padding),
-            layout.info_panel_bounds(w, h).padded_copy(padding),
-            settings_button_bounds(w, h).padded_copy(padding),
-            filters_button_bounds(w, h).padded_copy(padding)
-        )
+        return layout.traffic_label_avoid_rects(content_width(), content_height(), dp(8))
     }
 
     private fun draw_no_location_state(canvas: Canvas, w: Float, h: Float) {
@@ -2547,10 +2551,6 @@ class FlightMapView(
         width: Float,
         max_lines: Int
     ): Float = draw_wrapped_text(canvas, text_paint, value, x, y, width, max_lines, dp(19))
-
-    private fun RectF.padded_copy(padding: Float): RectF {
-        return RectF(left - padding, top - padding, right + padding, bottom + padding)
-    }
 
     private fun open_url(url: String) {
         val safe_url = https_url(url) ?: return
@@ -2918,84 +2918,68 @@ class FlightMapView(
     private fun handle_filters_panel_tap(x: Float, y: Float): Boolean {
         if (!filters_open) return false
         val panel = layout.settings_panel_bounds(content_width(), content_height())
-        when {
-            layout.close_button_bounds(panel).contains(x, y) -> {
+        handle_filter_panel_action(layout.filter_panel_action_at(panel, x, y))
+        invalidate()
+        return true
+    }
+
+    private fun handle_filter_panel_action(action: FilterPanelAction) {
+        when (action) {
+            FilterPanelAction.CLOSE -> {
                 filters_open = false
                 clear_filter_search_focus()
             }
 
-            layout.filter_search_box_bounds(panel).contains(x, y) -> focus_filter_search()
-            layout.filter_search_find_button_bounds(panel).contains(x, y) -> submit_filter_search()
-            layout.filter_search_clear_button_bounds(panel).contains(x, y) -> set_filter_search_query("")
-            layout.filter_aircraft_type_button_bounds(panel).contains(x, y) -> set_aircraft_type_filter(
+            FilterPanelAction.FOCUS_SEARCH -> focus_filter_search()
+            FilterPanelAction.SUBMIT_SEARCH -> submit_filter_search()
+            FilterPanelAction.CLEAR_SEARCH -> set_filter_search_query("")
+            FilterPanelAction.NEXT_AIRCRAFT_TYPE -> set_aircraft_type_filter(
                 aircraft_filter_controller.aircraft_type.next()
             )
 
-            layout.filter_altitude_button_bounds(panel).contains(x, y) -> set_altitude_filter(
+            FilterPanelAction.NEXT_ALTITUDE -> set_altitude_filter(
                 aircraft_filter_controller.altitude.next()
             )
 
-            layout.filter_distance_button_bounds(panel).contains(x, y) -> set_distance_filter(
+            FilterPanelAction.NEXT_DISTANCE -> set_distance_filter(
                 aircraft_filter_controller.distance.next()
             )
 
-            layout.filter_status_button_bounds(panel).contains(x, y) -> set_flight_status_filter(
+            FilterPanelAction.NEXT_STATUS -> set_flight_status_filter(
                 aircraft_filter_controller.flight_status.next()
             )
 
-            layout.filter_age_button_bounds(panel).contains(x, y) -> set_report_age_filter(
+            FilterPanelAction.NEXT_AGE -> set_report_age_filter(
                 aircraft_filter_controller.report_age.next()
             )
 
-            layout.filter_alert_button_bounds(panel).contains(
-                x,
-                y
-            ) -> set_alert_volume_filter(!aircraft_filter_controller.alert_volume_only)
-
-            layout.filter_reset_button_bounds(panel).contains(x, y) -> reset_filters()
-            else -> clear_filter_search_focus()
+            FilterPanelAction.TOGGLE_ALERT_VOLUME -> set_alert_volume_filter(!aircraft_filter_controller.alert_volume_only)
+            FilterPanelAction.RESET -> reset_filters()
+            FilterPanelAction.CLEAR_SEARCH_FOCUS -> clear_filter_search_focus()
         }
-        invalidate()
-        return true
     }
 
     private fun handle_priority_tracker_tap(x: Float, y: Float): Boolean {
         if (!priority_tracker_open) return false
         val panel = layout.priority_tracker_panel_bounds(content_width(), content_height())
-        when {
-            layout.priority_close_button_bounds(panel).contains(x, y) -> priority_tracker_open = false
-            layout.priority_tracking_toggle_bounds(panel).contains(
-                x,
-                y
-            ) -> set_priority_tracking_enabled(!priority_tracking_enabled)
-
-            layout.priority_ring_toggle_bounds(panel).contains(
-                x,
-                y
-            ) -> set_priority_range_circle_visible(!priority_range_circle_visible)
-
-            layout.alert_distance_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
-                PriorityRangeAdjustButton.DISTANCE_MINUS,
-                long_press = false
-            )
-
-            layout.alert_distance_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
-                PriorityRangeAdjustButton.DISTANCE_PLUS,
-                long_press = false
-            )
-
-            layout.alert_altitude_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
-                PriorityRangeAdjustButton.ALTITUDE_MINUS,
-                long_press = false
-            )
-
-            layout.alert_altitude_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
-                PriorityRangeAdjustButton.ALTITUDE_PLUS,
-                long_press = false
-            )
-        }
+        layout.priority_tracker_panel_hit_result(panel, x, y)
+            ?.let { handle_priority_tracker_panel_action(it.action, it.adjust_button) }
         invalidate()
         return true
+    }
+
+    private fun handle_priority_tracker_panel_action(
+        action: PriorityTrackerPanelAction,
+        adjust_button: PriorityRangeAdjustButton?
+    ) {
+        when (action) {
+            PriorityTrackerPanelAction.CLOSE -> priority_tracker_open = false
+            PriorityTrackerPanelAction.TOGGLE_TRACKING -> set_priority_tracking_enabled(!priority_tracking_enabled)
+            PriorityTrackerPanelAction.TOGGLE_RANGE_RING -> set_priority_range_circle_visible(!priority_range_circle_visible)
+            PriorityTrackerPanelAction.ADJUST_RANGE -> adjust_button?.let {
+                apply_priority_range_adjustment(it, long_press = false)
+            }
+        }
     }
 
     private fun begin_priority_adjust_hold_if_needed(x: Float, y: Float) {
@@ -3066,22 +3050,13 @@ class FlightMapView(
 
     private fun priority_adjust_button_at(x: Float, y: Float): PriorityRangeAdjustButton? {
         if (!priority_tracker_open) return null
-        return PriorityRangeAdjustButton.entries.firstOrNull {
-            priority_adjust_button_bounds(it).contains(
-                x,
-                y
-            )
-        }
+        val panel = layout.priority_tracker_panel_bounds(content_width(), content_height())
+        return layout.priority_adjust_button_at(panel, x, y)
     }
 
     private fun priority_adjust_button_bounds(button: PriorityRangeAdjustButton): RectF {
         val panel = layout.priority_tracker_panel_bounds(content_width(), content_height())
-        return when (button) {
-            PriorityRangeAdjustButton.DISTANCE_MINUS -> layout.alert_distance_minus_bounds(panel)
-            PriorityRangeAdjustButton.DISTANCE_PLUS -> layout.alert_distance_plus_bounds(panel)
-            PriorityRangeAdjustButton.ALTITUDE_MINUS -> layout.alert_altitude_minus_bounds(panel)
-            PriorityRangeAdjustButton.ALTITUDE_PLUS -> layout.alert_altitude_plus_bounds(panel)
-        }
+        return layout.priority_adjust_button_bounds(panel, button)
     }
 
     private fun apply_priority_range_adjustment(
@@ -3207,116 +3182,62 @@ class FlightMapView(
     private fun handle_settings_panel_tap(x: Float, y: Float): Boolean {
         if (!settings_open) return false
         val panel = layout.settings_panel_bounds(content_width(), content_height())
-        if (impact_methodology_open) {
-            when {
-                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                else -> AircraftImpactEstimator.source_urls.forEachIndexed { index, url ->
-                    if (layout.impact_source_button_bounds(panel, index, AircraftImpactEstimator.source_labels.size).contains(x, y)) {
-                        open_url(url)
-                    }
-                }
-            }
-            invalidate()
-            return true
-        }
-        if (aviation_layers_open) {
-            when {
-                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                layout.layer_atc_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> set_atc_boundaries_layer_enabled(!atc_boundaries_layer_enabled)
+        layout.settings_panel_hit_result(
+            panel = panel,
+            x = x,
+            y = y,
+            state = SettingsPanelHitState(
+                impact_methodology_open = impact_methodology_open,
+                aviation_layers_open = aviation_layers_open,
+                map_labels_open = map_labels_open,
+                display_settings_open = display_settings_open,
+                map_settings_open = map_settings_open,
+                alert_settings_open = alert_settings_open,
+                impact_source_count = AircraftImpactEstimator.source_labels.size
+            )
+        )?.let { handle_settings_panel_action(it.action, it.index) }
+        invalidate()
+        return true
+    }
 
-                layout.layer_restricted_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> set_restricted_airspaces_layer_enabled(!restricted_airspaces_layer_enabled)
-
-                layout.layer_oceanic_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> set_oceanic_tracks_layer_enabled(!oceanic_tracks_layer_enabled)
-
-                layout.layer_airport_labels_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> set_airport_labels_layer_enabled(!airport_labels_layer_enabled)
-            }
-            invalidate()
-            return true
-        }
-        if (map_labels_open) {
-            when {
-                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                layout.map_street_labels_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> set_map_labels_enabled(!active_map_labels_enabled())
-
-                layout.map_borders_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> set_map_borders_enabled(!map_borders_enabled)
-
-                layout.map_reference_mode_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> set_map_reference_mode(map_reference_mode.next())
-            }
-            invalidate()
-            return true
-        }
-        if (display_settings_open) {
-            when {
-                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                layout.imperial_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.IMPERIAL)
-                layout.metric_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.METRIC)
-                layout.theme_button_bounds(panel).contains(x, y) -> set_visual_theme(next_visual_theme())
-            }
-            invalidate()
-            return true
-        }
-        if (map_settings_open) {
-            when {
-                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                layout.map_source_button_bounds(panel).contains(x, y) -> toggle_map_source()
-                layout.map_labels_button_bounds(panel).contains(x, y) -> map_labels_open = true
-                layout.aviation_layers_button_bounds(panel).contains(x, y) -> aviation_layers_open = true
-            }
-            invalidate()
-            return true
-        }
-        if (alert_settings_open) {
-            when {
-                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                layout.alerts_toggle_bounds(panel).contains(x, y) -> set_alerts_enabled(!alerts_enabled)
-                layout.monitoring_notification_hider_button_bounds(panel).contains(
-                    x,
-                    y
-                ) -> open_notification_listener_settings()
-
-                layout.priority_tracker_button_bounds(panel).contains(x, y) -> {
-                    settings_open = false
-                    close_all_settings_subpages()
-                    priority_tracker_open = true
-                }
-            }
-            invalidate()
-            return true
-        }
-        when {
-            layout.close_button_bounds(panel).contains(x, y) -> {
+    private fun handle_settings_panel_action(action: SettingsPanelAction, index: Int) {
+        when (action) {
+            SettingsPanelAction.CLOSE_SUBPAGE -> close_settings_subpage()
+            SettingsPanelAction.CLOSE_SETTINGS -> {
                 settings_open = false
                 close_all_settings_subpages()
             }
 
-            layout.settings_display_button_bounds(panel).contains(x, y) -> display_settings_open = true
-            layout.settings_map_button_bounds(panel).contains(x, y) -> map_settings_open = true
-            layout.settings_alerts_button_bounds(panel).contains(x, y) -> alert_settings_open = true
-            layout.settings_info_button_bounds(panel).contains(x, y) -> impact_methodology_open = true
+            SettingsPanelAction.OPEN_IMPACT_SOURCE -> {
+                AircraftImpactEstimator.source_urls.getOrNull(index)?.let { open_url(it) }
+            }
+
+            SettingsPanelAction.TOGGLE_ATC_BOUNDARIES -> set_atc_boundaries_layer_enabled(!atc_boundaries_layer_enabled)
+            SettingsPanelAction.TOGGLE_RESTRICTED_AIRSPACES -> set_restricted_airspaces_layer_enabled(!restricted_airspaces_layer_enabled)
+            SettingsPanelAction.TOGGLE_OCEANIC_TRACKS -> set_oceanic_tracks_layer_enabled(!oceanic_tracks_layer_enabled)
+            SettingsPanelAction.TOGGLE_AIRPORT_LABELS -> set_airport_labels_layer_enabled(!airport_labels_layer_enabled)
+            SettingsPanelAction.TOGGLE_MAP_LABELS -> set_map_labels_enabled(!active_map_labels_enabled())
+            SettingsPanelAction.TOGGLE_MAP_BORDERS -> set_map_borders_enabled(!map_borders_enabled)
+            SettingsPanelAction.TOGGLE_MAP_REFERENCE_MODE -> set_map_reference_mode(map_reference_mode.next())
+            SettingsPanelAction.SET_UNITS_IMPERIAL -> set_units(UnitSystem.IMPERIAL)
+            SettingsPanelAction.SET_UNITS_METRIC -> set_units(UnitSystem.METRIC)
+            SettingsPanelAction.NEXT_THEME -> set_visual_theme(next_visual_theme())
+            SettingsPanelAction.TOGGLE_MAP_SOURCE -> toggle_map_source()
+            SettingsPanelAction.OPEN_MAP_LABELS -> map_labels_open = true
+            SettingsPanelAction.OPEN_AVIATION_LAYERS -> aviation_layers_open = true
+            SettingsPanelAction.TOGGLE_ALERTS -> set_alerts_enabled(!alerts_enabled)
+            SettingsPanelAction.OPEN_NOTIFICATION_ACCESS -> open_notification_listener_settings()
+            SettingsPanelAction.OPEN_PRIORITY_TRACKER -> {
+                settings_open = false
+                close_all_settings_subpages()
+                priority_tracker_open = true
+            }
+
+            SettingsPanelAction.OPEN_DISPLAY_SETTINGS -> display_settings_open = true
+            SettingsPanelAction.OPEN_MAP_SETTINGS -> map_settings_open = true
+            SettingsPanelAction.OPEN_ALERT_SETTINGS -> alert_settings_open = true
+            SettingsPanelAction.OPEN_IMPACT_METHODOLOGY -> impact_methodology_open = true
         }
-        invalidate()
-        return true
     }
 
     private fun settings_subpage_open(): Boolean {
@@ -3351,38 +3272,23 @@ class FlightMapView(
     private fun handle_map_surface_tap(x: Float, y: Float) {
         val w = content_width()
         val h = content_height()
-        val viewport = latest_location?.let { viewport_for(it, w, h) }
-        val path_button_hit = viewport != null && flight_path_button_bounds(w, h).contains(x, y)
-        when {
-            previous_flights_button_bounds(w, h).contains(
-                x,
-                y
-            ) && should_show_previous_flights_button() -> toggle_previous_flights()
-
-            clear_flight_path_button_bounds(w, h).contains(
-                x,
-                y
-            ) && should_show_clear_path_button() -> clear_selected_flight_path()
-
-            path_button_hit && has_selected_flight_path() -> show_selected_flight_path()
-            recenter_button_bounds(w, h).contains(
-                x,
-                y
-            ) && !following_location -> recenter_on_location()
-
-            settings_button_bounds(w, h).contains(x, y) -> settings_open = true
-            filters_button_bounds(w, h).contains(x, y) -> {
+        when (layout.map_surface_action_at(w, h, layout_state(), x, y)) {
+            MapSurfaceAction.TOGGLE_PREVIOUS_FLIGHTS -> toggle_previous_flights()
+            MapSurfaceAction.CLEAR_SELECTED_FLIGHT_PATH -> clear_selected_flight_path()
+            MapSurfaceAction.SHOW_SELECTED_FLIGHT_PATH -> show_selected_flight_path()
+            MapSurfaceAction.RECENTER -> recenter_on_location()
+            MapSurfaceAction.OPEN_SETTINGS -> settings_open = true
+            MapSurfaceAction.OPEN_FILTERS -> {
                 filters_open = true
                 settings_open = false
                 close_all_settings_subpages()
             }
 
-            layout.info_panel_bounds(w, h).contains(
-                x,
-                y
-            ) -> displayed_traffic().aircraft?.let { open_aircraft_details(it) }
+            MapSurfaceAction.OPEN_TRAFFIC_DETAILS -> displayed_traffic().aircraft?.let {
+                open_aircraft_details(it)
+            }
 
-            !is_overlay_or_control_hit(x, y) -> select_aircraft_at(x, y)
+            null -> if (!is_overlay_or_control_hit(x, y)) select_aircraft_at(x, y)
         }
         invalidate()
     }
@@ -3586,26 +3492,8 @@ class FlightMapView(
         if (settings_open || details_block_map_interaction() || priority_tracker_open || filters_open) return true
         val w = content_width()
         val h = content_height()
-        return (!following_location && recenter_button_bounds(w, h).contains(x, y)) ||
-                (should_show_path_button(
-                    viewport_for(
-                        latest_location ?: return true,
-                        w,
-                        h
-                    )
-                ) && flight_path_button_bounds(w, h).contains(x, y)) ||
-                (should_show_previous_flights_button() && previous_flights_button_bounds(
-                    w,
-                    h
-                ).contains(x, y)) ||
-                (should_show_clear_path_button() && clear_flight_path_button_bounds(
-                    w,
-                    h
-                ).contains(x, y)) ||
-                settings_button_bounds(w, h).contains(x, y) ||
-                filters_button_bounds(w, h).contains(x, y) ||
-                layout.info_panel_bounds(w, h).contains(x, y) ||
-                top_status_bounds(w, h).contains(x, y)
+        if (latest_location == null) return true
+        return layout.map_surface_blocks_aircraft_selection(w, h, layout_state(), x, y)
     }
 
     private fun set_units(next: UnitSystem) {
@@ -3723,11 +3611,6 @@ class FlightMapView(
         return true
     }
 
-    private fun map_label_text_scale_for_x(x: Float, bounds: RectF): Float {
-        val progress = ((x - bounds.left) / bounds.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
-        return MAP_LABEL_TEXT_SCALE_MIN + progress * (MAP_LABEL_TEXT_SCALE_MAX - MAP_LABEL_TEXT_SCALE_MIN)
-    }
-
     private fun set_atc_boundaries_layer_enabled(enabled: Boolean) {
         if (atc_boundaries_layer_enabled == enabled) return
         atc_boundaries_layer_enabled = enabled
@@ -3843,27 +3726,6 @@ class FlightMapView(
             is String -> stored.toDoubleOrNull() ?: 10.0
             else -> 10.0
         }.coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
-    }
-
-    private fun read_map_source(): TileSource {
-        val stored = prefs.getString(FlightAlertSettings.KEY_MAP_SOURCE, TileSource.SATELLITE.name)
-            ?: TileSource.SATELLITE.name
-        return TileSource.entries.firstOrNull { it.name == stored } ?: TileSource.SATELLITE
-    }
-
-    private fun read_map_label_text_scale(): Float {
-        return prefs.getFloat(
-            FlightAlertSettings.KEY_MAP_LABEL_TEXT_SCALE,
-            FlightAlertSettings.DEFAULT_MAP_LABEL_TEXT_SCALE
-        ).coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
-    }
-
-    private fun read_map_reference_mode(): MapReferenceMode {
-        val stored = prefs.getString(
-            FlightAlertSettings.KEY_MAP_REFERENCE_MODE,
-            FlightAlertSettings.DEFAULT_MAP_REFERENCE_MODE
-        )
-        return MapReferenceMode.entries.firstOrNull { it.name == stored } ?: MapReferenceMode.RASTER
     }
 
     private fun set_filter_search_query(value: String) {
@@ -4128,7 +3990,8 @@ class FlightMapView(
             following_location = following_location,
             has_location = latest_location != null,
             has_selected_flight_path = has_selected_flight_path(),
-            show_previous_flights = should_show_previous_flights_button()
+            show_previous_flights = should_show_previous_flights_button(),
+            show_clear_flight_path = should_show_clear_path_button()
         )
     }
 

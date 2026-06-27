@@ -25,7 +25,7 @@ FlightAlert should read like objects doing jobs.
 - `map`: map geometry, raster tiles, satellite/street rendering, reference labels, and aviation layers.
 - `sources`: live aircraft feed clients and source-specific parsing.
 - `traffic`: live traffic filtering, caching, motion projection, and overlay rendering.
-- `ui`: settings, layout, chrome, and panel drawing.
+- `ui`: settings, layout, chrome, panel drawing, and UI hit-target maps.
 
 ## Refactor Order
 

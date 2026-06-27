@@ -2,7 +2,7 @@
 
 Flight Alert is a Kotlin Android app for drone pilots who want live, map-first awareness of nearby aircraft. It is supplemental situational awareness only, not a certified detect-and-avoid system.
 
-Current version: **1.8**
+Current version: **1.9**
 
 ## Highlights
 
@@ -17,7 +17,8 @@ Current version: **1.8**
 - Registry country flag in aircraft details and the traffic card.
 - Settings skins/themes, with Cockpit retained as an option.
 - Priority alert settings with unit-aware range controls.
-- Nested Settings panels for street-map labels and aviation layers.
+- Nested Settings panels for Map Labels, aviation layers, display, and alert controls.
+- Map Labels controls for street labels, borders, raster/vector reference mode, and label text scale.
 - Optional aviation layers from real public sources:
   - FAA ATC/FIR/OCA boundary airspace.
   - FAA special-use/restricted airspace.
@@ -71,9 +72,16 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 - Filters only change visible map traffic; alert monitoring continues against the full live feed.
 - CO2/impact values are estimates, not measured fuel burn.
 
+## 1.9 Verification
+
+- `assembleDebug` passes on the v1.9 tree.
+- `testDebugUnitTest` passes; there are currently no debug unit test sources.
+- Map/settings UI hit targets now live with the UI layout/panel code while `FlightMapView` remains the coordinator for app state changes.
+- The debug build keeps version metadata at `versionCode = 10` and `versionName = "1.9"`.
+
 ## 1.8 Verification
 
-- `assembleDebug` passes on the v1.8 tree.
+- `assembleDebug` passed on the v1.8 tree.
 - Fresh installs default to satellite view with borders enabled and street labels disabled; saved user preferences still win.
 - Fresh installs default map-label text scaling to 1.35x; saved user preferences still win.
 - Flight-path and traffic hot paths reuse cached aircraft keys/labels instead of re-normalizing strings during rendering.

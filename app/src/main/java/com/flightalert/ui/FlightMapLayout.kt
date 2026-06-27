@@ -17,8 +17,24 @@ data class FlightMapLayoutState(
     val following_location: Boolean,
     val has_location: Boolean,
     val has_selected_flight_path: Boolean,
-    val show_previous_flights: Boolean
+    val show_previous_flights: Boolean,
+    val show_clear_flight_path: Boolean
 )
+
+data class MapSurfaceTarget(
+    val bounds: RectF,
+    val action: MapSurfaceAction
+)
+
+enum class MapSurfaceAction {
+    TOGGLE_PREVIOUS_FLIGHTS,
+    CLEAR_SELECTED_FLIGHT_PATH,
+    SHOW_SELECTED_FLIGHT_PATH,
+    RECENTER,
+    OPEN_SETTINGS,
+    OPEN_FILTERS,
+    OPEN_TRAFFIC_DETAILS
+}
 
 // Owns map and panel geometry so FlightMapView can ask where things go without doing rectangle math inline.
 class FlightMapLayout(private val scale_dp: (Float) -> Float) {
@@ -92,6 +108,61 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
             settings.top,
             settings.right + gap + width,
             settings.bottom
+        )
+    }
+
+    fun map_surface_targets(w: Float, h: Float, state: FlightMapLayoutState): List<MapSurfaceTarget> {
+        val targets = ArrayList<MapSurfaceTarget>(7)
+        fun add(bounds: RectF, action: MapSurfaceAction) {
+            targets.add(MapSurfaceTarget(bounds, action))
+        }
+        if (state.show_previous_flights) {
+            add(previous_flights_button_bounds(w, h, state), MapSurfaceAction.TOGGLE_PREVIOUS_FLIGHTS)
+        }
+        if (state.show_clear_flight_path) {
+            add(clear_flight_path_button_bounds(w, h, state), MapSurfaceAction.CLEAR_SELECTED_FLIGHT_PATH)
+        }
+        if (state.has_location && state.has_selected_flight_path) {
+            add(flight_path_button_bounds(w, h), MapSurfaceAction.SHOW_SELECTED_FLIGHT_PATH)
+        }
+        if (state.has_location && !state.following_location) {
+            add(recenter_button_bounds(w, h, state), MapSurfaceAction.RECENTER)
+        }
+        add(settings_button_bounds(w, h), MapSurfaceAction.OPEN_SETTINGS)
+        add(filters_button_bounds(w, h), MapSurfaceAction.OPEN_FILTERS)
+        add(info_panel_bounds(w, h), MapSurfaceAction.OPEN_TRAFFIC_DETAILS)
+        return targets
+    }
+
+    fun map_surface_action_at(
+        w: Float,
+        h: Float,
+        state: FlightMapLayoutState,
+        x: Float,
+        y: Float
+    ): MapSurfaceAction? {
+        return map_surface_targets(w, h, state)
+            .firstOrNull { it.bounds.contains(x, y) }
+            ?.action
+    }
+
+    fun map_surface_blocks_aircraft_selection(
+        w: Float,
+        h: Float,
+        state: FlightMapLayoutState,
+        x: Float,
+        y: Float
+    ): Boolean {
+        return top_status_bounds(w, h).contains(x, y) ||
+                map_surface_targets(w, h, state).any { it.bounds.contains(x, y) }
+    }
+
+    fun traffic_label_avoid_rects(w: Float, h: Float, padding: Float): List<RectF> {
+        return listOf(
+            top_status_bounds(w, h).padded_copy(padding),
+            info_panel_bounds(w, h).padded_copy(padding),
+            settings_button_bounds(w, h).padded_copy(padding),
+            filters_button_bounds(w, h).padded_copy(padding)
         )
     }
 
@@ -653,4 +724,8 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
     private fun dp(value: Int): Float = dp(value.toFloat())
 
     private fun dp(value: Float): Float = scale_dp(value)
+
+    private fun RectF.padded_copy(padding: Float): RectF {
+        return RectF(left - padding, top - padding, right + padding, bottom + padding)
+    }
 }
