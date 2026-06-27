@@ -43,7 +43,7 @@ class MainActivity : ComponentActivity() {
     private val location_permission_launcher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        flight_map_view?.set_location_permission_granted(has_location_permission())
+        flight_map_view?.set_location_permission_granted(has_flight_location_permission())
         update_alert_service()
     }
     private val notification_permission_launcher = registerForActivityResult(
@@ -155,7 +155,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun request_location_permission_if_needed() {
-        val granted = has_location_permission()
+        val granted = has_flight_location_permission()
         flight_map_view?.set_location_permission_granted(granted)
         if (!granted) {
             location_permission_launcher.launch(
@@ -167,8 +167,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun has_location_permission(): Boolean = has_flight_location_permission()
-
     private fun request_notification_permission_if_needed() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -179,7 +177,7 @@ class MainActivity : ComponentActivity() {
 
     // Keep the background watcher alive only when alerts need it and Android has granted location.
     private fun update_alert_service() {
-        if (monitoring_requested() && has_location_permission()) {
+        if (monitoring_requested() && has_flight_location_permission()) {
             AircraftAlertService.start(this)
         } else {
             AircraftAlertService.stop(this)

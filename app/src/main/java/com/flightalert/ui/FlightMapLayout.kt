@@ -123,9 +123,8 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         portrait_top_dp: Int
     ): RectF {
         if (is_compact_settings_panel(panel)) {
-            val column = compact_settings_display_column(panel)
             val top = panel.top + dp(compact_top_dp)
-            return RectF(column.left, top, column.right, top + dp(30))
+            return compact_settings_submenu_button_bounds(panel, top)
         }
         val top = panel.top + dp(portrait_top_dp)
         return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(34))
@@ -154,12 +153,15 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         portrait_top_dp: Int
     ): RectF {
         if (is_compact_settings_panel(panel)) {
-            val column = compact_settings_safety_column(panel)
             val top = panel.top + dp(compact_top_dp)
-            return RectF(column.left, top, column.right, top + dp(30))
+            return compact_settings_submenu_button_bounds(panel, top)
         }
         val top = panel.top + dp(portrait_top_dp)
         return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(34))
+    }
+
+    private fun compact_settings_submenu_button_bounds(panel: RectF, top: Float): RectF {
+        return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(30))
     }
 
     fun imperial_button_bounds(panel: RectF): RectF =
@@ -177,43 +179,65 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         )
     }
 
+    fun settings_display_button_bounds(panel: RectF): RectF =
+        settings_hub_button_bounds(panel, 0)
+
+    fun settings_map_button_bounds(panel: RectF): RectF =
+        settings_hub_button_bounds(panel, 1)
+
+    fun settings_alerts_button_bounds(panel: RectF): RectF =
+        settings_hub_button_bounds(panel, 2)
+
+    fun settings_info_button_bounds(panel: RectF): RectF =
+        settings_hub_button_bounds(panel, 3)
+
+    private fun settings_hub_button_bounds(panel: RectF, index: Int): RectF {
+        val gap = dp(12)
+        return if (is_compact_settings_panel(panel)) {
+            val columns = 2
+            val row = index / columns
+            val column = index % columns
+            val width = (panel.width() - dp(36) - gap) / columns
+            val height = dp(58)
+            val left = panel.left + dp(18) + column * (width + gap)
+            val top = panel.top + dp(74) + row * (height + gap)
+            RectF(left, top, left + width, top + height)
+        } else {
+            val height = dp(54)
+            val top = panel.top + dp(86) + index * (height + gap)
+            RectF(panel.left + dp(18), top, panel.right - dp(18), top + height)
+        }
+    }
+
     fun map_source_button_bounds(panel: RectF): RectF =
         map_setting_button_bounds(
             panel,
             wide_compact_top_dp = 66,
-            narrow_compact_top_dp = 190,
-            portrait_top_dp = 244
+            narrow_compact_top_dp = 66,
+            portrait_top_dp = 88
         )
 
     fun map_labels_button_bounds(panel: RectF): RectF =
         map_setting_button_bounds(
             panel,
             wide_compact_top_dp = 102,
-            narrow_compact_top_dp = 220,
-            portrait_top_dp = 284
-        )
-
-    fun aircraft_source_button_bounds(panel: RectF): RectF =
-        map_setting_button_bounds(
-            panel,
-            wide_compact_top_dp = 138,
-            narrow_compact_top_dp = 250,
-            portrait_top_dp = 324
+            narrow_compact_top_dp = 102,
+            portrait_top_dp = 130
         )
 
     fun aviation_layers_button_bounds(panel: RectF): RectF =
         map_setting_button_bounds(
             panel,
-            wide_compact_top_dp = 174,
-            narrow_compact_top_dp = 280,
-            portrait_top_dp = 364
+            wide_compact_top_dp = 138,
+            narrow_compact_top_dp = 138,
+            portrait_top_dp = 172
         )
 
     fun theme_button_bounds(panel: RectF): RectF =
         display_setting_button_bounds(panel, compact_top_dp = 138, portrait_top_dp = 168)
 
     fun alerts_toggle_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 66, portrait_top_dp = 452)
+        safety_setting_button_bounds(panel, compact_top_dp = 66, portrait_top_dp = 88)
 
     fun alert_distance_minus_bounds(panel: RectF): RectF {
         return if (is_compact_settings_panel(panel)) {
@@ -248,16 +272,13 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
     }
 
     fun priority_tracker_button_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 102, portrait_top_dp = 492)
+        safety_setting_button_bounds(panel, compact_top_dp = 102, portrait_top_dp = 130)
 
     fun monitoring_notification_status_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 138, portrait_top_dp = 532)
+        safety_setting_button_bounds(panel, compact_top_dp = 138, portrait_top_dp = 172)
 
     fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 174, portrait_top_dp = 572)
-
-    fun impact_methodology_button_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 244, portrait_top_dp = 624)
+        safety_setting_button_bounds(panel, compact_top_dp = 174, portrait_top_dp = 214)
 
     fun impact_source_button_bounds(panel: RectF, index: Int, source_count: Int): RectF {
         val gap = dp(8)
@@ -463,12 +484,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
 
     fun filter_reset_button_bounds(panel: RectF): RectF {
         return if (is_compact_settings_panel(panel)) {
-            RectF(
-                panel.right - dp(126),
-                panel.bottom - dp(52),
-                panel.right - dp(18),
-                panel.bottom - dp(22)
-            )
+            filter_button_bounds(panel, row = 3, right_column = true)
         } else {
             RectF(
                 panel.left + dp(18),

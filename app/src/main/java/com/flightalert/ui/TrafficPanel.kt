@@ -23,6 +23,7 @@ import android.graphics.RectF
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.TrafficDisplay
 import com.flightalert.details.AircraftDetails
+import com.flightalert.details.AircraftPhotoCatalog
 import com.flightalert.details.AircraftTelemetryFormatter
 import com.flightalert.traffic.FilterStats
 import java.util.Locale
@@ -40,6 +41,7 @@ sealed interface TrafficPanelContent
 
 data class TrafficPanelAircraftState(
     val callsign: String,
+    val model_label: String,
     val distance_label: String,
     val distance_color: Int,
     val wide_rows: List<TrafficPanelRow>,
@@ -84,6 +86,12 @@ class TrafficPanelRenderer(
         )
 
         val y = rect.top + if (wide) dp(32) else dp(27)
+        val model_label = (state.content as? TrafficPanelAircraftState)
+            ?.model_label
+            ?.takeIf { it != "Unavailable" }
+        val content_width = rect.width() - dp(32)
+        val model_width = if (model_label != null) min(content_width * 0.42f, dp(190)) else 0f
+        val title_width = content_width - model_width - if (model_label != null) dp(12) else 0f
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(13)
@@ -93,10 +101,22 @@ class TrafficPanelRenderer(
             state.title,
             rect.left + dp(16),
             y,
-            rect.width() - dp(32),
+            title_width,
             sp(13),
             sp(9)
         )
+        if (model_label != null) {
+            text_paint.color = style.visual_theme.colors.text
+            draw_fitted_right_text(
+                canvas,
+                model_label,
+                rect.right - dp(16),
+                y,
+                model_width,
+                sp(13),
+                sp(9)
+            )
+        }
 
         when (val content = state.content) {
             is TrafficPanelEmptyState -> draw_empty_panel(
@@ -446,8 +466,10 @@ internal class TrafficPanelStateBuilder(
     }
 
     private fun aircraft_panel_state(target: Aircraft): TrafficPanelAircraftState {
+        val model = aircraft_display_model(target)
         return TrafficPanelAircraftState(
-            callsign = target.callsign,
+            callsign = target.callsign_label,
+            model_label = model,
             distance_label = telemetry_formatter.distance(reported_distance_meters(target)),
             distance_color = traffic_distance_color(target),
             wide_rows = panel_rows(target),
@@ -465,6 +487,7 @@ internal class TrafficPanelStateBuilder(
     }
 
     private fun panel_rows(target: Aircraft): List<TrafficPanelRow> {
+        val route_details = current_route_details_for_panel(target)
         val rows = mutableListOf(
             TrafficPanelRow("Altitude", telemetry_formatter.altitude_value(target.altitude_m)),
             TrafficPanelRow("Speed", telemetry_formatter.speed_value(target.velocity_ms)),
@@ -476,18 +499,26 @@ internal class TrafficPanelStateBuilder(
             TrafficPanelRow("Last contact", telemetry_formatter.age(target)),
             TrafficPanelRow("Registration", target.registration ?: "Unavailable"),
             TrafficPanelRow("Registry country", registry_country_label(target)),
-            TrafficPanelRow("Type", target.type_code ?: "Unavailable")
+            TrafficPanelRow("Type code", target.type_code ?: "Unavailable")
         )
         if (target.is_military) {
             rows += TrafficPanelRow("Military", "Tagged military")
             rows += TrafficPanelRow(
                 "Origin status",
-                format_origin_status(target, current_route_details_for_panel(target))
+                format_origin_status(target, route_details)
             )
         }
         rows += TrafficPanelRow("ICAO", target.icao24.uppercase(Locale.US))
         rows += TrafficPanelRow("Reported position", telemetry_formatter.reported_position(target))
         return rows
+    }
+
+    private fun aircraft_display_model(target: Aircraft, details: AircraftDetails? = null): String {
+        return AircraftPhotoCatalog.display_model_name(
+            details?.manufacturer ?: target.metadata_seed?.manufacturer,
+            details?.type ?: target.metadata_seed?.type,
+            details?.type_code ?: target.metadata_seed?.type_code ?: target.type_code
+        ) ?: "Unavailable"
     }
 
     private fun empty_panel_state(

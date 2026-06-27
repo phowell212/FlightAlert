@@ -440,8 +440,8 @@ class AircraftFeedClient(private val user_agent: String) {
         val upper = compact.uppercase(Locale.US)
         return when {
             MODE_S_HEX.matches(upper) -> "hex/${upper.lowercase(Locale.US)}"
-            looks_like_registration_search(upper) -> "reg/${url_encode(upper)}"
-            CALLSIGN_SEARCH.matches(upper) -> "callsign/${url_encode(upper)}"
+            looks_like_registration_search(upper) -> "reg/${URLEncoder.encode(upper, "UTF-8")}"
+            CALLSIGN_SEARCH.matches(upper) -> "callsign/${URLEncoder.encode(upper, "UTF-8")}"
             else -> null
         }
     }
@@ -449,8 +449,6 @@ class AircraftFeedClient(private val user_agent: String) {
     private fun looks_like_registration_search(upper: String): Boolean {
         return upper.startsWith("N") || upper.contains("-")
     }
-
-    private fun url_encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     // Build a bounded grid of point queries; mark partial coverage when the viewport is too large for one pass.
     private fun airplanes_live_query_plan(bounds: FeedBounds): AirplanesLiveQueryPlan {

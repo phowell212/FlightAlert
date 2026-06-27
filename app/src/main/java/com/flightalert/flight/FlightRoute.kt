@@ -20,6 +20,7 @@ import com.flightalert.FlightAlertAppSettings
 
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.details.AircraftDetails
+import com.flightalert.details.AircraftPhotoCatalog
 import com.flightalert.details.AircraftRouteSource
 import com.flightalert.details.AirportDetails
 import com.flightalert.map.MapProjection
@@ -57,14 +58,11 @@ object AircraftRoutePresenter {
         aircraft: Aircraft,
         loading: Boolean = false
     ): String {
-        return listOfNotNull(
-            details?.manufacturer,
-            details?.type,
-            details?.type_code ?: aircraft.type_code
-        )
-            .distinct()
-            .joinToString(" ")
-            .ifEmpty { loading_or_unavailable(loading) }
+        return AircraftPhotoCatalog.display_model_name(
+            details?.manufacturer ?: aircraft.metadata_seed?.manufacturer,
+            details?.type ?: aircraft.metadata_seed?.type,
+            details?.type_code ?: aircraft.metadata_seed?.type_code ?: aircraft.type_code
+        ) ?: loading_or_unavailable(loading)
     }
 
     fun airport(airport: AirportDetails?, loading: Boolean = false): String {

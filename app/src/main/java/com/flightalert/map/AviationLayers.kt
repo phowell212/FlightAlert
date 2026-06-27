@@ -149,12 +149,12 @@ class AviationLayerClient(private val user_agent: String) {
         return try {
             val url = URL(
                 "$base_url?f=geojson" +
-                        "&where=${encode(where)}" +
-                        "&geometry=${encode(bounds.arc_gis_envelope())}" +
+                        "&where=${URLEncoder.encode(where, "UTF-8")}" +
+                        "&geometry=${URLEncoder.encode(bounds.arc_gis_envelope(), "UTF-8")}" +
                         "&geometryType=esriGeometryEnvelope" +
                         "&inSR=4326" +
                         "&spatialRel=esriSpatialRelIntersects" +
-                        "&outFields=${encode(out_fields)}" +
+                        "&outFields=${URLEncoder.encode(out_fields, "UTF-8")}" +
                         "&outSR=4326" +
                         "&returnGeometry=true" +
                         "&resultRecordCount=$max_records"
@@ -380,8 +380,6 @@ class AviationLayerClient(private val user_agent: String) {
             connection?.disconnect()
         }
     }
-
-    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     companion object {
         private const val BOUNDARY_AIRSPACE_QUERY_URL =

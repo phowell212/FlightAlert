@@ -43,8 +43,8 @@ data class AircraftDetailsRow(
     val section: Boolean = false
 ) {
     companion object {
-        fun section(label: String): AircraftDetailsRow =
-            AircraftDetailsRow(label, "", section = true)
+        fun section(label: String, value: String = ""): AircraftDetailsRow =
+            AircraftDetailsRow(label, value, section = true)
     }
 }
 
@@ -423,6 +423,28 @@ class AircraftDetailsPanelRenderer(
             ?: ((rows.size + 1) / 2)
     }
 
+    private fun draw_panel_heading(
+        canvas: Canvas,
+        rect: RectF,
+        title: String,
+        style: AircraftDetailsPanelStyle
+    ) {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = true
+        text_paint.textSize = sp(21)
+        text_paint.color = style.visual_theme.colors.text
+        val left = rect.left + dp(18)
+        draw_fitted_left_text(
+            canvas,
+            title,
+            left,
+            rect.top + dp(38),
+            max(0f, close_button_bounds(rect).left - left - dp(10)),
+            sp(21),
+            sp(11)
+        )
+    }
+
     // Draw environmental impact only from prepared presenter rows so missing aircraft data stays unavailable.
     private fun draw_impact_panel(
         canvas: Canvas,
@@ -439,11 +461,7 @@ class AircraftDetailsPanelRenderer(
         )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Back", false)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(21)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Environmental impact", rect.left + dp(18), rect.top + dp(38), text_paint)
+        draw_panel_heading(canvas, rect, "Environmental impact", style)
 
         if (!content.selected_aircraft_available) {
             draw_centered_message(
@@ -569,11 +587,7 @@ class AircraftDetailsPanelRenderer(
         )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Back", false)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(21)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Aircraft usage", rect.left + dp(18), rect.top + dp(38), text_paint)
+        draw_panel_heading(canvas, rect, "Aircraft usage", style)
 
         if (!content.selected_aircraft_available) {
             draw_centered_message(
@@ -778,21 +792,20 @@ class AircraftDetailsPanelRenderer(
         )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Close", false)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(21)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Photo verification", rect.left + dp(18), rect.top + dp(38), text_paint)
+        draw_panel_heading(canvas, rect, "Photo verification", style)
 
         if (evidence == null) {
             text_paint.isFakeBoldText = false
             text_paint.textSize = sp(13)
             text_paint.color = style.visual_theme.colors.muted
-            canvas.drawText(
+            draw_fitted_left_text(
+                canvas,
                 "No search-engine verification is attached to this photo.",
                 rect.left + dp(18),
                 rect.top + dp(78),
-                text_paint
+                rect.width() - dp(36),
+                sp(13),
+                sp(9)
             )
             return AircraftDetailsDrawResult(0f, 0f)
         }
@@ -884,11 +897,7 @@ class AircraftDetailsPanelRenderer(
         )
         chrome.draw_choice_button(canvas, close_button_bounds(rect), "Back", false)
 
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(21)
-        text_paint.color = style.visual_theme.colors.text
-        canvas.drawText("Photo gallery", rect.left + dp(18), rect.top + dp(38), text_paint)
+        draw_panel_heading(canvas, rect, "Photo gallery", style)
 
         text_paint.isFakeBoldText = false
         text_paint.textSize = sp(12)
@@ -1019,7 +1028,7 @@ class AircraftDetailsPanelRenderer(
                 canvas,
                 rect,
                 y,
-                row.label,
+                row,
                 style,
                 visible_top,
                 visible_bottom,
@@ -1111,7 +1120,7 @@ class AircraftDetailsPanelRenderer(
         canvas: Canvas,
         rect: RectF,
         y: Float,
-        label: String,
+        row: AircraftDetailsRow,
         style: AircraftDetailsPanelStyle,
         visible_top: Float,
         visible_bottom: Float,
@@ -1127,7 +1136,28 @@ class AircraftDetailsPanelRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = if (compact) sp(10) else sp(11)
         text_paint.color = style.visual_theme.colors.accent_blue
-        canvas.drawText(label.uppercase(Locale.US), left, y + top_gap, text_paint)
+        val value_width = if (row.value.isBlank()) 0f else (right - left) * 0.56f
+        draw_fitted_left_text(
+            canvas,
+            row.label.uppercase(Locale.US),
+            left,
+            y + top_gap,
+            right - left - value_width - if (row.value.isBlank()) 0f else dp(12),
+            text_paint.textSize,
+            if (compact) sp(8) else sp(9)
+        )
+        if (row.value.isNotBlank()) {
+            text_paint.color = style.visual_theme.colors.text
+            draw_fitted_right_text(
+                canvas,
+                row.value,
+                right,
+                y + top_gap,
+                value_width,
+                if (compact) sp(12) else sp(13),
+                if (compact) sp(8) else sp(9)
+            )
+        }
 
         stroke_paint.color = with_alpha(
             style.visual_theme.colors.panel_stroke,

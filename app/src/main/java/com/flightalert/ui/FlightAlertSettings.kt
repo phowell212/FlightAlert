@@ -114,12 +114,10 @@ data class SettingsPanelState(
     val map_source: TileSource,
     val map_labels_enabled: Boolean,
     val map_borders_enabled: Boolean,
-    val aircraft_feed_mode: AircraftFeedMode,
     val aviation_layers_enabled: Boolean,
     val alerts_enabled: Boolean,
     val priority_tracking_enabled: Boolean,
     val watcher_notification_hider_enabled: Boolean,
     val watcher_notification_hider_status: MonitoringNotificationHiderStatus,
-    val map_attribution: String,
-    val aircraft_source_label: String
+    val map_attribution: String
 )

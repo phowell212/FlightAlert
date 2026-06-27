@@ -126,19 +126,21 @@ import com.flightalert.map.Viewport
 import com.flightalert.map.WorldPoint
 import com.flightalert.map.bounds_around_location
 import com.flightalert.sources.AircraftFeedClient
-import com.flightalert.traffic.AircraftFilterController
 import com.flightalert.sources.AircraftTrafficFeed
-import com.flightalert.traffic.AircraftTypeFilter
-import com.flightalert.traffic.AltitudeFilter
-import com.flightalert.traffic.CachedTraffic
-import com.flightalert.traffic.DistanceFilter
 import com.flightalert.sources.FeedBounds
 import com.flightalert.sources.FeedResult
 import com.flightalert.sources.FeedSource
 import com.flightalert.sources.FeedStatus
+import com.flightalert.sources.GlobeBinCraftAircraftSource
+import com.flightalert.sources.VisibleAircraftFeedController
+import com.flightalert.sources.VisibleAircraftRequest
+import com.flightalert.traffic.AircraftFilterController
+import com.flightalert.traffic.AircraftTypeFilter
+import com.flightalert.traffic.AltitudeFilter
+import com.flightalert.traffic.CachedTraffic
+import com.flightalert.traffic.DistanceFilter
 import com.flightalert.traffic.FilterStats
 import com.flightalert.traffic.FlightStatusFilter
-import com.flightalert.sources.GlobeBinCraftAircraftSource
 import com.flightalert.traffic.OwnshipOverlayState
 import com.flightalert.traffic.ReportAgeFilter
 import com.flightalert.traffic.TrafficCacheController
@@ -152,9 +154,6 @@ import com.flightalert.traffic.TrafficOverlayStyle
 import com.flightalert.traffic.TrafficScreenProjector
 import com.flightalert.traffic.TrafficSelectionHitTester
 import com.flightalert.traffic.TrafficSpatialEntry
-import com.flightalert.sources.VisibleAircraftFeedController
-import com.flightalert.sources.VisibleAircraftRequest
-import com.flightalert.ui.AircraftFeedMode
 import com.flightalert.ui.AviationLayersPanelState
 import com.flightalert.ui.FiltersPanelState
 import com.flightalert.ui.FlightAlertSettings
@@ -278,8 +277,8 @@ class FlightMapView(
         draw_wrapped_text = { canvas, value, x, y, width, max_lines ->
             draw_wrapped_text(canvas, value, x, y, width, max_lines)
         },
-        lat_lon_to_world = ::lat_lon_to_world,
-        world_to_lat_lon = ::world_to_lat_lon
+        lat_lon_to_world = MapProjection::lat_lon_to_world,
+        world_to_lat_lon = MapProjection::world_to_lat_lon
     )
     private val panel_renderer = FlightMapPanelRenderer(
         paint = paint,
@@ -375,7 +374,6 @@ class FlightMapView(
         request_redraw = { invalidate() },
         is_selected_key = { key -> selected_path_controller.is_selected_key(key) },
         selected_segments = { selected_path_controller.selected_segments(visible_only = false) },
-        aircraft_feed_mode = { aircraft_feed_mode },
         aircraft_details = { details_session.aircraft_details },
         current_flight_route_details = ::current_flight_route_details
     )
@@ -397,8 +395,7 @@ class FlightMapView(
             origin_lookup_controller.trace_origin_loading_for(
                 aircraft
             )
-        },
-        aircraft_feed_mode = { aircraft_feed_mode }
+        }
     )
     private val traffic_panel_renderer = TrafficPanelRenderer(
         text_paint = text_paint,
@@ -531,7 +528,7 @@ class FlightMapView(
         aircraft_appearance = ::aircraft_appearance_for_key,
         display_aircraft_position = ::display_aircraft_position,
         spatial_entry_for = ::spatial_entry_for,
-        lat_lon_to_world = ::lat_lon_to_world,
+        lat_lon_to_world = MapProjection::lat_lon_to_world,
         now_elapsed_ms = { SystemClock.elapsedRealtime() }
     )
 
@@ -595,6 +592,9 @@ class FlightMapView(
 
     // Track which panel is open; Back and draw both use these flags to choose one visible branch.
     private var settings_open = false
+    private var display_settings_open = false
+    private var map_settings_open = false
+    private var alert_settings_open = false
     private var map_labels_open = false
     private var aviation_layers_open = false
     private var priority_tracker_open = false
@@ -683,6 +683,7 @@ class FlightMapView(
     private var last_pinch_focus_x = 0f
     private var last_pinch_focus_y = 0f
     private var last_map_interaction_ms = 0L
+    private var last_map_zoom_interaction_ms = 0L
     private var last_traffic_draw_elapsed_ms = 0L
     private var last_priority_notification_snapshot_check_ms = 0L
     private var last_priority_notification_snapshot_signature: String? = null
@@ -835,13 +836,8 @@ class FlightMapView(
             invalidate()
             return true
         }
-        if (map_labels_open) {
-            map_labels_open = false
-            invalidate()
-            return true
-        }
-        if (aviation_layers_open) {
-            aviation_layers_open = false
+        if (settings_subpage_open()) {
+            close_settings_subpage()
             invalidate()
             return true
         }
@@ -861,19 +857,8 @@ class FlightMapView(
             return true
         }
         if (settings_open) {
-            if (impact_methodology_open) {
-                impact_methodology_open = false
-                invalidate()
-                return true
-            }
-            if (aviation_layers_open) {
-                aviation_layers_open = false
-                invalidate()
-                return true
-            }
             settings_open = false
-            impact_methodology_open = false
-            aviation_layers_open = false
+            close_all_settings_subpages()
             invalidate()
             return true
         }
@@ -964,10 +949,16 @@ class FlightMapView(
                 draw_aircraft_details_panel(this, w, h)
             }
             if (settings_open) {
-                if (map_labels_open) {
+                if (display_settings_open) {
+                    draw_display_settings_panel(this, w, h)
+                } else if (map_labels_open) {
                     draw_map_labels_panel(this, w, h)
                 } else if (aviation_layers_open) {
                     draw_aviation_layers_panel(this, w, h)
+                } else if (map_settings_open) {
+                    draw_map_settings_panel(this, w, h)
+                } else if (alert_settings_open) {
+                    draw_alert_settings_panel(this, w, h)
                 } else if (impact_methodology_open) {
                     draw_impact_methodology_panel(this, w, h)
                 } else {
@@ -1276,7 +1267,7 @@ class FlightMapView(
         persist_zoom: Boolean = true
     ) {
         val old_viewport = current_interaction_viewport() ?: return
-        val anchor_geo = world_to_lat_lon(
+        val anchor_geo = MapProjection.world_to_lat_lon(
             old_viewport.center_x - old_viewport.width / 2.0 + old_focus_x,
             old_viewport.center_y - old_viewport.height / 2.0 + old_focus_y,
             old_viewport.zoom
@@ -1284,8 +1275,12 @@ class FlightMapView(
         val next_zoom =
             (zoom + ln(scale_factor) / ln(2.0)).coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
 
+        val old_zoom = zoom
         zoom = next_zoom
-        val focus_world = lat_lon_to_world(anchor_geo.lat, anchor_geo.lon, zoom)
+        if (abs(next_zoom - old_zoom) >= MAP_ZOOM_INTERACTION_EPSILON) {
+            last_map_zoom_interaction_ms = SystemClock.elapsedRealtime()
+        }
+        val focus_world = MapProjection.lat_lon_to_world(anchor_geo.lat, anchor_geo.lon, zoom)
         set_manual_center_from_world(
             focus_world.x + content_width() / 2.0 - new_focus_x,
             focus_world.y + content_height() / 2.0 - new_focus_y
@@ -1302,7 +1297,7 @@ class FlightMapView(
         latest_location?.let { location -> return viewport_for(location, w, h) }
         val center_lat = manual_center_lat ?: return null
         val center_lon = manual_center_lon ?: return null
-        val center = lat_lon_to_world(center_lat, center_lon, zoom)
+        val center = MapProjection.lat_lon_to_world(center_lat, center_lon, zoom)
         return Viewport(
             zoom = zoom,
             center_x = center.x,
@@ -1407,7 +1402,7 @@ class FlightMapView(
 
     // Ask Android for available providers, seed from last known fixes, then subscribe to live fixes.
     private fun start_location_updates() {
-        if (!has_location_permission()) {
+        if (!context.has_flight_location_permission()) {
             location_permission_granted = false
             return
         }
@@ -1447,8 +1442,6 @@ class FlightMapView(
         }
     }
 
-    private fun has_location_permission(): Boolean = context.has_flight_location_permission()
-
     private fun is_better_location(candidate: Location, current: Location?): Boolean {
         if (current == null) return true
         return candidate.time > current.time || candidate.accuracy < current.accuracy
@@ -1460,7 +1453,7 @@ class FlightMapView(
             if (following_location) location.latitude else manual_center_lat ?: location.latitude
         val center_lon =
             if (following_location) location.longitude else manual_center_lon ?: location.longitude
-        val center = lat_lon_to_world(center_lat, center_lon, zoom)
+        val center = MapProjection.lat_lon_to_world(center_lat, center_lon, zoom)
         val focus = if (following_location) default_map_focus(w, h) else ScreenPoint(w / 2f, h / 2f)
         return Viewport(
             zoom = zoom,
@@ -1491,14 +1484,16 @@ class FlightMapView(
     }
 
     private fun map_tile_state(): MapTileRenderState {
+        val now = SystemClock.elapsedRealtime()
         return MapTileRenderState(
             map_source = map_source,
             map_labels_enabled = map_labels_enabled,
             map_borders_enabled = map_borders_enabled,
             map_label_text_scale = map_label_text_scale,
-            map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
+            map_label_transition_alpha = map_label_transition_alpha(now),
             user_agent = USER_AGENT,
-            interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime())
+            interaction_active = map_tile_interaction_active(now),
+            zoom_interaction_active = map_tile_zoom_interaction_active(now)
         )
     }
 
@@ -1525,6 +1520,11 @@ class FlightMapView(
                 now - last_map_interaction_ms <= MAP_TILE_INTERACTION_SETTLE_MS
     }
 
+    private fun map_tile_zoom_interaction_active(now: Long): Boolean {
+        return last_map_zoom_interaction_ms > 0L &&
+                now - last_map_zoom_interaction_ms <= MAP_TILE_INTERACTION_SETTLE_MS
+    }
+
     private fun map_tile_style(): MapTileRenderStyle {
         return MapTileRenderStyle(
             map_empty = map_empty_color,
@@ -1545,11 +1545,11 @@ class FlightMapView(
         outline_only: Boolean = false
     ) {
         if (!should_draw_priority_range_circle()) return
-        val ownship = lat_lon_to_world(location.latitude, location.longitude, viewport.zoom)
+        val ownship = MapProjection.lat_lon_to_world(location.latitude, location.longitude, viewport.zoom)
         val cx = (ownship.x - viewport.center_x + viewport.width / 2.0).toFloat()
         val cy = (ownship.y - viewport.center_y + viewport.height / 2.0).toFloat()
         val meters_per_pixel =
-            meters_per_pixel_at(location.latitude, viewport.zoom).coerceAtLeast(0.01)
+            MapProjection.meters_per_pixel_at(location.latitude, viewport.zoom).coerceAtLeast(0.01)
         val radius_px =
             (feet_to_meters(alert_distance_feet.toDouble()) / meters_per_pixel).toFloat()
         if (radius_px <= 1f) return
@@ -2026,8 +2026,8 @@ class FlightMapView(
         val right = viewport.center_x + viewport.width / 2.0 + padding
         val top = viewport.center_y - viewport.height / 2.0 - padding
         val bottom = viewport.center_y + viewport.height / 2.0 + padding
-        val top_left = world_to_lat_lon(left, top, viewport.zoom)
-        val bottom_right = world_to_lat_lon(right, bottom, viewport.zoom)
+        val top_left = MapProjection.world_to_lat_lon(left, top, viewport.zoom)
+        val bottom_right = MapProjection.world_to_lat_lon(right, bottom, viewport.zoom)
         if (abs(top_left.lon - bottom_right.lon) > 180.0) return null
         return Bounds(
             min_lat = min(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
@@ -2052,8 +2052,8 @@ class FlightMapView(
         val right = viewport.center_x + viewport.width / 2.0 + padding
         val top = viewport.center_y - viewport.height / 2.0 - padding
         val bottom = viewport.center_y + viewport.height / 2.0 + padding
-        val top_left = world_to_lat_lon(left, top, viewport.zoom)
-        val bottom_right = world_to_lat_lon(right, bottom, viewport.zoom)
+        val top_left = MapProjection.world_to_lat_lon(left, top, viewport.zoom)
+        val bottom_right = MapProjection.world_to_lat_lon(right, bottom, viewport.zoom)
         return Bounds(
             min_lat = min(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
             min_lon = -180.0,
@@ -2318,7 +2318,7 @@ class FlightMapView(
     private fun current_map_scale(target_pixels: Float): ScaleLabel {
         val center_lat = latest_location
             ?.let { viewport_for(it, content_width(), content_height()) }
-            ?.let { world_to_lat_lon(it.center_x, it.center_y, it.zoom).lat }
+            ?.let { MapProjection.world_to_lat_lon(it.center_x, it.center_y, it.zoom).lat }
             ?: 0.0
         return measurement_formatter.current_map_scale(target_pixels, center_lat, zoom)
     }
@@ -2642,6 +2642,30 @@ class FlightMapView(
         panel_renderer.draw_settings_panel(canvas, w, h, panel_style(), settings_panel_state())
     }
 
+    private fun draw_display_settings_panel(canvas: Canvas, w: Float, h: Float) {
+        panel_renderer.draw_display_settings_panel(
+            canvas,
+            w,
+            h,
+            panel_style(),
+            settings_panel_state()
+        )
+    }
+
+    private fun draw_map_settings_panel(canvas: Canvas, w: Float, h: Float) {
+        panel_renderer.draw_map_settings_panel(canvas, w, h, panel_style(), settings_panel_state())
+    }
+
+    private fun draw_alert_settings_panel(canvas: Canvas, w: Float, h: Float) {
+        panel_renderer.draw_alert_settings_panel(
+            canvas,
+            w,
+            h,
+            panel_style(),
+            settings_panel_state()
+        )
+    }
+
     private fun draw_map_labels_panel(canvas: Canvas, w: Float, h: Float) {
         panel_renderer.draw_map_labels_panel(canvas, w, h, panel_style(), map_labels_panel_state())
     }
@@ -2690,7 +2714,6 @@ class FlightMapView(
             map_source = map_source,
             map_labels_enabled = map_labels_enabled,
             map_borders_enabled = map_borders_enabled,
-            aircraft_feed_mode = aircraft_feed_mode,
             aviation_layers_enabled = has_aviation_layers_enabled(),
             alerts_enabled = alerts_enabled,
             priority_tracking_enabled = priority_tracking_enabled,
@@ -2701,8 +2724,7 @@ class FlightMapView(
                 context,
                 app_opened_elapsed_ms
             ),
-            map_attribution = map_source.attribution_text(map_labels_enabled, map_borders_enabled),
-            aircraft_source_label = aircraft_source_preference_label()
+            map_attribution = map_source.attribution_text(map_labels_enabled, map_borders_enabled)
         )
     }
 
@@ -3184,7 +3206,7 @@ class FlightMapView(
         val panel = settings_panel_bounds(content_width(), content_height())
         if (impact_methodology_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> impact_methodology_open = false
+                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
                 else -> AircraftImpactEstimator.source_urls.forEachIndexed { index, url ->
                     if (impact_source_button_bounds(panel, index).contains(x, y)) {
                         open_url(url)
@@ -3196,7 +3218,7 @@ class FlightMapView(
         }
         if (aviation_layers_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> aviation_layers_open = false
+                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
                 layer_atc_button_bounds(panel).contains(
                     x,
                     y
@@ -3222,7 +3244,7 @@ class FlightMapView(
         }
         if (map_labels_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> map_labels_open = false
+                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
                 map_street_labels_button_bounds(panel).contains(
                     x,
                     y
@@ -3236,39 +3258,86 @@ class FlightMapView(
             invalidate()
             return true
         }
+        if (display_settings_open) {
+            when {
+                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                imperial_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.IMPERIAL)
+                metric_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.METRIC)
+                theme_button_bounds(panel).contains(x, y) -> set_visual_theme(next_visual_theme())
+            }
+            invalidate()
+            return true
+        }
+        if (map_settings_open) {
+            when {
+                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                map_source_button_bounds(panel).contains(x, y) -> toggle_map_source()
+                map_labels_button_bounds(panel).contains(x, y) -> map_labels_open = true
+                aviation_layers_button_bounds(panel).contains(x, y) -> aviation_layers_open = true
+            }
+            invalidate()
+            return true
+        }
+        if (alert_settings_open) {
+            when {
+                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                alerts_toggle_bounds(panel).contains(x, y) -> set_alerts_enabled(!alerts_enabled)
+                monitoring_notification_hider_button_bounds(panel).contains(
+                    x,
+                    y
+                ) -> open_notification_listener_settings()
+
+                priority_tracker_button_bounds(panel).contains(x, y) -> {
+                    settings_open = false
+                    close_all_settings_subpages()
+                    priority_tracker_open = true
+                }
+            }
+            invalidate()
+            return true
+        }
         when {
             close_button_bounds(panel).contains(x, y) -> {
                 settings_open = false
-                impact_methodology_open = false
-                aviation_layers_open = false
+                close_all_settings_subpages()
             }
 
-            imperial_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.IMPERIAL)
-            metric_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.METRIC)
-            map_source_button_bounds(panel).contains(x, y) -> toggle_map_source()
-            map_labels_button_bounds(panel).contains(x, y) -> map_labels_open = true
-            aircraft_source_button_bounds(panel).contains(x, y) -> set_aircraft_feed_mode(
-                aircraft_feed_mode.next()
-            )
-
-            aviation_layers_button_bounds(panel).contains(x, y) -> aviation_layers_open = true
-            theme_button_bounds(panel).contains(x, y) -> set_visual_theme(next_visual_theme())
-            alerts_toggle_bounds(panel).contains(x, y) -> set_alerts_enabled(!alerts_enabled)
-            monitoring_notification_hider_button_bounds(panel).contains(
-                x,
-                y
-            ) -> open_notification_listener_settings()
-
-            impact_methodology_button_bounds(panel).contains(x, y) -> impact_methodology_open = true
-            priority_tracker_button_bounds(panel).contains(x, y) -> {
-                settings_open = false
-                impact_methodology_open = false
-                aviation_layers_open = false
-                priority_tracker_open = true
-            }
+            layout.settings_display_button_bounds(panel).contains(x, y) -> display_settings_open = true
+            layout.settings_map_button_bounds(panel).contains(x, y) -> map_settings_open = true
+            layout.settings_alerts_button_bounds(panel).contains(x, y) -> alert_settings_open = true
+            layout.settings_info_button_bounds(panel).contains(x, y) -> impact_methodology_open = true
         }
         invalidate()
         return true
+    }
+
+    private fun settings_subpage_open(): Boolean {
+        return display_settings_open ||
+                map_settings_open ||
+                alert_settings_open ||
+                map_labels_open ||
+                aviation_layers_open ||
+                impact_methodology_open
+    }
+
+    private fun close_settings_subpage() {
+        when {
+            map_labels_open -> map_labels_open = false
+            aviation_layers_open -> aviation_layers_open = false
+            impact_methodology_open -> impact_methodology_open = false
+            display_settings_open -> display_settings_open = false
+            map_settings_open -> map_settings_open = false
+            alert_settings_open -> alert_settings_open = false
+        }
+    }
+
+    private fun close_all_settings_subpages() {
+        display_settings_open = false
+        map_settings_open = false
+        alert_settings_open = false
+        map_labels_open = false
+        aviation_layers_open = false
+        impact_methodology_open = false
     }
 
     private fun handle_map_surface_tap(x: Float, y: Float) {
@@ -3297,9 +3366,7 @@ class FlightMapView(
             filters_button_bounds(w, h).contains(x, y) -> {
                 filters_open = true
                 settings_open = false
-                map_labels_open = false
-                aviation_layers_open = false
-                impact_methodology_open = false
+                close_all_settings_subpages()
             }
 
             info_panel_bounds(w, h).contains(
@@ -3501,7 +3568,7 @@ class FlightMapView(
         val wrapped_x = ((center_x % scale) + scale) % scale
         val half_visible_world = (content_height() / 2.0).coerceAtMost(scale / 2.0)
         val clamped_y = center_y.coerceIn(half_visible_world, scale - half_visible_world)
-        val center = world_to_lat_lon(wrapped_x, clamped_y, zoom)
+        val center = MapProjection.world_to_lat_lon(wrapped_x, clamped_y, zoom)
         manual_center_lat = center.lat
         manual_center_lon = center.lon
         following_location = false
@@ -3630,25 +3697,6 @@ class FlightMapView(
         return MAP_LABEL_TEXT_SCALE_MIN + progress * (MAP_LABEL_TEXT_SCALE_MAX - MAP_LABEL_TEXT_SCALE_MIN)
     }
 
-    // Changing feed mode resets live source state so stale source snapshots do not carry across modes.
-    private fun set_aircraft_feed_mode(mode: AircraftFeedMode) {
-        if (aircraft_feed_mode == mode) return
-        aircraft_feed_mode = mode
-        mark_traffic_cache_dirty()
-        globe_bin_craft_source_enabled = mode.uses_globe
-        prefs.edit {
-            putString(FlightAlertSettings.KEY_AIRCRAFT_FEED_MODE, aircraft_feed_mode.name)
-        }
-        globe_bin_craft_aircraft_source?.set_enabled(globe_bin_craft_source_enabled)
-        aircraft_status = when (aircraft_feed_mode) {
-            AircraftFeedMode.HYBRID -> "Hybrid feed enabled; loading API plus binCraft supplement"
-            AircraftFeedMode.BINCRAFT -> "binCraft feed enabled; waiting for validated snapshot"
-            AircraftFeedMode.API -> "API feed enabled"
-        }
-        request_visible_aircraft_if_needed(force = true)
-        invalidate()
-    }
-
     private fun set_atc_boundaries_layer_enabled(enabled: Boolean) {
         if (atc_boundaries_layer_enabled == enabled) return
         atc_boundaries_layer_enabled = enabled
@@ -3688,10 +3736,6 @@ class FlightMapView(
         invalidate()
     }
 
-    private fun aircraft_source_preference_label(): String {
-        return aircraft_feed_mode.display_name
-    }
-
     private fun set_alerts_enabled(enabled: Boolean) {
         alerts_enabled = enabled
         mark_traffic_cache_dirty()
@@ -3701,7 +3745,7 @@ class FlightMapView(
     }
 
     private fun set_alert_distance_feet(next: Float) {
-        alert_distance_feet = next.coerceIn(500f, 60000f)
+        alert_distance_feet = next.coerceIn(500f, 100_000f)
         mark_traffic_cache_dirty()
         prefs.edit { putFloat(FlightAlertSettings.KEY_ALERT_DISTANCE_FEET, alert_distance_feet) }
         update_monitoring_service()
@@ -3710,7 +3754,7 @@ class FlightMapView(
     }
 
     private fun set_alert_altitude_feet(next: Float) {
-        alert_altitude_feet = next.coerceIn(100f, 10000f)
+        alert_altitude_feet = next.coerceIn(100f, 100_000f)
         mark_traffic_cache_dirty()
         prefs.edit { putFloat(FlightAlertSettings.KEY_ALERT_ALTITUDE_FEET, alert_altitude_feet) }
         update_monitoring_service()
@@ -4061,9 +4105,6 @@ class FlightMapView(
     private fun map_labels_button_bounds(panel: RectF): RectF =
         layout.map_labels_button_bounds(panel)
 
-    private fun aircraft_source_button_bounds(panel: RectF): RectF =
-        layout.aircraft_source_button_bounds(panel)
-
     private fun aviation_layers_button_bounds(panel: RectF): RectF =
         layout.aviation_layers_button_bounds(panel)
 
@@ -4086,9 +4127,6 @@ class FlightMapView(
 
     private fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
         layout.monitoring_notification_hider_button_bounds(panel)
-
-    private fun impact_methodology_button_bounds(panel: RectF): RectF =
-        layout.impact_methodology_button_bounds(panel)
 
     private fun impact_source_button_bounds(panel: RectF, index: Int): RectF =
         layout.impact_source_button_bounds(panel, index, AircraftImpactEstimator.source_labels.size)
@@ -4299,22 +4337,6 @@ class FlightMapView(
 
     private fun feet_to_meters(feet: Double): Double = feet / 3.28084
 
-    private fun meters_per_pixel_at(latitude: Double, z: Double): Double {
-        return MapProjection.meters_per_pixel_at(latitude, z)
-    }
-
-    private fun lat_lon_to_world(lat: Double, lon: Double, z: Double): WorldPoint {
-        return MapProjection.lat_lon_to_world(lat, lon, z)
-    }
-
-    private fun world_to_lat_lon(x: Double, y: Double, z: Double): GeoPoint {
-        return MapProjection.world_to_lat_lon(x, y, z)
-    }
-
-    private fun normalize_longitude(lon: Double): Double {
-        return MapProjection.normalize_longitude(lon)
-    }
-
     private fun Bounds.to_feed_bounds(): FeedBounds {
         return FeedBounds(
             min_lat = min_lat,
@@ -4414,6 +4436,7 @@ class FlightMapView(
         const val MAP_LABEL_TEXT_SCALE_STEP = 0.05f
         const val MAP_INTERACTION_SETTLE_REDRAW_PADDING_MS = 16L
         const val MAP_LABEL_SETTLED_FADE_MS = 140L
+        const val MAP_ZOOM_INTERACTION_EPSILON = 0.0005
     }
 
 }

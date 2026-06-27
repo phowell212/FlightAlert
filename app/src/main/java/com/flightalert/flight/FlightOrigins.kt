@@ -22,7 +22,6 @@ import com.flightalert.details.AirportDetails
 import com.flightalert.details.OriginAerodrome
 import com.flightalert.details.fetch_json_object
 import com.flightalert.map.MapProjection
-import com.flightalert.ui.AircraftFeedMode
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.Executor
@@ -36,7 +35,6 @@ class AircraftOriginLookupController(
     private val request_redraw: () -> Unit,
     private val is_selected_key: (String) -> Boolean,
     private val selected_segments: () -> List<TraceSegment>?,
-    private val aircraft_feed_mode: () -> AircraftFeedMode,
     private val aircraft_details: () -> AircraftDetails?,
     private val current_flight_route_details: (AircraftDetails, Aircraft) -> AircraftDetails?
 ) {
@@ -101,10 +99,9 @@ class AircraftOriginLookupController(
         }
     }
 
-    // Hybrid mode can enrich route origin from the selected trace only when no provider route origin exists.
+    // A selected real trace can enrich route origin when no provider route origin exists.
     fun request_trace_origin_airport_if_needed(aircraft: Aircraft) {
         val key = aircraft.icao24.lowercase(Locale.US)
-        if (aircraft_feed_mode() != AircraftFeedMode.HYBRID) return
         if (!is_selected_key(key)) return
         if (trace_origin_airport != null && trace_origin_aircraft_id == aircraft.icao24) return
         if (trace_origin_aircraft_id == aircraft.icao24 && trace_origin_loading) return

@@ -573,8 +573,10 @@ internal class AircraftDetailsRowsBuilder(
         val route_context = route_trace_context(aircraft)
         val telemetry =
             enriched_details?.telemetry?.with_fallback(aircraft.telemetry) ?: aircraft.telemetry
+        val aircraft_model =
+            AircraftRoutePresenter.aircraft_type(enriched_details, aircraft, details_loading)
         val rows = mutableListOf<AircraftDetailsRow>()
-        rows += AircraftDetailsRow.section("Aircraft")
+        rows += AircraftDetailsRow.section("Aircraft", aircraft_model)
         rows += AircraftDetailsRow("Callsign", aircraft.callsign)
         rows += AircraftDetailsRow("ICAO hex", aircraft.icao24.uppercase(Locale.US))
         rows += AircraftDetailsRow(
@@ -592,10 +594,6 @@ internal class AircraftDetailsRowsBuilder(
             AircraftRoutePresenter.details_value(enriched_details?.owner, details_loading)
         )
         rows += AircraftDetailsRow(
-            "Aircraft",
-            AircraftRoutePresenter.aircraft_type(enriched_details, aircraft, details_loading)
-        )
-        rows += AircraftDetailsRow(
             "MFR year",
             AircraftRoutePresenter.details_value(
                 enriched_details?.manufactured_year,
@@ -610,12 +608,8 @@ internal class AircraftDetailsRowsBuilder(
         )
         rows += AircraftDetailsRow("Squawk", telemetry_formatter.telemetry_value(telemetry?.squawk))
         rows += AircraftDetailsRow(
-            "Data source",
+            "Signal",
             telemetry_formatter.telemetry_value(telemetry_formatter.source_type(telemetry?.source_type))
-        )
-        rows += AircraftDetailsRow(
-            "Registry source",
-            AircraftRoutePresenter.details_value(enriched_details?.registry_source, details_loading)
         )
         if (aircraft.is_military) {
             rows += AircraftDetailsRow("Military", "Tagged military")
@@ -1566,8 +1560,7 @@ internal class AircraftTraceDetailsPresenter(
     private val selected_segments: (Boolean) -> List<TraceSegment>?,
     private val is_flight_path_loading: (Aircraft) -> Boolean,
     private val trace_origin_airport_for: (Aircraft) -> AirportDetails?,
-    private val trace_origin_loading_for: (Aircraft) -> Boolean,
-    private val aircraft_feed_mode: () -> AircraftFeedMode
+    private val trace_origin_loading_for: (Aircraft) -> Boolean
 ) {
     fun current_flight_route_details(
         details: AircraftDetails?,
@@ -1585,8 +1578,7 @@ internal class AircraftTraceDetailsPresenter(
     }
 
     fun current_flight_route_loading(aircraft: Aircraft, details_loading: Boolean): Boolean {
-        val trace_origin_pending = trace_origin_loading_for(aircraft) &&
-                aircraft_feed_mode() == AircraftFeedMode.HYBRID
+        val trace_origin_pending = trace_origin_loading_for(aircraft)
         return details_loading || is_flight_path_loading(aircraft) || trace_origin_pending
     }
 

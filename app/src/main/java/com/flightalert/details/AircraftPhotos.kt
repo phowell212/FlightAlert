@@ -34,7 +34,7 @@ import org.json.JSONObject
 
 object AircraftPhotoCatalog {
     fun representative_model_names(details: AircraftDetails): List<String> {
-        val base = representative_model_name(details)
+        val base = display_model_name(details.manufacturer, details.type, details.type_code)
         val type = details.type?.trim()
         val manufacturer = details.manufacturer?.trim()
         val aliases = mutableListOf<String>()
@@ -102,8 +102,8 @@ object AircraftPhotoCatalog {
             .distinct()
     }
 
-    private fun representative_model_name(details: AircraftDetails): String? {
-        val code = details.type_code?.uppercase(Locale.US)?.trim()
+    fun display_model_name(manufacturer: String?, type: String?, type_code: String?): String? {
+        val code = type_code?.uppercase(Locale.US)?.trim()
         val known_model = when (code) {
             "A19N" -> "Airbus A319neo"
             "A20N" -> "Airbus A320neo"
@@ -223,10 +223,25 @@ object AircraftPhotoCatalog {
             else -> null
         }
         if (known_model != null) return known_model
-        return listOfNotNull(details.manufacturer, details.type ?: details.type_code)
+        return listOfNotNull(
+            human_aircraft_name_part(manufacturer),
+            human_aircraft_name_part(type ?: type_code)
+        )
+            .distinct()
             .joinToString(" ")
-            .trim()
             .ifEmpty { null }
+    }
+
+    private fun human_aircraft_name_part(value: String?): String? {
+        val clean = value?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() }
+            ?: return null
+        return clean.split(" ").joinToString(" ") { word ->
+            if (word.any(Char::isLowerCase) || word.any(Char::isDigit) || word.length <= 3) {
+                word
+            } else {
+                word.lowercase(Locale.US).replaceFirstChar { char -> char.titlecase(Locale.US) }
+            }
+        }
     }
 
     private fun manufacturer_aliases(manufacturer: String): List<String> {

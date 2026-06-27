@@ -149,7 +149,7 @@ class AircraftAlertService : Service(), LocationListener {
 
     // Seed from last known providers, then subscribe to GPS/network so alert math has real ownship position.
     private fun start_location_updates() {
-        if (!has_location_permission()) return
+        if (!has_flight_location_permission()) return
         try {
             location_manager.getProviders(true).forEach { provider ->
                 val last = location_manager.getLastKnownLocation(provider)
@@ -595,8 +595,6 @@ class AircraftAlertService : Service(), LocationListener {
         foreground_active = false
         priority_notification_showing = false
     }
-
-    private fun has_location_permission(): Boolean = has_flight_location_permission()
 
     private fun has_notification_permission(): Boolean {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||

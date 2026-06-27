@@ -591,7 +591,8 @@ internal class SatelliteMapTileRenderer(
                 upper_tile_zoom = upper_tile_zoom,
                 has_upper_lod = has_upper_lod,
                 upper_lod_alpha = upper_lod_alpha,
-                prefetch_upper_lod = prefetch_upper_lod
+                prefetch_upper_lod = prefetch_upper_lod,
+                freeze_lod_for_pan = state.interaction_active && !state.zoom_interaction_active
             )
             if (plan == null) continue
             val overlay_alpha = reference_overlay_zoom_alpha(
@@ -956,7 +957,8 @@ internal class SatelliteMapTileRenderer(
         upper_tile_zoom: Int,
         has_upper_lod: Boolean,
         upper_lod_alpha: Float,
-        prefetch_upper_lod: Boolean
+        prefetch_upper_lod: Boolean,
+        freeze_lod_for_pan: Boolean
     ): ReferenceOverlayDrawPlan? {
         val candidates = reference_overlay_candidate_zooms(
             overlay = overlay,
@@ -1037,6 +1039,17 @@ internal class SatelliteMapTileRenderer(
         }
 
         val target_coverage = coverage_for(target_tile_zoom)
+        val previous_coverage = previous?.takeIf { it in drawable_candidates }?.let { zoom ->
+            zoom to if (zoom == target_tile_zoom) target_coverage else coverage_for(zoom)
+        }
+        val pan_held_previous = previous_coverage?.takeIf { (_, coverage) ->
+            freeze_lod_for_pan &&
+                    reference_selected_lod_pan_holdable(coverage)
+        }
+        if (pan_held_previous != null) {
+            return finish_plan(pan_held_previous.first, pan_held_previous.second)
+        }
+
         val target_commit_ready = reference_lod_switch_commit_ready(overlay, target_coverage)
         if (target_commit_ready) {
             return finish_plan(target_tile_zoom, target_coverage)
@@ -1051,9 +1064,6 @@ internal class SatelliteMapTileRenderer(
             return finish_plan(target_tile_zoom, target_coverage)
         }
 
-        val previous_coverage = previous?.takeIf { it in drawable_candidates }?.let { zoom ->
-            zoom to if (zoom == target_tile_zoom) target_coverage else coverage_for(zoom)
-        }
         val retained_previous = previous_coverage?.takeIf { (_, coverage) ->
             reference_selected_lod_holdable(
                 overlay = overlay,
@@ -1236,6 +1246,10 @@ internal class SatelliteMapTileRenderer(
                                     coverage = coverage
                                 ) > MIN_LAYER_ALPHA
                         )
+    }
+
+    private fun reference_selected_lod_pan_holdable(coverage: ReferenceTileCoverage): Boolean {
+        return coverage.visible > 0
     }
 
     private fun reference_close_pan_target_lod_holdable(

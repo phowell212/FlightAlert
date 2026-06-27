@@ -243,11 +243,11 @@ class TrafficOverlayRenderer(
     ) {
         rotorcraft_animation_frame_requested = false
         state.dot_batch?.let { batch ->
-            val marker_blend = smoothed_aircraft_marker_dot_blend(state.viewport)
+            val marker_blend = AircraftMarkerMorph.marker_dot_blend(state.viewport)
             val draw_symbols =
                 state.aircraft.isNotEmpty() && marker_blend < AIRCRAFT_BATCH_DOT_BLEND
             if (draw_symbols) {
-                val dot_alpha = dense_batch_dot_alpha(marker_blend)
+                val dot_alpha = AircraftMarkerMorph.dense_batch_dot_alpha(marker_blend)
                 draw_prepared_aircraft_dot_batch(
                     canvas = canvas,
                     batch = batch,
@@ -281,7 +281,7 @@ class TrafficOverlayRenderer(
             }
             return
         }
-        val marker_blend = smoothed_aircraft_marker_dot_blend(state.viewport)
+        val marker_blend = AircraftMarkerMorph.marker_dot_blend(state.viewport)
         if (marker_blend >= AIRCRAFT_BATCH_DOT_BLEND) {
             draw_aircraft_dot_batch(
                 canvas,
@@ -332,7 +332,10 @@ class TrafficOverlayRenderer(
         val has_selected_aircraft = normalized_selected_id != null
         val draw_any_labels = draw_labels && label_count > 0
         val max_cull_icon_scale =
-            max(aircraft_dot_scale(viewport.zoom), aircraft_icon_scale(viewport.zoom))
+            max(
+                AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom),
+                AircraftMarkerMorph.aircraft_icon_scale(viewport.zoom)
+            )
         for (item in aircraft) {
             val selected = has_selected_aircraft && item.appearance_key == normalized_selected_id
             val elapsed_sec = traffic_motion_elapsed_seconds(item, now_ms)
@@ -584,8 +587,8 @@ class TrafficOverlayRenderer(
                     marker_blend
                 )
             ),
-            icon_scale_bucket = (aircraft_icon_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
-            dot_scale_bucket = (aircraft_dot_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
+            icon_scale_bucket = (AircraftMarkerMorph.aircraft_icon_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
+            dot_scale_bucket = (AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
             aircraft_signature = aircraft_symbol_overlay_signature(
                 aircraft,
                 interaction_active,
@@ -960,7 +963,7 @@ class TrafficOverlayRenderer(
         draw_selected_overlay: Boolean = true,
         interaction_active: Boolean = false
     ) {
-        val base_scale = aircraft_dot_scale(viewport.zoom)
+        val base_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
@@ -1074,7 +1077,7 @@ class TrafficOverlayRenderer(
         batch.selected_aircraft?.let { item ->
             val transform_scale = batch.transform_scale.coerceAtLeast(0.001f)
             val appear = item.appearance_progress.coerceIn(0f, 1f)
-            val icon_scale = aircraft_dot_scale(viewport.zoom) *
+            val icon_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom) *
                     item.symbol_scale *
                     (0.18f + 0.82f * appear)
             draw_aircraft_dot(
@@ -1521,7 +1524,7 @@ class TrafficOverlayRenderer(
         reset_dot_batch_buffers()
         var selected_item: TrafficAircraftOverlayState? = null
         val normalized_selected_id = normalized_selected_aircraft_id(selected_aircraft_id)
-        val base_scale = aircraft_dot_scale(viewport.zoom)
+        val base_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
@@ -1561,7 +1564,7 @@ class TrafficOverlayRenderer(
         if (!draw_selected_overlay) return
         selected_item?.let { item ->
             val appear = item.appearance_progress.coerceIn(0f, 1f)
-            val icon_scale = aircraft_dot_scale(viewport.zoom) *
+            val icon_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom) *
                     item.symbol_scale *
                     (0.18f + 0.82f * appear)
             draw_aircraft_dot(
@@ -2587,16 +2590,6 @@ class TrafficOverlayRenderer(
         }
     }
 
-    // The zoom curve already eases the morph; following it directly keeps quick pinches visually locked to the map.
-    private fun smoothed_aircraft_marker_dot_blend(viewport: Viewport): Float {
-        return aircraft_marker_dot_blend(viewport)
-    }
-
-    // Blend toward dot markers by zoom only; density is handled by batching so the morph never locks.
-    private fun aircraft_marker_dot_blend(viewport: Viewport): Float {
-        return AircraftMarkerMorph.marker_dot_blend(viewport)
-    }
-
     // Labels are intentionally limited so nearby aircraft remain visible and touch targets stay clear.
     private fun label_aircraft_count(marker_blend: Float, zoom: Double): Int {
         if (marker_blend > 0.35f) return 0
@@ -2608,22 +2601,10 @@ class TrafficOverlayRenderer(
         }
     }
 
-    private fun aircraft_icon_scale(zoom: Double): Float {
-        return AircraftMarkerMorph.aircraft_icon_scale(zoom)
-    }
-
-    private fun aircraft_dot_scale(zoom: Double): Float {
-        return AircraftMarkerMorph.aircraft_dot_scale(zoom)
-    }
-
     private fun batch_dot_outline_extra_px(dot_scale: Float): Float {
         return chrome.dp(BATCH_DOT_OUTLINE_EXTRA_DP) * AircraftMarkerMorph.batch_dot_outline_scale(
             dot_scale
         )
-    }
-
-    private fun dense_batch_dot_alpha(marker_blend: Float): Float {
-        return AircraftMarkerMorph.dense_batch_dot_alpha(marker_blend)
     }
 
     private fun aircraft_cull_padding(
@@ -2633,7 +2614,10 @@ class TrafficOverlayRenderer(
     ): Float {
         return aircraft_cull_padding(
             item,
-            max(aircraft_dot_scale(zoom), aircraft_icon_scale(zoom)),
+            max(
+                AircraftMarkerMorph.aircraft_dot_scale(zoom),
+                AircraftMarkerMorph.aircraft_icon_scale(zoom)
+            ),
             selected
         )
     }

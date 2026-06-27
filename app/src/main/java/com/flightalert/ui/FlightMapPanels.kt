@@ -163,12 +163,52 @@ class FlightMapPanelRenderer(
         draw_panel_title(canvas, rect, "Settings", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Close", false)
 
-        if (chrome.layout.is_compact_settings_panel(rect)) {
-            draw_compact_settings_panel_contents(canvas, rect, style, state)
-            return
-        }
+        val compact = chrome.layout.is_compact_settings_panel(rect)
+        chrome.draw_choice_button(
+            canvas,
+            chrome.layout.settings_display_button_bounds(rect),
+            if (compact) "Display" else "Display: units and theme",
+            false
+        )
+        chrome.draw_choice_button(
+            canvas,
+            chrome.layout.settings_map_button_bounds(rect),
+            if (compact) "Map" else "Map: base, labels, layers",
+            false
+        )
+        chrome.draw_choice_button(
+            canvas,
+            chrome.layout.settings_alerts_button_bounds(rect),
+            if (compact) "Alerts" else "Alerts: hazards and notifications",
+            false
+        )
+        chrome.draw_choice_button(
+            canvas,
+            chrome.layout.settings_info_button_bounds(rect),
+            if (compact) "Info" else "Info: impact methodology",
+            false
+        )
 
-        draw_settings_section_label(canvas, rect.left + dp(18), rect.top + dp(74), "Display", style)
+        draw_settings_footer(canvas, rect, state, style)
+    }
+
+    fun draw_display_settings_panel(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        style: FlightMapPanelStyle,
+        state: SettingsPanelState
+    ) {
+        val rect = chrome.layout.settings_panel_bounds(w, h)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
+        draw_panel_title(canvas, rect, "Display", style)
+        chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
+
         chrome.draw_choice_button(
             canvas,
             chrome.layout.imperial_button_bounds(rect),
@@ -185,36 +225,66 @@ class FlightMapPanelRenderer(
             canvas,
             chrome.layout.theme_button_bounds(rect),
             "Theme: ${style.visual_theme.display_name}",
-            true
+            false
         )
+    }
 
-        draw_settings_section_label(canvas, rect.left + dp(18), rect.top + dp(230), "Map", style)
+    fun draw_map_settings_panel(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        style: FlightMapPanelStyle,
+        state: SettingsPanelState
+    ) {
+        val rect = chrome.layout.settings_panel_bounds(w, h)
+        val compact = chrome.layout.is_compact_settings_panel(rect)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
+        draw_panel_title(canvas, rect, "Map", style)
+        chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
+
         chrome.draw_choice_button(
             canvas,
             chrome.layout.map_source_button_bounds(rect),
             if (state.map_source == TileSource.SATELLITE) "Satellite map" else "Street map",
-            state.map_source == TileSource.SATELLITE
+            false
         )
         chrome.draw_choice_button(
             canvas,
             chrome.layout.map_labels_button_bounds(rect),
-            map_labels_button_label(state, compact = false),
-            state.map_labels_enabled || state.map_borders_enabled
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.aircraft_source_button_bounds(rect),
-            aircraft_source_button_label(state, compact = false),
-            true
+            map_labels_button_label(state, compact),
+            false
         )
         chrome.draw_choice_button(
             canvas,
             chrome.layout.aviation_layers_button_bounds(rect),
-            "Aviation layers",
-            state.aviation_layers_enabled
+            if (compact) "Layers" else "Aviation layers",
+            false
         )
+        draw_settings_footer(canvas, rect, state, style)
+    }
 
-        draw_settings_section_label(canvas, rect.left + dp(18), rect.top + dp(438), "Safety", style)
+    fun draw_alert_settings_panel(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        style: FlightMapPanelStyle,
+        state: SettingsPanelState
+    ) {
+        val rect = chrome.layout.settings_panel_bounds(w, h)
+        chrome.draw_panel_surface(
+            canvas,
+            rect,
+            style.visual_theme.colors.panel_alt,
+            style.visual_theme.style.modal_panel_alpha
+        )
+        draw_panel_title(canvas, rect, "Alerts", style)
+        chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
+
         chrome.draw_choice_button(
             canvas,
             chrome.layout.alerts_toggle_bounds(rect),
@@ -224,8 +294,8 @@ class FlightMapPanelRenderer(
         chrome.draw_choice_button(
             canvas,
             chrome.layout.priority_tracker_button_bounds(rect),
-            "Notification range and tracker",
-            state.priority_tracking_enabled
+            "Notification range",
+            false
         )
         draw_watcher_notification_status(
             canvas,
@@ -239,44 +309,27 @@ class FlightMapPanelRenderer(
             if (state.watcher_notification_hider_enabled) "Notification access enabled" else "Open notification access",
             state.watcher_notification_hider_enabled
         )
+    }
 
-        draw_settings_section_label(
+    private fun draw_settings_footer(
+        canvas: Canvas,
+        rect: RectF,
+        state: SettingsPanelState,
+        style: FlightMapPanelStyle
+    ) {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(11)
+        text_paint.color = style.visual_theme.colors.muted
+        draw_fitted_left_text(
             canvas,
+            "Map: ${state.map_attribution}",
             rect.left + dp(18),
-            rect.top + dp(612),
-            "Reference",
-            style
+            rect.bottom - dp(20),
+            rect.width() - dp(36),
+            sp(11),
+            sp(8)
         )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.impact_methodology_button_bounds(rect),
-            "Impact methodology",
-            false
-        )
-
-        val footer_top = rect.bottom - dp(38)
-        if (chrome.layout.impact_methodology_button_bounds(rect).bottom + dp(24) <= footer_top) {
-            text_paint.textAlign = Paint.Align.LEFT
-            text_paint.isFakeBoldText = false
-            text_paint.textSize = sp(11)
-            text_paint.color = style.visual_theme.colors.muted
-            draw_fitted_left_text(
-                canvas,
-                "Map: ${state.map_attribution}",
-                rect.left + dp(18),
-                rect.bottom - dp(38),
-                rect.width() - dp(36),
-                sp(11),
-                sp(9)
-            )
-            val source_label = "Aircraft: ${state.aircraft_source_label}; paths: live trace sources"
-            canvas.drawText(
-                chrome.ellipsize(source_label, rect.width() - dp(36)),
-                rect.left + dp(18),
-                rect.bottom - dp(18),
-                text_paint
-            )
-        }
     }
 
     // Draw map-label provider choices without implying label tiles are available for every map source.
@@ -614,18 +667,21 @@ class FlightMapPanelRenderer(
             return
         }
 
-        var y = rect.top + dp(382)
-        state.aircraft_rows.take(PRIORITY_PANEL_ROWS).forEach { item ->
+        val row_start_y = rect.top + dp(382)
+        val visible_rows = ((rect.bottom - dp(44) - row_start_y) / dp(64)).toInt()
+            .coerceIn(1, PRIORITY_PANEL_ROWS)
+        var y = row_start_y
+        state.aircraft_rows.take(visible_rows).forEach { item ->
             y = draw_priority_aircraft_row(canvas, rect, y, item, style)
         }
-        if (state.aircraft_rows.size > PRIORITY_PANEL_ROWS) {
+        if (state.aircraft_rows.size > visible_rows) {
             text_paint.textAlign = Paint.Align.LEFT
             text_paint.isFakeBoldText = false
             text_paint.textSize = sp(11)
             text_paint.color = style.visual_theme.colors.muted
             draw_fitted_left_text(
                 canvas,
-                "+${state.aircraft_rows.size - PRIORITY_PANEL_ROWS} more",
+                "+${state.aircraft_rows.size - visible_rows} more",
                 rect.left + dp(18),
                 y + dp(8),
                 rect.width() - dp(36),
@@ -635,105 +691,6 @@ class FlightMapPanelRenderer(
         }
     }
 
-    // Compact settings splits display/map and safety/reference into columns instead of clipping controls.
-    private fun draw_compact_settings_panel_contents(
-        canvas: Canvas,
-        rect: RectF,
-        style: FlightMapPanelStyle,
-        state: SettingsPanelState
-    ) {
-        val display = chrome.layout.compact_settings_display_column(rect)
-        val map = chrome.layout.compact_settings_map_column(rect)
-        val safety = chrome.layout.compact_settings_safety_column(rect)
-        val wide = chrome.layout.is_wide_settings_hub_panel(rect)
-
-        draw_settings_section_label(canvas, display.left, rect.top + dp(58), "Display", style)
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.imperial_button_bounds(rect),
-            "Miles / feet",
-            state.units == UnitSystem.IMPERIAL
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.metric_button_bounds(rect),
-            "Kilometers / meters",
-            state.units == UnitSystem.METRIC
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.theme_button_bounds(rect),
-            "Theme: ${style.visual_theme.short_name}",
-            true
-        )
-
-        draw_settings_section_label(
-            canvas,
-            map.left,
-            rect.top + dp(if (wide) 58 else 184),
-            "Map",
-            style
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.map_source_button_bounds(rect),
-            if (state.map_source == TileSource.SATELLITE) "Satellite" else "Street",
-            state.map_source == TileSource.SATELLITE
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.map_labels_button_bounds(rect),
-            map_labels_button_label(state, compact = true),
-            state.map_labels_enabled || state.map_borders_enabled
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.aircraft_source_button_bounds(rect),
-            aircraft_source_button_label(state, compact = true),
-            true
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.aviation_layers_button_bounds(rect),
-            "Layers",
-            state.aviation_layers_enabled
-        )
-
-        draw_settings_section_label(canvas, safety.left, rect.top + dp(58), "Safety", style)
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.alerts_toggle_bounds(rect),
-            if (state.alerts_enabled) "Hazard alerts on" else "Hazard alerts off",
-            state.alerts_enabled
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.priority_tracker_button_bounds(rect),
-            "Notification range",
-            state.priority_tracking_enabled
-        )
-        draw_watcher_notification_status(
-            canvas,
-            chrome.layout.monitoring_notification_status_bounds(rect),
-            state,
-            style
-        )
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.monitoring_notification_hider_button_bounds(rect),
-            if (state.watcher_notification_hider_enabled) "Access enabled" else "Open access",
-            state.watcher_notification_hider_enabled
-        )
-
-        draw_settings_section_label(canvas, safety.left, rect.top + dp(236), "Reference", style)
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.impact_methodology_button_bounds(rect),
-            "Impact method",
-            false
-        )
-    }
-
     private fun map_labels_button_label(state: SettingsPanelState, compact: Boolean): String {
         val prefix = if (compact) "Labels" else "Map labels"
         return when {
@@ -741,11 +698,6 @@ class FlightMapPanelRenderer(
             state.map_labels_enabled || state.map_borders_enabled -> "$prefix mixed"
             else -> "$prefix off"
         }
-    }
-
-    private fun aircraft_source_button_label(state: SettingsPanelState, compact: Boolean): String {
-        val prefix = if (compact) "Source" else "Aircraft source"
-        return "$prefix: ${state.aircraft_feed_mode.display_name}"
     }
 
     private fun draw_watcher_notification_status(
@@ -1462,8 +1414,8 @@ object PriorityRangeAdjuster {
             PriorityRangeValue.VERTICAL -> 30.0
         }
         val max_meters = when (value) {
-            PriorityRangeValue.HORIZONTAL -> 18_000.0
-            PriorityRangeValue.VERTICAL -> 3_000.0
+            PriorityRangeValue.HORIZONTAL -> 30_000.0
+            PriorityRangeValue.VERTICAL -> 30_000.0
         }
         return meters_to_feet(
             stepped_display_value(
@@ -1493,8 +1445,8 @@ object PriorityRangeAdjuster {
             PriorityRangeValue.VERTICAL -> 100.0
         }
         val max_feet = when (value) {
-            PriorityRangeValue.HORIZONTAL -> 60_000.0
-            PriorityRangeValue.VERTICAL -> 10_000.0
+            PriorityRangeValue.HORIZONTAL -> 100_000.0
+            PriorityRangeValue.VERTICAL -> 100_000.0
         }
         return stepped_display_value(
             current = current_feet.toDouble(),
