@@ -1178,7 +1178,7 @@ class FlightMapView(
             if (zoom_step != null) {
                 // Keyboard zoom is centered in the open map area so panels do not steal the focal point.
                 mark_map_interaction()
-                val focus = default_map_focus(content_width(), content_height())
+                val focus = layout.default_map_focus(content_width(), content_height(), layout_state())
                 val scale_factor = 2.0.pow(zoom_step)
                 zoom_and_pan_during_pinch(scale_factor, focus.x, focus.y, focus.x, focus.y)
                 request_visible_aircraft_after_map_interaction()
@@ -1447,7 +1447,7 @@ class FlightMapView(
         val center_lon =
             if (following_location) location.longitude else manual_center_lon ?: location.longitude
         val center = MapProjection.lat_lon_to_world(center_lat, center_lon, zoom)
-        val focus = if (following_location) default_map_focus(w, h) else ScreenPoint(w / 2f, h / 2f)
+        val focus = if (following_location) layout.default_map_focus(w, h, layout_state()) else ScreenPoint(w / 2f, h / 2f)
         return Viewport(
             zoom = zoom,
             center_x = center.x + w / 2.0 - focus.x,
@@ -2239,7 +2239,7 @@ class FlightMapView(
         val padding = dp(8)
         return listOf(
             top_status_bounds(w, h).padded_copy(padding),
-            info_panel_bounds(w, h).padded_copy(padding),
+            layout.info_panel_bounds(w, h).padded_copy(padding),
             settings_button_bounds(w, h).padded_copy(padding),
             filters_button_bounds(w, h).padded_copy(padding)
         )
@@ -2377,8 +2377,8 @@ class FlightMapView(
         layout.filters_button_bounds(w, h)
 
     private fun draw_traffic_panel(canvas: Canvas, w: Float, h: Float) {
-        val rect = info_panel_bounds(w, h)
-        val wide = is_wide_layout(w, h)
+        val rect = layout.info_panel_bounds(w, h)
+        val wide = layout.is_wide_layout(w, h)
         val style = traffic_panel_style()
         val state = traffic_panel_state()
         traffic_panel_renderer.draw_panel(canvas, rect, wide, style, state)
@@ -2438,7 +2438,7 @@ class FlightMapView(
                 transition_progress = photo_transition_progress
             ),
             scroll_y = details_scroll_y,
-            wide_layout = is_wide_layout(w, h)
+            wide_layout = layout.is_wide_layout(w, h)
         )
     }
 
@@ -2493,7 +2493,7 @@ class FlightMapView(
     }
 
     private fun details_panel_bounds(w: Float, h: Float): RectF {
-        return details_panel_renderer.panel_bounds(w, h, is_wide_layout(w, h))
+        return details_panel_renderer.panel_bounds(w, h, layout.is_wide_layout(w, h))
     }
 
     private fun restricted_airspace_details_panel_bounds(w: Float, h: Float): RectF {
@@ -2522,7 +2522,7 @@ class FlightMapView(
     private fun current_details_photo_bounds(panel: RectF, w: Float, h: Float): RectF {
         return details_panel_renderer.current_photo_bounds(
             panel,
-            is_wide_layout(w, h),
+            layout.is_wide_layout(w, h),
             details_session.aircraft_photo != null
         )
     }
@@ -2900,42 +2900,42 @@ class FlightMapView(
 
     private fun handle_filters_panel_tap(x: Float, y: Float): Boolean {
         if (!filters_open) return false
-        val panel = settings_panel_bounds(content_width(), content_height())
+        val panel = layout.settings_panel_bounds(content_width(), content_height())
         when {
-            close_button_bounds(panel).contains(x, y) -> {
+            layout.close_button_bounds(panel).contains(x, y) -> {
                 filters_open = false
                 clear_filter_search_focus()
             }
 
-            filter_search_box_bounds(panel).contains(x, y) -> focus_filter_search()
-            filter_search_find_button_bounds(panel).contains(x, y) -> submit_filter_search()
-            filter_search_clear_button_bounds(panel).contains(x, y) -> set_filter_search_query("")
-            filter_aircraft_type_button_bounds(panel).contains(x, y) -> set_aircraft_type_filter(
+            layout.filter_search_box_bounds(panel).contains(x, y) -> focus_filter_search()
+            layout.filter_search_find_button_bounds(panel).contains(x, y) -> submit_filter_search()
+            layout.filter_search_clear_button_bounds(panel).contains(x, y) -> set_filter_search_query("")
+            layout.filter_aircraft_type_button_bounds(panel).contains(x, y) -> set_aircraft_type_filter(
                 aircraft_filter_controller.aircraft_type.next()
             )
 
-            filter_altitude_button_bounds(panel).contains(x, y) -> set_altitude_filter(
+            layout.filter_altitude_button_bounds(panel).contains(x, y) -> set_altitude_filter(
                 aircraft_filter_controller.altitude.next()
             )
 
-            filter_distance_button_bounds(panel).contains(x, y) -> set_distance_filter(
+            layout.filter_distance_button_bounds(panel).contains(x, y) -> set_distance_filter(
                 aircraft_filter_controller.distance.next()
             )
 
-            filter_status_button_bounds(panel).contains(x, y) -> set_flight_status_filter(
+            layout.filter_status_button_bounds(panel).contains(x, y) -> set_flight_status_filter(
                 aircraft_filter_controller.flight_status.next()
             )
 
-            filter_age_button_bounds(panel).contains(x, y) -> set_report_age_filter(
+            layout.filter_age_button_bounds(panel).contains(x, y) -> set_report_age_filter(
                 aircraft_filter_controller.report_age.next()
             )
 
-            filter_alert_button_bounds(panel).contains(
+            layout.filter_alert_button_bounds(panel).contains(
                 x,
                 y
             ) -> set_alert_volume_filter(!aircraft_filter_controller.alert_volume_only)
 
-            filter_reset_button_bounds(panel).contains(x, y) -> reset_filters()
+            layout.filter_reset_button_bounds(panel).contains(x, y) -> reset_filters()
             else -> clear_filter_search_focus()
         }
         invalidate()
@@ -2944,35 +2944,35 @@ class FlightMapView(
 
     private fun handle_priority_tracker_tap(x: Float, y: Float): Boolean {
         if (!priority_tracker_open) return false
-        val panel = priority_tracker_panel_bounds(content_width(), content_height())
+        val panel = layout.priority_tracker_panel_bounds(content_width(), content_height())
         when {
-            priority_close_button_bounds(panel).contains(x, y) -> priority_tracker_open = false
-            priority_tracking_toggle_bounds(panel).contains(
+            layout.priority_close_button_bounds(panel).contains(x, y) -> priority_tracker_open = false
+            layout.priority_tracking_toggle_bounds(panel).contains(
                 x,
                 y
             ) -> set_priority_tracking_enabled(!priority_tracking_enabled)
 
-            priority_ring_toggle_bounds(panel).contains(
+            layout.priority_ring_toggle_bounds(panel).contains(
                 x,
                 y
             ) -> set_priority_range_circle_visible(!priority_range_circle_visible)
 
-            alert_distance_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
+            layout.alert_distance_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
                 PriorityRangeAdjustButton.DISTANCE_MINUS,
                 long_press = false
             )
 
-            alert_distance_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
+            layout.alert_distance_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
                 PriorityRangeAdjustButton.DISTANCE_PLUS,
                 long_press = false
             )
 
-            alert_altitude_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
+            layout.alert_altitude_minus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
                 PriorityRangeAdjustButton.ALTITUDE_MINUS,
                 long_press = false
             )
 
-            alert_altitude_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
+            layout.alert_altitude_plus_bounds(panel).contains(x, y) -> apply_priority_range_adjustment(
                 PriorityRangeAdjustButton.ALTITUDE_PLUS,
                 long_press = false
             )
@@ -3058,12 +3058,12 @@ class FlightMapView(
     }
 
     private fun priority_adjust_button_bounds(button: PriorityRangeAdjustButton): RectF {
-        val panel = priority_tracker_panel_bounds(content_width(), content_height())
+        val panel = layout.priority_tracker_panel_bounds(content_width(), content_height())
         return when (button) {
-            PriorityRangeAdjustButton.DISTANCE_MINUS -> alert_distance_minus_bounds(panel)
-            PriorityRangeAdjustButton.DISTANCE_PLUS -> alert_distance_plus_bounds(panel)
-            PriorityRangeAdjustButton.ALTITUDE_MINUS -> alert_altitude_minus_bounds(panel)
-            PriorityRangeAdjustButton.ALTITUDE_PLUS -> alert_altitude_plus_bounds(panel)
+            PriorityRangeAdjustButton.DISTANCE_MINUS -> layout.alert_distance_minus_bounds(panel)
+            PriorityRangeAdjustButton.DISTANCE_PLUS -> layout.alert_distance_plus_bounds(panel)
+            PriorityRangeAdjustButton.ALTITUDE_MINUS -> layout.alert_altitude_minus_bounds(panel)
+            PriorityRangeAdjustButton.ALTITUDE_PLUS -> layout.alert_altitude_plus_bounds(panel)
         }
     }
 
@@ -3189,12 +3189,12 @@ class FlightMapView(
 
     private fun handle_settings_panel_tap(x: Float, y: Float): Boolean {
         if (!settings_open) return false
-        val panel = settings_panel_bounds(content_width(), content_height())
+        val panel = layout.settings_panel_bounds(content_width(), content_height())
         if (impact_methodology_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
                 else -> AircraftImpactEstimator.source_urls.forEachIndexed { index, url ->
-                    if (impact_source_button_bounds(panel, index).contains(x, y)) {
+                    if (layout.impact_source_button_bounds(panel, index, AircraftImpactEstimator.source_labels.size).contains(x, y)) {
                         open_url(url)
                     }
                 }
@@ -3204,23 +3204,23 @@ class FlightMapView(
         }
         if (aviation_layers_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                layer_atc_button_bounds(panel).contains(
+                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                layout.layer_atc_button_bounds(panel).contains(
                     x,
                     y
                 ) -> set_atc_boundaries_layer_enabled(!atc_boundaries_layer_enabled)
 
-                layer_restricted_button_bounds(panel).contains(
+                layout.layer_restricted_button_bounds(panel).contains(
                     x,
                     y
                 ) -> set_restricted_airspaces_layer_enabled(!restricted_airspaces_layer_enabled)
 
-                layer_oceanic_button_bounds(panel).contains(
+                layout.layer_oceanic_button_bounds(panel).contains(
                     x,
                     y
                 ) -> set_oceanic_tracks_layer_enabled(!oceanic_tracks_layer_enabled)
 
-                layer_airport_labels_button_bounds(panel).contains(
+                layout.layer_airport_labels_button_bounds(panel).contains(
                     x,
                     y
                 ) -> set_airport_labels_layer_enabled(!airport_labels_layer_enabled)
@@ -3230,13 +3230,13 @@ class FlightMapView(
         }
         if (map_labels_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                map_street_labels_button_bounds(panel).contains(
+                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                layout.map_street_labels_button_bounds(panel).contains(
                     x,
                     y
                 ) -> set_map_labels_enabled(!map_labels_enabled)
 
-                map_borders_button_bounds(panel).contains(
+                layout.map_borders_button_bounds(panel).contains(
                     x,
                     y
                 ) -> set_map_borders_enabled(!map_borders_enabled)
@@ -3246,34 +3246,34 @@ class FlightMapView(
         }
         if (display_settings_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                imperial_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.IMPERIAL)
-                metric_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.METRIC)
-                theme_button_bounds(panel).contains(x, y) -> set_visual_theme(next_visual_theme())
+                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                layout.imperial_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.IMPERIAL)
+                layout.metric_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.METRIC)
+                layout.theme_button_bounds(panel).contains(x, y) -> set_visual_theme(next_visual_theme())
             }
             invalidate()
             return true
         }
         if (map_settings_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                map_source_button_bounds(panel).contains(x, y) -> toggle_map_source()
-                map_labels_button_bounds(panel).contains(x, y) -> map_labels_open = true
-                aviation_layers_button_bounds(panel).contains(x, y) -> aviation_layers_open = true
+                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                layout.map_source_button_bounds(panel).contains(x, y) -> toggle_map_source()
+                layout.map_labels_button_bounds(panel).contains(x, y) -> map_labels_open = true
+                layout.aviation_layers_button_bounds(panel).contains(x, y) -> aviation_layers_open = true
             }
             invalidate()
             return true
         }
         if (alert_settings_open) {
             when {
-                close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
-                alerts_toggle_bounds(panel).contains(x, y) -> set_alerts_enabled(!alerts_enabled)
-                monitoring_notification_hider_button_bounds(panel).contains(
+                layout.close_button_bounds(panel).contains(x, y) -> close_settings_subpage()
+                layout.alerts_toggle_bounds(panel).contains(x, y) -> set_alerts_enabled(!alerts_enabled)
+                layout.monitoring_notification_hider_button_bounds(panel).contains(
                     x,
                     y
                 ) -> open_notification_listener_settings()
 
-                priority_tracker_button_bounds(panel).contains(x, y) -> {
+                layout.priority_tracker_button_bounds(panel).contains(x, y) -> {
                     settings_open = false
                     close_all_settings_subpages()
                     priority_tracker_open = true
@@ -3283,7 +3283,7 @@ class FlightMapView(
             return true
         }
         when {
-            close_button_bounds(panel).contains(x, y) -> {
+            layout.close_button_bounds(panel).contains(x, y) -> {
                 settings_open = false
                 close_all_settings_subpages()
             }
@@ -3355,7 +3355,7 @@ class FlightMapView(
                 close_all_settings_subpages()
             }
 
-            info_panel_bounds(w, h).contains(
+            layout.info_panel_bounds(w, h).contains(
                 x,
                 y
             ) -> displayed_traffic().aircraft?.let { open_aircraft_details(it) }
@@ -3424,7 +3424,7 @@ class FlightMapView(
     }
 
     private fun handle_photo_gallery_tap(panel: RectF, x: Float, y: Float) {
-        val wide = is_wide_layout(content_width(), content_height())
+        val wide = layout.is_wide_layout(content_width(), content_height())
         details_session.aircraft_photo_gallery.forEachIndexed { index, item ->
             val bounds = details_panel_renderer.gallery_item_bounds(panel, index, wide)
             val displayed_bounds = RectF(
@@ -3518,7 +3518,7 @@ class FlightMapView(
     private fun fit_selected_flight_path() {
         val w = content_width()
         val h = content_height()
-        val usable = largest_unblocked_map_rect(w, h).inset_by(dp(12))
+        val usable = layout.largest_unblocked_map_rect(w, h, layout_state()).inset_by(dp(12))
         if (usable.width() <= dp(80) || usable.height() <= dp(80)) return
         val camera = selected_path_viewport_controller.fit_camera(w, h, usable) ?: return
         zoom = camera.zoom
@@ -3529,7 +3529,7 @@ class FlightMapView(
     }
 
     private fun should_show_path_button(viewport: Viewport): Boolean {
-        val usable = largest_unblocked_map_rect(viewport.width, viewport.height).inset_by(dp(14))
+        val usable = layout.largest_unblocked_map_rect(viewport.width, viewport.height, layout_state()).inset_by(dp(14))
         return selected_path_viewport_controller.should_show_path_button(viewport, usable)
     }
 
@@ -3582,7 +3582,7 @@ class FlightMapView(
                 ).contains(x, y)) ||
                 settings_button_bounds(w, h).contains(x, y) ||
                 filters_button_bounds(w, h).contains(x, y) ||
-                info_panel_bounds(w, h).contains(x, y) ||
+                layout.info_panel_bounds(w, h).contains(x, y) ||
                 top_status_bounds(w, h).contains(x, y)
     }
 
@@ -3652,8 +3652,8 @@ class FlightMapView(
 
     private fun begin_map_label_text_slider_drag_if_needed(x: Float, y: Float): Boolean {
         if (!settings_open || !map_labels_open) return false
-        val panel = settings_panel_bounds(content_width(), content_height())
-        val bounds = map_label_text_slider_bounds(panel)
+        val panel = layout.settings_panel_bounds(content_width(), content_height())
+        val bounds = layout.map_label_text_slider_bounds(panel)
         if (!bounds.contains(x, y)) return false
         map_label_text_slider_dragging = true
         set_map_label_text_scale(map_label_text_scale_for_x(x, bounds))
@@ -3663,8 +3663,8 @@ class FlightMapView(
 
     private fun update_map_label_text_slider_drag(x: Float, y: Float): Boolean {
         if (!map_label_text_slider_dragging) return false
-        val panel = settings_panel_bounds(content_width(), content_height())
-        val bounds = map_label_text_slider_bounds(panel)
+        val panel = layout.settings_panel_bounds(content_width(), content_height())
+        val bounds = layout.map_label_text_slider_bounds(panel)
         set_map_label_text_scale(map_label_text_scale_for_x(x, bounds))
         return true
     }
@@ -3672,8 +3672,8 @@ class FlightMapView(
     private fun finish_map_label_text_slider_drag(x: Float, y: Float): Boolean {
         if (!map_label_text_slider_dragging) return false
         map_label_text_slider_dragging = false
-        val panel = settings_panel_bounds(content_width(), content_height())
-        val bounds = map_label_text_slider_bounds(panel)
+        val panel = layout.settings_panel_bounds(content_width(), content_height())
+        val bounds = layout.map_label_text_slider_bounds(panel)
         set_map_label_text_scale(map_label_text_scale_for_x(x, bounds))
         return true
     }
@@ -3778,7 +3778,7 @@ class FlightMapView(
     private fun apply_initial_mavic_range_zoom_if_needed() {
         if (prefs.contains(FlightAlertSettings.KEY_ZOOM) || width <= 0 || height <= 0) return
         val focus_area =
-            largest_unblocked_map_rect(content_width(), content_height()).inset_by(dp(12))
+            layout.largest_unblocked_map_rect(content_width(), content_height(), layout_state()).inset_by(dp(12))
         val target_span_meters = DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M * INITIAL_RANGE_MULTIPLIER
         val available_pixels =
             min(focus_area.width(), focus_area.height()).coerceAtLeast(dp(120)).toDouble()
@@ -3871,7 +3871,7 @@ class FlightMapView(
         requestFocus()
         post {
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            imm.showSoftInput(this, 0)
         }
     }
 
@@ -4078,114 +4078,6 @@ class FlightMapView(
             show_previous_flights = should_show_previous_flights_button()
         )
     }
-
-    private fun settings_panel_bounds(w: Float, h: Float): RectF =
-        layout.settings_panel_bounds(w, h)
-
-    private fun imperial_button_bounds(panel: RectF): RectF = layout.imperial_button_bounds(panel)
-    private fun metric_button_bounds(panel: RectF): RectF = layout.metric_button_bounds(panel)
-    private fun close_button_bounds(panel: RectF): RectF = layout.close_button_bounds(panel)
-    private fun map_source_button_bounds(panel: RectF): RectF =
-        layout.map_source_button_bounds(panel)
-
-    private fun map_labels_button_bounds(panel: RectF): RectF =
-        layout.map_labels_button_bounds(panel)
-
-    private fun aviation_layers_button_bounds(panel: RectF): RectF =
-        layout.aviation_layers_button_bounds(panel)
-
-    private fun theme_button_bounds(panel: RectF): RectF = layout.theme_button_bounds(panel)
-    private fun alerts_toggle_bounds(panel: RectF): RectF = layout.alerts_toggle_bounds(panel)
-    private fun alert_distance_minus_bounds(panel: RectF): RectF =
-        layout.alert_distance_minus_bounds(panel)
-
-    private fun alert_distance_plus_bounds(panel: RectF): RectF =
-        layout.alert_distance_plus_bounds(panel)
-
-    private fun alert_altitude_minus_bounds(panel: RectF): RectF =
-        layout.alert_altitude_minus_bounds(panel)
-
-    private fun alert_altitude_plus_bounds(panel: RectF): RectF =
-        layout.alert_altitude_plus_bounds(panel)
-
-    private fun priority_tracker_button_bounds(panel: RectF): RectF =
-        layout.priority_tracker_button_bounds(panel)
-
-    private fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
-        layout.monitoring_notification_hider_button_bounds(panel)
-
-    private fun impact_source_button_bounds(panel: RectF, index: Int): RectF =
-        layout.impact_source_button_bounds(panel, index, AircraftImpactEstimator.source_labels.size)
-
-    private fun map_street_labels_button_bounds(panel: RectF): RectF =
-        layout.map_street_labels_button_bounds(panel)
-
-    private fun map_borders_button_bounds(panel: RectF): RectF =
-        layout.map_borders_button_bounds(panel)
-
-    private fun map_label_text_slider_bounds(panel: RectF): RectF =
-        layout.map_label_text_slider_bounds(panel)
-
-    private fun layer_atc_button_bounds(panel: RectF): RectF = layout.layer_atc_button_bounds(panel)
-    private fun layer_restricted_button_bounds(panel: RectF): RectF =
-        layout.layer_restricted_button_bounds(panel)
-
-    private fun layer_oceanic_button_bounds(panel: RectF): RectF =
-        layout.layer_oceanic_button_bounds(panel)
-
-    private fun layer_airport_labels_button_bounds(panel: RectF): RectF =
-        layout.layer_airport_labels_button_bounds(panel)
-
-    private fun filter_search_box_bounds(panel: RectF): RectF =
-        layout.filter_search_box_bounds(panel)
-
-    private fun filter_search_find_button_bounds(panel: RectF): RectF =
-        layout.filter_search_find_button_bounds(panel)
-
-    private fun filter_search_clear_button_bounds(panel: RectF): RectF =
-        layout.filter_search_clear_button_bounds(panel)
-
-    private fun filter_aircraft_type_button_bounds(panel: RectF): RectF =
-        layout.filter_aircraft_type_button_bounds(panel)
-
-    private fun filter_altitude_button_bounds(panel: RectF): RectF =
-        layout.filter_altitude_button_bounds(panel)
-
-    private fun filter_distance_button_bounds(panel: RectF): RectF =
-        layout.filter_distance_button_bounds(panel)
-
-    private fun filter_status_button_bounds(panel: RectF): RectF =
-        layout.filter_status_button_bounds(panel)
-
-    private fun filter_age_button_bounds(panel: RectF): RectF =
-        layout.filter_age_button_bounds(panel)
-
-    private fun filter_alert_button_bounds(panel: RectF): RectF =
-        layout.filter_alert_button_bounds(panel)
-
-    private fun filter_reset_button_bounds(panel: RectF): RectF =
-        layout.filter_reset_button_bounds(panel)
-
-    private fun priority_tracker_panel_bounds(w: Float, h: Float): RectF =
-        layout.priority_tracker_panel_bounds(w, h)
-
-    private fun priority_close_button_bounds(panel: RectF): RectF =
-        layout.priority_close_button_bounds(panel)
-
-    private fun priority_tracking_toggle_bounds(panel: RectF): RectF =
-        layout.priority_tracking_toggle_bounds(panel)
-
-    private fun priority_ring_toggle_bounds(panel: RectF): RectF =
-        layout.priority_ring_toggle_bounds(panel)
-
-    private fun info_panel_bounds(w: Float, h: Float): RectF = layout.info_panel_bounds(w, h)
-    private fun default_map_focus(w: Float, h: Float): ScreenPoint =
-        layout.default_map_focus(w, h, layout_state())
-
-    private fun largest_unblocked_map_rect(w: Float, h: Float): RectF =
-        layout.largest_unblocked_map_rect(w, h, layout_state())
-
-    private fun is_wide_layout(w: Float, h: Float): Boolean = layout.is_wide_layout(w, h)
 
     private fun displayed_traffic(): TrafficDisplay {
         val cache = cached_traffic()

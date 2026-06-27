@@ -583,7 +583,6 @@ class TrafficOverlayRenderer(
             dot_scale_bucket = (AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
             aircraft_signature = aircraft_symbol_overlay_signature(
                 aircraft,
-                interaction_active,
                 viewport.zoom
             ),
             appearance_bucket = appearance_bucket,
@@ -594,17 +593,23 @@ class TrafficOverlayRenderer(
         if (interaction_active) {
             symbol_overlay_last_interaction_visual_key = visual_key
         }
-        val key_matches = symbol_overlay_key == key && dimensions_match && center_matches
+        val population_key_matches = symbol_overlay_population_matches(aircraft, key)
+        val key_matches = symbol_overlay_key == key &&
+                dimensions_match &&
+                center_matches &&
+                population_key_matches
         val visual_key_matches = symbol_overlay_key?.visual_key_matches(key) == true &&
                 if (interaction_active) active_dimensions_compatible else dimensions_match
         val active_visual_bridge_matches = interaction_active &&
                 cache_intersects_viewport &&
                 active_dimensions_compatible &&
+                population_key_matches &&
                 symbol_overlay_key?.let { cached_key ->
                     symbol_overlay_interaction_visual_bridge_matches(cached_key, key, scale)
                 } == true
         val active_key_matches = interaction_active &&
                 cache_intersects_viewport &&
+                population_key_matches &&
                 (visual_key_matches || active_visual_bridge_matches)
         val cold_idle_prewarm = !interaction_active &&
                 !symbol_overlay_saw_interaction &&
@@ -612,7 +617,7 @@ class TrafficOverlayRenderer(
                 aircraft.isNotEmpty()
         val idle_visual_refresh = !interaction_active &&
                 symbol_overlay_key != null &&
-                !visual_key_matches &&
+                (!visual_key_matches || !population_key_matches) &&
                 !symbol_overlay_saw_interaction &&
                 aircraft.isNotEmpty()
         if (!key_matches && interaction_active && !active_key_matches) {
@@ -692,6 +697,20 @@ class TrafficOverlayRenderer(
         return abs(cached_key.marker_bucket - current_key.marker_bucket) <= SYMBOL_OVERLAY_INTERACTION_MARKER_BUCKET_TOLERANCE &&
                 abs(scaled_icon_bucket - current_key.icon_scale_bucket) <= SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE &&
                 abs(scaled_dot_bucket - current_key.dot_scale_bucket) <= SYMBOL_OVERLAY_INTERACTION_SCALE_BUCKET_TOLERANCE
+    }
+
+    private fun symbol_overlay_population_matches(
+        aircraft: List<TrafficAircraftOverlayState>,
+        current_key: AircraftSymbolOverlayCacheKey
+    ): Boolean {
+        val cached_key = symbol_overlay_key ?: return false
+        if (cached_key.aircraft_signature != current_key.aircraft_signature) return false
+        val cached_aircraft_keys = symbol_overlay_cached_aircraft_keys
+        if (cached_aircraft_keys.size != aircraft.size) return false
+        for (item in aircraft) {
+            if (!cached_aircraft_keys.contains(item.appearance_key)) return false
+        }
+        return true
     }
 
     private fun draw_cached_symbol_overlay_bitmap(canvas: Canvas, overlay_bitmap: Bitmap) {
@@ -783,11 +802,8 @@ class TrafficOverlayRenderer(
 
     private fun aircraft_symbol_overlay_signature(
         aircraft: List<TrafficAircraftOverlayState>,
-        interaction_active: Boolean,
         zoom: Double
     ): Int {
-        val cached_key = symbol_overlay_key
-        if (interaction_active && cached_key != null) return cached_key.aircraft_signature
         return aircraft_overlay_signature(aircraft, zoom)
     }
 
@@ -1110,17 +1126,8 @@ class TrafficOverlayRenderer(
             alpha_bucket = (dot_alpha * DOT_OVERLAY_ALPHA_BUCKET).round_to_int(),
             theme_key = dot_overlay_theme_key(style.visual_theme.colors)
         )
-        val center_dx = (dot_overlay_center_x - viewport.center_x).toFloat()
-        val center_dy = (dot_overlay_center_y - viewport.center_y).toFloat()
-        val dimensions_match = dot_overlay_width == width_px && dot_overlay_height == height_px
-        val cache_covers = dimensions_match &&
-                center_dx - dot_overlay_padding <= 0f &&
-                center_dy - dot_overlay_padding <= 0f &&
-                center_dx - dot_overlay_padding + dot_overlay_width >= viewport.width &&
-                center_dy - dot_overlay_padding + dot_overlay_height >= viewport.height
         val key_matches = dot_overlay_key == key
-        val visual_key_matches = dot_overlay_key?.visual_key_matches(key) == true
-        if (!key_matches && interaction_active && (!visual_key_matches || !cache_covers)) return false
+        if (!key_matches && interaction_active) return false
         if (!key_matches && !interaction_active) {
             val recording_complete = advance_dot_overlay_cache_recording(
                 batch = batch,

@@ -5,15 +5,14 @@
 android {
     namespace = "com.flightalert"
     compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
+        version = release(37)
     }
 
     defaultConfig {
         applicationId = "com.flightalert"
         minSdk = 29
-        targetSdk = 36
+        //noinspection AndroidLintEditedTargetSdkVersion
+        targetSdk = 37
         versionCode = 9
         versionName = "1.8"
     }
@@ -41,5 +40,6 @@ android {
 dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.core.ktx)
-    implementation("com.github.luben:zstd-jni:1.5.7-8@aar")
+    //noinspection UseTomlInstead
+    implementation("com.github.luben:zstd-jni:1.5.7-11@aar")
 }
