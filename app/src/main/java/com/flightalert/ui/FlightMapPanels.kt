@@ -29,6 +29,7 @@ import com.flightalert.alerts.MonitoringNotificationHiderStatus
 import com.flightalert.map.AviationLayerKind
 import com.flightalert.map.AviationLayerSnapshot
 import com.flightalert.map.AviationLayerState
+import com.flightalert.map.MapReferenceMode
 import com.flightalert.map.TileSource
 import com.flightalert.map.UnitSystem
 import com.flightalert.traffic.AircraftTypeFilter
@@ -51,6 +52,7 @@ data class FlightMapPanelStyle(val visual_theme: VisualTheme)
 data class MapLabelsPanelState(
     val street_labels_enabled: Boolean,
     val borders_enabled: Boolean,
+    val reference_mode: MapReferenceMode,
     val label_text_scale: Float
 )
 
@@ -349,20 +351,29 @@ class FlightMapPanelRenderer(
             style.visual_theme.style.modal_panel_alpha
         )
 
-        draw_panel_title(canvas, rect, "Map labels", style)
+        draw_panel_title(canvas, rect, "Map Labels", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
 
         text_paint.textAlign = Paint.Align.LEFT
         text_paint.isFakeBoldText = false
         text_paint.textSize = if (compact) sp(11) else sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        val label_y = if (compact) rect.top + dp(74) else rect.top + dp(82)
+        val provider_y = if (compact) rect.top + dp(74) else rect.top + dp(82)
+        canvas.drawText("Provider", rect.left + dp(18), provider_y, text_paint)
+        chrome.draw_choice_button(
+            canvas,
+            chrome.layout.map_reference_mode_button_bounds(rect),
+            "Provider: ${state.reference_mode.display_name}",
+            state.reference_mode == MapReferenceMode.VECTOR
+        )
+
+        val label_y = if (compact) rect.top + dp(148) else rect.top + dp(156)
         canvas.drawText("Label layers", rect.left + dp(18), label_y, text_paint)
 
         chrome.draw_choice_button(
             canvas,
             chrome.layout.map_street_labels_button_bounds(rect),
-            "Street labels",
+            if (state.reference_mode == MapReferenceMode.VECTOR) "Map labels" else "Street labels",
             state.street_labels_enabled
         )
         chrome.draw_choice_button(
@@ -382,11 +393,12 @@ class FlightMapPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = if (compact) sp(10) else sp(11)
         text_paint.color = style.visual_theme.colors.muted
-        val source_y = if (compact) rect.top + dp(206) else rect.top + dp(274)
+        val source_y = if (compact) rect.top + dp(282) else rect.top + dp(344)
+        val source_prefix = state.reference_mode.display_name.lowercase(Locale.US)
         val source_text = when {
-            state.street_labels_enabled && state.borders_enabled -> "Current: street labels plus countries and borders"
-            state.street_labels_enabled -> "Current: street labels only"
-            state.borders_enabled -> "Current: countries and borders only"
+            state.street_labels_enabled && state.borders_enabled -> "Current: $source_prefix labels plus countries and borders"
+            state.street_labels_enabled -> "Current: $source_prefix labels only"
+            state.borders_enabled -> "Current: $source_prefix countries and borders only"
             else -> "Current: no-label base where available"
         }
         draw_fitted_left_text(
@@ -484,7 +496,7 @@ class FlightMapPanelRenderer(
             style.visual_theme.style.modal_panel_alpha
         )
 
-        draw_panel_title(canvas, rect, "Impact methodology", style)
+        draw_panel_title(canvas, rect, "Impact Methodology", style)
         chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Back", false)
 
         val items = impact_methodology_items()
@@ -586,7 +598,7 @@ class FlightMapPanelRenderer(
             style.visual_theme.style.modal_panel_alpha
         )
 
-        draw_panel_title(canvas, rect, "Notification range", style)
+        draw_panel_title(canvas, rect, "Notification Range", style)
         chrome.draw_choice_button(
             canvas,
             chrome.layout.priority_close_button_bounds(rect),

@@ -94,6 +94,16 @@ enum class ReferenceTileOverlay(
     }
 }
 
+enum class MapReferenceMode(val display_name: String) {
+    RASTER("Raster"),
+    VECTOR("Vector");
+
+    fun next(): MapReferenceMode = when (this) {
+        RASTER -> VECTOR
+        VECTOR -> RASTER
+    }
+}
+
 enum class TileSource(
     val base_cache_key: String,
     val display_name: String,
@@ -113,28 +123,38 @@ enum class TileSource(
 
     fun reference_overlay_layers(
         street_labels_enabled: Boolean,
-        borders_enabled: Boolean
+        borders_enabled: Boolean,
+        reference_mode: MapReferenceMode
     ): List<ReferenceTileOverlay> {
         return when (this) {
             STREET -> emptyList()
-            SATELLITE -> buildList {
-                if (borders_enabled) add(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
-                if (street_labels_enabled) add(ReferenceTileOverlay.WORLD_TRANSPORTATION)
+            SATELLITE -> if (reference_mode == MapReferenceMode.RASTER) {
+                buildList {
+                    if (borders_enabled) add(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
+                    if (street_labels_enabled) add(ReferenceTileOverlay.WORLD_TRANSPORTATION)
+                }
+            } else {
+                emptyList()
             }
         }
     }
 
     fun attribution_text(
         labels_enabled: Boolean,
-        borders_enabled: Boolean = labels_enabled
+        borders_enabled: Boolean = labels_enabled,
+        reference_mode: MapReferenceMode = MapReferenceMode.RASTER
     ): String {
         return when (this) {
             STREET -> if (labels_enabled) base_attribution else "CARTO no-label tiles, OpenStreetMap data"
             SATELLITE -> {
-                val overlays = reference_overlay_layers(labels_enabled, borders_enabled)
+                val overlays = reference_overlay_layers(labels_enabled, borders_enabled, reference_mode)
                 buildList {
                     add(base_attribution)
-                    overlays.forEach { add(it.attribution) }
+                    if (reference_mode == MapReferenceMode.VECTOR && (labels_enabled || borders_enabled)) {
+                        add("Natural Earth public domain vector data")
+                    } else {
+                        overlays.forEach { add(it.attribution) }
+                    }
                 }.joinToString("; ")
             }
         }

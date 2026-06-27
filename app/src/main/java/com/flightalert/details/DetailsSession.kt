@@ -586,7 +586,7 @@ internal class AircraftDetailsRowsBuilder(
             )
         )
         rows += AircraftDetailsRow(
-            "Registry country",
+            "Origin",
             registry_country_label(aircraft, enriched_details, details_loading)
         )
         rows += AircraftDetailsRow(
@@ -612,7 +612,6 @@ internal class AircraftDetailsRowsBuilder(
             telemetry_formatter.telemetry_value(telemetry_formatter.source_type(telemetry?.source_type))
         )
         if (aircraft.is_military) {
-            rows += AircraftDetailsRow("Military", "Tagged military")
             rows += AircraftDetailsRow(
                 "Origin status",
                 format_origin_status(aircraft, route_details)

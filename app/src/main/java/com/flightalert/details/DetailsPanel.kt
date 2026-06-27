@@ -66,7 +66,6 @@ sealed interface AircraftDetailsPanelContent
 
 data class AircraftDetailsMainState(
     val title: String,
-    val status: String,
     val rows: List<AircraftDetailsRow>,
     val has_aircraft: Boolean,
     val has_usage_trace: Boolean
@@ -226,7 +225,7 @@ class AircraftDetailsPanelRenderer(
         return if (wide_layout) {
             val left = RectF(
                 panel.left + dp(18),
-                panel.top + dp(78),
+                panel.top + dp(66),
                 panel.left + panel.width() * 0.38f,
                 panel.bottom - dp(18)
             )
@@ -250,7 +249,7 @@ class AircraftDetailsPanelRenderer(
         return RectF(x, y, x + width, y + height)
     }
 
-    // Draw the normal details mode: title, exact/representative photo status, metadata rows, and impact entry.
+    // Draw the normal details mode: title, exact/representative photo, metadata rows, and impact entry.
     private fun draw_main_panel(
         canvas: Canvas,
         rect: RectF,
@@ -292,16 +291,6 @@ class AircraftDetailsPanelRenderer(
             max_width = (title_right - title_left).coerceAtLeast(dp(36)),
             start_size = sp(22),
             min_size = sp(12)
-        )
-
-        text_paint.isFakeBoldText = false
-        text_paint.textSize = sp(12)
-        text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(
-            chrome.ellipsize(content.status, rect.width() - dp(36)),
-            rect.left + dp(18),
-            rect.top + dp(60),
-            text_paint
         )
 
         val reserve_bottom = if (content.has_aircraft) dp(64) else dp(12)
@@ -368,7 +357,7 @@ class AircraftDetailsPanelRenderer(
     ): Float {
         val left = RectF(
             rect.left + dp(18),
-            rect.top + dp(78),
+            rect.top + dp(66),
             rect.left + rect.width() * 0.38f,
             rect.bottom - dp(18)
         )
@@ -378,7 +367,7 @@ class AircraftDetailsPanelRenderer(
         val col_gap = dp(16)
         val col_width = (right_width - col_gap) / 2f
         val col_a =
-            RectF(right_left, rect.top + dp(88), right_left + col_width, rect.bottom - dp(18))
+            RectF(right_left, rect.top + dp(76), right_left + col_width, rect.bottom - dp(18))
         val col_b = RectF(col_a.right + col_gap, col_a.top, rect.right - dp(18), col_a.bottom)
 
         val photo_rect = photo_bounds(left, wide = true, has_photo = photo.bitmap != null)
@@ -478,16 +467,6 @@ class AircraftDetailsPanelRenderer(
             return AircraftDetailsDrawResult(0f, 0f)
         }
 
-        text_paint.isFakeBoldText = false
-        text_paint.textSize = sp(12)
-        text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(
-            chrome.ellipsize(content.status, rect.width() - dp(36)),
-            rect.left + dp(18),
-            rect.top + dp(62),
-            text_paint
-        )
-
         val clip = content_bounds(rect)
         val visible_top = clip.top + state.scroll_y
         val visible_bottom = clip.bottom + state.scroll_y - dp(2)
@@ -495,11 +474,12 @@ class AircraftDetailsPanelRenderer(
         canvas.clipRect(clip)
         canvas.translate(0f, -state.scroll_y)
 
-        var y = rect.top + dp(98)
+        var y = clip.top + dp(16)
+        y = draw_impact_status(canvas, rect, y, content.status, style) + dp(18)
         y = draw_impact_score_summary(canvas, rect, y, content, style)
-        y += dp(10)
+        y += dp(8)
         content.rows.forEach { row ->
-            y = draw_adaptive_detail_row(
+            y = draw_impact_detail_row(
                 canvas,
                 row_bounds(rect),
                 y,
@@ -516,6 +496,27 @@ class AircraftDetailsPanelRenderer(
         return result
     }
 
+    private fun draw_impact_status(
+        canvas: Canvas,
+        rect: RectF,
+        y: Float,
+        status: String,
+        style: AircraftDetailsPanelStyle
+    ): Float {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(12)
+        text_paint.color = style.visual_theme.colors.muted
+        return draw_wrapped_text(
+            canvas,
+            status,
+            rect.left + dp(18),
+            y,
+            rect.width() - dp(36),
+            DETAILS_IMPACT_STATUS_MAX_LINES
+        )
+    }
+
     private fun draw_impact_score_summary(
         canvas: Canvas,
         rect: RectF,
@@ -525,51 +526,165 @@ class AircraftDetailsPanelRenderer(
     ): Float {
         val left = rect.left + dp(18)
         val right = rect.right - dp(18)
-        text_paint.textAlign = Paint.Align.LEFT
-        text_paint.isFakeBoldText = false
-        text_paint.textSize = sp(10)
-        text_paint.color = style.visual_theme.colors.muted
-        canvas.drawText(
-            if (content.show_trace_co2) "TRACE CO2 SO FAR" else "CLASS CO2 RATE",
-            left,
-            y,
-            text_paint
-        )
-        canvas.drawText(content.score_label, rect.centerX() + dp(8), y, text_paint)
-
-        text_paint.isFakeBoldText = true
-        text_paint.textSize = sp(19)
-        text_paint.color = style.visual_theme.colors.text
-        draw_fitted_left_text(
-            canvas,
-            content.co2_text,
-            left,
-            y + dp(32),
-            rect.width() * 0.56f,
-            sp(19),
-            sp(10)
-        )
-
-        text_paint.textSize = sp(24)
-        text_paint.color = content.score_color
-        draw_fitted_right_text(
-            canvas,
-            content.score_text,
-            right,
-            y + dp(32),
-            rect.width() * 0.34f,
-            sp(24),
-            sp(10)
-        )
+        val column_gap = dp(22)
+        val two_column = rect.width() >= dp(520)
+        val co2_label = if (content.show_trace_co2) "TRACE CO2 SO FAR" else "CLASS CO2 RATE"
+        val bottom = if (two_column) {
+            val column_width = (right - left - column_gap) / 2f
+            max(
+                draw_impact_metric_block(
+                    canvas,
+                    RectF(left, y, left + column_width, y),
+                    co2_label,
+                    content.co2_text,
+                    style.visual_theme.colors.text,
+                    style.visual_theme.colors.muted,
+                    sp(21)
+                ),
+                draw_impact_metric_block(
+                    canvas,
+                    RectF(right - column_width, y, right, y),
+                    content.score_label,
+                    content.score_text,
+                    content.score_color,
+                    style.visual_theme.colors.muted,
+                    sp(24)
+                )
+            )
+        } else {
+            var current = draw_impact_metric_block(
+                canvas,
+                RectF(left, y, right, y),
+                co2_label,
+                content.co2_text,
+                style.visual_theme.colors.text,
+                style.visual_theme.colors.muted,
+                sp(21)
+            ) + dp(12)
+            current = draw_impact_metric_block(
+                canvas,
+                RectF(left, current, right, current),
+                content.score_label,
+                content.score_text,
+                content.score_color,
+                style.visual_theme.colors.muted,
+                sp(24)
+            )
+            current
+        }
 
         stroke_paint.color = with_alpha(
             style.visual_theme.colors.panel_stroke,
             style.visual_theme.style.divider_alpha + 36
         )
         stroke_paint.strokeWidth = dp(1)
-        canvas.drawLine(left, y + dp(48), right, y + dp(48), stroke_paint)
+        val divider_y = bottom + dp(12)
+        canvas.drawLine(left, divider_y, right, divider_y, stroke_paint)
         text_paint.isFakeBoldText = false
-        return y + dp(70)
+        return divider_y + dp(18)
+    }
+
+    private fun draw_impact_metric_block(
+        canvas: Canvas,
+        rect: RectF,
+        label: String,
+        value: String,
+        value_color: Int,
+        label_color: Int,
+        value_size: Float
+    ): Float {
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(10)
+        text_paint.color = label_color
+        val label_bottom = draw_wrapped_text(
+            canvas,
+            label.uppercase(Locale.US),
+            rect.left,
+            rect.top,
+            rect.width(),
+            DETAILS_IMPACT_METRIC_LABEL_MAX_LINES
+        )
+
+        text_paint.isFakeBoldText = true
+        text_paint.textSize = value_size
+        text_paint.color = value_color
+        var value_y = label_bottom + dp(5)
+        val line_height = max(text_paint.fontSpacing, value_size + dp(4))
+        wrapped_text_lines(value, rect.width(), DETAILS_IMPACT_METRIC_VALUE_MAX_LINES).forEach { line ->
+            canvas.drawText(line, rect.left, value_y, text_paint)
+            value_y += line_height
+        }
+        text_paint.isFakeBoldText = false
+        return value_y
+    }
+
+    private fun draw_impact_detail_row(
+        canvas: Canvas,
+        rect: RectF,
+        y: Float,
+        row: AircraftDetailsRow,
+        style: AircraftDetailsPanelStyle,
+        visible_top: Float,
+        visible_bottom: Float
+    ): Float {
+        if (row.section) {
+            return draw_detail_section_header(
+                canvas,
+                rect,
+                y,
+                row,
+                style,
+                visible_top,
+                visible_bottom,
+                compact = false
+            )
+        }
+        val left = rect.left + dp(18)
+        val right = rect.right - dp(18)
+        val width = right - left
+        val label_line_height = dp(14)
+        val value_line_height = dp(18)
+
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(10)
+        val label_lines = wrapped_text_lines(
+            row.label.uppercase(Locale.US),
+            width,
+            DETAILS_IMPACT_ROW_LABEL_MAX_LINES
+        )
+        text_paint.textSize = sp(12)
+        val value_lines = wrapped_text_lines(row.value, width, DETAILS_IMPACT_ROW_VALUE_MAX_LINES)
+        val row_bottom =
+            y + label_line_height * label_lines.size + dp(6) + value_line_height * value_lines.size + dp(10)
+        if (row_bottom > visible_bottom || y < visible_top) return row_bottom
+
+        text_paint.textAlign = Paint.Align.LEFT
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(10)
+        text_paint.color = style.visual_theme.colors.accent_blue
+        var line_y = y
+        label_lines.forEach { line ->
+            canvas.drawText(line, left, line_y, text_paint)
+            line_y += label_line_height
+        }
+
+        line_y += dp(6)
+        text_paint.textSize = sp(12)
+        text_paint.color = style.visual_theme.colors.text
+        value_lines.forEach { line ->
+            canvas.drawText(line, left, line_y, text_paint)
+            line_y += value_line_height
+        }
+
+        stroke_paint.color = with_alpha(
+            style.visual_theme.colors.panel_stroke,
+            style.visual_theme.style.divider_alpha
+        )
+        stroke_paint.strokeWidth = dp(1)
+        canvas.drawLine(left, row_bottom - dp(5), right, row_bottom - dp(5), stroke_paint)
+        text_paint.isFakeBoldText = false
+        return row_bottom
     }
 
     // Draw trace-derived usage stats, or an honest unavailable message when no real trace supports it.
@@ -1329,15 +1444,15 @@ class AircraftDetailsPanelRenderer(
             val height = if (has_photo) dp(206) else dp(86)
             RectF(
                 area.left + dp(18),
-                area.top + dp(78),
+                area.top + dp(66),
                 area.right - dp(18),
-                area.top + dp(78) + height
+                area.top + dp(66) + height
             )
         }
     }
 
     private fun content_bounds(panel: RectF, reserve_bottom: Float = dp(12)): RectF {
-        return RectF(panel.left, panel.top + dp(70), panel.right, panel.bottom - reserve_bottom)
+        return RectF(panel.left, panel.top + dp(62), panel.right, panel.bottom - reserve_bottom)
     }
 
     private fun row_bounds(panel: RectF): RectF {
@@ -1417,6 +1532,11 @@ class AircraftDetailsPanelRenderer(
         const val PHOTO_UNAVAILABLE_LINES = 4
         const val PHOTO_CAPTION_MAX_LINES = 7
         const val DETAILS_ROW_MAX_LINES = 12
+        const val DETAILS_IMPACT_STATUS_MAX_LINES = 4
+        const val DETAILS_IMPACT_METRIC_LABEL_MAX_LINES = 2
+        const val DETAILS_IMPACT_METRIC_VALUE_MAX_LINES = 4
+        const val DETAILS_IMPACT_ROW_LABEL_MAX_LINES = 2
+        const val DETAILS_IMPACT_ROW_VALUE_MAX_LINES = 12
         const val DETAILS_EVIDENCE_LINE_MAX_LINES = 4
         const val DETAILS_PROOF_QUOTE_LINES = 12
     }

@@ -111,6 +111,9 @@ object AircraftPhotoCatalog {
             "A319" -> "Airbus A319"
             "A320" -> "Airbus A320"
             "A321" -> "Airbus A321"
+            "A359" -> "Airbus A350-900"
+            "A35K" -> "Airbus A350-1000"
+            "A388" -> "Airbus A380-800"
             "B37M" -> "Boeing 737 MAX 7"
             "B38M" -> "Boeing 737 MAX 8"
             "B39M" -> "Boeing 737 MAX 9"
@@ -119,8 +122,11 @@ object AircraftPhotoCatalog {
             "B738" -> "Boeing 737-800"
             "B739" -> "Boeing 737-900"
             "B752" -> "Boeing 757-200"
+            "B762" -> "Boeing 767-200"
             "B763" -> "Boeing 767-300"
+            "B764" -> "Boeing 767-400"
             "B772" -> "Boeing 777-200"
+            "B77L" -> "Boeing 777-200LR"
             "B77W" -> "Boeing 777-300ER"
             "B788" -> "Boeing 787-8"
             "B789" -> "Boeing 787-9"
@@ -144,6 +150,7 @@ object AircraftPhotoCatalog {
             "BE58" -> "Beechcraft Baron"
             "BE76" -> "Beechcraft Duchess"
             "B350" -> "Beechcraft King Air 350"
+            "B407" -> "Bell 407"
             "C120" -> "Cessna 120"
             "C140" -> "Cessna 140"
             "C150" -> "Cessna 150"
@@ -168,16 +175,25 @@ object AircraftPhotoCatalog {
             "C525" -> "Cessna CitationJet"
             "C56X" -> "Cessna Citation Excel"
             "C680" -> "Cessna Citation Sovereign"
+            "C68A" -> "Cessna Citation Latitude"
             "C700" -> "Cessna Citation Longitude"
+            "C130" -> "Lockheed C-130 Hercules"
+            "C17" -> "Boeing C-17 Globemaster III"
             "CL30" -> "Bombardier Challenger 300"
             "CL35" -> "Bombardier Challenger 350"
             "CL60" -> "Bombardier Challenger 600"
+            "CRJ2" -> "Bombardier CRJ200"
             "CRJ7" -> "Bombardier CRJ700"
             "CRJ9" -> "Bombardier CRJ900"
             "DA40" -> "Diamond DA40"
             "DA42" -> "Diamond DA42"
             "GA7" -> "Grumman American GA-7 Cougar"
             "DH8D" -> "De Havilland Canada Dash 8 Q400"
+            "A139" -> "Leonardo AW139"
+            "AS50" -> "Airbus Helicopters AS350"
+            "EC30" -> "Airbus Helicopters EC130"
+            "EC35" -> "Airbus Helicopters EC135"
+            "EC45" -> "Airbus Helicopters EC145"
             "E170" -> "Embraer 170"
             "E75L", "E75S" -> "Embraer 175"
             "E190" -> "Embraer 190"
@@ -194,8 +210,10 @@ object AircraftPhotoCatalog {
             "GLF5" -> "Gulfstream V"
             "GLF6" -> "Gulfstream G650"
             "H25B" -> "Hawker 800"
+            "LJ31" -> "Learjet 31"
             "LJ35" -> "Learjet 35"
             "LJ45" -> "Learjet 45"
+            "LJ60" -> "Learjet 60"
             "P28A" -> "Piper PA-28 Cherokee"
             "PA28" -> "Piper PA-28 Cherokee"
             "PA30" -> "Piper PA-30 Twin Comanche"
@@ -223,13 +241,41 @@ object AircraftPhotoCatalog {
             else -> null
         }
         if (known_model != null) return known_model
-        return listOfNotNull(
-            human_aircraft_name_part(manufacturer),
-            human_aircraft_name_part(type ?: type_code)
-        )
-            .distinct()
-            .joinToString(" ")
-            .ifEmpty { null }
+        val maker = human_aircraft_name_part(manufacturer)
+        val model = human_aircraft_name_part(type ?: type_code)
+        return when {
+            model == null -> maker
+            maker == null || model_starts_with_aircraft_brand(model) -> model
+            else -> "$maker $model"
+        }
+    }
+
+    private fun model_starts_with_aircraft_brand(value: String): Boolean {
+        val normalized = value.uppercase(Locale.US)
+        return listOf(
+            "AIRBUS",
+            "BOEING",
+            "CESSNA",
+            "PIPER",
+            "BEECHCRAFT",
+            "CIRRUS",
+            "DIAMOND",
+            "EMBRAER",
+            "BOMBARDIER",
+            "DASSAULT",
+            "GULFSTREAM",
+            "LEARJET",
+            "PILATUS",
+            "ROBINSON",
+            "SAAB",
+            "ATR",
+            "EUROCOPTER",
+            "DE HAVILLAND",
+            "HAWKER",
+            "MOONEY",
+            "DAHER",
+            "SOCATA"
+        ).any { brand -> normalized == brand || normalized.startsWith("$brand ") }
     }
 
     private fun human_aircraft_name_part(value: String?): String? {

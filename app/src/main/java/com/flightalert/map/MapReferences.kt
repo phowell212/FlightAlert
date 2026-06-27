@@ -53,6 +53,8 @@ internal data class LocalReferenceOverlayCacheKey(
     val center_y: Int,
     val width: Int,
     val height: Int,
+    val lines_enabled: Boolean,
+    val labels_enabled: Boolean,
     val label_text_scale: Int
 )
 
@@ -133,11 +135,12 @@ internal class LocalReferenceOverlayRenderer(
     fun draw(
         canvas: Canvas,
         viewport: Viewport,
-        enabled: Boolean,
+        lines_enabled: Boolean,
+        labels_enabled: Boolean,
         interaction_active: Boolean,
         label_text_scale: Float = 1f
     ): LocalReferenceOverlayStats {
-        if (!enabled) {
+        if (!lines_enabled && !labels_enabled) {
             return LocalReferenceOverlayStats(
                 status = LocalReferenceOverlayStatus.LOADED,
                 lines_drawn = 0,
@@ -164,7 +167,12 @@ internal class LocalReferenceOverlayRenderer(
             MAP_LABEL_TEXT_SCALE_MAX
         )
         if (!interaction_active) {
-            val cache_key = cache_key_for(viewport, safe_label_text_scale)
+            val cache_key = cache_key_for(
+                viewport,
+                lines_enabled,
+                labels_enabled,
+                safe_label_text_scale
+            )
             val cache = overlay_cache
             if (cache != null && cache.key == cache_key && !cache.bitmap.isRecycled) {
                 canvas.drawBitmap(cache.bitmap, 0f, 0f, null)
@@ -182,19 +190,22 @@ internal class LocalReferenceOverlayRenderer(
             if (cache_canvas.width != bitmap.width || cache_canvas.height != bitmap.height) {
                 cache_canvas.setBitmap(bitmap)
             }
-            val lines = draw_lines(
-                cache_canvas,
-                viewport,
-                local_dataset.lines,
-                LocalReferenceDetail.SETTLED
-            )
-            val labels = draw_labels(
-                cache_canvas,
-                viewport,
-                local_dataset.labels,
-                LocalReferenceDetail.SETTLED,
-                safe_label_text_scale
-            )
+            val lines = if (lines_enabled) {
+                draw_lines(cache_canvas, viewport, local_dataset.lines, LocalReferenceDetail.SETTLED)
+            } else {
+                0
+            }
+            val labels = if (labels_enabled) {
+                draw_labels(
+                    cache_canvas,
+                    viewport,
+                    local_dataset.labels,
+                    LocalReferenceDetail.SETTLED,
+                    safe_label_text_scale
+                )
+            } else {
+                0
+            }
             overlay_cache = LocalReferenceOverlayCache(
                 key = cache_key,
                 bitmap = bitmap,
@@ -208,9 +219,12 @@ internal class LocalReferenceOverlayRenderer(
                 labels_drawn = labels
             )
         }
-        val lines =
+        val lines = if (lines_enabled) {
             draw_lines(canvas, viewport, local_dataset.lines, LocalReferenceDetail.INTERACTION)
-        val labels =
+        } else {
+            0
+        }
+        val labels = if (labels_enabled) {
             draw_labels(
                 canvas,
                 viewport,
@@ -218,6 +232,9 @@ internal class LocalReferenceOverlayRenderer(
                 LocalReferenceDetail.INTERACTION,
                 safe_label_text_scale
             )
+        } else {
+            0
+        }
         return LocalReferenceOverlayStats(
             status = LocalReferenceOverlayStatus.LOADED,
             lines_drawn = lines,
@@ -234,6 +251,8 @@ internal class LocalReferenceOverlayRenderer(
 
     private fun cache_key_for(
         viewport: Viewport,
+        lines_enabled: Boolean,
+        labels_enabled: Boolean,
         label_text_scale: Float
     ): LocalReferenceOverlayCacheKey {
         return LocalReferenceOverlayCacheKey(
@@ -242,6 +261,8 @@ internal class LocalReferenceOverlayRenderer(
             center_y = viewport.center_y.roundToInt(),
             width = viewport.width.roundToInt(),
             height = viewport.height.roundToInt(),
+            lines_enabled = lines_enabled,
+            labels_enabled = labels_enabled,
             label_text_scale = (label_text_scale * 1000f).roundToInt()
         )
     }

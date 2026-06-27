@@ -107,6 +107,8 @@ internal class SatelliteMapTileRenderer(
     private val current_reference_tile_request_generations = mutableMapOf<String, Long>()
     private var current_reference_tile_request_generation = 0L
     private val reference_selected_tile_zooms = mutableMapOf<ReferenceTileOverlay, Int>()
+    private val reference_rendered_tile_zooms = mutableMapOf<ReferenceTileOverlay, Int>()
+    private val reference_lod_crossfades = mutableMapOf<ReferenceTileOverlay, ReferenceLodCrossfade>()
     private val reference_motion_coverage_alpha_floor = mutableMapOf<ReferenceTileOverlay, Float>()
     private val reference_lod_prefetch_lock = Any()
     private var reference_lod_prefetch_latest_plans: List<ReferencePrefetchGridPlan> = emptyList()
@@ -286,12 +288,12 @@ internal class SatelliteMapTileRenderer(
             allow_exact_requests = true,
             request_generation = reference_request_generation
         )
-        val settings_border_overlay_enabled =
-            state.reference_overlay_layers.contains(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
+        val vector_reference_enabled = state.map_reference_mode == MapReferenceMode.VECTOR
         local_reference_renderer.draw(
             canvas = canvas,
             viewport = viewport,
-            enabled = state.map_borders_enabled && !settings_border_overlay_enabled,
+            lines_enabled = vector_reference_enabled && state.map_borders_enabled,
+            labels_enabled = vector_reference_enabled && state.map_labels_enabled,
             interaction_active = state.interaction_active,
             label_text_scale = state.map_label_text_scale
         )
@@ -332,6 +334,8 @@ internal class SatelliteMapTileRenderer(
             reference_lod_prefetch_epoch++
         }
         reference_selected_tile_zooms.clear()
+        reference_rendered_tile_zooms.clear()
+        reference_lod_crossfades.clear()
         reference_motion_coverage_alpha_floor.clear()
         local_reference_renderer.clear()
         last_satellite_buffer_request_key = null
@@ -345,6 +349,7 @@ internal class SatelliteMapTileRenderer(
         last_satellite_buffer_request_ms = 0L
         last_satellite_prefetch_request_key = null
         last_satellite_prefetch_request_ms = 0L
+        reference_lod_crossfades.clear()
     }
 
     fun shutdown() {
@@ -613,20 +618,45 @@ internal class SatelliteMapTileRenderer(
             var overlay_loaded = 0
             var overlay_requested = 0
             var overlay_fallback_drawn = 0
-            val draw_stats = draw_reference_overlay_grid(
-                canvas = canvas,
-                viewport = viewport,
-                state = state,
+            val crossfade = reference_lod_crossfade(
                 overlay = overlay,
-                tile_zoom = plan.draw_tile_zoom,
-                now_ms = now_ms,
-                layer_alpha = draw_alpha,
-                allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
-                allow_parent_requests = requests_allowed_for_zoom,
-                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
-                request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
-                request_generation = request_generation
+                previous_tile_zoom = reference_rendered_tile_zooms[overlay],
+                draw_tile_zoom = plan.draw_tile_zoom,
+                now_ms = now_ms
             )
+            val draw_stats = if (crossfade != null && draw_alpha > MIN_LAYER_ALPHA) {
+                draw_crossfaded_reference_overlay_grid(
+                    canvas = canvas,
+                    viewport = viewport,
+                    state = state,
+                    overlay = overlay,
+                    plan = plan,
+                    crossfade = crossfade,
+                    now_ms = now_ms,
+                    draw_alpha = draw_alpha,
+                    allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                    allow_parent_requests = requests_allowed_for_zoom,
+                    request_generation = request_generation
+                ).also {
+                    fading = true
+                }
+            } else {
+                draw_reference_overlay_grid(
+                    canvas = canvas,
+                    viewport = viewport,
+                    state = state,
+                    overlay = overlay,
+                    tile_zoom = plan.draw_tile_zoom,
+                    now_ms = now_ms,
+                    layer_alpha = draw_alpha,
+                    allow_exact_requests = allow_exact_requests && requests_allowed_for_zoom,
+                    allow_parent_requests = requests_allowed_for_zoom,
+                    request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
+                    request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
+                    request_generation = request_generation
+                )
+            }
+            reference_rendered_tile_zooms[overlay] = plan.draw_tile_zoom
             overlay_visible += draw_stats.visible
             overlay_loaded += draw_stats.loaded
             overlay_requested += draw_stats.requested
@@ -657,6 +687,137 @@ internal class SatelliteMapTileRenderer(
             fallback_drawn = fallback_drawn,
             fading = fading
         )
+    }
+
+    private fun draw_crossfaded_reference_overlay_grid(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: MapTileRenderState,
+        overlay: ReferenceTileOverlay,
+        plan: ReferenceOverlayDrawPlan,
+        crossfade: ReferenceLodCrossfade,
+        now_ms: Long,
+        draw_alpha: Float,
+        allow_exact_requests: Boolean,
+        allow_parent_requests: Boolean,
+        request_generation: Long
+    ): TileLayerDrawStats {
+        val progress = reference_lod_crossfade_progress(crossfade, now_ms)
+        val zooming_in = crossfade.to_tile_zoom > crossfade.from_tile_zoom
+        val old_stats: TileLayerDrawStats
+        val new_stats: TileLayerDrawStats
+        if (zooming_in) {
+            old_stats = draw_reference_overlay_grid(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                overlay = overlay,
+                tile_zoom = crossfade.from_tile_zoom,
+                now_ms = now_ms,
+                layer_alpha = draw_alpha,
+                allow_exact_requests = false,
+                allow_parent_requests = false,
+                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
+                request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
+                request_generation = request_generation
+            )
+            new_stats = draw_reference_overlay_grid(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                overlay = overlay,
+                tile_zoom = plan.draw_tile_zoom,
+                now_ms = now_ms,
+                layer_alpha = draw_alpha * progress,
+                allow_exact_requests = allow_exact_requests,
+                allow_parent_requests = allow_parent_requests,
+                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
+                request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
+                request_generation = request_generation
+            )
+        } else {
+            new_stats = draw_reference_overlay_grid(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                overlay = overlay,
+                tile_zoom = plan.draw_tile_zoom,
+                now_ms = now_ms,
+                layer_alpha = draw_alpha,
+                allow_exact_requests = allow_exact_requests,
+                allow_parent_requests = allow_parent_requests,
+                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
+                request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
+                request_generation = request_generation
+            )
+            old_stats = draw_reference_overlay_grid(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                overlay = overlay,
+                tile_zoom = crossfade.from_tile_zoom,
+                now_ms = now_ms,
+                layer_alpha = draw_alpha * (1f - progress),
+                allow_exact_requests = false,
+                allow_parent_requests = false,
+                request_priority_base = REFERENCE_TILE_REQUEST_PRIORITY_EXACT,
+                request_stale_generation_tolerance = REFERENCE_TILE_REQUEST_STALE_GENERATIONS,
+                request_generation = request_generation
+            )
+        }
+        return TileLayerDrawStats(
+            visible = old_stats.visible + new_stats.visible,
+            loaded = old_stats.loaded + new_stats.loaded,
+            requested = old_stats.requested + new_stats.requested,
+            fallback_drawn = old_stats.fallback_drawn + new_stats.fallback_drawn,
+            fading = true || old_stats.fading || new_stats.fading
+        )
+    }
+
+    private fun reference_lod_crossfade(
+        overlay: ReferenceTileOverlay,
+        previous_tile_zoom: Int?,
+        draw_tile_zoom: Int,
+        now_ms: Long
+    ): ReferenceLodCrossfade? {
+        val active = reference_lod_crossfades[overlay]
+        if (active != null && active.to_tile_zoom == draw_tile_zoom) {
+            if (reference_lod_crossfade_progress(active, now_ms) < 1f) return active
+            reference_lod_crossfades.remove(overlay)
+        }
+        if (
+            overlay != ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES ||
+            previous_tile_zoom == null ||
+            previous_tile_zoom == draw_tile_zoom ||
+            !reference_boundary_lod_crossfade_enabled(previous_tile_zoom, draw_tile_zoom)
+        ) {
+            return null
+        }
+        return ReferenceLodCrossfade(
+            from_tile_zoom = previous_tile_zoom,
+            to_tile_zoom = draw_tile_zoom,
+            start_ms = now_ms
+        ).also { reference_lod_crossfades[overlay] = it }
+    }
+
+    private fun reference_lod_crossfade_progress(
+        crossfade: ReferenceLodCrossfade,
+        now_ms: Long
+    ): Float {
+        return smooth_step(
+            0f,
+            1f,
+            ((now_ms - crossfade.start_ms).coerceAtLeast(0L).toFloat() /
+                    REFERENCE_BOUNDARY_LOD_CROSSFADE_MS)
+        )
+    }
+
+    private fun reference_boundary_lod_crossfade_enabled(
+        from_tile_zoom: Int,
+        to_tile_zoom: Int
+    ): Boolean {
+        return minOf(from_tile_zoom, to_tile_zoom) == REFERENCE_BOUNDARY_COUNTY_DETAIL_FROM_TILE_ZOOM &&
+                maxOf(from_tile_zoom, to_tile_zoom) == REFERENCE_BOUNDARY_COUNTY_DETAIL_TO_TILE_ZOOM
     }
 
     private fun request_reference_overlay_prefetches(
@@ -3032,6 +3193,12 @@ internal class SatelliteMapTileRenderer(
         }
     }
 
+    private data class ReferenceLodCrossfade(
+        val from_tile_zoom: Int,
+        val to_tile_zoom: Int,
+        val start_ms: Long
+    )
+
     private class SatelliteTileRequestTask(
         private val generation: Long,
         private val priority: Int,
@@ -3063,6 +3230,7 @@ internal class SatelliteMapTileRenderer(
         const val MAX_REFERENCE_MEMORY_TILES = 768
         const val REFERENCE_TILE_CACHE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
         const val REFERENCE_TILE_FADE_MS = 280f
+        const val REFERENCE_BOUNDARY_LOD_CROSSFADE_MS = 260f
         const val REFERENCE_TILE_NETWORK_THREADS = 4
         const val REFERENCE_LOD_PREFETCH_REQUEST_THROTTLE_MS = 120L
         const val REFERENCE_PAN_PREFETCH_REQUEST_THROTTLE_MS = 120L
@@ -3112,6 +3280,8 @@ internal class SatelliteMapTileRenderer(
         const val REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_OFFSET = 3
         const val REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_STEP = 2
         const val REFERENCE_BOUNDARY_ZOOM_OUT_PREFETCH_COUNT = 4
+        const val REFERENCE_BOUNDARY_COUNTY_DETAIL_FROM_TILE_ZOOM = 8
+        const val REFERENCE_BOUNDARY_COUNTY_DETAIL_TO_TILE_ZOOM = 9
         const val REFERENCE_TRANSPORTATION_DETAIL_ADVANCE = 0.28
         const val REFERENCE_TRANSPORTATION_DRAW_MIN_LOADED_RATIO = 0.9f
         const val REFERENCE_TRANSPORTATION_DRAW_FULL_LOADED_RATIO = 0.99f

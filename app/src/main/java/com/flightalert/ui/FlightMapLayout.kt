@@ -280,13 +280,13 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         if (is_compact_settings_panel(panel)) {
             val left = panel.left + dp(18)
             val right = panel.centerX() - dp(5)
-            return RectF(left, panel.top + dp(92), right, panel.top + dp(128))
+            return RectF(left, panel.top + dp(162), right, panel.top + dp(198))
         }
         return RectF(
             panel.left + dp(18),
-            panel.top + dp(102),
+            panel.top + dp(176),
             panel.right - dp(18),
-            panel.top + dp(138)
+            panel.top + dp(212)
         )
     }
 
@@ -294,21 +294,29 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         if (is_compact_settings_panel(panel)) {
             val left = panel.centerX() + dp(5)
             val right = panel.right - dp(18)
-            return RectF(left, panel.top + dp(92), right, panel.top + dp(128))
+            return RectF(left, panel.top + dp(162), right, panel.top + dp(198))
         }
         return RectF(
             panel.left + dp(18),
-            panel.top + dp(148),
+            panel.top + dp(222),
             panel.right - dp(18),
-            panel.top + dp(184)
+            panel.top + dp(258)
         )
+    }
+
+    fun map_reference_mode_button_bounds(panel: RectF): RectF {
+        return if (is_compact_settings_panel(panel)) {
+            RectF(panel.left + dp(18), panel.top + dp(88), panel.right - dp(18), panel.top + dp(124))
+        } else {
+            RectF(panel.left + dp(18), panel.top + dp(102), panel.right - dp(18), panel.top + dp(138))
+        }
     }
 
     fun map_label_text_slider_bounds(panel: RectF): RectF {
         return if (is_compact_settings_panel(panel)) {
-            RectF(panel.left + dp(18), panel.top + dp(138), panel.right - dp(18), panel.top + dp(180))
+            RectF(panel.left + dp(18), panel.top + dp(208), panel.right - dp(18), panel.top + dp(250))
         } else {
-            RectF(panel.left + dp(18), panel.top + dp(194), panel.right - dp(18), panel.top + dp(244))
+            RectF(panel.left + dp(18), panel.top + dp(268), panel.right - dp(18), panel.top + dp(318))
         }
     }
 

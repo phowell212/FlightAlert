@@ -111,6 +111,7 @@ import com.flightalert.map.Bounds
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapMeasurementFormatter
 import com.flightalert.map.MapProjection
+import com.flightalert.map.MapReferenceMode
 import com.flightalert.map.MapTileRenderState
 import com.flightalert.map.MapTileRenderStyle
 import com.flightalert.map.MapTileRenderer
@@ -406,6 +407,12 @@ class FlightMapView(
         reported_distance_meters = ::reported_distance_meters,
         traffic_distance_color = ::traffic_distance_color,
         registry_country_label = { aircraft -> registry_country_label(aircraft) },
+        current_aircraft_details_for_panel = { target ->
+            details_with_trace_origin(
+                details_session.aircraft_details.takeIf { selected_path_controller.selected_aircraft_id == target.icao24 },
+                target
+            )
+        },
         current_route_details_for_panel = { target ->
             current_flight_route_details(
                 details_session.aircraft_details.takeIf { selected_path_controller.selected_aircraft_id == target.icao24 },
@@ -543,10 +550,15 @@ class FlightMapView(
         FlightAlertSettings.KEY_MAP_LABELS_ENABLED,
         FlightAlertSettings.DEFAULT_MAP_LABELS_ENABLED
     )
+    private var vector_map_labels_enabled = prefs.getBoolean(
+        FlightAlertSettings.KEY_VECTOR_MAP_LABELS_ENABLED,
+        FlightAlertSettings.DEFAULT_VECTOR_MAP_LABELS_ENABLED
+    )
     private var map_borders_enabled = prefs.getBoolean(
         FlightAlertSettings.KEY_MAP_BORDERS_ENABLED,
         FlightAlertSettings.DEFAULT_MAP_BORDERS_ENABLED
     )
+    private var map_reference_mode = read_map_reference_mode()
     private var map_label_text_scale = read_map_label_text_scale()
     private var aircraft_feed_mode = FlightAlertSettings.read_aircraft_feed_mode(prefs)
     private var globe_bin_craft_source_enabled = aircraft_feed_mode.uses_globe
@@ -1479,8 +1491,9 @@ class FlightMapView(
     private fun map_tile_state(): MapTileRenderState {
         return MapTileRenderState(
             map_source = map_source,
-            map_labels_enabled = map_labels_enabled,
+            map_labels_enabled = active_map_labels_enabled(),
             map_borders_enabled = map_borders_enabled,
+            map_reference_mode = map_reference_mode,
             map_label_text_scale = map_label_text_scale,
             map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
             user_agent = USER_AGENT,
@@ -2460,7 +2473,6 @@ class FlightMapView(
         val aircraft = displayed_traffic().aircraft
         return AircraftDetailsMainState(
             title = aircraft?.callsign ?: "Aircraft details",
-            status = details_session.aircraft_details_status,
             rows = aircraft?.let { aircraft_details_rows(it, details_session.aircraft_details) }
                 .orEmpty(),
             has_aircraft = aircraft != null,
@@ -2698,7 +2710,7 @@ class FlightMapView(
         return SettingsPanelState(
             units = units,
             map_source = map_source,
-            map_labels_enabled = map_labels_enabled,
+            map_labels_enabled = active_map_labels_enabled(),
             map_borders_enabled = map_borders_enabled,
             aviation_layers_enabled = has_aviation_layers_enabled(),
             alerts_enabled = alerts_enabled,
@@ -2710,14 +2722,19 @@ class FlightMapView(
                 context,
                 app_opened_elapsed_ms
             ),
-            map_attribution = map_source.attribution_text(map_labels_enabled, map_borders_enabled)
+            map_attribution = map_source.attribution_text(
+                active_map_labels_enabled(),
+                map_borders_enabled,
+                map_reference_mode
+            )
         )
     }
 
     private fun map_labels_panel_state(): MapLabelsPanelState {
         return MapLabelsPanelState(
-            street_labels_enabled = map_labels_enabled,
+            street_labels_enabled = active_map_labels_enabled(),
             borders_enabled = map_borders_enabled,
+            reference_mode = map_reference_mode,
             label_text_scale = map_label_text_scale
         )
     }
@@ -3234,12 +3251,17 @@ class FlightMapView(
                 layout.map_street_labels_button_bounds(panel).contains(
                     x,
                     y
-                ) -> set_map_labels_enabled(!map_labels_enabled)
+                ) -> set_map_labels_enabled(!active_map_labels_enabled())
 
                 layout.map_borders_button_bounds(panel).contains(
                     x,
                     y
                 ) -> set_map_borders_enabled(!map_borders_enabled)
+
+                layout.map_reference_mode_button_bounds(panel).contains(
+                    x,
+                    y
+                ) -> set_map_reference_mode(map_reference_mode.next())
             }
             invalidate()
             return true
@@ -3623,12 +3645,26 @@ class FlightMapView(
     }
 
     private fun set_map_labels_enabled(enabled: Boolean) {
-        if (map_labels_enabled == enabled) return
-        map_labels_enabled = enabled
+        if (uses_vector_reference_labels()) {
+            if (vector_map_labels_enabled == enabled) return
+            vector_map_labels_enabled = enabled
+            prefs.edit { putBoolean(FlightAlertSettings.KEY_VECTOR_MAP_LABELS_ENABLED, enabled) }
+        } else {
+            if (map_labels_enabled == enabled) return
+            map_labels_enabled = enabled
+            prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_LABELS_ENABLED, map_labels_enabled) }
+        }
         map_tile_renderer.reset_transitions()
-        prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_LABELS_ENABLED, map_labels_enabled) }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
         invalidate()
+    }
+
+    private fun active_map_labels_enabled(): Boolean {
+        return if (uses_vector_reference_labels()) vector_map_labels_enabled else map_labels_enabled
+    }
+
+    private fun uses_vector_reference_labels(): Boolean {
+        return map_source == TileSource.SATELLITE && map_reference_mode == MapReferenceMode.VECTOR
     }
 
     private fun set_map_borders_enabled(enabled: Boolean) {
@@ -3636,6 +3672,15 @@ class FlightMapView(
         map_borders_enabled = enabled
         map_tile_renderer.reset_transitions()
         prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_BORDERS_ENABLED, map_borders_enabled) }
+        map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
+        invalidate()
+    }
+
+    private fun set_map_reference_mode(next: MapReferenceMode) {
+        if (map_reference_mode == next) return
+        map_reference_mode = next
+        map_tile_renderer.reset_transitions()
+        prefs.edit { putString(FlightAlertSettings.KEY_MAP_REFERENCE_MODE, next.name) }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
         invalidate()
     }
@@ -3811,6 +3856,14 @@ class FlightMapView(
             FlightAlertSettings.KEY_MAP_LABEL_TEXT_SCALE,
             FlightAlertSettings.DEFAULT_MAP_LABEL_TEXT_SCALE
         ).coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
+    }
+
+    private fun read_map_reference_mode(): MapReferenceMode {
+        val stored = prefs.getString(
+            FlightAlertSettings.KEY_MAP_REFERENCE_MODE,
+            FlightAlertSettings.DEFAULT_MAP_REFERENCE_MODE
+        )
+        return MapReferenceMode.entries.firstOrNull { it.name == stored } ?: MapReferenceMode.RASTER
     }
 
     private fun set_filter_search_query(value: String) {
