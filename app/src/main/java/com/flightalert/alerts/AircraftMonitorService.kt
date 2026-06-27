@@ -126,7 +126,7 @@ class AircraftAlertService : Service(), LocationListener {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (!monitoring_enabled()) stopSelf()
+        stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
