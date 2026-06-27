@@ -1,17 +1,9 @@
 @file:Suppress(
-    "CanBeVal",
     "FunctionName",
-    "KotlinConstantConditions",
     "LocalVariableName",
-    "ObsoleteSdkInt",
     "PackageName",
     "PrivatePropertyName",
     "PropertyName",
-    "RedundantQualifierName",
-    "SameParameterValue",
-    "UNUSED_PARAMETER",
-    "UseKtxExtensionFunction",
-    "unused"
 )
 
 package com.flightalert.ui

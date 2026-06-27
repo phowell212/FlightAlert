@@ -1,17 +1,9 @@
 @file:Suppress(
-    "CanBeVal",
     "FunctionName",
-    "KotlinConstantConditions",
     "LocalVariableName",
-    "ObsoleteSdkInt",
     "PackageName",
     "PrivatePropertyName",
     "PropertyName",
-    "RedundantQualifierName",
-    "SameParameterValue",
-    "UNUSED_PARAMETER",
-    "UseKtxExtensionFunction",
-    "unused"
 )
 
 package com.flightalert.map
@@ -120,7 +112,7 @@ internal class StreetMapTileRenderer(
             draw_unavailable_if_missing = true,
             request_generation = request_generation
         )
-        val label_stats = if (
+        if (
             state.map_labels_enabled &&
             state.map_label_transition_alpha > MIN_LABEL_TRANSITION_ALPHA &&
             base_stats.requested == 0 &&
@@ -138,14 +130,6 @@ internal class StreetMapTileRenderer(
                 draw_unavailable_if_missing = false,
                 defer_until_exact_tiles_loaded = true,
                 request_generation = request_generation
-            )
-        } else {
-            TileLayerDrawStats(
-                visible = 0,
-                loaded = 0,
-                requested = 0,
-                fallback_drawn = 0,
-                fading = false
             )
         }
         val label_note = if (!state.map_labels_enabled) " no-label" else ""

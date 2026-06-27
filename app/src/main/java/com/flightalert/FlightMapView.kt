@@ -9,9 +9,7 @@
     "PropertyName",
     "RedundantQualifierName",
     "SameParameterValue",
-    "UNUSED_PARAMETER",
     "UseKtxExtensionFunction",
-    "unused"
 )
 
 package com.flightalert
@@ -683,7 +681,6 @@ class FlightMapView(
     private var last_pinch_focus_x = 0f
     private var last_pinch_focus_y = 0f
     private var last_map_interaction_ms = 0L
-    private var last_map_zoom_interaction_ms = 0L
     private var last_traffic_draw_elapsed_ms = 0L
     private var last_priority_notification_snapshot_check_ms = 0L
     private var last_priority_notification_snapshot_signature: String? = null
@@ -1275,11 +1272,7 @@ class FlightMapView(
         val next_zoom =
             (zoom + ln(scale_factor) / ln(2.0)).coerceIn(MIN_ZOOM.toDouble(), MAX_ZOOM.toDouble())
 
-        val old_zoom = zoom
         zoom = next_zoom
-        if (abs(next_zoom - old_zoom) >= MAP_ZOOM_INTERACTION_EPSILON) {
-            last_map_zoom_interaction_ms = SystemClock.elapsedRealtime()
-        }
         val focus_world = MapProjection.lat_lon_to_world(anchor_geo.lat, anchor_geo.lon, zoom)
         set_manual_center_from_world(
             focus_world.x + content_width() / 2.0 - new_focus_x,
@@ -1484,16 +1477,14 @@ class FlightMapView(
     }
 
     private fun map_tile_state(): MapTileRenderState {
-        val now = SystemClock.elapsedRealtime()
         return MapTileRenderState(
             map_source = map_source,
             map_labels_enabled = map_labels_enabled,
             map_borders_enabled = map_borders_enabled,
             map_label_text_scale = map_label_text_scale,
-            map_label_transition_alpha = map_label_transition_alpha(now),
+            map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
             user_agent = USER_AGENT,
-            interaction_active = map_tile_interaction_active(now),
-            zoom_interaction_active = map_tile_zoom_interaction_active(now)
+            interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime())
         )
     }
 
@@ -1518,11 +1509,6 @@ class FlightMapView(
                 drag_started ||
                 map_touch_active ||
                 now - last_map_interaction_ms <= MAP_TILE_INTERACTION_SETTLE_MS
-    }
-
-    private fun map_tile_zoom_interaction_active(now: Long): Boolean {
-        return last_map_zoom_interaction_ms > 0L &&
-                now - last_map_zoom_interaction_ms <= MAP_TILE_INTERACTION_SETTLE_MS
     }
 
     private fun map_tile_style(): MapTileRenderStyle {
@@ -4436,7 +4422,6 @@ class FlightMapView(
         const val MAP_LABEL_TEXT_SCALE_STEP = 0.05f
         const val MAP_INTERACTION_SETTLE_REDRAW_PADDING_MS = 16L
         const val MAP_LABEL_SETTLED_FADE_MS = 140L
-        const val MAP_ZOOM_INTERACTION_EPSILON = 0.0005
     }
 
 }

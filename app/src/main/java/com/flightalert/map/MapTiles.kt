@@ -1,17 +1,9 @@
 @file:Suppress(
-    "CanBeVal",
     "FunctionName",
-    "KotlinConstantConditions",
     "LocalVariableName",
-    "ObsoleteSdkInt",
     "PackageName",
     "PrivatePropertyName",
     "PropertyName",
-    "RedundantQualifierName",
-    "SameParameterValue",
-    "UNUSED_PARAMETER",
-    "UseKtxExtensionFunction",
-    "unused"
 )
 
 package com.flightalert.map
@@ -138,8 +130,7 @@ data class MapTileRenderState(
     val map_label_text_scale: Float,
     val map_label_transition_alpha: Float = 1f,
     val user_agent: String,
-    val interaction_active: Boolean = false,
-    val zoom_interaction_active: Boolean = false
+    val interaction_active: Boolean = false
 ) {
     val cache_key: String = map_source.cache_key(map_labels_enabled)
     val reference_overlay_layers: List<ReferenceTileOverlay> =

@@ -1,17 +1,9 @@
 @file:Suppress(
-    "CanBeVal",
     "FunctionName",
-    "KotlinConstantConditions",
     "LocalVariableName",
-    "ObsoleteSdkInt",
     "PackageName",
     "PrivatePropertyName",
     "PropertyName",
-    "RedundantQualifierName",
-    "SameParameterValue",
-    "UNUSED_PARAMETER",
-    "UseKtxExtensionFunction",
-    "unused"
 )
 
 package com.flightalert.ui
@@ -121,33 +113,21 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         panel: RectF,
         compact_top_dp: Int,
         portrait_top_dp: Int
-    ): RectF {
-        if (is_compact_settings_panel(panel)) {
-            val top = panel.top + dp(compact_top_dp)
-            return compact_settings_submenu_button_bounds(panel, top)
-        }
-        val top = panel.top + dp(portrait_top_dp)
-        return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(34))
-    }
+    ): RectF = setting_row_button_bounds(panel, compact_top_dp, portrait_top_dp)
 
     private fun map_setting_button_bounds(
         panel: RectF,
-        wide_compact_top_dp: Int,
-        narrow_compact_top_dp: Int,
+        compact_top_dp: Int,
         portrait_top_dp: Int
-    ): RectF {
-        if (is_compact_settings_panel(panel)) {
-            val column = compact_settings_map_column(panel)
-            val top_dp =
-                if (is_wide_settings_hub_panel(panel)) wide_compact_top_dp else narrow_compact_top_dp
-            val top = panel.top + dp(top_dp)
-            return RectF(column.left, top, column.right, top + dp(30))
-        }
-        val top = panel.top + dp(portrait_top_dp)
-        return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(34))
-    }
+    ): RectF = setting_row_button_bounds(panel, compact_top_dp, portrait_top_dp)
 
     private fun safety_setting_button_bounds(
+        panel: RectF,
+        compact_top_dp: Int,
+        portrait_top_dp: Int
+    ): RectF = setting_row_button_bounds(panel, compact_top_dp, portrait_top_dp)
+
+    private fun setting_row_button_bounds(
         panel: RectF,
         compact_top_dp: Int,
         portrait_top_dp: Int
@@ -157,25 +137,25 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
             return compact_settings_submenu_button_bounds(panel, top)
         }
         val top = panel.top + dp(portrait_top_dp)
-        return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(34))
+        return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(36))
     }
 
     private fun compact_settings_submenu_button_bounds(panel: RectF, top: Float): RectF {
-        return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(30))
+        return RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(36))
     }
 
     fun imperial_button_bounds(panel: RectF): RectF =
         display_setting_button_bounds(panel, compact_top_dp = 66, portrait_top_dp = 88)
 
     fun metric_button_bounds(panel: RectF): RectF =
-        display_setting_button_bounds(panel, compact_top_dp = 102, portrait_top_dp = 130)
+        display_setting_button_bounds(panel, compact_top_dp = 112, portrait_top_dp = 134)
 
     fun close_button_bounds(panel: RectF): RectF {
         return RectF(
             panel.right - dp(112),
             panel.top + dp(14),
             panel.right - dp(18),
-            panel.top + dp(48)
+            panel.top + dp(50)
         )
     }
 
@@ -192,18 +172,17 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         settings_hub_button_bounds(panel, 3)
 
     private fun settings_hub_button_bounds(panel: RectF, index: Int): RectF {
-        val gap = dp(12)
+        val gap = dp(10)
+        val height = dp(36)
         return if (is_compact_settings_panel(panel)) {
             val columns = 2
             val row = index / columns
             val column = index % columns
             val width = (panel.width() - dp(36) - gap) / columns
-            val height = dp(58)
             val left = panel.left + dp(18) + column * (width + gap)
             val top = panel.top + dp(74) + row * (height + gap)
             RectF(left, top, left + width, top + height)
         } else {
-            val height = dp(54)
             val top = panel.top + dp(86) + index * (height + gap)
             RectF(panel.left + dp(18), top, panel.right - dp(18), top + height)
         }
@@ -212,29 +191,26 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
     fun map_source_button_bounds(panel: RectF): RectF =
         map_setting_button_bounds(
             panel,
-            wide_compact_top_dp = 66,
-            narrow_compact_top_dp = 66,
+            compact_top_dp = 66,
             portrait_top_dp = 88
         )
 
     fun map_labels_button_bounds(panel: RectF): RectF =
         map_setting_button_bounds(
             panel,
-            wide_compact_top_dp = 102,
-            narrow_compact_top_dp = 102,
-            portrait_top_dp = 130
+            compact_top_dp = 112,
+            portrait_top_dp = 134
         )
 
     fun aviation_layers_button_bounds(panel: RectF): RectF =
         map_setting_button_bounds(
             panel,
-            wide_compact_top_dp = 138,
-            narrow_compact_top_dp = 138,
-            portrait_top_dp = 172
+            compact_top_dp = 158,
+            portrait_top_dp = 180
         )
 
     fun theme_button_bounds(panel: RectF): RectF =
-        display_setting_button_bounds(panel, compact_top_dp = 138, portrait_top_dp = 168)
+        display_setting_button_bounds(panel, compact_top_dp = 158, portrait_top_dp = 180)
 
     fun alerts_toggle_bounds(panel: RectF): RectF =
         safety_setting_button_bounds(panel, compact_top_dp = 66, portrait_top_dp = 88)
@@ -272,22 +248,22 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
     }
 
     fun priority_tracker_button_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 102, portrait_top_dp = 130)
+        safety_setting_button_bounds(panel, compact_top_dp = 112, portrait_top_dp = 134)
 
     fun monitoring_notification_status_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 138, portrait_top_dp = 172)
+        safety_setting_button_bounds(panel, compact_top_dp = 158, portrait_top_dp = 180)
 
     fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 174, portrait_top_dp = 214)
+        safety_setting_button_bounds(panel, compact_top_dp = 204, portrait_top_dp = 226)
 
     fun impact_source_button_bounds(panel: RectF, index: Int, source_count: Int): RectF {
-        val gap = dp(8)
+        val gap = dp(10)
         val safe_index = index.coerceIn(0, source_count - 1)
         return if (is_compact_settings_panel(panel)) {
             val left = panel.left + dp(18)
             val button_width = (panel.width() - dp(36) - gap * (source_count - 1)) / source_count
             val x = left + safe_index * (button_width + gap)
-            RectF(x, panel.bottom - dp(46), x + button_width, panel.bottom - dp(16))
+            RectF(x, panel.bottom - dp(52), x + button_width, panel.bottom - dp(16))
         } else {
             val columns = 3
             val row = safe_index / columns
@@ -295,8 +271,8 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
             val left = panel.left + dp(18)
             val button_width = (panel.width() - dp(36) - gap * (columns - 1)) / columns
             val x = left + column * (button_width + gap)
-            val y = panel.bottom - dp(92) + row * (dp(34) + gap)
-            RectF(x, y, x + button_width, y + dp(34))
+            val y = panel.bottom - dp(98) + row * (dp(36) + gap)
+            RectF(x, y, x + button_width, y + dp(36))
         }
     }
 
@@ -304,7 +280,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         if (is_compact_settings_panel(panel)) {
             val left = panel.left + dp(18)
             val right = panel.centerX() - dp(5)
-            return RectF(left, panel.top + dp(92), right, panel.top + dp(126))
+            return RectF(left, panel.top + dp(92), right, panel.top + dp(128))
         }
         return RectF(
             panel.left + dp(18),
@@ -318,7 +294,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         if (is_compact_settings_panel(panel)) {
             val left = panel.centerX() + dp(5)
             val right = panel.right - dp(18)
-            return RectF(left, panel.top + dp(92), right, panel.top + dp(126))
+            return RectF(left, panel.top + dp(92), right, panel.top + dp(128))
         }
         return RectF(
             panel.left + dp(18),
@@ -330,7 +306,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
 
     fun map_label_text_slider_bounds(panel: RectF): RectF {
         return if (is_compact_settings_panel(panel)) {
-            RectF(panel.left + dp(18), panel.top + dp(136), panel.right - dp(18), panel.top + dp(178))
+            RectF(panel.left + dp(18), panel.top + dp(138), panel.right - dp(18), panel.top + dp(180))
         } else {
             RectF(panel.left + dp(18), panel.top + dp(194), panel.right - dp(18), panel.top + dp(244))
         }
@@ -384,8 +360,8 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
                 if (right_column) compact_settings_right_column(panel) else compact_settings_left_column(
                     panel
                 )
-            val top = panel.top + dp(104 + row * 44)
-            RectF(column.left, top, column.right, top + dp(32))
+            val top = panel.top + dp(104 + row * 46)
+            RectF(column.left, top, column.right, top + dp(36))
         } else {
             val top = panel.top + dp(126 + row * 46)
             RectF(panel.left + dp(18), top, panel.right - dp(18), top + dp(36))
@@ -525,7 +501,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
             panel.right - dp(112),
             panel.top + dp(14),
             panel.right - dp(18),
-            panel.top + dp(48)
+            panel.top + dp(50)
         )
     }
 
@@ -534,11 +510,11 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         if (is_compact_settings_panel(panel)) {
             val left = compact_settings_left_column(panel)
             val right = left.left + (left.width() - gap) / 2f
-            return RectF(left.left, panel.top + dp(66), right, panel.top + dp(96))
+            return RectF(left.left, panel.top + dp(66), right, panel.top + dp(102))
         }
         val left = panel.left + dp(18)
         val right = panel.centerX() - gap / 2f
-        return RectF(left, panel.top + dp(72), right, panel.top + dp(110))
+        return RectF(left, panel.top + dp(72), right, panel.top + dp(108))
     }
 
     fun priority_ring_toggle_bounds(panel: RectF): RectF {
@@ -546,48 +522,15 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         if (is_compact_settings_panel(panel)) {
             val left = compact_settings_left_column(panel)
             val button_left = left.left + (left.width() + gap) / 2f
-            return RectF(button_left, panel.top + dp(66), left.right, panel.top + dp(96))
+            return RectF(button_left, panel.top + dp(66), left.right, panel.top + dp(102))
         }
         val button_left = panel.centerX() + gap / 2f
-        return RectF(button_left, panel.top + dp(72), panel.right - dp(18), panel.top + dp(110))
+        return RectF(button_left, panel.top + dp(72), panel.right - dp(18), panel.top + dp(108))
     }
 
     // Compact settings means short landscape: use columns before shrinking text or clipping controls.
     fun is_compact_settings_panel(panel: RectF): Boolean {
         return panel.width() >= dp(520) && panel.height() < dp(380)
-    }
-
-    fun is_wide_settings_hub_panel(panel: RectF): Boolean {
-        return is_compact_settings_panel(panel) && panel.width() >= dp(760)
-    }
-
-    fun compact_settings_display_column(panel: RectF): RectF {
-        return if (is_wide_settings_hub_panel(panel)) compact_settings_hub_column(
-            panel,
-            0
-        ) else compact_settings_left_column(panel)
-    }
-
-    fun compact_settings_map_column(panel: RectF): RectF {
-        return if (is_wide_settings_hub_panel(panel)) compact_settings_hub_column(
-            panel,
-            1
-        ) else compact_settings_left_column(panel)
-    }
-
-    fun compact_settings_safety_column(panel: RectF): RectF {
-        return if (is_wide_settings_hub_panel(panel)) compact_settings_hub_column(
-            panel,
-            2
-        ) else compact_settings_right_column(panel)
-    }
-
-    private fun compact_settings_hub_column(panel: RectF, index: Int): RectF {
-        val gap = dp(14)
-        val left = panel.left + dp(18)
-        val width = (panel.width() - dp(36) - gap * 2f) / 3f
-        val x = left + index.coerceIn(0, 2) * (width + gap)
-        return RectF(x, panel.top, x + width, panel.bottom)
     }
 
     fun compact_settings_left_column(panel: RectF): RectF {
@@ -618,11 +561,11 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
     }
 
     fun adjuster_minus_bounds(panel: RectF, top: Float): RectF {
-        return RectF(panel.left + dp(18), top, panel.left + dp(72), top + dp(38))
+        return RectF(panel.left + dp(18), top, panel.left + dp(72), top + dp(36))
     }
 
     fun adjuster_plus_bounds(panel: RectF, top: Float): RectF {
-        return RectF(panel.right - dp(72), top, panel.right - dp(18), top + dp(38))
+        return RectF(panel.right - dp(72), top, panel.right - dp(18), top + dp(36))
     }
 
     // The traffic panel anchors opposite the top/status controls and becomes a bottom card in portrait.

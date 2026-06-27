@@ -16,18 +16,11 @@ android {
         targetSdk = 36
         versionCode = 9
         versionName = "1.8"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     sourceSets {
         getByName("main") {
             setRoot("app/src/main")
-        }
-        getByName("test") {
-            setRoot("app/src/test")
-        }
-        getByName("androidTest") {
-            setRoot("app/src/androidTest")
         }
     }
 
@@ -49,8 +42,4 @@ dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.core.ktx)
     implementation("com.github.luben:zstd-jni:1.5.7-8@aar")
-    testImplementation(libs.junit)
-    androidTestImplementation("androidx.test:runner:1.5.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.4.0-alpha05")
 }

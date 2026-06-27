@@ -16,7 +16,7 @@
 # - Refactors must keep the existing styling, layout feel, interaction rhythm,
 #   and user experience unless a visible difference is an explicit bug fix.
 # - Release work must build, lint where tooling allows, verify on emulator/device,
-#   test the persistent extreme-priority notification, and clean generated junk.
+#   validate the persistent extreme-priority notification, and clean generated junk.
 #
 # Android manifest entry points. AGP usually preserves manifest classes on its
 # own; these explicit entries keep future minified release builds readable.
@@ -24,6 +24,6 @@
     public <init>();
 }
 
--keep class com.flightalert.AircraftAlertService {
+-keep class com.flightalert.alerts.AircraftAlertService {
     public <init>();
 }

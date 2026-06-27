@@ -1,22 +1,12 @@
 @file:Suppress(
-    "CanBeVal",
     "FunctionName",
-    "KotlinConstantConditions",
     "LocalVariableName",
-    "ObsoleteSdkInt",
     "PackageName",
     "PrivatePropertyName",
     "PropertyName",
-    "RedundantQualifierName",
-    "SameParameterValue",
-    "UNUSED_PARAMETER",
-    "UseKtxExtensionFunction",
-    "unused"
 )
 
 package com.flightalert.map
-
-import com.flightalert.FlightAlertAppSettings
 
 import android.content.Context
 import android.graphics.Bitmap
