@@ -13,6 +13,8 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
 import com.flightalert.aircraft.Aircraft
+import com.flightalert.aircraft.AircraftSymbol
+import com.flightalert.aircraft.AircraftSymbolClassifier
 import com.flightalert.aircraft.TrafficDisplay
 import com.flightalert.details.AircraftDetails
 import com.flightalert.details.AirportDetails
@@ -581,13 +583,13 @@ internal class TrafficPanelStateBuilder(
     private fun panel_rows(target: Aircraft, details: AircraftDetails?): List<TrafficPanelRow> {
         val route_details = current_route_details_for_panel(target)
         val telemetry = panel_telemetry(target, details)
+        val route_origin = route_details?.origin_airport?.let { route_airport_label(it) }
+        val route_destination = route_details?.destination_airport?.let { route_airport_label(it) }
         val rows = mutableListOf(
             TrafficPanelRow("Altitude", telemetry_formatter.altitude_value(target.altitude_m)),
             TrafficPanelRow("Speed", telemetry_formatter.speed_value(target.velocity_ms)),
             TrafficPanelRow("Origin", compact_registry_country_label(target)),
             TrafficPanelRow("Last contact", telemetry_formatter.age(target)),
-            route_details?.origin_airport?.let { TrafficPanelRow("From", route_airport_label(it)) },
-            route_details?.destination_airport?.let { TrafficPanelRow("To", route_airport_label(it)) },
             TrafficPanelRow("Track", telemetry_formatter.track(target.track_deg)),
             TrafficPanelRow(
                 "Vertical rate",
@@ -599,6 +601,10 @@ internal class TrafficPanelStateBuilder(
             telemetry?.squawk?.trim()?.takeIf { it.isNotBlank() }?.let { TrafficPanelRow("Squawk", it) },
             message_rate_label(telemetry?.message_rate)?.let { TrafficPanelRow("Messages", it) }
         ).filterNotNull().toMutableList()
+        if (route_origin != null || route_destination != null) {
+            rows += TrafficPanelRow("From", route_origin ?: "Unavailable")
+            rows += TrafficPanelRow("To", route_destination ?: "Unavailable")
+        }
         if (target.is_military) {
             rows += TrafficPanelRow(
                 "Origin status",
@@ -615,6 +621,19 @@ internal class TrafficPanelStateBuilder(
 
     private fun aircraft_display_model(target: Aircraft, details: AircraftDetails? = null): String {
         return AircraftRoutePresenter.aircraft_type(details, target)
+            .takeIf { it != "Unavailable" }
+            ?: aircraft_category_label(target)
+    }
+
+    private fun aircraft_category_label(target: Aircraft): String {
+        return when (AircraftSymbolClassifier.symbol_for(target)) {
+            AircraftSymbol.AIRLINER -> "Airliner"
+            AircraftSymbol.ROTORCRAFT -> "Rotorcraft"
+            AircraftSymbol.GLIDER -> "Glider"
+            AircraftSymbol.UAV -> "UAV"
+            AircraftSymbol.SURFACE -> "Ground vehicle"
+            AircraftSymbol.GENERAL_AVIATION -> "General aviation"
+        }
     }
 
     private fun panel_telemetry(target: Aircraft, details: AircraftDetails?) =

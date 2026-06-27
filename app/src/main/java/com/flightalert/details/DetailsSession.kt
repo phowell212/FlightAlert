@@ -27,6 +27,8 @@ import com.flightalert.DETAILS_PREFETCH_SCAN_LIMIT
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftPositionProjector
+import com.flightalert.aircraft.AircraftSymbol
+import com.flightalert.aircraft.AircraftSymbolClassifier
 import com.flightalert.aircraft.AircraftTelemetry
 import com.flightalert.flight.AircraftRoutePresenter
 import com.flightalert.flight.AircraftRouteTraceContext
@@ -573,8 +575,7 @@ internal class AircraftDetailsRowsBuilder(
         val route_context = route_trace_context(aircraft)
         val telemetry =
             enriched_details?.telemetry?.with_fallback(aircraft.telemetry) ?: aircraft.telemetry
-        val aircraft_model =
-            AircraftRoutePresenter.aircraft_type(enriched_details, aircraft, details_loading)
+        val aircraft_model = aircraft_display_model(enriched_details, aircraft, details_loading)
         val rows = mutableListOf<AircraftDetailsRow>()
         rows += AircraftDetailsRow.section("Aircraft", aircraft_model)
         rows += AircraftDetailsRow("Callsign", aircraft.callsign)
@@ -597,12 +598,6 @@ internal class AircraftDetailsRowsBuilder(
             "MFR year",
             AircraftRoutePresenter.details_value(
                 enriched_details?.manufactured_year,
-                details_loading
-            )
-        )
-        rows += AircraftDetailsRow(
-            "Type code",
-            enriched_details?.type_code ?: aircraft.type_code ?: loading_or_unavailable(
                 details_loading
             )
         )
@@ -658,6 +653,27 @@ internal class AircraftDetailsRowsBuilder(
         rows += altitude_rows(aircraft, telemetry)
         rows += direction_rows(aircraft, telemetry)
         return rows
+    }
+
+    private fun aircraft_display_model(
+        details: AircraftDetails?,
+        aircraft: Aircraft,
+        loading: Boolean
+    ): String {
+        return AircraftRoutePresenter.aircraft_type(details, aircraft, loading)
+            .takeIf { it != "Unavailable" && it != "Loading" }
+            ?: aircraft_category_label(aircraft)
+    }
+
+    private fun aircraft_category_label(aircraft: Aircraft): String {
+        return when (AircraftSymbolClassifier.symbol_for(aircraft)) {
+            AircraftSymbol.AIRLINER -> "Airliner"
+            AircraftSymbol.ROTORCRAFT -> "Rotorcraft"
+            AircraftSymbol.GLIDER -> "Glider"
+            AircraftSymbol.UAV -> "UAV"
+            AircraftSymbol.SURFACE -> "Ground vehicle"
+            AircraftSymbol.GENERAL_AVIATION -> "General aviation"
+        }
     }
 
     private fun spatial_rows(

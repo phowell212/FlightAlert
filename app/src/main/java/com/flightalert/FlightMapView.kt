@@ -419,14 +419,11 @@ class FlightMapView(
         traffic_distance_color = ::traffic_distance_color,
         registry_country_label = { aircraft -> registry_country_label(aircraft) },
         current_aircraft_details_for_panel = { target ->
-            details_with_trace_origin(
-                details_session.aircraft_details.takeIf { selected_path_controller.selected_aircraft_id == target.icao24 },
-                target
-            )
+            aircraft_details_for_panel(target)
         },
         current_route_details_for_panel = { target ->
             current_flight_route_details(
-                details_session.aircraft_details.takeIf { selected_path_controller.selected_aircraft_id == target.icao24 },
+                aircraft_details_for_panel(target),
                 target
             )
         },
@@ -2397,7 +2394,9 @@ class FlightMapView(
         val rect = layout.info_panel_bounds(w, h)
         val wide = layout.is_wide_layout(w, h)
         val style = traffic_panel_style()
-        val state = traffic_panel_state()
+        val display = displayed_traffic()
+        prefetch_info_panel_aircraft_details(display)
+        val state = traffic_panel_state(display)
         traffic_panel_renderer.draw_panel(canvas, rect, wide, style, state)
     }
 
@@ -2405,9 +2404,9 @@ class FlightMapView(
         return TrafficPanelStyle(visual_theme)
     }
 
-    private fun traffic_panel_state(): TrafficPanelState {
+    private fun traffic_panel_state(display: TrafficDisplay = displayed_traffic()): TrafficPanelState {
         return traffic_panel_state_builder.panel_state(
-            display = displayed_traffic(),
+            display = display,
             muted_color = muted_color,
             accent_blue_color = accent_blue_color,
             danger_color = danger_color,
@@ -2477,7 +2476,7 @@ class FlightMapView(
         val aircraft = displayed_traffic().aircraft
         return AircraftDetailsMainState(
             title = aircraft?.callsign ?: "Aircraft details",
-            rows = aircraft?.let { aircraft_details_rows(it, details_session.aircraft_details) }
+            rows = aircraft?.let { aircraft_details_rows(it, aircraft_details_for_panel(it)) }
                 .orEmpty(),
             has_aircraft = aircraft != null,
             has_usage_trace = aircraft?.let { has_usage_trace_for(it) } == true
@@ -3390,7 +3389,30 @@ class FlightMapView(
         details_session.usage_open = false
         details_session.environmental_impact_open = false
         origin_lookup_controller.reset_for_selection(aircraft)
+        prefetch_aircraft_details(aircraft)
         request_flight_path(aircraft.icao24)
+    }
+
+    private fun aircraft_details_for_panel(aircraft: Aircraft): AircraftDetails? {
+        val selected_details = details_session.aircraft_details?.takeIf { details ->
+            selected_path_controller.selected_aircraft_id == aircraft.icao24 &&
+                    details.icao24.equals(aircraft.icao24, ignoreCase = true)
+        }
+        return details_with_trace_origin(
+            selected_details ?: aircraft_details_warm_requester.fresh_details_for(aircraft)?.details,
+            aircraft
+        )
+    }
+
+    private fun prefetch_info_panel_aircraft_details(display: TrafficDisplay) {
+        display.aircraft?.let { prefetch_aircraft_details(it) }
+    }
+
+    private fun prefetch_aircraft_details(aircraft: Aircraft) {
+        val now = SystemClock.elapsedRealtime()
+        if (aircraft_details_warm_requester.in_flight_count >= DETAILS_PREFETCH_MAX_IN_FLIGHT) return
+        if (!aircraft_details_warm_requester.should_prefetch(aircraft, now)) return
+        aircraft_details_warm_requester.start_prefetch(aircraft)
     }
 
     private fun apply_warm_cache_to_current_details(

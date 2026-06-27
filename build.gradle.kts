@@ -13,8 +13,8 @@ android {
         minSdk = 29
         //noinspection AndroidLintEditedTargetSdkVersion
         targetSdk = 37
-        versionCode = 10
-        versionName = "1.9"
+        versionCode = 11
+        versionName = "1.10"
     }
 
     sourceSets {

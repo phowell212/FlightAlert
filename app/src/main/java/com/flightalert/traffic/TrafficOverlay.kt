@@ -2186,8 +2186,9 @@ class TrafficOverlayRenderer(
     ) {
         val callsign = item.aircraft.callsign_label
         val detail = chrome.aircraft_label_detail(item.aircraft)
+        val label_top = y + chrome.dp(42f * item.symbol_scale.coerceIn(0.85f, 1.3f))
         if (state.map_source != TileSource.STREET) {
-            draw_satellite_aircraft_label(canvas, x, y, callsign, detail, state, style)
+            draw_satellite_aircraft_label(canvas, x, label_top, callsign, detail, state, style)
             return
         }
 
@@ -2213,21 +2214,13 @@ class TrafficOverlayRenderer(
         val text_width = max(callsign_width, detail_width)
         val chip_width = text_width + chrome.dp(17f)
         val chip_height = chrome.dp(37f)
-        val min_left = chrome.dp(4f)
-        val max_left = max(min_left, state.content_width - chip_width - chrome.dp(4f))
-        val right_left = x + chrome.dp(20f)
-        val left_left = x - chrome.dp(20f) - chip_width
-        val chip_left = when {
-            right_left <= max_left -> right_left
-            left_left >= min_left -> left_left
-            else -> right_left
-        }.coerceIn(min_left, max_left)
+        val chip_left = x - chip_width / 2f
         val chip = placed_aircraft_label_rect(
             preferred = RectF(
                 chip_left,
-                y - chrome.dp(25f),
+                label_top,
                 chip_left + chip_width,
-                y - chrome.dp(25f) + chip_height
+                label_top + chip_height
             ),
             state = state
         ) ?: return
@@ -2260,7 +2253,7 @@ class TrafficOverlayRenderer(
     private fun draw_satellite_aircraft_label(
         canvas: Canvas,
         x: Float,
-        y: Float,
+        label_top: Float,
         callsign: String,
         detail: String,
         state: TrafficOverlayState,
@@ -2286,12 +2279,13 @@ class TrafficOverlayRenderer(
         }
         val detail_width = text_paint.measureText(display_detail)
         val label_width = max(title_width, detail_width) + chrome.dp(4f)
+        val label_left = x - label_width / 2f
         val label = placed_aircraft_label_rect(
             preferred = RectF(
-                x + chrome.dp(20f),
-                y - chrome.dp(23f),
-                x + chrome.dp(20f) + label_width,
-                y + chrome.dp(18f)
+                label_left,
+                label_top,
+                label_left + label_width,
+                label_top + chrome.dp(41f)
             ),
             state = state
         ) ?: return
