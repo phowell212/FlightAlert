@@ -19,11 +19,13 @@ package com.flightalert.ui
 import com.flightalert.VisualTheme
 import com.flightalert.ThemeTreatment
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.os.SystemClock
 import androidx.core.graphics.withSave
+import com.flightalert.alerts.MonitoringNotificationHiderStatus
 import com.flightalert.map.AviationLayerKind
 import com.flightalert.map.AviationLayerSnapshot
 import com.flightalert.map.AviationLayerState
@@ -201,8 +203,8 @@ class FlightMapPanelRenderer(
         )
         chrome.draw_choice_button(
             canvas,
-            chrome.layout.globe_bin_craft_source_button_bounds(rect),
-            state.aircraft_feed_mode.display_name,
+            chrome.layout.aircraft_source_button_bounds(rect),
+            aircraft_source_button_label(state, compact = false),
             true
         )
         chrome.draw_choice_button(
@@ -225,17 +227,23 @@ class FlightMapPanelRenderer(
             "Notification range and tracker",
             state.priority_tracking_enabled
         )
+        draw_watcher_notification_status(
+            canvas,
+            chrome.layout.monitoring_notification_status_bounds(rect),
+            state,
+            style
+        )
         chrome.draw_choice_button(
             canvas,
             chrome.layout.monitoring_notification_hider_button_bounds(rect),
-            if (state.watcher_notification_hider_enabled) "Watcher notice hidden" else "Hide watcher notice",
+            if (state.watcher_notification_hider_enabled) "Notification access enabled" else "Open notification access",
             state.watcher_notification_hider_enabled
         )
 
         draw_settings_section_label(
             canvas,
             rect.left + dp(18),
-            rect.top + dp(606),
+            rect.top + dp(612),
             "Reference",
             style
         )
@@ -680,8 +688,8 @@ class FlightMapPanelRenderer(
         )
         chrome.draw_choice_button(
             canvas,
-            chrome.layout.globe_bin_craft_source_button_bounds(rect),
-            state.aircraft_feed_mode.compact_name,
+            chrome.layout.aircraft_source_button_bounds(rect),
+            aircraft_source_button_label(state, compact = true),
             true
         )
         chrome.draw_choice_button(
@@ -704,14 +712,20 @@ class FlightMapPanelRenderer(
             "Notification range",
             state.priority_tracking_enabled
         )
+        draw_watcher_notification_status(
+            canvas,
+            chrome.layout.monitoring_notification_status_bounds(rect),
+            state,
+            style
+        )
         chrome.draw_choice_button(
             canvas,
             chrome.layout.monitoring_notification_hider_button_bounds(rect),
-            if (state.watcher_notification_hider_enabled) "Watcher hidden" else "Hide watcher",
+            if (state.watcher_notification_hider_enabled) "Access enabled" else "Open access",
             state.watcher_notification_hider_enabled
         )
 
-        draw_settings_section_label(canvas, safety.left, rect.top + dp(196), "Reference", style)
+        draw_settings_section_label(canvas, safety.left, rect.top + dp(236), "Reference", style)
         chrome.draw_choice_button(
             canvas,
             chrome.layout.impact_methodology_button_bounds(rect),
@@ -726,6 +740,59 @@ class FlightMapPanelRenderer(
             state.map_labels_enabled && state.map_borders_enabled -> "$prefix on"
             state.map_labels_enabled || state.map_borders_enabled -> "$prefix mixed"
             else -> "$prefix off"
+        }
+    }
+
+    private fun aircraft_source_button_label(state: SettingsPanelState, compact: Boolean): String {
+        val prefix = if (compact) "Source" else "Aircraft source"
+        return "$prefix: ${state.aircraft_feed_mode.display_name}"
+    }
+
+    private fun draw_watcher_notification_status(
+        canvas: Canvas,
+        rect: RectF,
+        state: SettingsPanelState,
+        style: FlightMapPanelStyle
+    ) {
+        val status = state.watcher_notification_hider_status
+        val fill = when (status) {
+            MonitoringNotificationHiderStatus.UP -> style.visual_theme.colors.accent_green
+            MonitoringNotificationHiderStatus.BOOTING -> style.visual_theme.colors.accent_orange
+            MonitoringNotificationHiderStatus.DOWN -> style.visual_theme.colors.danger
+        }
+        val label = when (status) {
+            MonitoringNotificationHiderStatus.UP -> "Notification watcher: UP"
+            MonitoringNotificationHiderStatus.BOOTING -> "Notification watcher: BOOTING"
+            MonitoringNotificationHiderStatus.DOWN -> "Notification watcher: DOWN"
+        }
+        val radius = chrome.control_radius().coerceAtLeast(dp(4))
+        paint.style = Paint.Style.FILL
+        paint.color = with_alpha(fill, 220)
+        canvas.drawRoundRect(rect, radius, radius, paint)
+
+        stroke_paint.style = Paint.Style.STROKE
+        stroke_paint.strokeWidth = dp(1.2f)
+        stroke_paint.color = with_alpha(Color.WHITE, 150)
+        canvas.drawRoundRect(rect, radius, radius, stroke_paint)
+
+        text_paint.textAlign = Paint.Align.CENTER
+        text_paint.isFakeBoldText = true
+        text_paint.color = if (status == MonitoringNotificationHiderStatus.BOOTING) {
+            Color.rgb(28, 20, 8)
+        } else {
+            Color.WHITE
+        }
+        draw_fitted_center_text(
+            canvas,
+            label,
+            rect.left + dp(8),
+            rect.right - dp(8),
+            rect.centerY() + dp(5),
+            sp(12),
+            sp(8)
+        )
+        if (status == MonitoringNotificationHiderStatus.BOOTING) {
+            chrome.request_animation_frame()
         }
     }
 

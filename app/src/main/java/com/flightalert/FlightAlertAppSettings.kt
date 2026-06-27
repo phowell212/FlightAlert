@@ -99,6 +99,7 @@ object FlightAlertAppSettings {
     }
 
     object AircraftFeed {
+        const val DEFAULT_MODE = "HYBRID"
         const val HTTP_TOO_MANY_REQUESTS = 429
         const val DEFAULT_OPENSKY_BACKOFF_SECONDS = 3600L
         const val DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS = 120L

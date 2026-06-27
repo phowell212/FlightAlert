@@ -887,7 +887,7 @@ class AircraftTrafficFeed(
     ): FeedResult? {
         val globe_source = globe_bin_craft_aircraft_source?.takeIf { feed_mode.uses_globe }
         return when (feed_mode) {
-            AircraftFeedMode.WEB -> {
+            AircraftFeedMode.BINCRAFT -> {
                 globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
                     ?: FeedResult(
                         status = FeedStatus.UNAVAILABLE,

@@ -960,7 +960,7 @@ class AircraftDetailsSession(
         aircraft_photo_gallery = emptyList()
         aircraft_photo_gallery_loading = true
         aircraft_photo_gallery_status = when (feed_mode()) {
-            AircraftFeedMode.WEB -> "Loading exact photos from direct aircraft-photo sources"
+            AircraftFeedMode.BINCRAFT -> "Loading exact photos from direct aircraft-photo sources"
             AircraftFeedMode.API -> "Loading exterior photos from API sources"
             AircraftFeedMode.HYBRID -> "Loading exact photos, then labeled representatives"
         }

@@ -18,7 +18,9 @@ package com.flightalert.ui
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.flightalert.FlightAlertAppSettings
 import com.flightalert.VisualTheme
+import com.flightalert.alerts.MonitoringNotificationHiderStatus
 import com.flightalert.map.TileSource
 import com.flightalert.map.UnitSystem
 
@@ -27,14 +29,14 @@ enum class AircraftFeedMode(
     val compact_name: String,
     val uses_globe: Boolean
 ) {
-    WEB("binCraft feed", "binCraft", true),
-    API("API feed", "API feed", false),
-    HYBRID("Hybrid feed", "Hybrid", true);
+    HYBRID("Hybrid", "Hybrid", true),
+    BINCRAFT("binCraft", "binCraft", true),
+    API("API", "API", false);
 
     fun next(): AircraftFeedMode = when (this) {
-        WEB -> API
+        HYBRID -> BINCRAFT
+        BINCRAFT -> API
         API -> HYBRID
-        HYBRID -> WEB
     }
 }
 
@@ -53,7 +55,6 @@ object FlightAlertSettings {
     const val KEY_MAP_BORDERS_ENABLED = "map_borders_enabled"
     const val KEY_MAP_LABEL_TEXT_SCALE = "map_label_text_scale"
     const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
-    const val KEY_GLOBE_BINCRAFT_SOURCE_ENABLED = "globe_bin_craft_source_enabled"
     const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
     const val KEY_LAYER_RESTRICTED_AIRSPACES_ENABLED = "layer_restricted_airspaces_enabled"
     const val KEY_LAYER_OCEANIC_TRACKS_ENABLED = "layer_oceanic_tracks_enabled"
@@ -74,7 +75,7 @@ object FlightAlertSettings {
     const val DEFAULT_MAP_LABELS_ENABLED = false
     const val DEFAULT_MAP_BORDERS_ENABLED = true
     const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1.35f
-    const val DEFAULT_GLOBE_BINCRAFT_SOURCE_ENABLED = true
+    const val DEFAULT_AIRCRAFT_FEED_MODE = FlightAlertAppSettings.AircraftFeed.DEFAULT_MODE
     const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
     const val DEFAULT_LAYER_RESTRICTED_AIRSPACES_ENABLED = false
     const val DEFAULT_LAYER_OCEANIC_TRACKS_ENABLED = false
@@ -92,12 +93,20 @@ object FlightAlertSettings {
 
     fun read_aircraft_feed_mode(prefs: SharedPreferences): AircraftFeedMode {
         val stored = prefs.getString(KEY_AIRCRAFT_FEED_MODE, null)
-        return stored?.let { AircraftFeedMode.entries.firstOrNull { mode -> mode.name == it } }
-            ?: AircraftFeedMode.HYBRID
+        return stored?.let { stored_name ->
+            if (stored_name == "WEB") AircraftFeedMode.BINCRAFT
+            else AircraftFeedMode.entries.firstOrNull { mode -> mode.name == stored_name }
+        } ?: default_aircraft_feed_mode()
     }
 
     fun read_aircraft_feed_mode(context: Context): AircraftFeedMode =
         read_aircraft_feed_mode(prefs(context))
+
+    private fun default_aircraft_feed_mode(): AircraftFeedMode {
+        return AircraftFeedMode.entries.firstOrNull { mode ->
+            mode.name == DEFAULT_AIRCRAFT_FEED_MODE
+        } ?: AircraftFeedMode.HYBRID
+    }
 }
 
 data class SettingsPanelState(
@@ -110,6 +119,7 @@ data class SettingsPanelState(
     val alerts_enabled: Boolean,
     val priority_tracking_enabled: Boolean,
     val watcher_notification_hider_enabled: Boolean,
+    val watcher_notification_hider_status: MonitoringNotificationHiderStatus,
     val map_attribution: String,
     val aircraft_source_label: String
 )

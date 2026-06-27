@@ -555,6 +555,7 @@ class FlightMapView(
     private var map_label_text_scale = read_map_label_text_scale()
     private var aircraft_feed_mode = FlightAlertSettings.read_aircraft_feed_mode(prefs)
     private var globe_bin_craft_source_enabled = aircraft_feed_mode.uses_globe
+    private val app_opened_elapsed_ms = SystemClock.elapsedRealtime()
     private var atc_boundaries_layer_enabled = prefs.getBoolean(
         FlightAlertSettings.KEY_LAYER_ATC_BOUNDARIES_ENABLED,
         FlightAlertSettings.DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED
@@ -2696,6 +2697,10 @@ class FlightMapView(
             watcher_notification_hider_enabled = MonitoringNotificationHiderService.is_enabled(
                 context
             ),
+            watcher_notification_hider_status = MonitoringNotificationHiderService.status(
+                context,
+                app_opened_elapsed_ms
+            ),
             map_attribution = map_source.attribution_text(map_labels_enabled, map_borders_enabled),
             aircraft_source_label = aircraft_source_preference_label()
         )
@@ -3242,7 +3247,7 @@ class FlightMapView(
             metric_button_bounds(panel).contains(x, y) -> set_units(UnitSystem.METRIC)
             map_source_button_bounds(panel).contains(x, y) -> toggle_map_source()
             map_labels_button_bounds(panel).contains(x, y) -> map_labels_open = true
-            globe_bin_craft_source_button_bounds(panel).contains(x, y) -> set_aircraft_feed_mode(
+            aircraft_source_button_bounds(panel).contains(x, y) -> set_aircraft_feed_mode(
                 aircraft_feed_mode.next()
             )
 
@@ -3633,16 +3638,12 @@ class FlightMapView(
         globe_bin_craft_source_enabled = mode.uses_globe
         prefs.edit {
             putString(FlightAlertSettings.KEY_AIRCRAFT_FEED_MODE, aircraft_feed_mode.name)
-            putBoolean(
-                FlightAlertSettings.KEY_GLOBE_BINCRAFT_SOURCE_ENABLED,
-                globe_bin_craft_source_enabled
-            )
         }
         globe_bin_craft_aircraft_source?.set_enabled(globe_bin_craft_source_enabled)
         aircraft_status = when (aircraft_feed_mode) {
-            AircraftFeedMode.WEB -> "binCraft feed enabled; waiting for validated snapshot"
-            AircraftFeedMode.API -> "API feed enabled"
             AircraftFeedMode.HYBRID -> "Hybrid feed enabled; loading API plus binCraft supplement"
+            AircraftFeedMode.BINCRAFT -> "binCraft feed enabled; waiting for validated snapshot"
+            AircraftFeedMode.API -> "API feed enabled"
         }
         request_visible_aircraft_if_needed(force = true)
         invalidate()
@@ -4060,8 +4061,8 @@ class FlightMapView(
     private fun map_labels_button_bounds(panel: RectF): RectF =
         layout.map_labels_button_bounds(panel)
 
-    private fun globe_bin_craft_source_button_bounds(panel: RectF): RectF =
-        layout.globe_bin_craft_source_button_bounds(panel)
+    private fun aircraft_source_button_bounds(panel: RectF): RectF =
+        layout.aircraft_source_button_bounds(panel)
 
     private fun aviation_layers_button_bounds(panel: RectF): RectF =
         layout.aviation_layers_button_bounds(panel)

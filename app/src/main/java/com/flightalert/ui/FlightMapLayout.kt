@@ -193,7 +193,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
             portrait_top_dp = 284
         )
 
-    fun globe_bin_craft_source_button_bounds(panel: RectF): RectF =
+    fun aircraft_source_button_bounds(panel: RectF): RectF =
         map_setting_button_bounds(
             panel,
             wide_compact_top_dp = 138,
@@ -250,11 +250,14 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
     fun priority_tracker_button_bounds(panel: RectF): RectF =
         safety_setting_button_bounds(panel, compact_top_dp = 102, portrait_top_dp = 492)
 
-    fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
+    fun monitoring_notification_status_bounds(panel: RectF): RectF =
         safety_setting_button_bounds(panel, compact_top_dp = 138, portrait_top_dp = 532)
 
+    fun monitoring_notification_hider_button_bounds(panel: RectF): RectF =
+        safety_setting_button_bounds(panel, compact_top_dp = 174, portrait_top_dp = 572)
+
     fun impact_methodology_button_bounds(panel: RectF): RectF =
-        safety_setting_button_bounds(panel, compact_top_dp = 204, portrait_top_dp = 620)
+        safety_setting_button_bounds(panel, compact_top_dp = 244, portrait_top_dp = 624)
 
     fun impact_source_button_bounds(panel: RectF, index: Int, source_count: Int): RectF {
         val gap = dp(8)
