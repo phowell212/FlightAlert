@@ -3590,7 +3590,13 @@ class FlightMapView(
         if (map_reference_mode == next) return
         map_reference_mode = next
         map_tile_renderer.reset_transitions()
-        prefs.edit { putString(FlightAlertSettings.KEY_MAP_REFERENCE_MODE, next.name) }
+        if (next == MapReferenceMode.VECTOR) vector_map_labels_enabled = true
+        prefs.edit {
+            putString(FlightAlertSettings.KEY_MAP_REFERENCE_MODE, next.name)
+            if (next == MapReferenceMode.VECTOR) {
+                putBoolean(FlightAlertSettings.KEY_VECTOR_MAP_LABELS_ENABLED, true)
+            }
+        }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
         invalidate()
     }
