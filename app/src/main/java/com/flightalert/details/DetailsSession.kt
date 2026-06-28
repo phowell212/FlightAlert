@@ -683,12 +683,6 @@ internal class AircraftDetailsRowsBuilder(
         return listOf(
             AircraftDetailsRow.section("Spatial"),
             AircraftDetailsRow(
-                "Groundspeed",
-                telemetry_formatter.aviation_speed(
-                    telemetry?.ground_speed_ms ?: aircraft.velocity_ms
-                )
-            ),
-            AircraftDetailsRow(
                 "Baro. altitude",
                 telemetry_formatter.altitude_value(
                     telemetry?.baro_altitude_m ?: aircraft.altitude_m
