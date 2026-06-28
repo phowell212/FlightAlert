@@ -229,7 +229,7 @@ internal class LocalReferenceOverlayRenderer(
                 canvas,
                 viewport,
                 local_dataset.labels,
-                LocalReferenceDetail.INTERACTION,
+                LocalReferenceDetail.SETTLED,
                 safe_label_text_scale
             )
         } else {
