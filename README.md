@@ -85,4 +85,4 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 - Fresh installs default to satellite view with borders enabled and street labels disabled; saved user preferences still win.
 - Fresh installs default map-label text scaling to 1.35x; saved user preferences still win.
 - Flight-path and traffic hot paths reuse cached aircraft keys/labels instead of re-normalizing strings during rendering.
-- The docs and tools folders include concise folder-level READMEs, and generated perf/map artifacts stay ignored.
+- The app repo keeps build/source tooling only; tests, perf scripts, and generated evidence live in `../FlightAlert-test-artifacts/`.

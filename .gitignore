@@ -3,6 +3,8 @@
 /.gradle/
 /build/
 /app/build/
+/app/src/androidTest/
+/app/src/test/
 /.kotlin/
 /local.properties
 *.iml
@@ -12,10 +14,6 @@
 /.externalNativeBuild/
 /.cxx/
 /*.png
-/tools/perf/classes/
-/tools/perf/dex/
-/tools/perf/mtclasses/
-/tools/perf/mtdex/
-/tools/perf/out/
+/tools/perf/
 /tmp/
 ~$*.xlsx

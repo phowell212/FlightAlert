@@ -21,6 +21,12 @@ android {
         getByName("main") {
             setRoot("app/src/main")
         }
+        getByName("test") {
+            setRoot("../FlightAlert-test-artifacts/test")
+        }
+        getByName("androidTest") {
+            setRoot("../FlightAlert-test-artifacts/androidTest")
+        }
     }
 
     buildTypes {

@@ -98,7 +98,7 @@ Build before release. Use lint and unit/instrumented tests when the touched area
 
 Use emulators for layout/aspect/theme checks. Use physical-device video for optimization, timing, responsiveness, smoothness, flicker, popping, aircraft continuity, border behavior, and road/reference-layer motion. Screenshots are scouting evidence only for temporal rendering bugs.
 
-For optimization work, follow `docs/flightalert-performance-metrics.xlsx` `Performance Notes`, including timetable-selected traffic regions, comparable 60-second apples-to-apples multi-zoom runs, frame-time/FPS metrics, thermal notes, and workbook graph updates.
+For optimization work, follow `docs/flightalert-performance-metrics.xlsx` `Performance Notes`, including timetable-selected traffic regions, comparable 60-second apples-to-apples multi-zoom runs, frame-time/FPS metrics, thermal notes, and workbook graph updates. Keep test code, perf scripts, videos, traces, and run output in `../FlightAlert-test-artifacts/`, not in this app repo.
 
 ## 15. Code Organization
 
@@ -126,7 +126,7 @@ After meaningful non-optimization changes, run `.\gradlew.bat assembleDebug`. Fo
 
 The durable performance notebook is `docs/flightalert-performance-metrics.xlsx`.
 
-Use `tools/perf/BuildFlightAlertPerformanceWorkbook.mjs` to rebuild it. Do not create a second durable performance source of truth.
+Use `../FlightAlert-test-artifacts/perf/BuildFlightAlertPerformanceWorkbook.mjs` to rebuild it. Do not create a second durable performance source of truth.
 
 Every accepted optimization iteration must be recorded in the workbook with comparable run parameters, target region/city, map mode, layer state, duration, thermal state, frame metrics, and graph updates.
 
