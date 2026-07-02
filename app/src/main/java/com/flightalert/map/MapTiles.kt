@@ -117,6 +117,7 @@ class MapTileRenderer(
         satellite_renderer.reset_transitions()
     }
 
+    @Suppress("unused")
     fun shutdown() {
         street_renderer.shutdown()
         satellite_renderer.shutdown()
@@ -224,6 +225,5 @@ internal data class ReferencePrefetchGridPlan(
     val last_tile_y: Int,
     val max_tile: Int,
     val request_priority: Int,
-    val request_stale_generation_tolerance: Long,
     val request_generation: Long
 )

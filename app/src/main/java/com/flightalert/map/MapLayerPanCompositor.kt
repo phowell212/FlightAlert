@@ -3,6 +3,7 @@
     "LocalVariableName",
     "PackageName",
     "PrivatePropertyName",
+    "PropertyName",
 )
 
 package com.flightalert.map
@@ -10,6 +11,7 @@ package com.flightalert.map
 import android.graphics.Canvas
 import android.graphics.RenderNode
 import android.os.SystemClock
+import androidx.core.graphics.withTranslation
 import kotlin.math.abs
 import kotlin.math.ceil
 
@@ -33,7 +35,6 @@ internal class MapLayerPanCompositor(
         val viewport_height: Float,
         val width: Int,
         val height: Int,
-        val padding: Float,
         val recorded_ms: Long,
         val status: String
     )
@@ -73,10 +74,9 @@ internal class MapLayerPanCompositor(
         ) {
             return null
         }
-        canvas.save()
-        canvas.translate(draw_x, draw_y)
-        canvas.drawRenderNode(cached.node)
-        canvas.restore()
+        canvas.withTranslation(draw_x, draw_y) {
+            drawRenderNode(cached.node)
+        }
         return cached.status
     }
 
@@ -116,7 +116,6 @@ internal class MapLayerPanCompositor(
             viewport_height = viewport.height,
             width = width,
             height = height,
-            padding = padding,
             recorded_ms = SystemClock.elapsedRealtime(),
             status = result.status
         )
