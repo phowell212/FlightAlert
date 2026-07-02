@@ -9,6 +9,7 @@
     "PropertyName",
     "RedundantQualifierName",
     "SameParameterValue",
+    "SpellCheckingInspection",
     "UseKtxExtensionFunction",
 )
 
@@ -108,6 +109,7 @@ import com.flightalert.map.AviationLayerRenderer
 import com.flightalert.map.AviationLayerStyle
 import com.flightalert.map.AviationLayerVisibility
 import com.flightalert.map.Bounds
+import com.flightalert.map.DeviceHeadingProvider
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapMeasurementFormatter
 import com.flightalert.map.MapProjection
@@ -319,6 +321,13 @@ class FlightMapView(
     private val military_gray_color get() = theme_colors.military
     private val location_manager =
         context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+    private val device_heading_provider = DeviceHeadingProvider(
+        context = context,
+        on_heading_changed = { heading_degrees ->
+            ownship_heading_degrees = heading_degrees
+            if (latest_location != null) postInvalidateOnAnimation()
+        }
+    )
     private val executor = Executors.newFixedThreadPool(4)
     private val alert_monitoring_controller = AlertMonitoringController(context)
     private val measurement_formatter = MapMeasurementFormatter { units }
@@ -548,6 +557,7 @@ class FlightMapView(
     // Mirror persisted display and safety settings in memory so draw and tap handlers read one fast state.
     private var location_permission_granted = false
     private var latest_location: Location? = null
+    private var ownship_heading_degrees: Float? = null
     private var zoom = read_stored_zoom()
     private var units = FlightAlertSettings.read_unit_system(prefs)
     private var map_source = FlightAlertSettings.read_map_source(prefs)
@@ -763,6 +773,8 @@ class FlightMapView(
     // MainActivity calls this from onResume; live location and the frame ticker start here.
     fun start() {
         start_location_updates()
+        latest_location?.let { device_heading_provider.update_location(it) }
+        device_heading_provider.start()
         removeCallbacks(ticker)
         postOnAnimation(ticker)
     }
@@ -771,6 +783,7 @@ class FlightMapView(
     fun stop() {
         removeCallbacks(ticker)
         removeCallbacks(map_interaction_settle_redraw)
+        device_heading_provider.stop()
         persist_zoom_preference_if_dirty()
         if (location_permission_granted) {
             try {
@@ -894,6 +907,7 @@ class FlightMapView(
     // Android's LocationManager calls this with the device's real location fix.
     override fun onLocationChanged(location: Location) {
         latest_location = location
+        device_heading_provider.update_location(location)
         mark_traffic_cache_dirty()
         map_status = "Loading map"
         apply_initial_mavic_range_zoom_if_needed()
@@ -1040,7 +1054,7 @@ class FlightMapView(
             }
 
             MotionEvent.ACTION_MOVE -> {
-                if (update_map_label_text_slider_drag(x, y)) return true
+                if (update_map_label_text_slider_drag(x)) return true
                 if (update_priority_adjust_hold(x, y)) return true
                 if (details_session.details_open && !settings_open && !priority_tracker_open && !filters_open && details_max_scroll_y > 0f) {
                     val dy = y - details_scroll_start_y
@@ -1075,7 +1089,7 @@ class FlightMapView(
                 val was_dragging_map = drag_started && !drag_blocked
                 drag_started = false
                 drag_start_center = null
-                if (finish_map_label_text_slider_drag(x, y)) return true
+                if (finish_map_label_text_slider_drag(x)) return true
                 if (finish_priority_adjust_hold(x, y)) return true
                 if (was_dragging) {
                     if (was_dragging_map) {
@@ -1428,6 +1442,7 @@ class FlightMapView(
                 if (last != null && is_better_location(last, latest_location)) latest_location =
                     last
             }
+            latest_location?.let { device_heading_provider.update_location(it) }
             if (latest_location != null) request_visible_aircraft_if_needed(force = true)
             if (latest_location == null) {
                 map_status = "Waiting for device location"
@@ -1958,13 +1973,13 @@ class FlightMapView(
         }
     }
 
-    private fun aircraft_appearance_progress_for_key(key: String, aircraft: Aircraft): Float {
+    private fun aircraft_appearance_progress_for_key(key: String): Float {
         val appearance = aircraft_appearance_snapshot[key] ?: return 1f
         val elapsed = SystemClock.elapsedRealtime() - appearance.first_seen_ms - appearance.delay_ms
         return smooth_step(0f, AIRCRAFT_APPEAR_DURATION_MS.toFloat(), elapsed.toFloat())
     }
 
-    private fun aircraft_appearance_for_key(key: String, aircraft: Aircraft): AircraftAppearance? {
+    private fun aircraft_appearance_for_key(key: String): AircraftAppearance? {
         return aircraft_appearance_snapshot[key]
     }
 
@@ -2172,7 +2187,8 @@ class FlightMapView(
             canvas = canvas,
             state = OwnshipOverlayState(
                 viewport = viewport,
-                location = GeoPoint(location.latitude, location.longitude)
+                location = GeoPoint(location.latitude, location.longitude),
+                heading_degrees = ownship_heading_degrees
             ),
             style = TrafficOverlayStyle(visual_theme)
         )
@@ -3622,7 +3638,7 @@ class FlightMapView(
         return true
     }
 
-    private fun update_map_label_text_slider_drag(x: Float, y: Float): Boolean {
+    private fun update_map_label_text_slider_drag(x: Float): Boolean {
         if (!map_label_text_slider_dragging) return false
         val panel = layout.settings_panel_bounds(content_width(), content_height())
         val bounds = layout.map_label_text_slider_bounds(panel)
@@ -3630,7 +3646,7 @@ class FlightMapView(
         return true
     }
 
-    private fun finish_map_label_text_slider_drag(x: Float, y: Float): Boolean {
+    private fun finish_map_label_text_slider_drag(x: Float): Boolean {
         if (!map_label_text_slider_dragging) return false
         map_label_text_slider_dragging = false
         val panel = layout.settings_panel_bounds(content_width(), content_height())
@@ -4184,8 +4200,6 @@ class FlightMapView(
     private fun dp(value: Int): Float = dp(value.toFloat())
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
-
-    private fun sp(value: Int): Float = sp(value.toFloat())
 
     private fun sp(value: Float): Float {
         val metrics = resources.displayMetrics

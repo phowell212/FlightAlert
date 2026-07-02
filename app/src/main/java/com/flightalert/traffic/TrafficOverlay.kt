@@ -137,7 +137,8 @@ data class TrafficOverlayState(
 
 data class OwnshipOverlayState(
     val viewport: Viewport,
-    val location: GeoPoint
+    val location: GeoPoint,
+    val heading_degrees: Float?
 )
 
 interface TrafficOverlayChrome {
@@ -1629,16 +1630,18 @@ class TrafficOverlayRenderer(
         stroke_paint.color = with_alpha(colors.text, 210)
         canvas.drawCircle(screen.x, screen.y, chrome.dp(20f), stroke_paint)
 
-        canvas.withTranslation(screen.x, screen.y) {
-            rotate(38f)
-            paint.color = colors.text
-            path.reset()
-            path.moveTo(0f, -chrome.dp(12f))
-            path.lineTo(chrome.dp(8f), chrome.dp(12f))
-            path.lineTo(0f, chrome.dp(7f))
-            path.lineTo(-chrome.dp(8f), chrome.dp(12f))
-            path.close()
-            drawPath(path, paint)
+        state.heading_degrees?.let { heading_degrees ->
+            canvas.withTranslation(screen.x, screen.y) {
+                rotate(heading_degrees)
+                paint.color = colors.text
+                path.reset()
+                path.moveTo(0f, -chrome.dp(12f))
+                path.lineTo(chrome.dp(8f), chrome.dp(12f))
+                path.lineTo(0f, chrome.dp(7f))
+                path.lineTo(-chrome.dp(8f), chrome.dp(12f))
+                path.close()
+                drawPath(path, paint)
+            }
         }
         draw_you_pill(
             canvas = canvas,
@@ -3357,8 +3360,8 @@ internal data class TrafficOverlayFrame(
 internal class TrafficOverlayStateBuilder(
     private val dp: (Float) -> Float,
     private val aircraft_color: (Aircraft) -> Int,
-    private val aircraft_appearance_progress: (String, Aircraft) -> Float,
-    private val aircraft_appearance: (String, Aircraft) -> AircraftAppearance?,
+    private val aircraft_appearance_progress: (String) -> Float,
+    private val aircraft_appearance: (String) -> AircraftAppearance?,
     private val display_aircraft_position: (Aircraft, Double) -> GeoPoint,
     private val spatial_entry_for: (Aircraft, Double) -> TrafficSpatialEntry,
     private val lat_lon_to_world: (Double, Double, Double) -> WorldPoint,
@@ -4489,7 +4492,7 @@ internal class TrafficOverlayStateBuilder(
     ): TrafficAircraftOverlayState {
         val appearance_key = entry?.appearance_key ?: aircraft.appearance_key()
         val symbol = entry?.symbol ?: AircraftSymbolClassifier.symbol_for(aircraft)
-        val appearance = aircraft_appearance(appearance_key, aircraft)
+        val appearance = aircraft_appearance(appearance_key)
         val motion_scale = scale?.takeIf { it.isFinite() && it > 0.0 }
         val motion_remaining_sec =
             entry?.projected_motion_remaining_sec?.toFloat()?.coerceAtLeast(0f) ?: 0f
@@ -4498,7 +4501,7 @@ internal class TrafficOverlayStateBuilder(
             screen_point = screen,
             appearance_key = appearance_key,
             color = cached_aircraft_color(entry, aircraft, visual_theme_key),
-            appearance_progress = aircraft_appearance_progress(appearance_key, aircraft),
+            appearance_progress = aircraft_appearance_progress(appearance_key),
             symbol = symbol,
             symbol_scale = entry?.symbol_scale ?: AircraftSymbolClassifier.size_multiplier(
                 aircraft,
