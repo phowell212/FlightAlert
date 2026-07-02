@@ -116,6 +116,7 @@ internal class SatelliteMapTileRenderer(
     private var reference_lod_prefetch_epoch = 0L
     private val reference_tile_worker_id = AtomicInteger()
     private val reference_tile_task_sequence = AtomicLong()
+    private val map_content_revision = AtomicLong()
 
     // Label/reference overlays deliberately run on their own small, prioritized worker pool so
     // stale zoom levels cannot block the current real roads/borders/place-label tiles.
@@ -164,6 +165,14 @@ internal class SatelliteMapTileRenderer(
         with_alpha = with_alpha,
         request_redraw = request_redraw
     )
+    private val pan_compositor = MapLayerPanCompositor(
+        name = "flightalert-satellite-map-pan-cache",
+        max_age_ms = MAP_PAN_CACHE_MAX_AGE_MS
+    )
+    private var last_pan_cache_draw_zoom = Double.NaN
+    private var last_pan_cache_record_attempt_ms = 0L
+    private var last_pan_cache_record_attempt_key: SatellitePanCacheKey? = null
+    private var last_pan_cache_record_attempt_revision = Long.MIN_VALUE
 
     fun draw_tiles(
         canvas: Canvas,
@@ -171,6 +180,70 @@ internal class SatelliteMapTileRenderer(
         state: MapTileRenderState,
         style: MapTileRenderStyle
     ): String {
+        val now_ms = SystemClock.elapsedRealtime()
+        val pan_cache_key = satellite_pan_cache_key(state, style)
+        val content_revision = map_content_revision.get()
+        pan_compositor.draw_cached(
+            canvas = canvas,
+            viewport = viewport,
+            key = pan_cache_key,
+            content_revision = content_revision,
+            now_ms = now_ms
+        )?.let { status ->
+            last_pan_cache_draw_zoom = viewport.zoom
+            return status
+        }
+
+        val result = draw_tiles_direct(
+            canvas = canvas,
+            viewport = viewport,
+            state = state,
+            style = style
+        )
+        if (result.reusable_for_pan_cache &&
+            should_record_pan_cache(
+                viewport = viewport,
+                key = pan_cache_key,
+                content_revision = map_content_revision.get(),
+                now_ms = now_ms
+            )
+        ) {
+            val record_revision = map_content_revision.get()
+            pan_compositor.record_for_future(
+                canvas = canvas,
+                viewport = viewport,
+                key = pan_cache_key,
+                content_revision = record_revision,
+                padding = MAP_PAN_CACHE_PADDING_PX
+            ) { recording_canvas, cache_viewport ->
+                val visual_state = snapshot_visual_state()
+                try {
+                    val recorded_result = draw_tiles_direct(
+                        canvas = recording_canvas,
+                        viewport = cache_viewport,
+                        state = state,
+                        style = style
+                    )
+                    MapLayerPanCacheRecordResult(
+                        status = recorded_result.status,
+                        reusable = recorded_result.reusable_for_pan_cache &&
+                                map_content_revision.get() == record_revision
+                    )
+                } finally {
+                    restore_visual_state(visual_state)
+                }
+            }
+        }
+        last_pan_cache_draw_zoom = viewport.zoom
+        return result.status
+    }
+
+    private fun draw_tiles_direct(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: MapTileRenderState,
+        style: MapTileRenderStyle
+    ): SatelliteTileDrawResult {
         val now_ms = SystemClock.elapsedRealtime()
         paint.style = Paint.Style.FILL
         paint.color = style.map_empty
@@ -302,14 +375,116 @@ internal class SatelliteMapTileRenderer(
             request_redraw()
         }
 
-        return if (lower_stats.requested == 0 && lower_stats.loaded > 0) {
+        val status = if (lower_stats.requested == 0 && lower_stats.loaded > 0) {
             "${TileSource.SATELLITE.display_name} loaded"
         } else {
             "Loading ${TileSource.SATELLITE.display_name.lowercase(Locale.US)} tiles"
         }
+        val reusable_for_pan_cache = state.map_reference_mode == MapReferenceMode.RASTER &&
+                lower_stats.requested == 0 &&
+                upper_stats.requested == 0 &&
+                label_stats.requested == 0 &&
+                !lower_stats.fading &&
+                !upper_stats.fading &&
+                !label_stats.fading
+        return SatelliteTileDrawResult(
+            status = status,
+            reusable_for_pan_cache = reusable_for_pan_cache
+        )
+    }
+
+    private fun should_record_pan_cache(
+        viewport: Viewport,
+        key: SatellitePanCacheKey,
+        content_revision: Long,
+        now_ms: Long
+    ): Boolean {
+        if (!last_pan_cache_draw_zoom.isFinite() ||
+            abs(last_pan_cache_draw_zoom - viewport.zoom) > MAP_PAN_CACHE_ZOOM_EPSILON
+        ) {
+            return false
+        }
+        if (last_pan_cache_record_attempt_key == key &&
+            last_pan_cache_record_attempt_revision == content_revision &&
+            now_ms - last_pan_cache_record_attempt_ms < MAP_PAN_CACHE_RECORD_RETRY_MS
+        ) {
+            return false
+        }
+        last_pan_cache_record_attempt_key = key
+        last_pan_cache_record_attempt_revision = content_revision
+        last_pan_cache_record_attempt_ms = now_ms
+        return true
+    }
+
+    private fun satellite_pan_cache_key(
+        state: MapTileRenderState,
+        style: MapTileRenderStyle
+    ): SatellitePanCacheKey {
+        return SatellitePanCacheKey(
+            cache_key = state.cache_key,
+            labels_enabled = state.map_labels_enabled,
+            borders_enabled = state.map_borders_enabled,
+            reference_mode = state.map_reference_mode,
+            label_text_scale = state.map_label_text_scale,
+            interaction_active = state.interaction_active,
+            map_empty = style.map_empty,
+            panel_alt = style.panel_alt,
+            text = style.text
+        )
+    }
+
+    private fun snapshot_visual_state(): SatelliteVisualStateSnapshot {
+        val protected_keys: Set<String>
+        val previous_protected_keys: Set<String>
+        synchronized(protected_reference_tile_keys) {
+            protected_keys = protected_reference_tile_keys.toSet()
+            previous_protected_keys = previous_protected_reference_tile_keys.toSet()
+        }
+        return SatelliteVisualStateSnapshot(
+            interim_tiles = LinkedHashMap(interim_tiles),
+            protected_reference_tile_keys = protected_keys,
+            previous_protected_reference_tile_keys = previous_protected_keys,
+            reference_selected_tile_zooms = reference_selected_tile_zooms.toMap(),
+            reference_rendered_tile_zooms = reference_rendered_tile_zooms.toMap(),
+            reference_lod_crossfades = reference_lod_crossfades.toMap(),
+            reference_motion_coverage_alpha_floor = reference_motion_coverage_alpha_floor.toMap(),
+            last_satellite_buffer_request_key = last_satellite_buffer_request_key,
+            last_satellite_buffer_request_ms = last_satellite_buffer_request_ms,
+            last_satellite_prefetch_request_key = last_satellite_prefetch_request_key,
+            last_satellite_prefetch_request_ms = last_satellite_prefetch_request_ms
+        )
+    }
+
+    private fun restore_visual_state(snapshot: SatelliteVisualStateSnapshot) {
+        interim_tiles.clear()
+        interim_tiles.putAll(snapshot.interim_tiles)
+        synchronized(protected_reference_tile_keys) {
+            protected_reference_tile_keys.clear()
+            protected_reference_tile_keys.addAll(snapshot.protected_reference_tile_keys)
+            previous_protected_reference_tile_keys.clear()
+            previous_protected_reference_tile_keys.addAll(
+                snapshot.previous_protected_reference_tile_keys
+            )
+        }
+        reference_selected_tile_zooms.clear()
+        reference_selected_tile_zooms.putAll(snapshot.reference_selected_tile_zooms)
+        reference_rendered_tile_zooms.clear()
+        reference_rendered_tile_zooms.putAll(snapshot.reference_rendered_tile_zooms)
+        reference_lod_crossfades.clear()
+        reference_lod_crossfades.putAll(snapshot.reference_lod_crossfades)
+        reference_motion_coverage_alpha_floor.clear()
+        reference_motion_coverage_alpha_floor.putAll(
+            snapshot.reference_motion_coverage_alpha_floor
+        )
+        last_satellite_buffer_request_key = snapshot.last_satellite_buffer_request_key
+        last_satellite_buffer_request_ms = snapshot.last_satellite_buffer_request_ms
+        last_satellite_prefetch_request_key = snapshot.last_satellite_prefetch_request_key
+        last_satellite_prefetch_request_ms = snapshot.last_satellite_prefetch_request_ms
     }
 
     fun clear() {
+        pan_compositor.clear()
+        map_content_revision.incrementAndGet()
         synchronized(tile_cache) {
             tile_cache.clear()
             tile_loaded_elapsed_ms.clear()
@@ -345,6 +520,7 @@ internal class SatelliteMapTileRenderer(
     }
 
     fun reset_transitions() {
+        pan_compositor.clear()
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
         last_satellite_prefetch_request_key = null
@@ -1571,12 +1747,8 @@ internal class SatelliteMapTileRenderer(
         coverage_alpha: Float,
         coverage: ReferenceTileCoverage
     ): Float {
-        if (overlay != ReferenceTileOverlay.WORLD_TRANSPORTATION || overlay_alpha <= MIN_LAYER_ALPHA) {
-            if (overlay_alpha <= MIN_LAYER_ALPHA) {
-                reference_motion_coverage_alpha_floor.remove(overlay)
-            } else {
-                reference_motion_coverage_alpha_floor[overlay] = coverage_alpha
-            }
+        if (overlay_alpha <= MIN_LAYER_ALPHA) {
+            reference_motion_coverage_alpha_floor.remove(overlay)
             return coverage_alpha
         }
         if (!interaction_active) {
@@ -2362,7 +2534,9 @@ internal class SatelliteMapTileRenderer(
     }
 
     private fun put_reference_tile_in_memory(key: String, bitmap: Bitmap, fade: Boolean) {
+        val previous = reference_tile_cache[key]
         reference_tile_cache[key] = bitmap
+        if (previous !== bitmap) map_content_revision.incrementAndGet()
         if (fade) {
             reference_tile_loaded_elapsed_ms[key] = SystemClock.elapsedRealtime()
         } else {
@@ -3113,8 +3287,10 @@ internal class SatelliteMapTileRenderer(
     }
 
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
-        val is_new = !tile_cache.containsKey(key)
+        val previous = tile_cache[key]
         tile_cache[key] = bitmap
+        val is_new = previous == null
+        if (previous !== bitmap) map_content_revision.incrementAndGet()
         if (is_new) tile_loaded_elapsed_ms[key] = SystemClock.elapsedRealtime()
         while (tile_cache.size > MAX_MEMORY_TILES) {
             val first_key = tile_cache.keys.firstOrNull() ?: break
@@ -3215,6 +3391,37 @@ internal class SatelliteMapTileRenderer(
         }
     }
 
+    private data class SatelliteTileDrawResult(
+        val status: String,
+        val reusable_for_pan_cache: Boolean
+    )
+
+    private data class SatellitePanCacheKey(
+        val cache_key: String,
+        val labels_enabled: Boolean,
+        val borders_enabled: Boolean,
+        val reference_mode: MapReferenceMode,
+        val label_text_scale: Float,
+        val interaction_active: Boolean,
+        val map_empty: Int,
+        val panel_alt: Int,
+        val text: Int
+    )
+
+    private data class SatelliteVisualStateSnapshot(
+        val interim_tiles: LinkedHashMap<String, InterimRasterTile>,
+        val protected_reference_tile_keys: Set<String>,
+        val previous_protected_reference_tile_keys: Set<String>,
+        val reference_selected_tile_zooms: Map<ReferenceTileOverlay, Int>,
+        val reference_rendered_tile_zooms: Map<ReferenceTileOverlay, Int>,
+        val reference_lod_crossfades: Map<ReferenceTileOverlay, ReferenceLodCrossfade>,
+        val reference_motion_coverage_alpha_floor: Map<ReferenceTileOverlay, Float>,
+        val last_satellite_buffer_request_key: String?,
+        val last_satellite_buffer_request_ms: Long,
+        val last_satellite_prefetch_request_key: String?,
+        val last_satellite_prefetch_request_ms: Long
+    )
+
     private companion object {
         const val TILE_SIZE = 256
         const val MIN_ZOOM = 3
@@ -3227,6 +3434,10 @@ internal class SatelliteMapTileRenderer(
         const val SATELLITE_PARENT_REQUEST_DEPTH = 10
         const val SATELLITE_CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
+        const val MAP_PAN_CACHE_PADDING_PX = 512f
+        const val MAP_PAN_CACHE_MAX_AGE_MS = 750L
+        const val MAP_PAN_CACHE_RECORD_RETRY_MS = 250L
+        const val MAP_PAN_CACHE_ZOOM_EPSILON = 0.000_001
         const val MAX_REFERENCE_MEMORY_TILES = 768
         const val REFERENCE_TILE_CACHE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
         const val REFERENCE_TILE_FADE_MS = 280f
