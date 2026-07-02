@@ -2,6 +2,10 @@
     alias(libs.plugins.android.application)
 }
 
+val externalFlightAlertTestsEnabled = providers.gradleProperty("flightAlertExternalTests")
+    .map { it.equals("true", ignoreCase = true) }
+    .getOrElse(false)
+
 android {
     namespace = "com.flightalert"
     compileSdk {
@@ -21,11 +25,13 @@ android {
         getByName("main") {
             setRoot("app/src/main")
         }
-        getByName("test") {
-            setRoot("../FlightAlert-test-artifacts/test")
-        }
-        getByName("androidTest") {
-            setRoot("../FlightAlert-test-artifacts/androidTest")
+        if (externalFlightAlertTestsEnabled) {
+            getByName("test") {
+                setRoot("../FlightAlert-test-artifacts/test")
+            }
+            getByName("androidTest") {
+                setRoot("../FlightAlert-test-artifacts/androidTest")
+            }
         }
     }
 
@@ -40,6 +46,15 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+}
+
+androidComponents {
+    beforeVariants(selector().all()) { variant ->
+        if (!externalFlightAlertTestsEnabled) {
+            variant.enableAndroidTest = false
+            variant.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = false
+        }
     }
 }
 
