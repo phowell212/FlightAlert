@@ -29,7 +29,6 @@ import com.flightalert.alerts.MonitoringNotificationHiderStatus
 import com.flightalert.map.AviationLayerKind
 import com.flightalert.map.AviationLayerSnapshot
 import com.flightalert.map.AviationLayerState
-import com.flightalert.map.MapReferenceMode
 import com.flightalert.map.TileSource
 import com.flightalert.map.UnitSystem
 import com.flightalert.traffic.AircraftTypeFilter
@@ -57,7 +56,6 @@ data class FlightMapPanelStyle(val visual_theme: VisualTheme)
 data class MapLabelsPanelState(
     val street_labels_enabled: Boolean,
     val borders_enabled: Boolean,
-    val reference_mode: MapReferenceMode,
     val label_text_scale: Float
 )
 
@@ -150,7 +148,6 @@ internal enum class SettingsPanelAction {
     TOGGLE_AIRPORT_LABELS,
     TOGGLE_MAP_LABELS,
     TOGGLE_MAP_BORDERS,
-    TOGGLE_MAP_REFERENCE_MODE,
     SET_UNITS_IMPERIAL,
     SET_UNITS_METRIC,
     NEXT_THEME,
@@ -235,7 +232,6 @@ internal fun FlightMapLayout.settings_panel_targets(
         add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
         add(map_street_labels_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_LABELS)
         add(map_borders_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_BORDERS)
-        add(map_reference_mode_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_REFERENCE_MODE)
         return targets
     }
     if (state.display_settings_open) {
@@ -609,22 +605,13 @@ class FlightMapPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = if (compact) sp(11) else sp(12)
         text_paint.color = style.visual_theme.colors.muted
-        val provider_y = if (compact) rect.top + dp(74) else rect.top + dp(82)
-        canvas.drawText("Provider", rect.left + dp(18), provider_y, text_paint)
-        chrome.draw_choice_button(
-            canvas,
-            chrome.layout.map_reference_mode_button_bounds(rect),
-            "Provider: ${state.reference_mode.display_name}",
-            state.reference_mode == MapReferenceMode.VECTOR
-        )
-
-        val label_y = if (compact) rect.top + dp(148) else rect.top + dp(156)
+        val label_y = if (compact) rect.top + dp(82) else rect.top + dp(94)
         canvas.drawText("Label layers", rect.left + dp(18), label_y, text_paint)
 
         chrome.draw_choice_button(
             canvas,
             chrome.layout.map_street_labels_button_bounds(rect),
-            if (state.reference_mode == MapReferenceMode.VECTOR) "Map labels" else "Street labels",
+            "Street labels",
             state.street_labels_enabled
         )
         chrome.draw_choice_button(
@@ -644,12 +631,11 @@ class FlightMapPanelRenderer(
         text_paint.isFakeBoldText = false
         text_paint.textSize = if (compact) sp(10) else sp(11)
         text_paint.color = style.visual_theme.colors.muted
-        val source_y = if (compact) rect.top + dp(282) else rect.top + dp(344)
-        val source_prefix = state.reference_mode.display_name.lowercase(Locale.US)
+        val source_y = if (compact) rect.top + dp(228) else rect.top + dp(292)
         val source_text = when {
-            state.street_labels_enabled && state.borders_enabled -> "Current: $source_prefix labels plus countries and borders"
-            state.street_labels_enabled -> "Current: $source_prefix labels only"
-            state.borders_enabled -> "Current: $source_prefix countries and borders only"
+            state.street_labels_enabled && state.borders_enabled -> "Current: raster labels plus countries and borders"
+            state.street_labels_enabled -> "Current: raster labels only"
+            state.borders_enabled -> "Current: raster countries and borders only"
             else -> "Current: no-label base where available"
         }
         draw_fitted_left_text(

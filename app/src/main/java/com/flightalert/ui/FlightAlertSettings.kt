@@ -13,7 +13,6 @@ import android.content.SharedPreferences
 import com.flightalert.FlightAlertAppSettings
 import com.flightalert.VisualTheme
 import com.flightalert.alerts.MonitoringNotificationHiderStatus
-import com.flightalert.map.MapReferenceMode
 import com.flightalert.map.TileSource
 import com.flightalert.map.UnitSystem
 
@@ -46,8 +45,6 @@ object FlightAlertSettings {
     const val KEY_MAP_SOURCE = "map_source"
     const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
     const val KEY_MAP_BORDERS_ENABLED = "map_borders_enabled"
-    const val KEY_VECTOR_MAP_LABELS_ENABLED = "vector_map_labels_enabled"
-    const val KEY_MAP_REFERENCE_MODE = "map_reference_mode"
     const val KEY_MAP_LABEL_TEXT_SCALE = "map_label_text_scale"
     const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
     const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
@@ -69,8 +66,6 @@ object FlightAlertSettings {
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
     const val DEFAULT_MAP_LABELS_ENABLED = false
     const val DEFAULT_MAP_BORDERS_ENABLED = true
-    const val DEFAULT_VECTOR_MAP_LABELS_ENABLED = true
-    const val DEFAULT_MAP_REFERENCE_MODE = "RASTER"
     const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1.35f
     const val DEFAULT_AIRCRAFT_FEED_MODE = FlightAlertAppSettings.AircraftFeed.DEFAULT_MODE
     const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
@@ -98,11 +93,6 @@ object FlightAlertSettings {
         val stored = prefs.getString(KEY_MAP_SOURCE, TileSource.SATELLITE.name)
             ?: TileSource.SATELLITE.name
         return TileSource.entries.firstOrNull { it.name == stored } ?: TileSource.SATELLITE
-    }
-
-    fun read_map_reference_mode(prefs: SharedPreferences): MapReferenceMode {
-        val stored = prefs.getString(KEY_MAP_REFERENCE_MODE, DEFAULT_MAP_REFERENCE_MODE)
-        return MapReferenceMode.entries.firstOrNull { it.name == stored } ?: MapReferenceMode.RASTER
     }
 
     fun read_map_label_text_scale(prefs: SharedPreferences, min: Float, max: Float): Float {

@@ -156,16 +156,6 @@ internal class SatelliteMapTileRenderer(
     private var last_reference_lod_prefetch_batch_ms = 0L
     private val last_reference_pan_prefetch_request_ms =
         LinkedHashMap<String, Long>(REFERENCE_PAN_PREFETCH_THROTTLE_HISTORY_MAX, 0.75f, true)
-    private val local_reference_renderer = LocalReferenceOverlayRenderer(
-        context = context,
-        paint = paint,
-        text_paint = text_paint,
-        path = Path(),
-        dp = dp,
-        sp = sp,
-        with_alpha = with_alpha,
-        request_redraw = request_redraw
-    )
     private val pan_compositor = MapLayerPanCompositor(
         name = "flightalert-satellite-map-pan-cache",
         max_age_ms = MAP_PAN_CACHE_MAX_AGE_MS
@@ -411,7 +401,7 @@ internal class SatelliteMapTileRenderer(
     ): TileLayerDrawStats {
         val reference_request_generation = begin_reference_tile_request_generation()
         begin_reference_tile_protection_frame()
-        val label_stats = draw_reference_overlay_layers(
+        return draw_reference_overlay_layers(
             canvas = canvas,
             viewport = viewport,
             state = state,
@@ -423,16 +413,6 @@ internal class SatelliteMapTileRenderer(
             prefetch_upper_lod = lod.prefetch_upper_lod,
             request_generation = reference_request_generation
         )
-        val vector_reference_enabled = state.map_reference_mode == MapReferenceMode.VECTOR
-        local_reference_renderer.draw(
-            canvas = canvas,
-            viewport = viewport,
-            lines_enabled = vector_reference_enabled && state.map_borders_enabled,
-            labels_enabled = vector_reference_enabled && state.map_labels_enabled,
-            interaction_active = state.interaction_active,
-            label_text_scale = state.map_label_text_scale
-        )
-        return label_stats
     }
 
     private fun should_record_pan_cache(
@@ -547,7 +527,6 @@ internal class SatelliteMapTileRenderer(
         reference_rendered_tile_zooms.clear()
         reference_lod_crossfades.clear()
         reference_motion_coverage_alpha_floor.clear()
-        local_reference_renderer.clear()
         last_satellite_buffer_request_key = null
         last_satellite_buffer_request_ms = 0L
         last_satellite_prefetch_request_key = null

@@ -128,7 +128,6 @@ data class MapTileRenderState(
     val map_source: TileSource,
     val map_labels_enabled: Boolean,
     val map_borders_enabled: Boolean,
-    val map_reference_mode: MapReferenceMode,
     val map_label_text_scale: Float,
     val map_label_transition_alpha: Float = 1f,
     val user_agent: String,
@@ -138,8 +137,7 @@ data class MapTileRenderState(
     val reference_overlay_layers: List<ReferenceTileOverlay> =
         map_source.reference_overlay_layers(
             map_labels_enabled,
-            map_borders_enabled,
-            map_reference_mode
+            map_borders_enabled
         )
 }
 
