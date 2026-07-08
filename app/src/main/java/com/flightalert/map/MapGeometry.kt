@@ -73,24 +73,24 @@ internal fun is_inside_viewport(x: Float, y: Float, viewport: Viewport, padding:
             y <= viewport.height + padding
 }
 
+private const val LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION =
+    "Local baked Esri World Basemap v2 reference dictionary"
+
 enum class ReferenceTileOverlay(
     val cache_key: String,
-    val attribution: String,
-    private val service_path: String
+    val attribution: String
 ) {
     WORLD_TRANSPORTATION(
-        cache_key = "esri_world_transportation",
-        attribution = "Esri World Transportation",
-        service_path = "Reference/World_Transportation"
+        cache_key = "local_reference_transportation_disabled",
+        attribution = LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION
     ),
     WORLD_BOUNDARIES_AND_PLACES(
-        cache_key = "esri_world_boundaries_places",
-        attribution = "Esri World Boundaries and Places, HERE, Garmin, OpenStreetMap contributors, GIS user community",
-        service_path = "Reference/World_Boundaries_and_Places"
+        cache_key = "local_reference_boundaries_places_disabled",
+        attribution = LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION
     );
 
     fun tile_url(z: Int, x: Int, y: Int): String {
-        return "https://services.arcgisonline.com/ArcGIS/rest/services/$service_path/MapServer/tile/$z/$y/$x"
+        return ""
     }
 }
 
@@ -112,16 +112,10 @@ enum class TileSource(
     }
 
     fun reference_overlay_layers(
-        street_labels_enabled: Boolean,
-        borders_enabled: Boolean
+        @Suppress("UNUSED_PARAMETER") street_labels_enabled: Boolean,
+        @Suppress("UNUSED_PARAMETER") borders_enabled: Boolean
     ): List<ReferenceTileOverlay> {
-        return when (this) {
-            STREET -> emptyList()
-            SATELLITE -> buildList {
-                if (borders_enabled) add(ReferenceTileOverlay.WORLD_BOUNDARIES_AND_PLACES)
-                if (street_labels_enabled) add(ReferenceTileOverlay.WORLD_TRANSPORTATION)
-            }
-        }
+        return emptyList()
     }
 
     fun attribution_text(
@@ -131,10 +125,11 @@ enum class TileSource(
         return when (this) {
             STREET -> if (labels_enabled) base_attribution else "CARTO no-label tiles, OpenStreetMap data"
             SATELLITE -> {
-                val overlays = reference_overlay_layers(labels_enabled, borders_enabled)
                 buildList {
                     add(base_attribution)
-                    overlays.forEach { add(it.attribution) }
+                    if (labels_enabled || borders_enabled) {
+                        add(LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION)
+                    }
                 }.joinToString("; ")
             }
         }

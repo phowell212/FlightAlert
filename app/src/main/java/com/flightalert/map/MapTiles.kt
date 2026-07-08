@@ -129,6 +129,7 @@ data class MapTileRenderState(
     val map_labels_enabled: Boolean,
     val map_borders_enabled: Boolean,
     val map_label_text_scale: Float,
+    val public_lands_enabled: Boolean,
     val map_label_transition_alpha: Float = 1f,
     val user_agent: String,
     val interaction_active: Boolean = false

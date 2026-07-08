@@ -82,6 +82,8 @@ data class FiltersPanelState(
     val flight_status_filter: FlightStatusFilter,
     val report_age_filter: ReportAgeFilter,
     val alert_volume_filter: Boolean,
+    val reference_layer_controls_visible: Boolean,
+    val public_lands_enabled: Boolean,
     val filters_active: Boolean,
     val stats_summary: String
 )
@@ -179,6 +181,7 @@ internal enum class FilterPanelAction {
     NEXT_STATUS,
     NEXT_AGE,
     TOGGLE_ALERT_VOLUME,
+    TOGGLE_PUBLIC_LANDS,
     RESET,
     CLEAR_SEARCH_FOCUS
 }
@@ -230,7 +233,6 @@ internal fun FlightMapLayout.settings_panel_targets(
     }
     if (state.map_labels_open) {
         add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
-        add(map_street_labels_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_LABELS)
         add(map_borders_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_BORDERS)
         return targets
     }
@@ -274,28 +276,40 @@ internal fun FlightMapLayout.settings_panel_hit_result(
         ?.let { SettingsPanelHitResult(it.action, it.index) }
 }
 
-internal fun FlightMapLayout.filter_panel_targets(panel: RectF): List<FilterPanelTarget> {
-    return listOf(
-        FilterPanelTarget(close_button_bounds(panel), FilterPanelAction.CLOSE),
-        FilterPanelTarget(filter_search_box_bounds(panel), FilterPanelAction.FOCUS_SEARCH),
-        FilterPanelTarget(filter_search_find_button_bounds(panel), FilterPanelAction.SUBMIT_SEARCH),
-        FilterPanelTarget(filter_search_clear_button_bounds(panel), FilterPanelAction.CLEAR_SEARCH),
-        FilterPanelTarget(filter_aircraft_type_button_bounds(panel), FilterPanelAction.NEXT_AIRCRAFT_TYPE),
-        FilterPanelTarget(filter_altitude_button_bounds(panel), FilterPanelAction.NEXT_ALTITUDE),
-        FilterPanelTarget(filter_distance_button_bounds(panel), FilterPanelAction.NEXT_DISTANCE),
-        FilterPanelTarget(filter_status_button_bounds(panel), FilterPanelAction.NEXT_STATUS),
-        FilterPanelTarget(filter_age_button_bounds(panel), FilterPanelAction.NEXT_AGE),
-        FilterPanelTarget(filter_alert_button_bounds(panel), FilterPanelAction.TOGGLE_ALERT_VOLUME),
-        FilterPanelTarget(filter_reset_button_bounds(panel), FilterPanelAction.RESET)
-    )
+internal fun FlightMapLayout.filter_panel_targets(
+    panel: RectF,
+    state: FiltersPanelState
+): List<FilterPanelTarget> {
+    return buildList {
+        add(FilterPanelTarget(close_button_bounds(panel), FilterPanelAction.CLOSE))
+        add(FilterPanelTarget(filter_search_box_bounds(panel), FilterPanelAction.FOCUS_SEARCH))
+        add(FilterPanelTarget(filter_search_find_button_bounds(panel), FilterPanelAction.SUBMIT_SEARCH))
+        add(FilterPanelTarget(filter_search_clear_button_bounds(panel), FilterPanelAction.CLEAR_SEARCH))
+        add(FilterPanelTarget(filter_aircraft_type_button_bounds(panel), FilterPanelAction.NEXT_AIRCRAFT_TYPE))
+        add(FilterPanelTarget(filter_altitude_button_bounds(panel), FilterPanelAction.NEXT_ALTITUDE))
+        add(FilterPanelTarget(filter_distance_button_bounds(panel), FilterPanelAction.NEXT_DISTANCE))
+        add(FilterPanelTarget(filter_status_button_bounds(panel), FilterPanelAction.NEXT_STATUS))
+        add(FilterPanelTarget(filter_age_button_bounds(panel), FilterPanelAction.NEXT_AGE))
+        add(FilterPanelTarget(filter_alert_button_bounds(panel), FilterPanelAction.TOGGLE_ALERT_VOLUME))
+        if (state.reference_layer_controls_visible) {
+            add(
+                FilterPanelTarget(
+                    filter_public_lands_button_bounds(panel),
+                    FilterPanelAction.TOGGLE_PUBLIC_LANDS
+                )
+            )
+        }
+        add(FilterPanelTarget(filter_reset_button_bounds(panel), FilterPanelAction.RESET))
+    }
 }
 
 internal fun FlightMapLayout.filter_panel_action_at(
     panel: RectF,
     x: Float,
-    y: Float
+    y: Float,
+    state: FiltersPanelState
 ): FilterPanelAction {
-    return filter_panel_targets(panel)
+    return filter_panel_targets(panel, state)
         .firstOrNull { it.bounds.contains(x, y) }
         ?.action
         ?: FilterPanelAction.CLEAR_SEARCH_FOCUS
@@ -608,11 +622,11 @@ class FlightMapPanelRenderer(
         val label_y = if (compact) rect.top + dp(82) else rect.top + dp(94)
         canvas.drawText("Label layers", rect.left + dp(18), label_y, text_paint)
 
-        chrome.draw_choice_button(
+        draw_disabled_choice_button(
             canvas,
             chrome.layout.map_street_labels_button_bounds(rect),
-            "Street labels",
-            state.street_labels_enabled
+            if (compact) "Street labels" else "Street labels unavailable",
+            style
         )
         chrome.draw_choice_button(
             canvas,
@@ -633,9 +647,9 @@ class FlightMapPanelRenderer(
         text_paint.color = style.visual_theme.colors.muted
         val source_y = if (compact) rect.top + dp(228) else rect.top + dp(292)
         val source_text = when {
-            state.street_labels_enabled && state.borders_enabled -> "Current: raster labels plus countries and borders"
-            state.street_labels_enabled -> "Current: raster labels only"
-            state.borders_enabled -> "Current: raster countries and borders only"
+            state.street_labels_enabled && state.borders_enabled -> "Current: baked labels plus countries and borders"
+            state.street_labels_enabled -> "Current: baked labels only"
+            state.borders_enabled -> "Current: baked countries and borders only"
             else -> "Current: no-label base where available"
         }
         draw_fitted_left_text(
@@ -1036,6 +1050,44 @@ class FlightMapPanelRenderer(
         canvas.drawCircle(track.left + track.width() * progress, track_y, dp(8), paint)
     }
 
+    private fun draw_disabled_choice_button(
+        canvas: Canvas,
+        rect: RectF,
+        label: String,
+        style: FlightMapPanelStyle
+    ) {
+        val colors = style.visual_theme.colors
+        chrome.draw_control_surface(
+            canvas,
+            rect,
+            with_alpha(colors.button_fill, 54),
+            with_alpha(colors.muted, 112),
+            false
+        )
+        val previous_align = text_paint.textAlign
+        text_paint.textAlign = Paint.Align.CENTER
+        text_paint.isFakeBoldText = false
+        text_paint.textSize = sp(12)
+        val available_width = (rect.width() - dp(12)).coerceAtLeast(dp(4))
+        while (text_paint.textSize > sp(8) && text_paint.measureText(label) > available_width) {
+            text_paint.textSize -= dp(0.5f)
+        }
+        val display = if (text_paint.measureText(label) <= available_width) {
+            label
+        } else {
+            chrome.ellipsize(label, available_width)
+        }
+        text_paint.color = with_alpha(colors.muted, 170)
+        val metrics = text_paint.fontMetrics
+        canvas.drawText(
+            display,
+            rect.centerX(),
+            rect.centerY() - (metrics.ascent + metrics.descent) / 2f,
+            text_paint
+        )
+        text_paint.textAlign = previous_align
+    }
+
     private fun draw_settings_section_label(
         canvas: Canvas,
         x: Float,
@@ -1252,6 +1304,18 @@ class FlightMapPanelRenderer(
             if (state.alert_volume_filter) "Alert volume only" else "Alert volume: off",
             state.alert_volume_filter
         )
+        if (state.reference_layer_controls_visible) {
+            draw_filter_cycle_row(
+                canvas,
+                chrome.layout.filter_public_lands_button_bounds(rect),
+                if (state.public_lands_enabled) {
+                    "Public lands: on"
+                } else {
+                    "Public lands: off"
+                },
+                state.public_lands_enabled
+            )
+        }
         chrome.draw_choice_button(
             canvas,
             chrome.layout.filter_reset_button_bounds(rect),

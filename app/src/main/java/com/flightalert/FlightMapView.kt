@@ -573,6 +573,10 @@ class FlightMapView(
         MAP_LABEL_TEXT_SCALE_MIN,
         MAP_LABEL_TEXT_SCALE_MAX
     )
+    private var public_lands_layer_enabled = prefs.getBoolean(
+        FlightAlertSettings.KEY_LAYER_PUBLIC_LANDS_ENABLED,
+        FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED
+    )
     private var aircraft_feed_mode = FlightAlertSettings.read_aircraft_feed_mode(prefs)
     private var globe_bin_craft_source_enabled = aircraft_feed_mode.uses_globe
     private val app_opened_elapsed_ms = SystemClock.elapsedRealtime()
@@ -1512,6 +1516,7 @@ class FlightMapView(
             map_labels_enabled = active_map_labels_enabled(),
             map_borders_enabled = map_borders_enabled,
             map_label_text_scale = map_label_text_scale,
+            public_lands_enabled = public_lands_layer_enabled,
             map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
             user_agent = USER_AGENT,
             interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime())
@@ -2771,6 +2776,8 @@ class FlightMapView(
             flight_status_filter = aircraft_filter_controller.flight_status,
             report_age_filter = aircraft_filter_controller.report_age,
             alert_volume_filter = aircraft_filter_controller.alert_volume_only,
+            reference_layer_controls_visible = reference_layer_filters_visible(),
+            public_lands_enabled = public_lands_layer_enabled,
             filters_active = filters_active(),
             stats_summary = filter_stats().summary
         )
@@ -2924,7 +2931,7 @@ class FlightMapView(
     private fun handle_filters_panel_tap(x: Float, y: Float): Boolean {
         if (!filters_open) return false
         val panel = layout.settings_panel_bounds(content_width(), content_height())
-        handle_filter_panel_action(layout.filter_panel_action_at(panel, x, y))
+        handle_filter_panel_action(layout.filter_panel_action_at(panel, x, y, filters_panel_state()))
         invalidate()
         return true
     }
@@ -2960,6 +2967,9 @@ class FlightMapView(
             )
 
             FilterPanelAction.TOGGLE_ALERT_VOLUME -> set_alert_volume_filter(!aircraft_filter_controller.alert_volume_only)
+            FilterPanelAction.TOGGLE_PUBLIC_LANDS -> set_public_lands_layer_enabled(
+                !public_lands_layer_enabled
+            )
             FilterPanelAction.RESET -> reset_filters()
             FilterPanelAction.CLEAR_SEARCH_FOCUS -> clear_filter_search_focus()
         }
@@ -3570,7 +3580,7 @@ class FlightMapView(
     }
 
     private fun active_map_labels_enabled(): Boolean {
-        return map_labels_enabled
+        return if (map_source == TileSource.SATELLITE) true else map_labels_enabled
     }
 
     private fun set_map_borders_enabled(enabled: Boolean) {
@@ -3580,6 +3590,24 @@ class FlightMapView(
         prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_BORDERS_ENABLED, map_borders_enabled) }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"
         invalidate()
+    }
+
+    private fun set_public_lands_layer_enabled(enabled: Boolean) {
+        if (public_lands_layer_enabled == enabled) return
+        public_lands_layer_enabled = enabled
+        map_tile_renderer.reset_transitions()
+        prefs.edit {
+            putBoolean(
+                FlightAlertSettings.KEY_LAYER_PUBLIC_LANDS_ENABLED,
+                public_lands_layer_enabled
+            )
+        }
+        invalidate()
+    }
+
+    private fun reference_layer_filters_visible(): Boolean {
+        return map_source == TileSource.SATELLITE &&
+                (active_map_labels_enabled() || map_borders_enabled)
     }
 
     private fun set_map_label_text_scale(next: Float) {
