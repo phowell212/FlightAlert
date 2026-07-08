@@ -1,10 +1,6 @@
-# Snake Case Migration Status
+# Naming Methodology
 
-Status date: 2026-06-26
-
-Branch scanned: `master`
-
-The app-owned Kotlin function, property, parameter, and local-variable migration is substantially complete.
+Flight Alert uses Kotlin names that make app-owned behavior easy to scan while preserving required external names at framework and source boundaries.
 
 ## Current Rule
 
@@ -12,22 +8,22 @@ The app-owned Kotlin function, property, parameter, and local-variable migration
 - Keep Kotlin type names in PascalCase.
 - Keep constants in UPPER_SNAKE.
 - Keep Android framework override names and required override parameter names in their framework spelling.
-- Keep manifest entry-point class names such as `MainActivity` and `AircraftAlertService`.
+- Keep manifest entry-point class names such as `MainActivity` and service/activity class names.
 - Keep generated/build API names, Gradle DSL names, resource names, and Android/Java/Kotlin library calls unchanged.
 - Keep external provider field names unchanged when they must match source data, headers, URL parameters, or page globals.
 
-## Verified Exceptions
+## Boundary Exceptions
 
-Remaining camelCase hits in source should be one of these categories:
+Remaining camelCase hits in app source should come from framework, generated, library, or external-source boundaries, including:
 
-- Android lifecycle/input overrides: `onCreate`, `onDraw`, `onTouchEvent`, `onKeyDown`, `performClick`, and related framework methods.
-- Android override parameters whose names match superclass signatures: `savedInstanceState`, `rootIntent`, `startId`, `outAttrs`, `newCursorPosition`, `beforeLength`, `afterLength`, `actionCode`, and `keyCode`.
-- Android, Java, Kotlin, or JSON API calls: `drawText`, `textSize`, `startsWith`, `currentTimeMillis`, `openConnection`, `optJSONObject`, and similar library members.
-- External source keys and globals: for example `ownOpCode`, `globe.firstFetchDone`, `pendingFetches`, FAA/ArcGIS field names, and HTTP headers.
+- Android lifecycle/input overrides such as `onCreate`, `onDraw`, `onTouchEvent`, `onKeyDown`, and `performClick`.
+- Android override parameters whose names match superclass signatures, such as `savedInstanceState`, `rootIntent`, `startId`, `outAttrs`, and `keyCode`.
+- Android, Java, Kotlin, or JSON API calls such as `drawText`, `textSize`, `startsWith`, `currentTimeMillis`, `openConnection`, and `optJSONObject`.
+- External source keys and globals, such as feed fields, FAA/ArcGIS field names, HTTP headers, and page globals.
 
-## Verification Commands
+## Verification Method
 
-Useful scans:
+Use scans to find app-owned declarations that appear to violate the naming rule:
 
 ```powershell
 rg -n "\b(?:val|var|fun)\s+[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9_]*\b" app\src\main\java\com\flightalert app\src\test\java\com\flightalert
@@ -35,7 +31,7 @@ rg -n "\b(?:val|var|fun)\s+[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9_]*\b" app\src\main\j
 
 The declaration scan should return only framework overrides or documented boundary exceptions.
 
-Run after naming changes:
+After broad naming changes, run the normal verification commands:
 
 ```powershell
 .\gradlew.bat assembleDebug --console=plain

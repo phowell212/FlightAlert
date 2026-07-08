@@ -1,6 +1,5 @@
-# Flight Alert Tools
+# Flight Alert Tools Method
 
-Small utilities for generating app assets.
+This folder is for small, durable utilities that help generate or maintain app assets.
 
-Testing, performance scripts, videos, traces, and run output belong in the sibling
-`../FlightAlert-test-artifacts/` folder, not in this app repo.
+Keep testing scripts, performance probes, videos, traces, generated data, and run output outside this app repo unless the file is intentionally small, durable source/tooling.

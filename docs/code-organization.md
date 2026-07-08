@@ -1,10 +1,10 @@
-# FlightAlert Code Organization
+# FlightAlert Code Organization Method
 
 FlightAlert should read like objects doing jobs.
 
 `FlightMapView` is the air traffic controller. It coordinates visible systems, selected aircraft, drawing order, and user input. It should not personally own feed parsing, route validation, photo lookup, impact scoring, settings math, or feature-specific business rules.
 
-## Rules
+## Organization Rules
 
 - Give every major feature its own file or small package, but do not create one-folder islands for tiny concepts.
 - Keep settings and tuning values in explicit settings files.
@@ -14,7 +14,7 @@ FlightAlert should read like objects doing jobs.
 - Prefer names that describe the object doing the work: `CurrentRouteValidator`, `AircraftDetailsClient`, `FlightMapSettings`.
 - Add a one-line comment before complicated code only when the purpose is not obvious from the names.
 - Do not add comments that restate the line below them.
-- New features should start as a new object/file with a narrow public method, then be called by the coordinator.
+- New or changed behavior should usually start in a focused object/file with a narrow public method, then be called by the coordinator.
 
 ## Current Packages
 
@@ -27,9 +27,11 @@ FlightAlert should read like objects doing jobs.
 - `traffic`: live traffic filtering, caching, motion projection, and overlay rendering.
 - `ui`: settings, layout, chrome, panel drawing, and UI hit-target maps.
 
-## Refactor Order
+## Extraction Method
 
-1. Extract pure business rules first: route validation, impact scoring, usage stats.
-2. Extract presentation builders next: details rows, settings rows, traffic rows.
-3. Extract renderers after the data shape is stable.
-4. Leave `FlightMapView` as the coordinator that wires state, renderers, and feature objects together.
+Prefer extracting behavior in this order when a touched area is doing too much:
+
+1. Pure business rules, such as route validation, impact scoring, or usage math.
+2. Presentation builders, such as details rows, settings rows, or traffic rows.
+3. Renderers, after the data shape is stable.
+4. Coordinator wiring, keeping `FlightMapView` responsible for connecting state, renderers, and feature objects.

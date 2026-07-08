@@ -1,8 +1,20 @@
-# Flight Alert Agent Rules
+# Flight Alert Agent Guardrails
 
 Flight Alert is a drone situational-awareness app. Preserve the current user experience and styling unless a visible difference fixes a real bug or honesty issue.
 
+This file is durable guidance for agents working in the repo. It is not a backlog, task prompt, roadmap, or active goal source. Use it only as constraints for the user's current request.
+
 Rules are priority ordered. If rules conflict, follow the higher-priority rule. Newer concrete user instructions supersede older notes.
+
+## Scope Guardrails
+
+Do only the work requested in the current chat unless additional work is required to complete or verify that request.
+
+Do not infer a task from protected behaviors, examples, release checks, source names, file paths, documentation rules, or testing guidance in this file.
+
+Do not start unrelated cleanup, refactors, release work, artifact-generation work, scans, performance investigations, pushes, or broad verification passes unless the user asks for them or they are directly necessary for the current request.
+
+When a specific task needs detailed instructions, keep those instructions outside durable repo guidance unless the details are included only to explain a reusable method.
 
 ## 0. Priorities And Baseline
 
@@ -116,13 +128,19 @@ Use subagents only for low-conflict, bounded work. Do not touch files owned by a
 
 After meaningful code changes, run `.\gradlew.bat assembleDebug` when the touched area warrants it or before release.
 
-## 17. Security / Privacy
+## 17. Documentation
+
+Keep `README.md` public-facing and user-friendly. Keep methodology, agent workflow, and repeatable contributor rules in this file or durable docs under `docs/`.
+
+Do not store one-off task prompts, run logs, generated evidence, temporary instructions, stale experiment notes, or scratch plans in durable docs unless they are intentionally included to explain methodology.
+
+## 18. Security / Privacy
 
 Prefer HTTPS-only APIs and assets. Do not hardcode API keys, tokens, secrets, credentials, personal device IDs, or private test artifacts.
 
 Avoid cleartext traffic unless documented. Lock-screen notifications should avoid exposing sensitive aircraft details unnecessarily.
 
-## 18. Release Behavior
+## 19. Release Behavior
 
 Before pushing: build, inspect git status, check for duplicate project files, scan for obvious secrets, update README accurately, and clean generated junk.
 
