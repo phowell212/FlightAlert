@@ -418,6 +418,9 @@ internal class SatelliteMapTileRenderer(
             labels_enabled = state.map_labels_enabled,
             borders_enabled = state.map_borders_enabled,
             label_text_scale = state.map_label_text_scale,
+            place_labels_enabled = state.place_labels_enabled,
+            water_labels_enabled = state.water_labels_enabled,
+            region_labels_enabled = state.region_labels_enabled,
             public_lands_enabled = state.public_lands_enabled,
             interaction_active = state.interaction_active
         )

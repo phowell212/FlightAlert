@@ -529,7 +529,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         )
     }
 
-    fun filter_public_lands_button_bounds(panel: RectF): RectF {
+    fun filter_place_labels_button_bounds(panel: RectF): RectF {
         return filter_button_bounds(
             panel,
             row = if (is_compact_settings_panel(panel)) 3 else 6,
@@ -537,9 +537,33 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         )
     }
 
+    fun filter_water_labels_button_bounds(panel: RectF): RectF {
+        return filter_button_bounds(
+            panel,
+            row = if (is_compact_settings_panel(panel)) 3 else 7,
+            right_column = is_compact_settings_panel(panel)
+        )
+    }
+
+    fun filter_region_labels_button_bounds(panel: RectF): RectF {
+        return filter_button_bounds(
+            panel,
+            row = if (is_compact_settings_panel(panel)) 4 else 8,
+            right_column = false
+        )
+    }
+
+    fun filter_public_lands_button_bounds(panel: RectF): RectF {
+        return filter_button_bounds(
+            panel,
+            row = if (is_compact_settings_panel(panel)) 4 else 9,
+            right_column = is_compact_settings_panel(panel)
+        )
+    }
+
     fun filter_reset_button_bounds(panel: RectF): RectF {
         return if (is_compact_settings_panel(panel)) {
-            filter_button_bounds(panel, row = 3, right_column = true)
+            filter_button_bounds(panel, row = 5, right_column = true)
         } else {
             RectF(
                 panel.left + dp(18),
@@ -557,14 +581,14 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
                 if (right_column) compact_settings_right_column(panel) else compact_settings_left_column(
                     panel
                 )
-            val top = panel.top + dp(120 + row * 46)
-            RectF(column.left, top, column.right, top + dp(32))
+            val top = panel.top + dp(106 + row * 34)
+            RectF(column.left, top, column.right, top + dp(30))
         } else {
             val row_height = dp(36)
             val start = filter_search_clear_button_bounds(panel).bottom + dp(20)
             val reset_top = filter_reset_button_bounds(panel).top
-            val available = (reset_top - start - row_height * 7).coerceAtLeast(dp(24))
-            val gap = (available / 6f).coerceIn(dp(4), dp(14))
+            val available = (reset_top - start - row_height * 10).coerceAtLeast(dp(24))
+            val gap = (available / 9f).coerceIn(dp(4), dp(14))
             val top = start + row * (row_height + gap)
             RectF(panel.left + dp(18), top, panel.right - dp(18), top + row_height)
         }

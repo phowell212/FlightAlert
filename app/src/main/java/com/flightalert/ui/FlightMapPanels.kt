@@ -83,6 +83,9 @@ data class FiltersPanelState(
     val report_age_filter: ReportAgeFilter,
     val alert_volume_filter: Boolean,
     val reference_layer_controls_visible: Boolean,
+    val place_labels_enabled: Boolean,
+    val water_labels_enabled: Boolean,
+    val region_labels_enabled: Boolean,
     val public_lands_enabled: Boolean,
     val filters_active: Boolean,
     val stats_summary: String
@@ -181,6 +184,9 @@ internal enum class FilterPanelAction {
     NEXT_STATUS,
     NEXT_AGE,
     TOGGLE_ALERT_VOLUME,
+    TOGGLE_PLACE_LABELS,
+    TOGGLE_WATER_LABELS,
+    TOGGLE_REGION_LABELS,
     TOGGLE_PUBLIC_LANDS,
     RESET,
     CLEAR_SEARCH_FOCUS
@@ -292,6 +298,24 @@ internal fun FlightMapLayout.filter_panel_targets(
         add(FilterPanelTarget(filter_age_button_bounds(panel), FilterPanelAction.NEXT_AGE))
         add(FilterPanelTarget(filter_alert_button_bounds(panel), FilterPanelAction.TOGGLE_ALERT_VOLUME))
         if (state.reference_layer_controls_visible) {
+            add(
+                FilterPanelTarget(
+                    filter_place_labels_button_bounds(panel),
+                    FilterPanelAction.TOGGLE_PLACE_LABELS
+                )
+            )
+            add(
+                FilterPanelTarget(
+                    filter_water_labels_button_bounds(panel),
+                    FilterPanelAction.TOGGLE_WATER_LABELS
+                )
+            )
+            add(
+                FilterPanelTarget(
+                    filter_region_labels_button_bounds(panel),
+                    FilterPanelAction.TOGGLE_REGION_LABELS
+                )
+            )
             add(
                 FilterPanelTarget(
                     filter_public_lands_button_bounds(panel),
@@ -1305,6 +1329,24 @@ class FlightMapPanelRenderer(
             state.alert_volume_filter
         )
         if (state.reference_layer_controls_visible) {
+            draw_filter_cycle_row(
+                canvas,
+                chrome.layout.filter_place_labels_button_bounds(rect),
+                if (state.place_labels_enabled) "Places: on" else "Places: off",
+                state.place_labels_enabled
+            )
+            draw_filter_cycle_row(
+                canvas,
+                chrome.layout.filter_water_labels_button_bounds(rect),
+                if (state.water_labels_enabled) "Water: on" else "Water: off",
+                state.water_labels_enabled
+            )
+            draw_filter_cycle_row(
+                canvas,
+                chrome.layout.filter_region_labels_button_bounds(rect),
+                if (state.region_labels_enabled) "Regions: on" else "Regions: off",
+                state.region_labels_enabled
+            )
             draw_filter_cycle_row(
                 canvas,
                 chrome.layout.filter_public_lands_button_bounds(rect),

@@ -4,13 +4,13 @@ Flight Alert is a drone situational-awareness app. Preserve the current user exp
 
 Rules are priority ordered. If rules conflict, follow the higher-priority rule. Newer concrete user instructions supersede older notes.
 
-## 0. Optimization Priorities And Baseline
+## 0. Priorities And Baseline
 
-Optimize in this order: functionality for the end user, visuals for the end user, frame timing, then implementation elegance.
+Prioritize in this order: functionality for the end user, visuals for the end user, frame timing, then implementation elegance.
 
 Performance wins that introduce flicker, pop, missing layers, wrong motion, changed styling, reduced information, or source dishonesty are failures.
 
-Use the current branch/release as the normal baseline unless the user explicitly requests another comparison. The detailed optimization workflow, benchmark lanes, rejected-attempt history, and ledger live in `docs/flightalert-performance-metrics.xlsx`.
+Use the current branch/release as the normal baseline unless the user explicitly requests another comparison.
 
 ## 1. No Pretending
 
@@ -34,7 +34,7 @@ Aircraft traffic must come from live aircraft APIs or documented live feed forma
 
 ## 4. Debugging Stays Off App
 
-Keep debugging, profiling, and measurement code out of the app runtime. Do not add app-side counters, timing wrappers, debug flags, perf intents, diagnostic overlays, hidden debug gestures, or per-frame log strings to collect stats. Gather stats through external probing and analysis: Android Studio Profiler, Perfetto/System Trace, Android Studio MCP/IDE debugger inspection, Logcat capture of existing user-facing/status logs, tests, scripts, and workbook/tool analysis. If a measurement requires editing production app code, stop and choose an external probe instead.
+Keep debugging, profiling, and measurement code out of the app runtime. Do not add app-side counters, timing wrappers, debug flags, perf intents, diagnostic overlays, hidden debug gestures, or per-frame log strings to collect stats. Gather stats through external probing and analysis: Android Studio Profiler, Perfetto/System Trace, Android Studio MCP/IDE debugger inspection, Logcat capture of existing user-facing/status logs, tests, scripts, and external tool analysis. If a measurement requires editing production app code, stop and choose an external probe instead.
 
 ## 5. Safety Bias
 
@@ -96,11 +96,7 @@ Keep one real project: one manifest, one root Gradle setup, and no duplicate gen
 
 Build before release. Use lint and unit/instrumented tests when the touched area warrants them.
 
-Use emulators for layout/aspect/theme checks. Use physical-device video for optimization, timing, responsiveness, smoothness, flicker, popping, aircraft continuity, border behavior, and road/reference-layer motion. Screenshots are scouting evidence only for temporal rendering bugs.
-
-For optimization work, follow `docs/flightalert-performance-metrics.xlsx` `Performance Notes`, including timetable-selected traffic regions, comparable 60-second apples-to-apples multi-zoom runs, frame-time/FPS metrics, thermal notes, and workbook graph updates. Keep test code, perf scripts, videos, traces, and run output in `../FlightAlert-test-artifacts/`, not in this app repo.
-
-For whole-world reference-dictionary baking, keep scripts, raw downloads, reference caches, shard outputs, package outputs, validation reports, workbooks, and videos outside the repo. Keep active Phase 1 Experiment 3 work under `D:\FlightAlert-test-artifacts\experiment 3`. Treat `D:\FlightAlert-test-artifacts\experiment 1` as the first historical cook/archive and `D:\FlightAlert-test-artifacts\experiment 2` as a stopped/dud follow-up reference, not as implementation input. The old folders `C:\Users\Phineas\Documents\FlightAlert-test-artifacts` and `E:\FlightAlert-test-artifacts` may be actively deleted or recycled; do not work inside them. If fast E-side scratch is needed, use a separate temporary sibling such as `E:\FlightAlert-experiment3-scratch`, then verify and drain outputs back to the D Experiment 3 root. If small C-side Phase 2 probe scripts are needed, use a separate sibling such as `C:\Users\Phineas\Documents\FlightAlert-experiment3-probes`, and write durable outputs back to D. Only the final validated phone-consumable package/artifact should be copied out of the Experiment 3 D-root. Keep the app repo limited to source/docs and small manifest-style guidance.
+Use emulators for layout/aspect/theme checks. Use physical-device video for timing, responsiveness, smoothness, flicker, popping, aircraft continuity, border behavior, and road/reference-layer motion when the requested work warrants it. Screenshots are scouting evidence only for temporal rendering bugs.
 
 ## 15. Code Organization
 
@@ -116,33 +112,17 @@ In hot paths, prefer typed fields, numeric keys, sets/maps, arrays, or cached no
 
 Before changing code, read this file and `docs/code-organization.md`.
 
-For optimization work, also read `docs/flightalert-performance-metrics.xlsx`, especially `Performance Notes`. Keep detailed optimization procedure in that workbook, not in `AGENTS.md`.
-
-For the Esri-derived whole-world reference dictionary effort, treat Phase 1 as an external bake/schema/package task before phone renderer work. Experiment 3 starts from the current raster-only app state: there is no user-facing or code-level vector reference mode for borders or labels. Phase 1 must lock onto the same Esri reference source/path used by Flight Alert's accepted satellite/reference baseline before large data generation begins. Do not silently substitute a non-Esri structured map provider for the Experiment 3 dictionary source; if Esri structured data is unavailable, design and prove an Esri raster-tile analysis/extraction path instead. Phase 1 must produce a globally scalable dictionary plan and coherent proof slice; phone code changes belong to Phase 2 after the schema, LOD hierarchy, storage layout, and validation approach are documented. Phase 2 must replace superseded raster-reference work with the accepted dictionary path as an optimization; do not add a second reference-rendering layer. Phase 1 builder jobs should not target a fixed builder count. Adapt builder/shard concurrency until sustained average CPU utilization is above 85% when enough work is available, while avoiding disk stalls, memory pressure, provider throttling, and low-space conditions. Report percent complete at least every 5 minutes while running, including active builder count and each builder's own percent complete. Save those metrics to an Experiment 3 workbook under `D:\FlightAlert-test-artifacts\experiment 3` and update its graphs as the run progresses.
-
-Experiment 3 agents must keep one explicit active goal and continue working until that goal is complete, spanning Phase 0 source recovery/design reset, Phase 1 Esri-derived dictionary construction/validation, and Phase 2 phone implementation/validation. Do not mark the goal complete after a broad context pass, partial report, proof slice, or build. Complete it only when all three phases are validated, or mark it blocked only for a concrete blocker that prevents meaningful progress.
-
-If Pro Agent Bridge or Android Studio MCP usage fails, report diagnostics to the `Use advisory bridge` thread as described in the workbook.
-
 Use subagents only for low-conflict, bounded work. Do not touch files owned by an active editing subagent unless the user redirects ownership.
 
-After meaningful non-optimization changes, run `.\gradlew.bat assembleDebug`. For optimization build/test/logging requirements, follow the workbook.
+After meaningful code changes, run `.\gradlew.bat assembleDebug` when the touched area warrants it or before release.
 
-## 17. Performance Workbook And Optimization Ledger
-
-The durable performance notebook is `docs/flightalert-performance-metrics.xlsx`.
-
-Use `../FlightAlert-test-artifacts/perf/BuildFlightAlertPerformanceWorkbook.mjs` to rebuild it. Do not create a second durable performance source of truth.
-
-Every accepted optimization iteration must be recorded in the workbook with comparable run parameters, target region/city, map mode, layer state, duration, thermal state, frame metrics, and graph updates.
-
-## 18. Security / Privacy
+## 17. Security / Privacy
 
 Prefer HTTPS-only APIs and assets. Do not hardcode API keys, tokens, secrets, credentials, personal device IDs, or private test artifacts.
 
 Avoid cleartext traffic unless documented. Lock-screen notifications should avoid exposing sensitive aircraft details unnecessarily.
 
-## 19. Release Behavior
+## 18. Release Behavior
 
 Before pushing: build, inspect git status, check for duplicate project files, scan for obvious secrets, update README accurately, and clean generated junk.
 

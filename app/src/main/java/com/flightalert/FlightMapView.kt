@@ -573,6 +573,18 @@ class FlightMapView(
         MAP_LABEL_TEXT_SCALE_MIN,
         MAP_LABEL_TEXT_SCALE_MAX
     )
+    private var place_labels_layer_enabled = prefs.getBoolean(
+        FlightAlertSettings.KEY_LAYER_PLACE_LABELS_ENABLED,
+        FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED
+    )
+    private var water_labels_layer_enabled = prefs.getBoolean(
+        FlightAlertSettings.KEY_LAYER_WATER_LABELS_ENABLED,
+        FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED
+    )
+    private var region_labels_layer_enabled = prefs.getBoolean(
+        FlightAlertSettings.KEY_LAYER_REGION_LABELS_ENABLED,
+        FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED
+    )
     private var public_lands_layer_enabled = prefs.getBoolean(
         FlightAlertSettings.KEY_LAYER_PUBLIC_LANDS_ENABLED,
         FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED
@@ -1516,6 +1528,9 @@ class FlightMapView(
             map_labels_enabled = active_map_labels_enabled(),
             map_borders_enabled = map_borders_enabled,
             map_label_text_scale = map_label_text_scale,
+            place_labels_enabled = place_labels_layer_enabled,
+            water_labels_enabled = water_labels_layer_enabled,
+            region_labels_enabled = region_labels_layer_enabled,
             public_lands_enabled = public_lands_layer_enabled,
             map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
             user_agent = USER_AGENT,
@@ -2394,7 +2409,7 @@ class FlightMapView(
 
     private fun draw_filters_button(canvas: Canvas, w: Float, h: Float) {
         val rect = filters_button_bounds(w, h)
-        val active = filters_active()
+        val active = filters_active() || reference_layer_filters_active()
         chrome_renderer.draw_filters_button(canvas, rect, active, chrome_style())
     }
 
@@ -2777,8 +2792,11 @@ class FlightMapView(
             report_age_filter = aircraft_filter_controller.report_age,
             alert_volume_filter = aircraft_filter_controller.alert_volume_only,
             reference_layer_controls_visible = reference_layer_filters_visible(),
+            place_labels_enabled = place_labels_layer_enabled,
+            water_labels_enabled = water_labels_layer_enabled,
+            region_labels_enabled = region_labels_layer_enabled,
             public_lands_enabled = public_lands_layer_enabled,
-            filters_active = filters_active(),
+            filters_active = filters_active() || reference_layer_filters_active(),
             stats_summary = filter_stats().summary
         )
     }
@@ -2967,6 +2985,15 @@ class FlightMapView(
             )
 
             FilterPanelAction.TOGGLE_ALERT_VOLUME -> set_alert_volume_filter(!aircraft_filter_controller.alert_volume_only)
+            FilterPanelAction.TOGGLE_PLACE_LABELS -> set_place_labels_layer_enabled(
+                !place_labels_layer_enabled
+            )
+            FilterPanelAction.TOGGLE_WATER_LABELS -> set_water_labels_layer_enabled(
+                !water_labels_layer_enabled
+            )
+            FilterPanelAction.TOGGLE_REGION_LABELS -> set_region_labels_layer_enabled(
+                !region_labels_layer_enabled
+            )
             FilterPanelAction.TOGGLE_PUBLIC_LANDS -> set_public_lands_layer_enabled(
                 !public_lands_layer_enabled
             )
@@ -3605,6 +3632,45 @@ class FlightMapView(
         invalidate()
     }
 
+    private fun set_place_labels_layer_enabled(enabled: Boolean) {
+        if (place_labels_layer_enabled == enabled) return
+        place_labels_layer_enabled = enabled
+        map_tile_renderer.reset_transitions()
+        prefs.edit {
+            putBoolean(
+                FlightAlertSettings.KEY_LAYER_PLACE_LABELS_ENABLED,
+                place_labels_layer_enabled
+            )
+        }
+        invalidate()
+    }
+
+    private fun set_water_labels_layer_enabled(enabled: Boolean) {
+        if (water_labels_layer_enabled == enabled) return
+        water_labels_layer_enabled = enabled
+        map_tile_renderer.reset_transitions()
+        prefs.edit {
+            putBoolean(
+                FlightAlertSettings.KEY_LAYER_WATER_LABELS_ENABLED,
+                water_labels_layer_enabled
+            )
+        }
+        invalidate()
+    }
+
+    private fun set_region_labels_layer_enabled(enabled: Boolean) {
+        if (region_labels_layer_enabled == enabled) return
+        region_labels_layer_enabled = enabled
+        map_tile_renderer.reset_transitions()
+        prefs.edit {
+            putBoolean(
+                FlightAlertSettings.KEY_LAYER_REGION_LABELS_ENABLED,
+                region_labels_layer_enabled
+            )
+        }
+        invalidate()
+    }
+
     private fun reference_layer_filters_visible(): Boolean {
         return map_source == TileSource.SATELLITE &&
                 (active_map_labels_enabled() || map_borders_enabled)
@@ -3801,7 +3867,33 @@ class FlightMapView(
 
     private fun reset_filters() {
         aircraft_filter_controller.reset()
+        reset_reference_layer_filters()
         on_filters_changed()
+    }
+
+    private fun reset_reference_layer_filters() {
+        val next_places = FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED
+        val next_water = FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED
+        val next_regions = FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED
+        val next_public_lands = FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED
+        if (place_labels_layer_enabled == next_places &&
+            water_labels_layer_enabled == next_water &&
+            region_labels_layer_enabled == next_regions &&
+            public_lands_layer_enabled == next_public_lands
+        ) {
+            return
+        }
+        place_labels_layer_enabled = next_places
+        water_labels_layer_enabled = next_water
+        region_labels_layer_enabled = next_regions
+        public_lands_layer_enabled = next_public_lands
+        map_tile_renderer.reset_transitions()
+        prefs.edit {
+            putBoolean(FlightAlertSettings.KEY_LAYER_PLACE_LABELS_ENABLED, place_labels_layer_enabled)
+            putBoolean(FlightAlertSettings.KEY_LAYER_WATER_LABELS_ENABLED, water_labels_layer_enabled)
+            putBoolean(FlightAlertSettings.KEY_LAYER_REGION_LABELS_ENABLED, region_labels_layer_enabled)
+            putBoolean(FlightAlertSettings.KEY_LAYER_PUBLIC_LANDS_ENABLED, public_lands_layer_enabled)
+        }
     }
 
     // Filter changes redraw the map and may clear selection if the selected aircraft no longer belongs.
@@ -3871,6 +3963,13 @@ class FlightMapView(
 
     private fun filters_active(): Boolean {
         return aircraft_filter_controller.is_active()
+    }
+
+    private fun reference_layer_filters_active(): Boolean {
+        return place_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED ||
+                water_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED ||
+                region_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED ||
+                public_lands_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED
     }
 
     private fun filters_restrict_aircraft(): Boolean {

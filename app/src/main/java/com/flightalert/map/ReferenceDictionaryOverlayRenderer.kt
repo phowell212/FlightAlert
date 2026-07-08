@@ -94,6 +94,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         labels_enabled: Boolean,
         borders_enabled: Boolean,
         label_text_scale: Float,
+        place_labels_enabled: Boolean,
+        water_labels_enabled: Boolean,
+        region_labels_enabled: Boolean,
         public_lands_enabled: Boolean,
         interaction_active: Boolean
     ): ReferenceDictionaryOverlayDrawStats {
@@ -108,6 +111,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         val options = RetainedReferenceOptions(
             labels_enabled = labels_enabled,
             borders_enabled = borders_enabled,
+            place_labels_enabled = place_labels_enabled,
+            water_labels_enabled = water_labels_enabled,
+            region_labels_enabled = region_labels_enabled,
             public_lands_enabled = public_lands_enabled,
             label_text_scale_key = (label_text_scale * 1000f).roundToInt()
         )
@@ -116,6 +122,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         val draw_viewport = retained_frame_viewport(viewport)
         build_visible_tile_list(draw_viewport, viewport, tile_zoom)
         if (visible_tiles.isEmpty()) return ready_empty_stats()
+        val groups = ReferenceDictionaryLayerGroups(
+            places = place_labels_enabled,
+            water = water_labels_enabled,
+            regions = region_labels_enabled,
+            public_lands = public_lands_enabled
+        )
 
         draw_tiles.clear()
         var requested = 0
@@ -123,7 +135,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         var core_missing = 0
         var padded_prefetch_requests = 0
         for (tile in visible_tiles) {
-            val parsed = synchronized(tile_cache) { tile_cache[tile.key] }
+            val cache_key = tile.cache_key(groups)
+            val parsed = synchronized(tile_cache) { tile_cache[cache_key] }
             if (parsed != null) {
                 draw_tiles += DictionaryTileDrawRef(
                     tile = parsed,
@@ -133,9 +146,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 missing++
                 if (tile.core_visible) {
                     core_missing++
-                    requested += request_tile_if_needed(tile)
+                    requested += request_tile_if_needed(tile, groups)
                 } else if (padded_prefetch_requests < PADDED_TILE_PREFETCH_REQUESTS_PER_DRAW) {
-                    val queued = request_tile_if_needed(tile)
+                    val queued = request_tile_if_needed(tile, groups)
                     requested += queued
                     padded_prefetch_requests += queued
                 }
@@ -208,6 +221,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 labels_enabled = labels_enabled,
                 borders_enabled = borders_enabled,
                 label_text_scale = label_text_scale,
+                place_labels_enabled = place_labels_enabled,
+                water_labels_enabled = water_labels_enabled,
+                region_labels_enabled = region_labels_enabled,
                 public_lands_enabled = public_lands_enabled,
                 options = options
             )
@@ -235,6 +251,9 @@ internal class ReferenceDictionaryOverlayRenderer(
             labels_enabled = labels_enabled,
             borders_enabled = borders_enabled,
             label_text_scale = label_text_scale,
+            place_labels_enabled = place_labels_enabled,
+            water_labels_enabled = water_labels_enabled,
+            region_labels_enabled = region_labels_enabled,
             public_lands_enabled = public_lands_enabled
         )
         return ReferenceDictionaryOverlayDrawStats(
@@ -273,9 +292,14 @@ internal class ReferenceDictionaryOverlayRenderer(
         clear()
     }
 
-    private fun request_tile_if_needed(tile: VisibleDictionaryTile): Int {
+    private fun request_tile_if_needed(
+        tile: VisibleDictionaryTile,
+        groups: ReferenceDictionaryLayerGroups
+    ): Int {
+        val cache_key = tile.cache_key(groups)
         synchronized(tile_cache) {
-            if (!requested_tiles.add(tile.key)) return 0
+            if (tile_cache.containsKey(cache_key)) return 0
+            if (!requested_tiles.add(cache_key)) return 0
         }
         tile_executor.execute {
             try {
@@ -285,19 +309,22 @@ internal class ReferenceDictionaryOverlayRenderer(
                     y = tile.y
                 )
                 val parsed = if (payload != null) {
-                    parse_tile_payload(payload)
+                    parse_tile_payload(
+                        payload = payload,
+                        groups = groups
+                    )
                 } else {
                     empty_parsed_tile(tile)
                 }
                 synchronized(tile_cache) {
-                    tile_cache[tile.key] = parsed
+                    tile_cache[cache_key] = parsed
                     content_revision.incrementAndGet()
                 }
             } catch (_: Exception) {
                 // Missing or corrupt baked reference data is treated as unavailable real data.
             } finally {
                 synchronized(tile_cache) {
-                    requested_tiles.remove(tile.key)
+                    requested_tiles.remove(cache_key)
                 }
                 request_redraw()
             }
@@ -393,6 +420,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         labels_enabled: Boolean,
         borders_enabled: Boolean,
         label_text_scale: Float,
+        place_labels_enabled: Boolean,
+        water_labels_enabled: Boolean,
+        region_labels_enabled: Boolean,
         public_lands_enabled: Boolean,
         options: RetainedReferenceOptions
     ): RetainedReferenceFrame? {
@@ -413,6 +443,9 @@ internal class ReferenceDictionaryOverlayRenderer(
             labels_enabled = labels_enabled,
             borders_enabled = borders_enabled,
             label_text_scale = label_text_scale,
+            place_labels_enabled = place_labels_enabled,
+            water_labels_enabled = water_labels_enabled,
+            region_labels_enabled = region_labels_enabled,
             public_lands_enabled = public_lands_enabled
         )
         return RetainedReferenceFrame(
@@ -567,13 +600,22 @@ internal class ReferenceDictionaryOverlayRenderer(
         labels_enabled: Boolean,
         borders_enabled: Boolean,
         label_text_scale: Float,
+        place_labels_enabled: Boolean,
+        water_labels_enabled: Boolean,
+        region_labels_enabled: Boolean,
         public_lands_enabled: Boolean
     ): ReferenceDrawCounts {
+        val groups = ReferenceDictionaryLayerGroups(
+            places = place_labels_enabled,
+            water = water_labels_enabled,
+            regions = region_labels_enabled,
+            public_lands = public_lands_enabled
+        )
         var boundaries_drawn = 0
         if (borders_enabled) {
             for (tile in tiles) {
                 for (record in tile.tile.boundaries) {
-                    if (!public_lands_enabled && record.protected_area) continue
+                    if (!groups.enabled(record.layer_group)) continue
                     if (draw_path_record(canvas, viewport, tile, record.geometry, record.style)) {
                         boundaries_drawn++
                     }
@@ -586,7 +628,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 viewport = viewport,
                 tiles = tiles,
                 label_text_scale = label_text_scale,
-                public_lands_enabled = public_lands_enabled
+                groups = groups
             )
         } else {
             0
@@ -625,13 +667,13 @@ internal class ReferenceDictionaryOverlayRenderer(
         viewport: Viewport,
         tiles: List<DictionaryTileDrawRef>,
         label_text_scale: Float,
-        public_lands_enabled: Boolean
+        groups: ReferenceDictionaryLayerGroups
     ): Int {
         label_candidates.clear()
         for (tile in tiles) {
             for (record in tile.tile.labels) {
                 if (!record.drawable || !record.visible_at(viewport.zoom)) continue
-                if (!public_lands_enabled && record.protected_area) continue
+                if (!groups.enabled(record.layer_group)) continue
                 val style = label_style_for(record, label_text_scale)
                 val candidate = if (record.line_label && record.geometry?.rings?.isNotEmpty() == true) {
                     line_label_candidate(viewport, tile, record, style)
@@ -894,25 +936,34 @@ internal class ReferenceDictionaryOverlayRenderer(
         )
     }
 
-    private fun parse_tile_payload(payload: ReferenceDictionaryTilePayload): ParsedDictionaryTile {
+    private fun parse_tile_payload(
+        payload: ReferenceDictionaryTilePayload,
+        groups: ReferenceDictionaryLayerGroups
+    ): ParsedDictionaryTile {
         val root = JSONObject(payload.raw_json)
         val records = root.optJSONObject("records") ?: JSONObject()
         return ParsedDictionaryTile(
             coordinate = payload.coordinate,
-            boundaries = parse_line_records(records.optJSONArray("boundaries")),
+            boundaries = parse_line_records(
+                records = records.optJSONArray("boundaries"),
+                groups = groups
+            ),
             labels = parse_label_records(
                 records = records.optJSONArray("labels"),
-                z = payload.coordinate.z
+                z = payload.coordinate.z,
+                groups = groups
             )
         )
     }
 
-    private fun parse_line_records(records: JSONArray?): List<DictionaryLineRecord> {
+    private fun parse_line_records(
+        records: JSONArray?,
+        groups: ReferenceDictionaryLayerGroups
+    ): List<DictionaryLineRecord> {
         if (records == null || records.length() <= 0) return emptyList()
         return buildList(records.length()) {
             for (index in 0 until records.length()) {
                 val record = records.optJSONObject(index) ?: continue
-                val geometry = parse_geometry(record.optJSONObject("geometry")) ?: continue
                 val source_layer = record.optString("sourceLayer", "")
                 val source_kind = record.optString("sourceKind", "")
                 val class_name = record.optString("class", "")
@@ -921,12 +972,21 @@ internal class ReferenceDictionaryOverlayRenderer(
                     source_kind = source_kind,
                     class_name = class_name
                 )
+                val layer_group = line_layer_group(
+                    source_layer = source_layer,
+                    source_kind = source_kind,
+                    class_name = class_name,
+                    protected_area = protected_area
+                )
+                if (!groups.enabled(layer_group)) continue
+                val geometry = parse_geometry(record.optJSONObject("geometry")) ?: continue
                 add(
                     DictionaryLineRecord(
                         source_layer = source_layer,
                         source_kind = source_kind,
                         class_name = class_name,
                         protected_area = protected_area,
+                        layer_group = layer_group,
                         geometry = geometry,
                         style = line_style_for(
                             source_layer = source_layer,
@@ -941,7 +1001,8 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private fun parse_label_records(
         records: JSONArray?,
-        z: Int
+        z: Int,
+        groups: ReferenceDictionaryLayerGroups
     ): List<DictionaryLabelRecord> {
         if (records == null || records.length() <= 0) return emptyList()
         return buildList(records.length()) {
@@ -959,6 +1020,12 @@ internal class ReferenceDictionaryOverlayRenderer(
                     source_kind = source_kind,
                     class_name = record.optString("class", "")
                 )
+                val layer_group = label_layer_group(
+                    source_kind = source_kind,
+                    source_layer = source_layer,
+                    protected_area = protected_area
+                )
+                if (!groups.enabled(layer_group)) continue
                 if (!should_draw_label(
                         text = text,
                         source_kind = source_kind,
@@ -993,6 +1060,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                         line_label = line_label,
                         drawable = true,
                         protected_area = protected_area,
+                        layer_group = layer_group,
                         priority = label_priority(
                             text = text,
                             source_kind = source_kind,
@@ -1306,12 +1374,20 @@ internal class ReferenceDictionaryOverlayRenderer(
         if (protected_area_terms(text_terms) || protected_area_terms(metadata_terms)) {
             return true
         }
-        if (source_kind == "admin") return false
         return text_terms.endsWith(" park ") ||
+                text_terms.contains(" parks ") ||
+                text_terms.contains(" wildlife ") ||
+                text_terms.contains(" parkway ") ||
+                text_terms.contains(" gameland ") ||
+                text_terms.contains(" gamelands ") ||
                 metadata_terms.contains(" park ") ||
                 metadata_terms.contains(" parks ") ||
+                metadata_terms.contains(" wildlife ") ||
+                metadata_terms.contains(" parkway ") ||
                 metadata_terms.contains(" forest ") ||
-                metadata_terms.contains(" forests ")
+                metadata_terms.contains(" forests ") ||
+                metadata_terms.contains(" gameland ") ||
+                metadata_terms.contains(" gamelands ")
     }
 
     private fun protected_area_line(
@@ -1324,29 +1400,52 @@ internal class ReferenceDictionaryOverlayRenderer(
         return protected_area_terms(terms) ||
                 terms.contains(" park ") ||
                 terms.contains(" parks ") ||
+                terms.contains(" wildlife ") ||
+                terms.contains(" parkway ") ||
                 terms.contains(" forest ") ||
-                terms.contains(" forests ")
+                terms.contains(" forests ") ||
+                terms.contains(" gameland ") ||
+                terms.contains(" gamelands ")
     }
 
     private fun protected_area_terms(terms: String): Boolean {
         return terms.contains(" wildlife refuge ") ||
                 terms.contains(" national wildlife ") ||
+                terms.contains(" wildlife area ") ||
+                terms.contains(" wildlife areas ") ||
+                terms.contains(" wildlife sanctuary ") ||
+                terms.contains(" wildlife sanctuaries ") ||
                 terms.contains(" refuge ") ||
                 terms.contains(" national park ") ||
+                terms.contains(" national parks ") ||
+                terms.contains(" national capital parks ") ||
                 terms.contains(" state park ") ||
                 terms.contains(" county park ") ||
                 terms.contains(" regional park ") ||
+                terms.contains(" military park ") ||
+                terms.contains(" memorial parkway ") ||
                 terms.contains(" national forest ") ||
                 terms.contains(" state forest ") ||
                 terms.contains(" forest preserve ") ||
                 terms.contains(" nature preserve ") ||
                 terms.contains(" preserve ") ||
                 terms.contains(" wilderness ") ||
+                terms.contains(" national monument ") ||
+                terms.contains(" national battlefield ") ||
+                terms.contains(" national historic ") ||
+                terms.contains(" national seashore ") ||
+                terms.contains(" national seashores ") ||
                 terms.contains(" recreation area ") ||
                 terms.contains(" management area ") ||
                 terms.contains(" conservation ") ||
                 terms.contains(" natural area ") ||
                 terms.contains(" game land ") ||
+                terms.contains(" game lands ") ||
+                terms.contains(" gameland ") ||
+                terms.contains(" gamelands ") ||
+                terms.contains(" state gameland ") ||
+                terms.contains(" state gamelands ") ||
+                terms.contains(" game refuge ") ||
                 terms.contains(" wildlife management ")
     }
 
@@ -1357,6 +1456,61 @@ internal class ReferenceDictionaryOverlayRenderer(
         return if (compact.isEmpty()) " " else " $compact "
     }
 
+    private fun label_layer_group(
+        source_kind: String,
+        source_layer: String,
+        protected_area: Boolean
+    ): ReferenceDictionaryLayerGroup {
+        if (protected_area) return ReferenceDictionaryLayerGroup.PUBLIC_LANDS
+        return when {
+            source_kind == "water" -> ReferenceDictionaryLayerGroup.WATER
+            source_kind == "admin" || source_kind == "county" -> ReferenceDictionaryLayerGroup.REGIONS
+            source_kind == "place" -> ReferenceDictionaryLayerGroup.PLACES
+            source_layer.contains("City", ignoreCase = true) -> ReferenceDictionaryLayerGroup.PLACES
+            source_layer.contains("Admin", ignoreCase = true) -> ReferenceDictionaryLayerGroup.REGIONS
+            else -> ReferenceDictionaryLayerGroup.PLACES
+        }
+    }
+
+    private fun line_layer_group(
+        source_layer: String,
+        source_kind: String,
+        class_name: String,
+        protected_area: Boolean
+    ): ReferenceDictionaryLayerGroup {
+        if (protected_area) return ReferenceDictionaryLayerGroup.PUBLIC_LANDS
+        if (water_line_feature(source_layer, source_kind, class_name)) {
+            return ReferenceDictionaryLayerGroup.WATER
+        }
+        return when (source_kind) {
+            "water" -> ReferenceDictionaryLayerGroup.WATER
+            "admin", "county" -> ReferenceDictionaryLayerGroup.REGIONS
+            else -> ReferenceDictionaryLayerGroup.REGIONS
+        }
+    }
+
+    private fun water_line_feature(
+        source_layer: String,
+        source_kind: String,
+        class_name: String
+    ): Boolean {
+        if (source_kind == "water") return true
+        val terms = reference_terms(source_layer, source_kind, class_name)
+        return terms.contains(" water ") ||
+                terms.contains(" waterbody ") ||
+                terms.contains(" water bodies ") ||
+                terms.contains(" ocean ") ||
+                terms.contains(" sea ") ||
+                terms.contains(" bay ") ||
+                terms.contains(" lake ") ||
+                terms.contains(" river ") ||
+                terms.contains(" stream ") ||
+                terms.contains(" coastline ") ||
+                terms.contains(" shoreline ") ||
+                terms.contains(" marine ") ||
+                terms.contains(" hydro ")
+    }
+
     private fun line_style_for(
         source_layer: String,
         source_kind: String,
@@ -1365,6 +1519,14 @@ internal class ReferenceDictionaryOverlayRenderer(
         val source = source_layer.lowercase()
         val normalized_class = class_name.lowercase()
         return when {
+            water_line_feature(source_layer, source_kind, class_name) -> DictionaryLineStyle(
+                color = Color.rgb(166, 214, 236),
+                stroke_width_dp = 0.58f,
+                halo_width_dp = 0.82f,
+                alpha = 112,
+                halo_alpha = 56
+            )
+
             source.contains("admin0") || normalized_class.contains("country") -> DictionaryLineStyle(
                 color = Color.WHITE,
                 stroke_width_dp = 1.65f,
@@ -1504,7 +1666,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         val core_visible: Boolean,
         val request_priority: Int
     ) {
-        val key: String = "$z/$x/$y"
+        fun cache_key(groups: ReferenceDictionaryLayerGroups): String {
+            return "$z/$x/$y/${groups.cache_suffix}"
+        }
     }
 
     private data class DictionaryTileDrawRef(
@@ -1523,6 +1687,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         val source_kind: String,
         val class_name: String,
         val protected_area: Boolean,
+        val layer_group: ReferenceDictionaryLayerGroup,
         val geometry: DictionaryGeometry,
         val style: DictionaryLineStyle
     )
@@ -1534,6 +1699,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         val line_label: Boolean,
         val drawable: Boolean,
         val protected_area: Boolean,
+        val layer_group: ReferenceDictionaryLayerGroup,
         val priority: Int,
         val color: Int,
         val base_text_size_sp: Float,
@@ -1628,9 +1794,39 @@ internal class ReferenceDictionaryOverlayRenderer(
         val labels: Int
     )
 
+    private enum class ReferenceDictionaryLayerGroup {
+        PLACES,
+        WATER,
+        REGIONS,
+        PUBLIC_LANDS
+    }
+
+    private data class ReferenceDictionaryLayerGroups(
+        val places: Boolean,
+        val water: Boolean,
+        val regions: Boolean,
+        val public_lands: Boolean
+    ) {
+        val cache_suffix: String =
+            "${if (places) 'p' else '-'}${if (water) 'w' else '-'}" +
+                    "${if (regions) 'r' else '-'}${if (public_lands) 'l' else '-'}"
+
+        fun enabled(group: ReferenceDictionaryLayerGroup): Boolean {
+            return when (group) {
+                ReferenceDictionaryLayerGroup.PLACES -> places
+                ReferenceDictionaryLayerGroup.WATER -> water
+                ReferenceDictionaryLayerGroup.REGIONS -> regions
+                ReferenceDictionaryLayerGroup.PUBLIC_LANDS -> public_lands
+            }
+        }
+    }
+
     private data class RetainedReferenceOptions(
         val labels_enabled: Boolean,
         val borders_enabled: Boolean,
+        val place_labels_enabled: Boolean,
+        val water_labels_enabled: Boolean,
+        val region_labels_enabled: Boolean,
         val public_lands_enabled: Boolean,
         val label_text_scale_key: Int
     )

@@ -46,6 +46,9 @@ object FlightAlertSettings {
     const val KEY_MAP_LABELS_ENABLED = "map_labels_enabled"
     const val KEY_MAP_BORDERS_ENABLED = "map_borders_enabled"
     const val KEY_MAP_LABEL_TEXT_SCALE = "map_label_text_scale"
+    const val KEY_LAYER_PLACE_LABELS_ENABLED = "layer_place_labels_enabled"
+    const val KEY_LAYER_WATER_LABELS_ENABLED = "layer_water_labels_enabled"
+    const val KEY_LAYER_REGION_LABELS_ENABLED = "layer_region_labels_enabled"
     const val KEY_LAYER_PUBLIC_LANDS_ENABLED = "layer_public_lands_enabled"
     const val KEY_AIRCRAFT_FEED_MODE = "aircraft_feed_mode"
     const val KEY_LAYER_ATC_BOUNDARIES_ENABLED = "layer_atc_boundaries_enabled"
@@ -68,6 +71,9 @@ object FlightAlertSettings {
     const val DEFAULT_MAP_LABELS_ENABLED = false
     const val DEFAULT_MAP_BORDERS_ENABLED = true
     const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1.35f
+    const val DEFAULT_LAYER_PLACE_LABELS_ENABLED = true
+    const val DEFAULT_LAYER_WATER_LABELS_ENABLED = true
+    const val DEFAULT_LAYER_REGION_LABELS_ENABLED = true
     const val DEFAULT_LAYER_PUBLIC_LANDS_ENABLED = false
     const val DEFAULT_AIRCRAFT_FEED_MODE = FlightAlertAppSettings.AircraftFeed.DEFAULT_MODE
     const val DEFAULT_LAYER_ATC_BOUNDARIES_ENABLED = false
