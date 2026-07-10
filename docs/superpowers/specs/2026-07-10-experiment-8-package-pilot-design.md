@@ -222,7 +222,7 @@ Stage B is cumulative and runs only after Stage A correctness passes:
 
 Source-byte tails come from the validated Experiment 6 source-size metadata when coordinate and source hashes match. If that metadata is unavailable, source sizes are measured during a deterministic first acquisition pass. Certainty units are excluded from random means and added exactly to the projection.
 
-A separate non-projection fixture manifest covers dense cities on every inhabited continent, rural interiors, coasts, small islands, public lands, rivers, the antimeridian, polar Web Mercator limits, and real disputed/international boundary cases. Fixtures prove semantics and visuals; they do not bias the size estimate.
+A separate non-projection fixture manifest uses these named points: New York `(40.7128,-74.0060)`, London `(51.5074,-0.1278)`, Sao Paulo `(-23.5505,-46.6333)`, Cape Town `(-33.9249,18.4241)`, Cairo `(30.0444,31.2357)`, Mumbai `(19.0760,72.8777)`, Tokyo `(35.6762,139.6503)`, Sydney `(-33.8688,151.2093)`, Yellowstone `(44.4280,-110.5885)`, central Amazon `(-3.4653,-62.2159)`, Greenland `(72.0,-40.0)`, Fiji `(-17.7134,178.0650)`, the Aleutian antimeridian `(52.0,179.5)`, the US-Canada boundary `(49.0,-123.0)`, the India-Pakistan boundary `(32.5,74.5)`, the West Bank `(31.8,35.2)`, Western Sahara `(24.0,-13.0)`, and the Great Barrier Reef `(-18.2871,147.6992)`. The tile containing each point is selected at z5, z8, z11, z13, and z16, then deduplicated. Fixtures prove semantics and visuals; they do not bias the size estimate.
 
 ## Source Acquisition and Resume
 
