@@ -170,7 +170,7 @@ git commit -m "Add Experiment 8 source lock models"
 - Consumes: `TileKey` from Task 1.
 - Produces: `SourceSizeRecord`, `build_source_size_catalog()`, deterministic `source-sizes.tsv`, and `source-sizes-summary.json`.
 
-- [ ] **Step 1: Write failing source-size catalog tests**
+- [x] **Step 1: Write failing source-size catalog tests**
 
 Tests create temporary Experiment 6-style shard directories containing `package/tile-index.tsv` and assert:
 
@@ -189,7 +189,7 @@ def test_tail_order_is_source_bytes_then_packed_key():
     # Assert stable descending size and ascending packed-key tie break.
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```powershell
 python -m unittest tools.experiment8.tests.test_source_sizes -v
@@ -197,7 +197,7 @@ python -m unittest tools.experiment8.tests.test_source_sizes -v
 
 Expected: import failure for `source_sizes`.
 
-- [ ] **Step 3: Implement catalog recovery**
+- [x] **Step 3: Implement catalog recovery**
 
 Implement `SourceSizeRecord` exactly as shown. Expose
 `build_source_size_catalog(population_path, shard_roots, output_dir) -> SourceSizeSummary`.
@@ -214,7 +214,7 @@ class SourceSizeRecord:
 
 The function recursively reads only `package/tile-index.tsv`, validates the exact required columns, merges D/E copies, rejects conflicts, writes a packed-key-sorted TSV atomically, and writes a JSON summary containing input roots, row count, missing population count/list, duplicate-copy count, hashes, and per-zoom counts. It must never read FAR6 payload bytes. Return the summary object only after both output files have been flushed and atomically replaced.
 
-- [ ] **Step 4: Run Task 2 and cumulative tests**
+- [x] **Step 4: Run Task 2 and cumulative tests**
 
 ```powershell
 python -m unittest tools.experiment8.tests.test_source_sizes tools.experiment8.tests.test_source_lock -v
@@ -222,7 +222,7 @@ python -m unittest tools.experiment8.tests.test_source_sizes tools.experiment8.t
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 ```powershell
 git add -- tools/experiment8/source_sizes.py tools/experiment8/tests/test_source_sizes.py
@@ -429,7 +429,7 @@ git commit -m "Add resumable Experiment 8 PBF acquisition"
 - Consumes: all Task 1-4 CLIs.
 - Produces: real source lock evidence, complete size catalog, Stage A/Stage B manifests, fixture cache, smoke cache, and resumable Stage A acquisition state.
 
-- [ ] **Step 1: Install pinned external dependencies**
+- [x] **Step 1: Install pinned external dependencies**
 
 ```powershell
 python -m pip install --target 'D:\FlightAlert-test-artifacts\experiment 8\python-packages' mapbox-vector-tile==2.2.0 zstandard==0.25.0
@@ -437,13 +437,13 @@ python -m pip install --target 'D:\FlightAlert-test-artifacts\experiment 8\pytho
 
 Expected: packages install outside the repository and imports report versions `2.2.0` and `0.25.0`.
 
-- [ ] **Step 2: Verify the real source lock and population**
+- [x] **Step 2: Verify the real source lock and population**
 
 Run the source-lock CLI against the authoritative Experiment 6 source lock and population using the exact descriptor, style, metadata, population hashes, and per-zoom counts from the design. Write evidence under `D:\FlightAlert-test-artifacts\experiment 8\source-lock`.
 
 Expected: `2,802,117` unique rows and exact z0-z16 counts; SHA-256 checks pass.
 
-- [ ] **Step 3: Recover the real source-size catalog**
+- [x] **Step 3: Recover the real source-size catalog**
 
 Run the catalog builder with both:
 
