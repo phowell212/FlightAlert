@@ -273,6 +273,18 @@ def test_fixture_manifest_preserves_present_and_source_proven_empty_rows():
     # Every requested coordinate is retained with present/known_empty state.
 ```
 
+Also test `math.nextafter()` immediately below, at, and above every internal latitude/longitude edge; reject non-finite/out-of-range coordinates. Pin these independent constants:
+
+```text
+New York z16 = 16/19295/24640
+London z16 = 16/32744/21792
+Aleutian z16 = 16/65444/21647
+rank(9/28/128) = a7db84874f44e2d3eea9cfac627159d81b1664cf1f8e590c3240084e7014e8ab
+rank(16/63809/42195) = 4e4dc04f4487eba36daa3e5d4da7968673d799c6a9c141c8d32e44d3b35d620c
+```
+
+Tests must also prove external-sort output is identical across shuffled input and different chunk sizes, equal-byte tails break ties by ascending packed key, random sampling refills after certainty selection, canonical JSONL is timestamp-free UTF-8/LF with sorted keys and fixed separators, and the exact per-stratum count formula reconciles to the manifest.
+
 - [ ] **Step 2: Run tests and verify RED**
 
 ```powershell
@@ -331,6 +343,8 @@ FIXTURE_POINTS = (
     ("great-barrier-reef", -18.2871, 147.6992),
 )
 ```
+
+Against the pinned population, this fixture set has exactly 90 distinct requested keys: 63 `present` and 27 `known_empty`. The real-population fixture test must reproduce those totals.
 
 - [ ] **Step 4: Run Task 3 and cumulative tests**
 
