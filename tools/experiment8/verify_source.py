@@ -116,7 +116,7 @@ def _parse_expected_counts(value: str) -> dict[int, int]:
 def _load_expected_counts(arguments: argparse.Namespace) -> dict[int, int]:
     if arguments.expected_counts_file is not None:
         try:
-            value = arguments.expected_counts_file.read_text(encoding="utf-8")
+            value = arguments.expected_counts_file.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError) as error:
             raise SourceLockError(
                 f"expected counts file is unreadable: {arguments.expected_counts_file}: {error}"

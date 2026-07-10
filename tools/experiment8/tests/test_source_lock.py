@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import contextlib
 import io
 import json
@@ -250,7 +251,7 @@ class VerifySourceCliTests(unittest.TestCase):
             root = Path(directory)
             lock_dir, population_path = self._prepare_lock_directory(root)
             counts_path = root / "expected-counts.json"
-            counts_path.write_text('{"0":1}\n', encoding="utf-8", newline="")
+            counts_path.write_bytes(codecs.BOM_UTF8 + b'{"0":1}\r\n')
             out_path = root / "verified-source-lock.json"
             arguments = self._common_cli_arguments(
                 lock_dir,
