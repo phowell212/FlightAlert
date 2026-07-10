@@ -211,22 +211,26 @@ Each exact zoom and nonempty geographic cell is a separate stratum. Sampling wit
 flight-alert-exp8-pilot-v1|z|x|y
 ```
 
+Band and sector intervals are half-open `[lower, upper)`, except the final upper endpoint is inclusive; a coordinate exactly on an internal boundary belongs to the north/east interval. The rank text is exact UTF-8/ASCII with no newline or padding. Rank ties use ascending packed tile key.
+
 Stage A:
 
 - census every z0-z8 present tile: `22,841` tiles;
 - select up to 32 ranked tiles from every nonempty geographic cell at z9-z16;
 - include the 32 largest known source-byte tiles at every z9-z16 as certainty tail units;
-- maximum population: approximately `35,385` tiles.
+- conservative full-grid, zero-uncatalogued bound: `35,385` tiles.
 
 Stage B is cumulative and runs only after Stage A correctness passes:
 
 - expand each z9-z16 geographic cell to at most 256 ranked tiles;
 - expand certainty tails to the 256 largest source-byte tiles per z9-z16;
-- maximum population: approximately `123,193` tiles.
+- conservative full-grid, zero-uncatalogued bound: `123,193` tiles.
 
-Source-byte tails come from the validated Experiment 6 source-size metadata when coordinate and source hashes match. If that metadata is unavailable, source sizes are measured during a deterministic first acquisition pass. Certainty units are excluded from random means and added exactly to the projection.
+The locked population has 336 nonempty z9-z16 cells. Its tighter zero-uncatalogued bounds are `33,171` Stage A tiles and `96,745` Stage B tiles. Uncatalogued source-size coordinates are certainty units and may add to those tighter bounds. For each stratum `h`, the generated exact sample count is `|C_h| + min(q, N_h - |C_h|)`, where `C_h` is the union of uncatalogued and tail certainty units outside the z0-z8 census. Random selection refills from the remainder. Selection precedence is `census`, `uncatalogued`, `tail`, then `random`; Stage containment is compared by tile key because a Stage A random unit may become a Stage B tail.
 
-A separate non-projection fixture manifest uses these named points: New York `(40.7128,-74.0060)`, London `(51.5074,-0.1278)`, Sao Paulo `(-23.5505,-46.6333)`, Cape Town `(-33.9249,18.4241)`, Cairo `(30.0444,31.2357)`, Mumbai `(19.0760,72.8777)`, Tokyo `(35.6762,139.6503)`, Sydney `(-33.8688,151.2093)`, Yellowstone `(44.4280,-110.5885)`, central Amazon `(-3.4653,-62.2159)`, Greenland `(72.0,-40.0)`, Fiji `(-17.7134,178.0650)`, the Aleutian antimeridian `(52.0,179.5)`, the US-Canada boundary `(49.0,-123.0)`, the India-Pakistan boundary `(32.5,74.5)`, the West Bank `(31.8,35.2)`, Western Sahara `(24.0,-13.0)`, and the Great Barrier Reef `(-18.2871,147.6992)`. The tile containing each point is selected at z5, z8, z11, z13, and z16, then deduplicated. Fixtures prove semantics and visuals; they do not bias the size estimate.
+Source-byte tails come from the validated Experiment 6 source-size metadata only when the catalog summary matches the pinned population and source hashes. If that metadata is unavailable, source sizes are measured during a deterministic first acquisition pass. Certainty units are excluded from random means and added exactly to the projection.
+
+A separate non-projection fixture manifest uses these named points: New York `(40.7128,-74.0060)`, London `(51.5074,-0.1278)`, Sao Paulo `(-23.5505,-46.6333)`, Cape Town `(-33.9249,18.4241)`, Cairo `(30.0444,31.2357)`, Mumbai `(19.0760,72.8777)`, Tokyo `(35.6762,139.6503)`, Sydney `(-33.8688,151.2093)`, Yellowstone `(44.4280,-110.5885)`, central Amazon `(-3.4653,-62.2159)`, Greenland `(72.0,-40.0)`, Fiji `(-17.7134,178.0650)`, the Aleutian antimeridian `(52.0,179.5)`, the US-Canada boundary `(49.0,-123.0)`, the India-Pakistan boundary `(32.5,74.5)`, the West Bank `(31.8,35.2)`, Western Sahara `(24.0,-13.0)`, and the Great Barrier Reef `(-18.2871,147.6992)`. The tile containing each point is selected at z5, z8, z11, z13, and z16, then deduplicated while retaining every sorted fixture name. Each row is classified from the pinned population as `present` or source-proven `known_empty`. Present rows are acquired and used for semantic/visual checks; known-empty rows prove coverage-state honesty and are never silently dropped or treated as fetch failures. Fixtures do not bias the size estimate.
 
 ## Source Acquisition and Resume
 
@@ -234,7 +238,7 @@ A separate non-projection fixture manifest uses these named points: New York `(4
 - Cache the exact compressed response by source generation and z/x/y.
 - Verify HTTP status, content type, gzip/PBF decode, coordinate, source generation, and SHA-256 before atomic rename from a temporary file.
 - Apply bounded concurrency, provider-aware retry/backoff, checkpointed progress, and storage watermarks.
-- A failed or missing source tile remains failed; it is never recorded as known-empty.
+- A coordinate absent from the pinned tilemap population is `known_empty`; a failed, missing, malformed, or mismatched acquisition for a population-present coordinate remains failed and is never converted to empty.
 - Repeated runs reuse only hash-verified cache files and produce the same sample manifest.
 - The full world bake is forbidden during the pilot.
 
@@ -257,7 +261,7 @@ Serial and parallel cooks of the Stage A correctness subset must produce identic
 
 ## Projection and Selection
 
-Each random stratum estimates its remaining population as `N_h * mean_h`, with finite-population correction. The pilot calculates:
+Each random stratum estimates only its non-certainty remainder as `(N_h - |C_h|) * mean_h`, with finite-population correction, then adds exact certainty bytes. The pilot calculates:
 
 - a one-sided 99% Student-t upper confidence bound;
 - a deterministic stratified bootstrap 99th percentile;

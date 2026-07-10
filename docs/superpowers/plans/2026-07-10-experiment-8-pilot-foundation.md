@@ -238,7 +238,7 @@ git commit -m "Recover Experiment 8 source size catalog"
 - Create: `tools/experiment8/tests/test_sample.py`
 
 **Interfaces:**
-- Consumes: `TileKey`, verified population TSV, packed-key source-size TSV.
+- Consumes: `TileKey`, verified source-lock descriptor, verified population TSV, packed-key source-size TSV, and its hash-bound summary.
 - Produces: `build_sample_manifest()`, Stage A/Stage B `sample.jsonl`, `summary.json`, and `fixtures.jsonl`.
 
 - [ ] **Step 1: Write failing sampler tests**
@@ -265,6 +265,12 @@ def test_uncatalogued_tiles_are_certainty_units():
 
 def test_same_inputs_produce_byte_identical_manifests():
     # Build twice with different input row order and compare SHA-256.
+
+def test_stage_a_keys_are_subset_of_stage_b_even_when_random_becomes_tail():
+    # Compare keys, not selection labels.
+
+def test_fixture_manifest_preserves_present_and_source_proven_empty_rows():
+    # Every requested coordinate is retained with present/known_empty state.
 ```
 
 - [ ] **Step 2: Run tests and verify RED**
@@ -277,28 +283,31 @@ Expected: import failure for `sample`.
 
 - [ ] **Step 3: Implement the sampler and CLI**
 
-Use exact latitude edges `[-90, -41.810315, -19.471221, 0, 19.471221, 41.810315, 90]`, longitude edges every 45 degrees, and SHA-256 rank text `flight-alert-exp8-pilot-v1|z|x|y`.
+Use exact latitude edges `[-90, -41.810315, -19.471221, 0, 19.471221, 41.810315, 90]`, longitude edges every 45 degrees, and SHA-256 rank text `flight-alert-exp8-pilot-v1|z|x|y`. Intervals are half-open with the final upper endpoint inclusive; internal boundaries belong north/east. Compare raw rank digest bytes, then packed keys.
 
-Implement a two-pass streaming algorithm:
+Implement a memory-bounded external merge:
 
-1. load catalog tails and uncatalogued certainty keys;
-2. stream population counts by `(z, latBand, lonSector)` excluding certainty units;
-3. retain the smallest ranks in bounded heaps per stratum;
-4. sort output by packed tile key and write atomically.
+1. verify the source-lock, population, catalog-summary, and catalog hashes;
+2. external-sort population packed keys in bounded binary runs;
+3. merge them with the already packed-sorted source-size catalog, rejecting catalog extras and writing a fixed-width classified spool with a missing-size sentinel;
+4. compute per-zoom top tails, then scan the spool for stratum/certainty counts and bounded lowest-rank heaps;
+5. scan again and write canonical packed-key-sorted JSONL and summaries atomically.
 
 CLI:
 
 ```powershell
 python -m tools.experiment8.make_sample `
+  --verified-source-lock <verified-source-lock.json> `
   --population <present-vector-tiles.tsv> `
   --source-sizes <source-sizes.tsv> `
+  --source-size-summary <source-sizes-summary.json> `
   --stage a|b `
   --out <directory>
 ```
 
-Stage A uses census z0-z8, 32 random units per nonempty z9-z16 cell, and 32 tails per z9-z16. Stage B uses the same ordering with 256 random and 256 tail units. Summary JSON records all input/output hashes, stratum populations/sample counts, selection counts, exact parameters, and missing-size certainty units.
+Stage A uses census z0-z8, 32 random units per nonempty z9-z16 cell, and 32 tails per z9-z16. Stage B uses the same ordering with 256 random and 256 tail units. Selection precedence is `census`, `uncatalogued`, `tail`, then `random`, and random selection refills from the remainder. Summary JSON records all input/output hashes, stratum population/certainty/random counts, exact count reconciliation, selection counts, exact parameters, and missing-size certainty units.
 
-Create a fixed non-projection fixture manifest containing the tile at zooms 5, 8, 11, 13, and 16 for these exact named `(latitude, longitude)` points, then deduplicate coordinates and mark every row `selection="fixture"`:
+Create a fixed non-projection fixture manifest containing the tile at zooms 5, 8, 11, 13, and 16 for these exact named `(latitude, longitude)` points, then deduplicate coordinates while preserving every sorted fixture name. Classify each row `sourceState="present"` when its key is in the pinned population or `sourceState="known_empty"` when the pinned population proves absence; do not silently drop absent rows:
 
 ```python
 FIXTURE_POINTS = (
@@ -449,7 +458,7 @@ Expected: duplicate copies agree; the summary accounts for every population tile
 
 Run `make_sample` twice with `--stage a` and `--stage b`.
 
-Expected:
+Expected, using generated exact counts rather than treating conservative bounds as identities:
 
 - Stage A count does not exceed `35,385`;
 - Stage B count does not exceed `123,193` and contains every Stage A tile;
@@ -459,9 +468,9 @@ Expected:
 
 - [ ] **Step 5: Run fixture and 64-tile smoke acquisition**
 
-Acquire every fixed fixture plus the first 64 packed-key Stage A rows to a new cache generation.
+Validate every fixture state against the pinned population. Acquire every `present` fixture plus the first 64 packed-key Stage A rows to a new cache generation; do not fetch rows proven `known_empty`.
 
-Expected: zero failed rows, every PBF decodes, all sidecars and hashes pass an immediate resume run, and no repository file is generated.
+Expected: all known-empty fixtures remain explicit and unrequested; zero present-fixture/sample failures; every acquired PBF decodes; all sidecars and hashes pass an immediate resume run; and no repository file is generated.
 
 - [ ] **Step 6: Start/resume full Stage A acquisition**
 
