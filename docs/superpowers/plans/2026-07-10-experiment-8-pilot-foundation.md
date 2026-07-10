@@ -310,9 +310,11 @@ CLI:
 ```powershell
 python -m tools.experiment8.make_sample `
   --verified-source-lock <verified-source-lock.json> `
+  --expected-verified-source-lock-sha256 <verified-lock-sha256> `
   --population <present-vector-tiles.tsv> `
   --source-sizes <source-sizes.tsv> `
   --source-size-summary <source-sizes-summary.json> `
+  --expected-source-size-summary-sha256 <catalog-summary-sha256> `
   --stage a|b `
   --out <directory>
 ```
