@@ -58,10 +58,13 @@ class SourceLockTests(unittest.TestCase):
         root: Path,
         *,
         population_text: str | None = None,
-    ) -> tuple[Path, Path, Path]:
+        service_url: str = "https://example.test/VectorTileServer",
+        schema_version: int = 1,
+    ) -> tuple[Path, Path, Path, Path]:
         style_path = root / "style.json"
         metadata_path = root / "metadata.pjson"
         population_path = root / "population.tsv"
+        source_lock_path = root / "fixture-source-lock.json"
         style_path.write_bytes(b'{"version":8}\n')
         metadata_path.write_bytes(b'{"name":"fixture"}\n')
         population_path.write_text(
@@ -77,21 +80,35 @@ class SourceLockTests(unittest.TestCase):
             encoding="utf-8",
             newline="",
         )
-        return style_path, metadata_path, population_path
+        source_lock_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": schema_version,
+                    "source": "Fixture VectorTileServer",
+                    "serviceUrl": service_url,
+                    "styleSha256": sha256_file(style_path),
+                    "metadataSha256": sha256_file(metadata_path),
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return style_path, metadata_path, population_path, source_lock_path
 
     def _verify(
         self,
         style_path: Path,
         metadata_path: Path,
         population_path: Path,
+        source_lock_path: Path,
         **overrides: object,
     ):
         arguments: dict[str, object] = {
-            "source_name": "Fixture VectorTileServer",
-            "service_url": "https://example.test/VectorTileServer",
+            "source_lock_path": source_lock_path,
             "style_path": style_path,
             "metadata_path": metadata_path,
             "population_path": population_path,
+            "expected_source_lock_sha256": sha256_file(source_lock_path),
             "expected_style_sha256": sha256_file(style_path),
             "expected_metadata_sha256": sha256_file(metadata_path),
             "expected_population_sha256": sha256_file(population_path),
@@ -106,6 +123,8 @@ class SourceLockTests(unittest.TestCase):
             expected_style_hash = sha256_file(paths[0])
             expected_metadata_hash = sha256_file(paths[1])
             expected_population_hash = sha256_file(paths[2])
+            expected_source_lock_hash = sha256_file(paths[3])
+            expected_source_lock_path = paths[3].resolve()
 
             lock = self._verify(*paths)
 
@@ -114,6 +133,8 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(lock.style_sha256, expected_style_hash)
         self.assertEqual(lock.metadata_sha256, expected_metadata_hash)
         self.assertEqual(lock.population.sha256, expected_population_hash)
+        self.assertEqual(lock.source_lock_path, expected_source_lock_path)
+        self.assertEqual(lock.source_lock_sha256, expected_source_lock_hash)
         with self.assertRaises(TypeError):
             lock.population.counts_by_zoom[0] = 99  # type: ignore[index]
 
@@ -147,6 +168,39 @@ class SourceLockTests(unittest.TestCase):
 
             with self.assertRaisesRegex(SourceLockError, "population SHA-256 mismatch"):
                 self._verify(*paths, expected_population_sha256="f" * 64)
+
+    def test_population_service_identity_is_bound_by_full_file_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self._write_fixture(Path(directory))
+            expected_population_hash = sha256_file(paths[2])
+            tampered = paths[2].read_text(encoding="utf-8").replace(
+                "\tfixture\t",
+                "\tother-service\t",
+            )
+            paths[2].write_text(tampered, encoding="utf-8", newline="")
+
+            with self.assertRaisesRegex(SourceLockError, "population SHA-256 mismatch"):
+                self._verify(
+                    *paths,
+                    expected_population_sha256=expected_population_hash,
+                )
+
+    def test_rejects_non_https_relative_or_credentialed_service_url(self) -> None:
+        invalid_urls = (
+            "http://example.test/VectorTileServer",
+            "example.test/VectorTileServer",
+            "https://user:secret@example.test/VectorTileServer",
+        )
+        for service_url in invalid_urls:
+            with self.subTest(service_url=service_url):
+                with tempfile.TemporaryDirectory() as directory:
+                    paths = self._write_fixture(
+                        Path(directory),
+                        service_url=service_url,
+                    )
+
+                    with self.assertRaisesRegex(SourceLockError, "service URL"):
+                        self._verify(*paths)
 
     def test_requires_exact_tab_separated_header(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -201,8 +255,14 @@ class VerifySourceCliTests(unittest.TestCase):
             newline="",
         )
         descriptor = {
+            "schemaVersion": 1,
+            "generatedAtUtc": "2026-07-05T16:03:48.371Z",
             "source": "Fixture VectorTileServer",
+            "authoritativeBulkSource": True,
             "serviceUrl": "https://example.test/VectorTileServer",
+            "metadataUrl": "https://example.test/VectorTileServer?f=pjson",
+            "styleUrl": "https://example.test/VectorTileServer/resources/styles/root.json",
+            "tileUrlTemplate": "https://example.test/VectorTileServer/tile/{z}/{y}/{x}.pbf",
             "styleSha256": sha256_file(style_path),
             "metadataSha256": sha256_file(metadata_path),
         }
@@ -223,6 +283,8 @@ class VerifySourceCliTests(unittest.TestCase):
             str(lock_dir),
             "--population",
             str(population_path),
+            "--expected-lock-sha256",
+            sha256_file(next(lock_dir.glob("*-source-lock.json"))),
             "--expected-style-sha256",
             sha256_file(lock_dir / "World_Basemap_v2-root-style.json"),
             "--expected-metadata-sha256",
@@ -264,8 +326,63 @@ class VerifySourceCliTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             output = json.loads(out_path.read_text(encoding="utf-8"))
+            source_lock_path = next(lock_dir.glob("*-source-lock.json")).resolve()
+            source_lock_hash = sha256_file(source_lock_path)
 
         self.assertEqual(output["population"]["countsByZoom"], {"0": 1})
+        self.assertEqual(Path(output["sourceLockPath"]), source_lock_path)
+        self.assertEqual(output["sourceLockSha256"], source_lock_hash)
+
+    def test_rejects_tampered_attribution_and_url_by_source_lock_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_dir, population_path = self._prepare_lock_directory(root)
+            out_path = root / "verified-source-lock.json"
+            arguments = self._common_cli_arguments(
+                lock_dir,
+                population_path,
+                out_path,
+            )
+            descriptor_path = next(lock_dir.glob("*-source-lock.json"))
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            descriptor["source"] = "Tampered Attribution"
+            descriptor["serviceUrl"] = "https://tampered.example/VectorTileServer"
+            descriptor_path.write_text(
+                json.dumps(descriptor),
+                encoding="utf-8",
+            )
+            arguments.extend(["--expected-counts-json", '{"0":1}'])
+
+            completed = self._run_cli_process(arguments)
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("source descriptor SHA-256 mismatch", completed.stderr)
+        self.assertFalse(out_path.exists())
+
+    def test_rejects_unsupported_source_descriptor_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_dir, population_path = self._prepare_lock_directory(root)
+            descriptor_path = next(lock_dir.glob("*-source-lock.json"))
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            descriptor["schemaVersion"] = 2
+            descriptor_path.write_text(
+                json.dumps(descriptor),
+                encoding="utf-8",
+            )
+            out_path = root / "verified-source-lock.json"
+            arguments = self._common_cli_arguments(
+                lock_dir,
+                population_path,
+                out_path,
+            )
+            arguments.extend(["--expected-counts-json", '{"0":1}'])
+
+            completed = self._run_cli_process(arguments)
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("schemaVersion mismatch", completed.stderr)
+        self.assertFalse(out_path.exists())
 
     def test_cli_parser_rejects_both_expected_counts_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -342,6 +459,8 @@ class VerifySourceCliTests(unittest.TestCase):
                     str(lock_dir),
                     "--population",
                     str(population_path),
+                    "--expected-lock-sha256",
+                    sha256_file(next(lock_dir.glob("*-source-lock.json"))),
                     "--expected-style-sha256",
                     style_hash,
                     "--expected-metadata-sha256",
@@ -380,6 +499,8 @@ class VerifySourceCliTests(unittest.TestCase):
                         str(lock_dir),
                         "--population",
                         str(population_path),
+                        "--expected-lock-sha256",
+                        sha256_file(next(lock_dir.glob("*-source-lock.json"))),
                         "--expected-style-sha256",
                         "0" * 64,
                         "--expected-metadata-sha256",

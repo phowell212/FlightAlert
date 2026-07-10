@@ -65,6 +65,8 @@ class PopulationSummary:
 class SourceLock:
     source_name: str
     service_url: str
+    source_lock_path: Path
+    source_lock_sha256: str
     style_path: Path
     metadata_path: Path
     style_sha256: str

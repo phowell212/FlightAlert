@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Sequence
 
 from .model import SourceLock
-from .source_lock import SourceLockError, sha256_file, verify_source_lock
+from .source_lock import (
+    SourceLockError,
+    sha256_file,
+    verify_source_descriptor,
+    verify_source_lock,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,6 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--lock-dir", required=True, type=Path)
     parser.add_argument("--population", required=True, type=Path)
+    parser.add_argument("--expected-lock-sha256", required=True)
     parser.add_argument("--expected-style-sha256", required=True)
     parser.add_argument("--expected-metadata-sha256", required=True)
     parser.add_argument("--expected-population-sha256", required=True)
@@ -28,7 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_descriptor(lock_dir: Path) -> tuple[Path, dict[str, object]]:
+def _find_descriptor(lock_dir: Path) -> Path:
     try:
         resolved_dir = lock_dir.resolve(strict=True)
     except OSError as error:
@@ -41,36 +47,7 @@ def _load_descriptor(lock_dir: Path) -> tuple[Path, dict[str, object]]:
             "source lock directory must contain exactly one '*-source-lock.json' descriptor; "
             f"found {len(descriptors)}"
         )
-    descriptor_path = descriptors[0]
-    try:
-        document = json.loads(descriptor_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SourceLockError(
-            f"source lock descriptor is unreadable: {descriptor_path}: {error}"
-        ) from error
-    if not isinstance(document, dict):
-        raise SourceLockError("source lock descriptor root must be a JSON object")
-    return descriptor_path, document
-
-
-def _descriptor_text(document: dict[str, object], key: str) -> str:
-    value = document.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise SourceLockError(f"source lock descriptor field {key!r} is missing or empty")
-    return value
-
-
-def _descriptor_hash(
-    document: dict[str, object],
-    key: str,
-    expected: str,
-    label: str,
-) -> None:
-    value = _descriptor_text(document, key).lower()
-    if value != expected.lower():
-        raise SourceLockError(
-            f"source descriptor {label} SHA-256 mismatch: expected {expected.lower()}, got {value}"
-        )
+    return descriptors[0]
 
 
 def _find_file_by_hash(lock_dir: Path, expected_hash: str, label: str) -> Path:
@@ -131,6 +108,8 @@ def _descriptor_document(lock: SourceLock) -> dict[str, object]:
         "schemaVersion": 1,
         "sourceName": lock.source_name,
         "serviceUrl": lock.service_url,
+        "sourceLockPath": str(lock.source_lock_path),
+        "sourceLockSha256": lock.source_lock_sha256,
         "stylePath": str(lock.style_path),
         "metadataPath": str(lock.metadata_path),
         "styleSha256": lock.style_sha256,
@@ -173,21 +152,39 @@ def _atomic_write_json(path: Path, document: dict[str, object]) -> None:
 
 
 def run(arguments: argparse.Namespace) -> SourceLock:
-    descriptor_path, descriptor = _load_descriptor(arguments.lock_dir)
+    descriptor_path = _find_descriptor(arguments.lock_dir)
+    source_descriptor = verify_source_descriptor(
+        descriptor_path,
+        arguments.expected_lock_sha256,
+    )
     expected_style = arguments.expected_style_sha256.lower()
     expected_metadata = arguments.expected_metadata_sha256.lower()
-    _descriptor_hash(descriptor, "styleSha256", expected_style, "style")
-    _descriptor_hash(descriptor, "metadataSha256", expected_metadata, "metadata")
-    style_path = _find_file_by_hash(descriptor_path.parent, expected_style, "style")
+    if source_descriptor.style_sha256 != expected_style:
+        raise SourceLockError(
+            "source descriptor style SHA-256 mismatch: "
+            f"expected {expected_style}, got {source_descriptor.style_sha256}"
+        )
+    if source_descriptor.metadata_sha256 != expected_metadata:
+        raise SourceLockError(
+            "source descriptor metadata SHA-256 mismatch: "
+            f"expected {expected_metadata}, got {source_descriptor.metadata_sha256}"
+        )
+    style_path = _find_file_by_hash(
+        descriptor_path.parent,
+        source_descriptor.style_sha256,
+        "style",
+    )
     metadata_path = _find_file_by_hash(
-        descriptor_path.parent, expected_metadata, "metadata"
+        descriptor_path.parent,
+        source_descriptor.metadata_sha256,
+        "metadata",
     )
     lock = verify_source_lock(
-        source_name=_descriptor_text(descriptor, "source"),
-        service_url=_descriptor_text(descriptor, "serviceUrl"),
+        source_lock_path=descriptor_path,
         style_path=style_path,
         metadata_path=metadata_path,
         population_path=arguments.population,
+        expected_source_lock_sha256=arguments.expected_lock_sha256,
         expected_style_sha256=expected_style,
         expected_metadata_sha256=expected_metadata,
         expected_population_sha256=arguments.expected_population_sha256,

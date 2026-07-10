@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from .model import PopulationSummary, SourceLock, TileKey
 
@@ -17,6 +20,16 @@ _UNSIGNED_DECIMAL = re.compile(r"[0-9]+\Z")
 
 class SourceLockError(ValueError):
     """A source-lock artifact violated a required identity invariant."""
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedSourceDescriptor:
+    path: Path
+    sha256: str
+    source_name: str
+    service_url: str
+    style_sha256: str
+    metadata_sha256: str
 
 
 def sha256_file(path: str | os.PathLike[str], chunk_size: int = 1024 * 1024) -> str:
@@ -44,6 +57,85 @@ def _expected_sha256(value: str, label: str) -> str:
     if not isinstance(value, str) or _HEX_SHA256.fullmatch(value) is None:
         raise SourceLockError(f"expected {label} SHA-256 is not 64 hexadecimal digits")
     return value.lower()
+
+
+def _descriptor_text(document: dict[str, object], key: str) -> str:
+    value = document.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SourceLockError(f"source descriptor field {key!r} is missing or empty")
+    return value
+
+
+def _validated_service_url(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(character.isspace() for character in value)
+    ):
+        raise SourceLockError("source descriptor service URL is missing or invalid")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError as error:
+        raise SourceLockError(f"source descriptor service URL is invalid: {value!r}") from error
+    if parsed.scheme.lower() != "https" or not parsed.netloc or hostname is None:
+        raise SourceLockError(
+            f"source descriptor service URL must be absolute HTTPS: {value!r}"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise SourceLockError(
+            f"source descriptor service URL must not contain credentials: {value!r}"
+        )
+    return value
+
+
+def verify_source_descriptor(
+    source_lock_path: str | os.PathLike[str],
+    expected_source_lock_sha256: str,
+) -> VerifiedSourceDescriptor:
+    resolved_path = _required_file(source_lock_path, "source descriptor")
+    expected_hash = _expected_sha256(expected_source_lock_sha256, "source descriptor")
+    try:
+        raw_document = resolved_path.read_bytes()
+    except OSError as error:
+        raise SourceLockError(
+            f"source descriptor is unreadable: {resolved_path}: {error}"
+        ) from error
+    actual_hash = hashlib.sha256(raw_document).hexdigest()
+    if actual_hash != expected_hash:
+        raise SourceLockError(
+            "source descriptor SHA-256 mismatch: "
+            f"expected {expected_hash}, got {actual_hash}"
+        )
+
+    try:
+        document = json.loads(raw_document.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SourceLockError(
+            f"source descriptor is not valid UTF-8 JSON: {resolved_path}: {error}"
+        ) from error
+    if not isinstance(document, dict):
+        raise SourceLockError("source descriptor root must be a JSON object")
+    schema_version = document.get("schemaVersion")
+    if type(schema_version) is not int or schema_version != 1:
+        raise SourceLockError(
+            f"source descriptor schemaVersion mismatch: expected 1, got {schema_version!r}"
+        )
+    return VerifiedSourceDescriptor(
+        path=resolved_path,
+        sha256=actual_hash,
+        source_name=_descriptor_text(document, "source"),
+        service_url=_validated_service_url(document.get("serviceUrl")),
+        style_sha256=_expected_sha256(
+            _descriptor_text(document, "styleSha256"),
+            "source descriptor style",
+        ),
+        metadata_sha256=_expected_sha256(
+            _descriptor_text(document, "metadataSha256"),
+            "source descriptor metadata",
+        ),
+    )
 
 
 def _expected_counts(counts: Mapping[int, int]) -> dict[int, int]:
@@ -130,22 +222,22 @@ def _stream_population(population_path: Path) -> tuple[str, int, dict[int, int]]
 
 def verify_source_lock(
     *,
-    source_name: str,
-    service_url: str,
+    source_lock_path: str | os.PathLike[str],
     style_path: str | os.PathLike[str],
     metadata_path: str | os.PathLike[str],
     population_path: str | os.PathLike[str],
+    expected_source_lock_sha256: str,
     expected_style_sha256: str,
     expected_metadata_sha256: str,
     expected_population_sha256: str,
     expected_counts_by_zoom: Mapping[int, int],
 ) -> SourceLock:
-    """Verify immutable source artifacts and the complete population inventory."""
+    """Verify source identity and population; its full TSV hash binds service fields."""
 
-    if not source_name.strip():
-        raise SourceLockError("source name is empty")
-    if not service_url.strip():
-        raise SourceLockError("service URL is empty")
+    source_descriptor = verify_source_descriptor(
+        source_lock_path,
+        expected_source_lock_sha256,
+    )
 
     resolved_style = _required_file(style_path, "style")
     resolved_metadata = _required_file(metadata_path, "metadata")
@@ -154,6 +246,17 @@ def verify_source_lock(
     expected_metadata = _expected_sha256(expected_metadata_sha256, "metadata")
     expected_population = _expected_sha256(expected_population_sha256, "population")
     expected_counts = _expected_counts(expected_counts_by_zoom)
+
+    if source_descriptor.style_sha256 != expected_style:
+        raise SourceLockError(
+            "source descriptor style SHA-256 mismatch: "
+            f"expected {expected_style}, got {source_descriptor.style_sha256}"
+        )
+    if source_descriptor.metadata_sha256 != expected_metadata:
+        raise SourceLockError(
+            "source descriptor metadata SHA-256 mismatch: "
+            f"expected {expected_metadata}, got {source_descriptor.metadata_sha256}"
+        )
 
     actual_style = sha256_file(resolved_style)
     if actual_style != expected_style:
@@ -189,8 +292,10 @@ def verify_source_lock(
         sha256=actual_population,
     )
     return SourceLock(
-        source_name=source_name,
-        service_url=service_url,
+        source_name=source_descriptor.source_name,
+        service_url=source_descriptor.service_url,
+        source_lock_path=source_descriptor.path,
+        source_lock_sha256=source_descriptor.sha256,
         style_path=resolved_style,
         metadata_path=resolved_metadata,
         style_sha256=actual_style,
