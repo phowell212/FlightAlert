@@ -47,21 +47,25 @@ The current Esri raster reference overlays remain the visual comparison floor. N
 
 The pilot records and verifies these inputs before work begins:
 
-1. Source lock:
+1. Source-lock directory:
    `D:\FlightAlert-test-artifacts\experiment 6\phase1\world-basemap-v2-source-lock`
-2. Source style SHA-256:
+2. Source-lock descriptor:
+   `D:\FlightAlert-test-artifacts\experiment 6\phase1\world-basemap-v2-source-lock\world-basemap-v2-source-lock.json`
+3. Source-lock descriptor SHA-256:
+   `ebadb97f9484e202909db6f514cd0453043ba2cc0329fb81c4eca75540b39907`
+4. Source style SHA-256:
    `92cec535724bebd560ce18ba47f5ddbc803e9bef61d8450bd24098f941276c5b`
-3. Source metadata SHA-256:
+5. Source metadata SHA-256:
    `29586b422c8a5a9baa942551f9d1af634dcaea0c95e04aae47f571f48ef48136`
-4. Coordinate population:
+6. Coordinate population:
    `D:\FlightAlert-test-artifacts\experiment 6\phase1\world-basemap-v2-tilemap-enumeration\present-vector-tiles.tsv`
-5. Coordinate-population SHA-256:
+7. Coordinate-population SHA-256:
    `ef3a0ab58d422add4c50a85525ef578fcb9106570f99ce9d529d2c7626cf85a3`
-6. Per-zoom present counts:
+8. Per-zoom present counts:
    `1, 4, 16, 64, 216, 684, 1,808, 5,024, 15,024, 43,680, 113,848, 278,192, 474,992, 584,176, 588,788, 491,940, 203,660` for z0 through z16.
-7. Typed format specimen:
+9. Typed format specimen:
    `D:\FlightAlert-test-artifacts\experiment 3\phase2\phone-package-pull-codex\dc-baltimore-z10-z11-phone-v1`
-8. Experiment 4 FAD2 engineering reference:
+10. Experiment 4 FAD2 engineering reference:
    `D:\FlightAlert-test-artifacts\experiment 4\tools\build_esri_reference_package.py`
 
 The locked structured service is:

@@ -40,7 +40,7 @@ This is Plan 1 of the Experiment 8 package pilot. Plan 2 implements the common s
 - Produces: `TileKey`, `SourceLock`, `PopulationSummary`, `sha256_file()`, `verify_source_lock()`, and the `verify_source` CLI.
 - Consumes: no earlier task interfaces.
 
-- [ ] **Step 1: Write failing source-lock and tile-model tests**
+- [x] **Step 1: Write failing source-lock and tile-model tests**
 
 Create tests that assert:
 
@@ -72,7 +72,7 @@ class SourceLockTests(unittest.TestCase):
         # Supply a deliberately wrong style hash and assert SourceLockError.
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -82,7 +82,7 @@ python -m unittest tools.experiment8.tests.test_source_lock -v
 
 Expected: import failure because `tools.experiment8.model` and `source_lock` do not exist.
 
-- [ ] **Step 3: Implement immutable models and source verification**
+- [x] **Step 3: Implement immutable models and source verification**
 
 Implement these public shapes:
 
@@ -128,6 +128,8 @@ class PopulationSummary:
 class SourceLock:
     source_name: str
     service_url: str
+    source_lock_path: Path
+    source_lock_sha256: str
     style_path: Path
     metadata_path: Path
     style_sha256: str
@@ -136,11 +138,11 @@ class SourceLock:
     population: PopulationSummary
 ```
 
-`verify_source_lock()` must stream the TSV, require the exact header `serviceId serviceName z x y`, validate each tile, detect duplicate packed keys, calculate the file SHA-256, verify exact per-zoom counts, and return `SourceLock`. Errors use a dedicated `SourceLockError` and include the violated invariant.
+`verify_source_lock()` must hash the raw source descriptor before parsing it, require the pinned schema-v1 descriptor hash, require an absolute credential-free HTTPS service URL, cross-check the descriptor's style and metadata identities, stream the TSV, require the exact header `serviceId serviceName z x y`, validate each tile, detect duplicate packed keys, calculate the population SHA-256, verify exact per-zoom counts, and return `SourceLock`. The exact population hash binds every `serviceId` and `serviceName` byte. Errors use a dedicated `SourceLockError` and include the violated invariant.
 
-`verify_source.py` accepts `--lock-dir`, `--population`, the three expected SHA-256 values, `--expected-counts-json`, and `--out`. It writes the verified lock descriptor atomically as JSON and exits nonzero on any mismatch.
+`verify_source.py` accepts `--lock-dir`, `--population`, `--expected-lock-sha256`, the expected style, metadata, and population SHA-256 values, exactly one of `--expected-counts-json` or `--expected-counts-file`, and `--out`. The counts-file form accepts BOM or BOM-free UTF-8 and is the recommended PowerShell interface. It writes the verified lock descriptor atomically as JSON and exits nonzero on any mismatch.
 
-- [ ] **Step 4: Run Task 1 tests**
+- [x] **Step 4: Run Task 1 tests**
 
 Run:
 
@@ -150,7 +152,7 @@ python -m unittest tools.experiment8.tests.test_source_lock -v
 
 Expected: all Task 1 tests pass.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```powershell
 git add -- tools/experiment8/__init__.py tools/experiment8/model.py tools/experiment8/source_lock.py tools/experiment8/verify_source.py tools/experiment8/tests/__init__.py tools/experiment8/tests/test_source_lock.py
@@ -428,7 +430,7 @@ Expected: packages install outside the repository and imports report versions `2
 
 - [ ] **Step 2: Verify the real source lock and population**
 
-Run the source-lock CLI against the authoritative Experiment 6 source lock and population using the exact hashes/counts from the design. Write evidence under `D:\FlightAlert-test-artifacts\experiment 8\source-lock`.
+Run the source-lock CLI against the authoritative Experiment 6 source lock and population using the exact descriptor, style, metadata, population hashes, and per-zoom counts from the design. Write evidence under `D:\FlightAlert-test-artifacts\experiment 8\source-lock`.
 
 Expected: `2,802,117` unique rows and exact z0-z16 counts; SHA-256 checks pass.
 
