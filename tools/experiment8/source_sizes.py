@@ -183,17 +183,24 @@ def _load_population(path: Path) -> tuple[set[int], str, dict[int, int]]:
     return packed_keys, digest.hexdigest(), dict(sorted(counts.items()))
 
 
-def _parse_tile_index(path: Path) -> Iterator[tuple[int, _CatalogValue]]:
+def _parse_tile_index(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> Iterator[tuple[int, _CatalogValue]]:
     """Parse one exact Experiment 6 index without opening its FAR6 payload."""
 
+    digest = hashlib.sha256()
     with path.open("rb") as source:
         header_raw = source.readline()
+        digest.update(header_raw)
         header = _decode_line(header_raw, path, 1)
         if header not in _ALLOWED_HEADERS:
             raise SourceSizeError(f"tile-index header mismatch in {path}: {header!r}")
         columns = header.split("\t")
         positions = {name: index for index, name in enumerate(columns)}
         for line_number, raw_line in enumerate(source, start=2):
+            digest.update(raw_line)
             line = _decode_line(raw_line, path, line_number)
             fields = line.split("\t")
             if len(fields) != len(columns):
@@ -236,6 +243,11 @@ def _parse_tile_index(path: Path) -> Iterator[tuple[int, _CatalogValue]]:
                     fields[positions["featureCount"]], "featureCount", path, line_number
                 ),
             )
+    if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+        raise SourceSizeError(
+            f"tile-index changed after inventory: {path}; "
+            f"expected {expected_sha256}, parsed {digest.hexdigest()}"
+        )
 
 
 def _inventory_digest(files: Iterable[_InputFile], include_root: bool) -> str:
@@ -373,7 +385,10 @@ def build_source_size_catalog(
         copies = groups[group_key]
         representative = min(copies, key=lambda item: str(item.path).casefold())
         representative_rows = 0
-        for packed, value in _parse_tile_index(representative.path):
+        for packed, value in _parse_tile_index(
+            representative.path,
+            expected_sha256=representative.sha256,
+        ):
             representative_rows += 1
             physical_rows += 1
             if packed not in population_keys:

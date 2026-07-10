@@ -318,6 +318,42 @@ class SourceSizeCatalogTests(unittest.TestCase):
             lines = (output / "source-sizes.tsv").read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0] + "\n", OUTPUT_HEADER)
             self.assertEqual([line.split("\t")[:3] for line in lines[1:]], [["1", "0", "0"], ["3", "7", "7"]])
+            self.assertEqual(
+                lines[1],
+                f"1\t0\t0\t{_sha('a')}\t100\t200\t3",
+            )
+            self.assertEqual(
+                lines[2],
+                f"3\t7\t7\t{_sha('a')}\t100\t200\t3",
+            )
+
+    def test_rejects_index_changed_after_inventory_before_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            tile = TileKey(0, 0, 0)
+            population = base / "population.tsv"
+            _write_population(population, [tile])
+            root = base / "root"
+            _write_index(root, "shard", [_row(tile, source_bytes=100)])
+            output = base / "out"
+            real_parse = source_sizes._parse_tile_index
+
+            def mutate_then_parse(path: Path, *args: object, **kwargs: object):
+                changed = path.read_bytes().replace(b"\t100\t200\t", b"\t101\t200\t", 1)
+                self.assertNotEqual(changed, path.read_bytes())
+                path.write_bytes(changed)
+                return real_parse(path, *args, **kwargs)
+
+            with mock.patch.object(
+                source_sizes,
+                "_parse_tile_index",
+                side_effect=mutate_then_parse,
+            ):
+                with self.assertRaisesRegex(SourceSizeError, "changed after inventory"):
+                    build_source_size_catalog(population, [root], output)
+
+            self.assertFalse((output / "source-sizes.tsv").exists())
+            self.assertFalse((output / "source-sizes-summary.json").exists())
 
     def test_rejects_bad_schema_hash_numeric_coordinate_and_shape(self) -> None:
         cases: list[tuple[str, str, bytes, list[str]]] = []
