@@ -4,9 +4,13 @@ import contextlib
 import io
 import json
 import math
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.experiment8.model import TileKey
 from tools.experiment8.source_lock import (
@@ -206,6 +210,120 @@ class VerifySourceCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         return lock_dir, population_path
+
+    def _common_cli_arguments(
+        self,
+        lock_dir: Path,
+        population_path: Path,
+        out_path: Path,
+    ) -> list[str]:
+        return [
+            "--lock-dir",
+            str(lock_dir),
+            "--population",
+            str(population_path),
+            "--expected-style-sha256",
+            sha256_file(lock_dir / "World_Basemap_v2-root-style.json"),
+            "--expected-metadata-sha256",
+            sha256_file(lock_dir / "World_Basemap_v2-service-metadata.pjson"),
+            "--expected-population-sha256",
+            sha256_file(population_path),
+            "--out",
+            str(out_path),
+        ]
+
+    def _run_cli_process(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run(
+            [sys.executable, "-m", "tools.experiment8.verify_source", *arguments],
+            cwd=Path(__file__).resolve().parents[3],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+    def test_cli_process_accepts_utf8_expected_counts_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_dir, population_path = self._prepare_lock_directory(root)
+            counts_path = root / "expected-counts.json"
+            counts_path.write_text('{"0":1}\n', encoding="utf-8", newline="")
+            out_path = root / "verified-source-lock.json"
+            arguments = self._common_cli_arguments(
+                lock_dir,
+                population_path,
+                out_path,
+            )
+            arguments.extend(["--expected-counts-file", str(counts_path)])
+
+            completed = self._run_cli_process(arguments)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            output = json.loads(out_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(output["population"]["countsByZoom"], {"0": 1})
+
+    def test_cli_parser_rejects_both_expected_counts_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_dir, population_path = self._prepare_lock_directory(root)
+            counts_path = root / "expected-counts.json"
+            counts_path.write_text('{"0":1}\n', encoding="utf-8", newline="")
+            out_path = root / "verified-source-lock.json"
+            arguments = self._common_cli_arguments(
+                lock_dir,
+                population_path,
+                out_path,
+            )
+            arguments.extend(
+                [
+                    "--expected-counts-json",
+                    '{"0":1}',
+                    "--expected-counts-file",
+                    str(counts_path),
+                ]
+            )
+
+            completed = self._run_cli_process(arguments)
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("not allowed with argument", completed.stderr)
+        self.assertFalse(out_path.exists())
+
+    def test_replace_failure_preserves_destination_and_cleans_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_dir, population_path = self._prepare_lock_directory(root)
+            out_path = root / "verified-source-lock.json"
+            original_bytes = b'{"previous":"verified"}\n'
+            out_path.write_bytes(original_bytes)
+            arguments = self._common_cli_arguments(
+                lock_dir,
+                population_path,
+                out_path,
+            )
+            arguments.extend(["--expected-counts-json", '{"0":1}'])
+            stderr = io.StringIO()
+
+            with (
+                mock.patch(
+                    "tools.experiment8.verify_source.os.replace",
+                    side_effect=OSError("injected replace failure"),
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = verify_source_main(arguments)
+
+            remaining_temporary_files = list(root.glob("*.tmp"))
+            preserved_bytes = out_path.read_bytes()
+
+        self.assertNotEqual(exit_code, 0)
+        self.assertIn("injected replace failure", stderr.getvalue())
+        self.assertEqual(preserved_bytes, original_bytes)
+        self.assertEqual(remaining_temporary_files, [])
 
     def test_writes_verified_descriptor_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

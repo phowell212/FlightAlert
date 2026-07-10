@@ -21,7 +21,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-style-sha256", required=True)
     parser.add_argument("--expected-metadata-sha256", required=True)
     parser.add_argument("--expected-population-sha256", required=True)
-    parser.add_argument("--expected-counts-json", required=True)
+    expected_counts = parser.add_mutually_exclusive_group(required=True)
+    expected_counts.add_argument("--expected-counts-json")
+    expected_counts.add_argument("--expected-counts-file", type=Path)
     parser.add_argument("--out", required=True, type=Path)
     return parser
 
@@ -111,6 +113,19 @@ def _parse_expected_counts(value: str) -> dict[int, int]:
     return counts
 
 
+def _load_expected_counts(arguments: argparse.Namespace) -> dict[int, int]:
+    if arguments.expected_counts_file is not None:
+        try:
+            value = arguments.expected_counts_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise SourceLockError(
+                f"expected counts file is unreadable: {arguments.expected_counts_file}: {error}"
+            ) from error
+    else:
+        value = arguments.expected_counts_json
+    return _parse_expected_counts(value)
+
+
 def _descriptor_document(lock: SourceLock) -> dict[str, object]:
     return {
         "schemaVersion": 1,
@@ -176,7 +191,7 @@ def run(arguments: argparse.Namespace) -> SourceLock:
         expected_style_sha256=expected_style,
         expected_metadata_sha256=expected_metadata,
         expected_population_sha256=arguments.expected_population_sha256,
-        expected_counts_by_zoom=_parse_expected_counts(arguments.expected_counts_json),
+        expected_counts_by_zoom=_load_expected_counts(arguments),
     )
     _atomic_write_json(arguments.out, _descriptor_document(lock))
     return lock
