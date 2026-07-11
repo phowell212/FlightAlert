@@ -85,7 +85,7 @@ Do not begin Task 1 until an independent specification reviewer confirms the loc
 - Produces: numeric enums, exact `SourceOccurrence`, `CanonicalVariant`, and `TilePosting` encodings, reconstructed renderer records, canonical semantic byte encoding, full SHA-256 fingerprints, collision-checked 64-bit IDs, one renderer-return order, and renderer-contract hashes.
 - Consumes: `TileKey` from Plan 1.
 
-- [ ] **Step 1: Write failing model and canonicalization tests**
+- [x] **Step 1: Write failing model and canonicalization tests**
 
 Create complete tests for:
 
@@ -113,7 +113,7 @@ Run and verify RED:
 & 'C:\FlightAlert-exp8-work\.venv\Scripts\python.exe' -m unittest tools.experiment8.tests.test_semantic_model -v
 ```
 
-- [ ] **Step 2: Implement immutable semantic records**
+- [x] **Step 2: Implement immutable semantic records**
 
 The canonical model separates exact source provenance, immutable renderer payload, and tile ownership so Format B can reuse only complete byte-identical payloads without losing a source occurrence or changing the renderer result:
 
@@ -204,11 +204,11 @@ Line-label tests additionally prove exact rational path/tile intersection, sourc
 
 Canonical records use the `N8T1` version/magic and integer/enumerated/NFC-string fields only. A reconstructed hot renderer record is exactly one tile posting joined to its referenced variant; detached `SourceOccurrence` bytes are not part of the phone record. Every adapter returns each requested tile in one order: `(draw_order, priority, layer_group, feature_kind, canonical_variant_id, feature_id, canonical_renderer_bytes)`. The global semantic stream prefixes packed tile key and uses that same order. Its hash is `SHA256("flight-alert-exp8-semantic-v1\\0" || repeated(u32le(record_length) || record_bytes))`; the independent verifier reimplements this serialization from the document rather than importing the writer.
 
-- [ ] **Step 3: Document the language-neutral renderer contract**
+- [x] **Step 3: Document the language-neutral renderer contract**
 
 `docs/experiment8-renderer-contract.md` defines all three encodings, their exact join into renderer records, state semantics, centizoom units, enums, the one renderer order, geometry/rational math, collision ownership, placement/collision fields, land evidence, style interpolation, and heap-weight calculation. It defines `N8T1` canonical semantic records and explicit domain/version identifiers for geometry, dedupe, variants, features, source audit, and the whole semantic stream. It preserves the approved Kotlin-facing `ReferenceTileSource`/`ReferenceTileLoad` contract without editing Kotlin.
 
-- [ ] **Step 4: Verify and commit Task 1**
+- [x] **Step 4: Verify and commit Task 1**
 
 ```powershell
 & 'C:\FlightAlert-exp8-work\.venv\Scripts\python.exe' -m unittest tools.experiment8.tests.test_semantic_model -v
@@ -218,6 +218,12 @@ git commit -m "Define Experiment 8 renderer semantics"
 ```
 
 Expected: tests pass; specification and code-quality reviewers approve exact record semantics before source selection begins.
+
+Accepted 2026-07-11 in commit `b047e2e`. The intended RED import failure was
+recorded; the final focused suite passed `39/39`; independent specification and
+code-quality re-review reported ready after critical identity/order defects were
+fixed; and the cumulative Experiment 8 suite passed `166/166` in 33.943 seconds
+with the separate OSM-pilot tests included.
 
 ---
 
