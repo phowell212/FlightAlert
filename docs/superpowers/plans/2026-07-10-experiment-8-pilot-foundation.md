@@ -370,12 +370,13 @@ git commit -m "Add deterministic Experiment 8 pilot sampling"
 - Create: `tools/experiment8/acquire.py`
 - Create: `tools/experiment8/fetch_sample.py`
 - Create: `tools/experiment8/tests/test_acquire.py`
+- Create: `tools/experiment8/tests/test_fetch_sample.py`
 
 **Interfaces:**
 - Consumes: verified `SourceLock` and sample JSONL.
 - Produces: `PbfCache`, immutable per-tile PBF/metadata files, `acquisition.jsonl`, and `acquisition-summary.json`.
 
-- [ ] **Step 1: Write failing acquisition tests**
+- [x] **Step 1: Write failing acquisition tests**
 
 Use `mapbox_vector_tile.encode` to create a minimal real vector tile in memory, serve it from a temporary local `ThreadingHTTPServer`, and assert:
 
@@ -390,7 +391,7 @@ Write these six concrete tests, each with a complete arrange/act/assert body:
 
 Also test the locked coordinate contract `11/585/783 -> /tile/11/783/585.pbf`, gzip returned despite `Accept-Encoding: identity`, distinct exact wire/decoded hashes, truncated-gzip CRC failure, valid gzip containing malformed PBF, HTTP 200 JSON/provider errors, redirect host/scheme rejection, 429/5xx retry with `Retry-After`, non-429 4xx without retry, orphan payload/sidecar rejection, source-generation mismatch, and zero absolute filesystem paths in deterministic inventory output.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```powershell
 $env:PYTHONPATH='D:\FlightAlert-test-artifacts\experiment 8\python-packages'
@@ -399,7 +400,7 @@ python -m unittest tools.experiment8.tests.test_acquire -v
 
 Expected: import failure for `acquire`.
 
-- [ ] **Step 3: Implement bounded HTTPS acquisition**
+- [x] **Step 3: Implement bounded HTTPS acquisition**
 
 Implement:
 
@@ -437,7 +438,7 @@ python -m tools.experiment8.fetch_sample `
   --workers 8
 ```
 
-- [ ] **Step 4: Run Task 4 and cumulative tests**
+- [x] **Step 4: Run Task 4 and cumulative tests**
 
 ```powershell
 $env:PYTHONPATH='D:\FlightAlert-test-artifacts\experiment 8\python-packages'
@@ -446,7 +447,7 @@ python -m unittest discover -s tools/experiment8/tests -v
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit Task 4**
+- [x] **Step 5: Commit Task 4**
 
 ```powershell
 git add -- tools/experiment8/acquire.py tools/experiment8/fetch_sample.py tools/experiment8/tests/test_acquire.py
@@ -458,7 +459,8 @@ git commit -m "Add resumable Experiment 8 PBF acquisition"
 
 **Files:**
 - Generated outside Git: `D:\FlightAlert-test-artifacts\experiment 8\**`
-- Modify tracked files: none
+- Create: `tools/experiment8/make_acquisition_smoke.py`
+- Create: `tools/experiment8/tests/test_make_acquisition_smoke.py`
 
 **Interfaces:**
 - Consumes: all Task 1-4 CLIs.
@@ -505,7 +507,19 @@ Expected, using generated exact counts rather than treating conservative bounds 
 
 Validate every fixture state against the pinned population. Acquire every `present` fixture plus the first 64 packed-key Stage A rows to a new cache generation; do not fetch rows proven `known_empty`.
 
-Expected: all known-empty fixtures remain explicit and unrequested; zero present-fixture/sample failures; every acquired PBF decodes; all sidecars and hashes pass an immediate resume run; and no repository file is generated.
+Compose the acquisition input without dropping empty fixtures:
+
+```powershell
+python -m tools.experiment8.make_acquisition_smoke `
+  --fixtures <stage-a-fixtures.jsonl> `
+  --expected-fixture-sha256 <fixture-sha256> `
+  --stage-a <stage-a-sample.jsonl> `
+  --expected-stage-a-sha256 <stage-a-sha256> `
+  --first-count 64 `
+  --out <smoke-input-directory>
+```
+
+Expected: the input has 154 rows (`63` present fixtures + `27` source-proven known-empty fixtures + `64` non-overlapping Stage A rows). All known-empty fixtures remain explicit and unrequested; zero present-fixture/sample failures; every acquired PBF decodes; all sidecars and hashes pass an immediate resume run; and no repository file is generated.
 
 - [ ] **Step 6: Start/resume full Stage A acquisition**
 
