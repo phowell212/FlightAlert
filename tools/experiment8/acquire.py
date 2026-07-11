@@ -9,21 +9,30 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
+import stat
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Sequence
 
-from .model import TileKey
+from .model import PopulationSummary, TileKey
 
 
 _HEX_SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
+_UNSIGNED_DECIMAL = re.compile(r"0|[1-9][0-9]*\Z")
+_POPULATION_HEADER = "serviceId\tserviceName\tz\tx\ty"
+# Approved 123,193-row Stage B conservative bound plus the separate 90-key fixture set.
+_MAX_PILOT_SAMPLE_ROWS = 123_283
+_MAX_SAMPLE_LINE_BYTES = 16 * 1024
+_MAX_POPULATION_LINE_BYTES = 4096
 _USER_AGENT = "FlightAlert-Experiment8/1.0"
 
 
@@ -80,7 +89,19 @@ class _SourceContext:
     tile_cols: int
     min_lod: int
     max_lod: int
+    population_path: Path
+    population: PopulationSummary
     generation_id: str
+
+
+class _ValidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, validator: Callable[[str, str], None]) -> None:
+        super().__init__()
+        self.validator = validator
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.validator(req.full_url, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -89,6 +110,24 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
         while chunk := source.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_octet_stream(value: object) -> bool:
+    return str(value).split(";", 1)[0].strip().lower() == "application/octet-stream"
+
+
+def _directory_file_bytes(root: Path) -> int:
+    total = 0
+    for directory, _, filenames in os.walk(root, followlinks=False):
+        for filename in filenames:
+            path = Path(directory) / filename
+            try:
+                details = path.stat(follow_symlinks=False)
+            except OSError as error:
+                raise AcquisitionError(f"cannot measure cache file {path}: {error}") from error
+            if stat.S_ISREG(details.st_mode):
+                total += details.st_size
+    return total
 
 
 def _read_json(path: Path, label: str) -> tuple[Path, dict[str, object], bytes]:
@@ -149,6 +188,41 @@ def _verify_file(path_text: str, expected_sha256: str, label: str) -> tuple[Path
     return resolved, raw
 
 
+def _required_file(path_text: str, label: str) -> Path:
+    path = Path(path_text)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise AcquisitionError(f"{label} is unavailable: {path}: {error}") from error
+    if not resolved.is_file():
+        raise AcquisitionError(f"{label} is not a file: {resolved}")
+    return resolved
+
+
+def _population_summary(verified: Mapping[str, object]) -> PopulationSummary:
+    document = _object(verified, "population", "verified source lock")
+    counts_document = _object(document, "countsByZoom", "verified source lock population")
+    counts: dict[int, int] = {}
+    for zoom_text, value in counts_document.items():
+        if re.fullmatch(r"0|[1-9][0-9]*", zoom_text) is None:
+            raise AcquisitionError(
+                f"verified source lock population zoom is invalid: {zoom_text!r}"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AcquisitionError(
+                f"verified source lock population count is invalid at zoom {zoom_text}"
+            )
+        counts[int(zoom_text)] = value
+    try:
+        return PopulationSummary(
+            row_count=_integer(document, "rowCount", "verified source lock population"),
+            counts_by_zoom=counts,
+            sha256=_sha_field(document, "sha256", "verified source lock population"),
+        )
+    except ValueError as error:
+        raise AcquisitionError(f"verified source lock population is invalid: {error}") from error
+
+
 def _source_context(
     verified_source_lock_path: Path,
     expected_verified_source_lock_sha256: str,
@@ -180,6 +254,10 @@ def _source_context(
 
     metadata_sha = _sha_field(verified, "metadataSha256", "verified source lock")
     style_sha = _sha_field(verified, "styleSha256", "verified source lock")
+    population_path = _required_file(
+        _text(verified, "populationPath", "verified source lock"), "source population"
+    )
+    population = _population_summary(verified)
     _, metadata_raw = _verify_file(
         _text(verified, "metadataPath", "verified source lock"), metadata_sha, "source metadata"
     )
@@ -192,7 +270,12 @@ def _source_context(
     service_url = _text(descriptor, "serviceUrl", "source-lock descriptor")
     tile_url_template = _text(descriptor, "tileUrlTemplate", "source-lock descriptor")
     service_parts = urllib.parse.urlsplit(service_url)
-    if service_parts.scheme != "https" or not service_parts.hostname or service_parts.username:
+    if (
+        service_parts.scheme != "https"
+        or not service_parts.hostname
+        or service_parts.username is not None
+        or service_parts.password is not None
+    ):
         raise AcquisitionError("locked service URL must be credential-free HTTPS")
     try:
         metadata = json.loads(metadata_raw.decode("utf-8"))
@@ -241,6 +324,8 @@ def _source_context(
         tile_cols=int(generation["tileCols"]),
         min_lod=int(generation["minLOD"]),
         max_lod=int(generation["maxLOD"]),
+        population_path=population_path,
+        population=population,
         generation_id=generation_id,
     )
 
@@ -258,28 +343,93 @@ class PbfCache:
         max_attempts: int = 3,
         max_wire_bytes: int = 16 * 1024 * 1024,
         max_pbf_bytes: int = 64 * 1024 * 1024,
+        max_cache_bytes: int = 23_500_000_000,
+        min_free_bytes: int = 5_000_000_000,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         if timeout_seconds <= 0 or not 1 <= max_attempts <= 10:
             raise AcquisitionError("timeout must be positive and max_attempts between 1 and 10")
         if max_wire_bytes <= 0 or max_pbf_bytes <= 0:
             raise AcquisitionError("acquisition byte ceilings must be positive")
+        if max_cache_bytes <= 0 or min_free_bytes < 0:
+            raise AcquisitionError(
+                "max cache bytes must be positive and minimum free bytes cannot be negative"
+            )
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.source = _source_context(
             Path(verified_source_lock_path), expected_verified_source_lock_sha256
         )
         self.source_generation_id = self.source.generation_id
+        self._template_overridden = (
+            request_url_template is not None
+            and request_url_template != self.source.tile_url_template
+        )
         self.request_url_template = request_url_template or self.source.tile_url_template
         self.allow_loopback_http = allow_loopback_http
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
         self.max_wire_bytes = max_wire_bytes
         self.max_pbf_bytes = max_pbf_bytes
+        self.max_cache_bytes = max_cache_bytes
+        self.min_free_bytes = min_free_bytes
         self.sleeper = sleeper
         self._validate_template()
+        self._opener = urllib.request.build_opener(
+            _ValidatingRedirectHandler(self._validate_final_url)
+        )
         self._tile_locks: dict[int, threading.Lock] = {}
         self._tile_locks_guard = threading.Lock()
+        self._storage_lock = threading.Lock()
+        self._manifest_lock = threading.Lock()
+        self._reserved_storage_bytes = 0
+        self._committed_cache_bytes = _directory_file_bytes(self.root)
+
+    @contextmanager
+    def exclusive_writer(self):
+        lock_path = self.root.parent / f".{self.root.name}.experiment8-writer.lock"
+        with self._manifest_lock:
+            try:
+                lock_file = lock_path.open("a+b")
+            except OSError as error:
+                raise AcquisitionError(f"cannot open cache writer lock {lock_path}: {error}") from error
+            with lock_file:
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                    os.fsync(lock_file.fileno())
+                lock_file.seek(0)
+                acquired = False
+                try:
+                    try:
+                        if os.name == "nt":
+                            import msvcrt
+
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        else:
+                            import fcntl
+
+                            fcntl.flock(
+                                lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                            )
+                    except OSError as error:
+                        raise AcquisitionError(
+                            f"cache is held by another Experiment 8 writer: {self.root}"
+                        ) from error
+                    acquired = True
+                    yield
+                finally:
+                    if acquired:
+                        lock_file.seek(0)
+                        if os.name == "nt":
+                            import msvcrt
+
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _validate_template(self) -> None:
         try:
@@ -288,9 +438,18 @@ class PbfCache:
             raise AcquisitionError(f"invalid tile URL template: {error}") from error
         parts = urllib.parse.urlsplit(example)
         loopback = parts.hostname in ("127.0.0.1", "localhost", "::1")
+        if self._template_overridden and not (self.allow_loopback_http and loopback):
+            raise AcquisitionError(
+                "tile URL override is permitted only for explicit loopback tests"
+            )
         if parts.scheme == "http" and not (self.allow_loopback_http and loopback):
             raise AcquisitionError("tile URL must use HTTPS; HTTP is permitted only for loopback tests")
-        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username:
+        if (
+            parts.scheme not in ("http", "https")
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+        ):
             raise AcquisitionError("tile URL must be an absolute credential-free HTTP(S) URL")
 
     def _url(self, tile: TileKey) -> str:
@@ -318,6 +477,43 @@ class PbfCache:
     def _lock_for(self, tile: TileKey) -> threading.Lock:
         with self._tile_locks_guard:
             return self._tile_locks.setdefault(tile.packed, threading.Lock())
+
+    def _reserve_storage(self, required_bytes: int) -> None:
+        if required_bytes <= 0:
+            raise AcquisitionError(f"storage reservation must be positive: {required_bytes}")
+        with self._storage_lock:
+            projected = (
+                self._committed_cache_bytes + self._reserved_storage_bytes + required_bytes
+            )
+            if projected > self.max_cache_bytes:
+                raise AcquisitionError(
+                    "cache byte budget exceeded: "
+                    f"projected {projected}, ceiling {self.max_cache_bytes}"
+                )
+            try:
+                free_bytes = shutil.disk_usage(self.root).free
+            except OSError as error:
+                raise AcquisitionError(
+                    f"cannot measure cache filesystem free space: {error}"
+                ) from error
+            free_after_reservations = free_bytes - self._reserved_storage_bytes - required_bytes
+            if free_after_reservations < self.min_free_bytes:
+                raise AcquisitionError(
+                    "cache free-space watermark would be crossed: "
+                    f"remaining {free_after_reservations}, minimum {self.min_free_bytes}"
+                )
+            self._reserved_storage_bytes += required_bytes
+
+    def _release_storage(self, reserved_bytes: int, *, committed: bool) -> None:
+        with self._storage_lock:
+            if not 0 < reserved_bytes <= self._reserved_storage_bytes:
+                raise RuntimeError(
+                    "invalid storage reservation release: "
+                    f"reserved={reserved_bytes}, outstanding={self._reserved_storage_bytes}"
+                )
+            self._reserved_storage_bytes -= reserved_bytes
+            if committed:
+                self._committed_cache_bytes += reserved_bytes
 
     def _quarantine(self, tile: TileKey, paths: EntryPaths) -> None:
         existing = [path for path in (paths.wire_path, paths.pbf_path, paths.sidecar_path) if path.exists()]
@@ -349,6 +545,17 @@ class PbfCache:
                 raise AcquisitionError("cache sidecar schema mismatch")
             if sidecar.get("sourceGenerationId") != self.source_generation_id:
                 raise AcquisitionError("cache source generation mismatch")
+            expected_provenance = {
+                "verifiedSourceLockSha256": self.source.verified_lock_sha256,
+                "sourceLockSha256": self.source.source_lock_sha256,
+                "metadataSha256": self.source.metadata_sha256,
+                "styleSha256": self.source.style_sha256,
+                "serviceItemId": self.source.service_item_id,
+                "currentVersion": self.source.current_version,
+            }
+            for field, expected in expected_provenance.items():
+                if sidecar.get(field) != expected:
+                    raise AcquisitionError(f"cache provenance field {field} mismatch")
             if sidecar.get("tile") != {"z": tile.z, "x": tile.x, "y": tile.y}:
                 raise AcquisitionError("cache coordinate mismatch")
             if sidecar.get("relativeCacheKey") != paths.relative_cache_key:
@@ -363,11 +570,16 @@ class PbfCache:
             wire = _object(sidecar, "wire", "cache sidecar")
             decoded = _object(sidecar, "decoded", "cache sidecar")
             response = _object(sidecar, "response", "cache sidecar")
+            request = _object(sidecar, "request", "cache sidecar")
+            if request != {
+                "method": "GET",
+                "userAgent": _USER_AGENT,
+                "acceptEncoding": "identity",
+            }:
+                raise AcquisitionError("cache request validation marker mismatch")
             if (
                 response.get("status") != 200
-                or not str(response.get("contentType", "")).lower().startswith(
-                    "application/octet-stream"
-                )
+                or not _is_octet_stream(response.get("contentType"))
                 or str(response.get("contentEncoding", "")).lower() != "gzip"
             ):
                 raise AcquisitionError("cache response validation marker mismatch")
@@ -381,6 +593,9 @@ class PbfCache:
                 raise AcquisitionError("cache decoded validation marker mismatch")
             wire_bytes = _integer(wire, "bytes", "cache sidecar wire")
             pbf_bytes = _integer(decoded, "bytes", "cache sidecar decoded")
+            content_length = response.get("contentLength")
+            if content_length is not None and content_length != str(wire_bytes):
+                raise AcquisitionError("cache response content length mismatch")
             wire_sha = _sha_field(wire, "sha256", "cache sidecar wire")
             pbf_sha = _sha_field(decoded, "sha256", "cache sidecar decoded")
             if paths.wire_path.stat().st_size != wire_bytes or _sha256_file(paths.wire_path) != wire_sha:
@@ -456,10 +671,13 @@ class PbfCache:
         pbf_temp: Path | None = None
         sidecar_temp: Path | None = None
         installed: list[Path] = []
+        sidecar_bytes = (json.dumps(sidecar, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        required_bytes = len(wire) + len(pbf) + len(sidecar_bytes)
+        self._reserve_storage(required_bytes)
+        committed = False
         try:
             wire_temp = self._temporary_bytes(paths.wire_path, wire)
             pbf_temp = self._temporary_bytes(paths.pbf_path, pbf)
-            sidecar_bytes = (json.dumps(sidecar, indent=2, sort_keys=True) + "\n").encode("utf-8")
             sidecar_temp = self._temporary_bytes(paths.sidecar_path, sidecar_bytes)
             for temporary_path, destination in (
                 (wire_temp, paths.wire_path),
@@ -469,14 +687,18 @@ class PbfCache:
                 os.replace(temporary_path, destination)
                 installed.append(destination)
             wire_temp = pbf_temp = sidecar_temp = None
+            committed = True
         except BaseException:
             for path in installed:
                 path.unlink(missing_ok=True)
             raise
         finally:
-            for path in (wire_temp, pbf_temp, sidecar_temp):
-                if path is not None:
-                    path.unlink(missing_ok=True)
+            try:
+                for path in (wire_temp, pbf_temp, sidecar_temp):
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+            finally:
+                self._release_storage(required_bytes, committed=committed)
 
     def _retry_delay(self, attempt: int, retry_after: str | None) -> float:
         if retry_after:
@@ -494,6 +716,20 @@ class PbfCache:
         return min(float(2 ** (attempt - 1)), 8.0)
 
     def acquire(self, tile: TileKey) -> AcquisitionResult:
+        if not self.source.min_lod <= tile.z <= self.source.max_lod:
+            return AcquisitionResult(
+                tile=tile,
+                status="failed",
+                response_sha256=None,
+                pbf_sha256=None,
+                response_bytes=0,
+                pbf_bytes=0,
+                attempts=0,
+                error=(
+                    f"tile zoom {tile.z} is outside locked LOD "
+                    f"{self.source.min_lod}..{self.source.max_lod}"
+                ),
+            )
         with self._lock_for(tile):
             paths = self.entry_paths(tile)
             cached = self._cached(tile, paths)
@@ -508,7 +744,7 @@ class PbfCache:
                         headers={"User-Agent": _USER_AGENT, "Accept-Encoding": "identity"},
                         method="GET",
                     )
-                    with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    with self._opener.open(request, timeout=self.timeout_seconds) as response:
                         final_url = response.geturl()
                         self._validate_final_url(requested_url, final_url)
                         status = int(response.status)
@@ -520,7 +756,7 @@ class PbfCache:
                         raise AcquisitionError(f"HTTP {status}")
                     if len(wire) > self.max_wire_bytes:
                         raise AcquisitionError(f"wire response exceeds {self.max_wire_bytes} bytes")
-                    if not content_type.lower().startswith("application/octet-stream"):
+                    if not _is_octet_stream(content_type):
                         raise AcquisitionError(f"unexpected content type: {content_type!r}")
                     pbf, layer_count, feature_count = self._decode(wire, content_encoding)
                     wire_sha = hashlib.sha256(wire).hexdigest()
@@ -592,7 +828,14 @@ class PbfCache:
                         self.sleeper(self._retry_delay(attempt, error.headers.get("Retry-After")))
                         continue
                     break
-                except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
+                except urllib.error.URLError as error:
+                    last_error = f"transport failure: {error}"
+                    retryable = isinstance(error.reason, (TimeoutError, socket.timeout))
+                    if retryable and attempt < self.max_attempts:
+                        self.sleeper(self._retry_delay(attempt, None))
+                        continue
+                    break
+                except (TimeoutError, socket.timeout) as error:
                     last_error = f"transport failure: {error}"
                     if attempt < self.max_attempts:
                         self.sleeper(self._retry_delay(attempt, None))
@@ -613,53 +856,210 @@ class PbfCache:
             )
 
 
-def _sample_tiles(path: Path, expected_sha256: str) -> tuple[list[TileKey], int, int]:
+def _sample_tiles(
+    path: Path, expected_sha256: str
+) -> tuple[list[tuple[TileKey, Literal["present", "known_empty"]]], int, int]:
     if _HEX_SHA256.fullmatch(expected_sha256) is None:
         raise AcquisitionError("expected sample SHA-256 is invalid")
     try:
         resolved = path.resolve(strict=True)
-        raw = resolved.read_bytes()
     except OSError as error:
         raise AcquisitionError(f"sample is unavailable: {path}: {error}") from error
-    actual = hashlib.sha256(raw).hexdigest()
+    rows: dict[int, tuple[TileKey, Literal["present", "known_empty"]]] = {}
+    input_row_count = 0
+    skipped_known_empty_count = 0
+    digest = hashlib.sha256()
+    try:
+        sample = resolved.open("rb")
+    except OSError as error:
+        raise AcquisitionError(f"sample is unavailable: {resolved}: {error}") from error
+    with sample:
+        line_number = 0
+        while True:
+            raw_line = sample.readline(_MAX_SAMPLE_LINE_BYTES + 1)
+            if not raw_line:
+                break
+            line_number += 1
+            digest.update(raw_line)
+            if len(raw_line) > _MAX_SAMPLE_LINE_BYTES:
+                raise AcquisitionError(
+                    f"sample line {line_number} exceeds {_MAX_SAMPLE_LINE_BYTES}-byte limit"
+                )
+            input_row_count += 1
+            if input_row_count > _MAX_PILOT_SAMPLE_ROWS:
+                raise AcquisitionError(
+                    f"sample exceeds Experiment 8 pilot row limit {_MAX_PILOT_SAMPLE_ROWS}"
+                )
+            try:
+                document = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise AcquisitionError(
+                    f"sample line {line_number} is invalid JSON: {error}"
+                ) from error
+            if not isinstance(document, dict):
+                raise AcquisitionError(f"sample line {line_number} must be an object")
+            try:
+                coordinates = tuple(document[name] for name in ("z", "x", "y"))
+                if any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in coordinates
+                ):
+                    raise TypeError("coordinates must be JSON integers")
+                tile = TileKey(*coordinates)
+            except (KeyError, TypeError, ValueError) as error:
+                raise AcquisitionError(
+                    f"sample line {line_number} has invalid coordinates"
+                ) from error
+            source_state = document.get("sourceState")
+            if source_state is None:
+                source_state = "present"
+            if source_state not in ("present", "known_empty"):
+                raise AcquisitionError(
+                    f"sample line {line_number} has unsupported sourceState {source_state!r}"
+                )
+            if tile.packed in rows:
+                raise AcquisitionError(f"duplicate sample tile {tile.z}/{tile.x}/{tile.y}")
+            if source_state == "known_empty":
+                skipped_known_empty_count += 1
+            rows[tile.packed] = (tile, source_state)
+    if input_row_count == 0:
+        raise AcquisitionError("sample is empty")
+    actual = digest.hexdigest()
     if actual != expected_sha256.lower():
         raise AcquisitionError(
             f"sample SHA-256 mismatch: expected {expected_sha256.lower()}, got {actual}"
         )
-    tiles: dict[int, TileKey] = {}
-    input_row_count = 0
-    skipped_known_empty_count = 0
-    for line_number, raw_line in enumerate(raw.splitlines(), start=1):
-        input_row_count += 1
-        try:
-            document = json.loads(raw_line)
-        except json.JSONDecodeError as error:
-            raise AcquisitionError(f"sample line {line_number} is invalid JSON: {error}") from error
-        if not isinstance(document, dict):
-            raise AcquisitionError(f"sample line {line_number} must be an object")
-        try:
-            coordinates = tuple(document[name] for name in ("z", "x", "y"))
-            if any(isinstance(value, bool) or not isinstance(value, int) for value in coordinates):
-                raise TypeError("coordinates must be JSON integers")
-            tile = TileKey(*coordinates)
-        except (KeyError, TypeError, ValueError) as error:
-            raise AcquisitionError(f"sample line {line_number} has invalid coordinates") from error
-        source_state = document.get("sourceState")
-        if source_state == "known_empty":
-            skipped_known_empty_count += 1
-            continue
-        if source_state not in (None, "present"):
-            raise AcquisitionError(
-                f"sample line {line_number} has unsupported sourceState {source_state!r}"
-            )
-        if tile.packed in tiles:
-            raise AcquisitionError(f"duplicate sample tile {tile.z}/{tile.x}/{tile.y}")
-        tiles[tile.packed] = tile
     return (
-        [tiles[packed] for packed in sorted(tiles)],
+        [rows[packed] for packed in sorted(rows)],
         input_row_count,
         skipped_known_empty_count,
     )
+
+
+def _population_line(raw_line: bytes, line_number: int) -> str:
+    if raw_line.endswith(b"\n"):
+        raw_line = raw_line[:-1]
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+    try:
+        return raw_line.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AcquisitionError(
+            f"source population is not valid UTF-8 at line {line_number}: {error}"
+        ) from error
+
+
+def _validate_sample_population(
+    source: _SourceContext,
+    rows: Sequence[tuple[TileKey, Literal["present", "known_empty"]]],
+) -> list[TileKey]:
+    states = {tile.packed: (tile, state) for tile, state in rows}
+    for tile, _ in rows:
+        if not source.min_lod <= tile.z <= source.max_lod:
+            raise AcquisitionError(
+                f"sample tile {tile.z}/{tile.x}/{tile.y} is outside locked LOD "
+                f"{source.min_lod}..{source.max_lod}"
+            )
+    unmatched_present = {
+        tile.packed for tile, state in rows if state == "present"
+    }
+    known_empty_contradiction: TileKey | None = None
+    digest = hashlib.sha256()
+    counts: dict[int, int] = {}
+    row_count = 0
+    try:
+        population = source.population_path.open("rb")
+    except OSError as error:
+        raise AcquisitionError(
+            f"source population is unavailable: {source.population_path}: {error}"
+        ) from error
+    with population:
+        header_raw = population.readline()
+        digest.update(header_raw)
+        header = _population_line(header_raw, 1)
+        if header != _POPULATION_HEADER:
+            raise AcquisitionError(
+                f"source population header mismatch: expected {_POPULATION_HEADER!r}, got {header!r}"
+            )
+        line_number = 1
+        while True:
+            raw_line = population.readline(_MAX_POPULATION_LINE_BYTES + 1)
+            if not raw_line:
+                break
+            line_number += 1
+            digest.update(raw_line)
+            if len(raw_line) > _MAX_POPULATION_LINE_BYTES:
+                raise AcquisitionError(
+                    f"source population line {line_number} exceeds "
+                    f"{_MAX_POPULATION_LINE_BYTES}-byte limit"
+                )
+            fields = _population_line(raw_line, line_number).split("\t")
+            if len(fields) != 5:
+                raise AcquisitionError(
+                    f"source population row {line_number} has {len(fields)} fields, expected 5"
+                )
+            service_id, service_name, zoom_text, x_text, y_text = fields
+            if not service_id or not service_name:
+                raise AcquisitionError(
+                    f"source population identity is empty at line {line_number}"
+                )
+            if any(
+                _UNSIGNED_DECIMAL.fullmatch(value) is None
+                for value in (zoom_text, x_text, y_text)
+            ):
+                raise AcquisitionError(
+                    f"source population tile is invalid at line {line_number}: "
+                    f"{zoom_text}/{x_text}/{y_text}"
+                )
+            try:
+                tile = TileKey(int(zoom_text), int(x_text), int(y_text))
+            except ValueError as error:
+                raise AcquisitionError(
+                    f"source population tile is invalid at line {line_number}: "
+                    f"{zoom_text}/{x_text}/{y_text}: {error}"
+                ) from error
+            row_count += 1
+            counts[tile.z] = counts.get(tile.z, 0) + 1
+            sample = states.get(tile.packed)
+            if sample is None:
+                continue
+            if sample[1] == "known_empty":
+                if (
+                    known_empty_contradiction is None
+                    or sample[0].packed < known_empty_contradiction.packed
+                ):
+                    known_empty_contradiction = sample[0]
+            else:
+                unmatched_present.discard(tile.packed)
+
+    actual_sha = digest.hexdigest()
+    if actual_sha != source.population.sha256:
+        raise AcquisitionError(
+            "source population SHA-256 mismatch: "
+            f"expected {source.population.sha256}, got {actual_sha}"
+        )
+    if row_count != source.population.row_count:
+        raise AcquisitionError(
+            "source population row-count mismatch: "
+            f"expected {source.population.row_count}, got {row_count}"
+        )
+    actual_counts = dict(sorted(counts.items()))
+    expected_counts = dict(source.population.counts_by_zoom)
+    if actual_counts != expected_counts:
+        raise AcquisitionError(
+            f"source population per-zoom counts mismatch: expected {expected_counts}, got {actual_counts}"
+        )
+    if known_empty_contradiction is not None:
+        tile = known_empty_contradiction
+        raise AcquisitionError(
+            f"known_empty sample tile {tile.z}/{tile.x}/{tile.y} is present in pinned population"
+        )
+    if unmatched_present:
+        tile = TileKey.from_packed(min(unmatched_present))
+        raise AcquisitionError(
+            f"present sample tile {tile.z}/{tile.x}/{tile.y} is absent from pinned population"
+        )
+    return [tile for tile, state in rows if state == "present"]
 
 
 def _atomic_text(path: Path):
@@ -740,28 +1140,58 @@ def acquire_manifest(
 ) -> AcquisitionSummary:
     if not 1 <= workers <= 16:
         raise AcquisitionError(f"workers must be between 1 and 16: {workers}")
-    tiles, input_row_count, skipped_known_empty_count = _sample_tiles(
+    with cache.exclusive_writer():
+        return _acquire_manifest_locked(
+            sample_path, expected_sample_sha256, cache, workers, output_dir
+        )
+
+
+def _acquire_manifest_locked(
+    sample_path: Path,
+    expected_sample_sha256: str,
+    cache: PbfCache,
+    workers: int,
+    output_dir: Path,
+) -> AcquisitionSummary:
+    sample_rows, input_row_count, skipped_known_empty_count = _sample_tiles(
         Path(sample_path), expected_sample_sha256
     )
+    tiles = _validate_sample_population(cache.source, sample_rows)
     results: dict[int, AcquisitionResult] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(cache.acquire, tile): tile for tile in tiles}
-        for future in concurrent.futures.as_completed(futures):
-            tile = futures[future]
-            try:
-                result = future.result()
-            except BaseException as error:
-                result = AcquisitionResult(
-                    tile=tile,
-                    status="failed",
-                    response_sha256=None,
-                    pbf_sha256=None,
-                    response_bytes=0,
-                    pbf_bytes=0,
-                    attempts=0,
-                    error=f"worker failure: {error}",
-                )
-            results[tile.packed] = result
+        tile_iterator = iter(tiles)
+        futures: dict[concurrent.futures.Future[AcquisitionResult], TileKey] = {}
+        window = workers * 2
+        exhausted = False
+        while futures or not exhausted:
+            while not exhausted and len(futures) < window:
+                try:
+                    tile = next(tile_iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                futures[executor.submit(cache.acquire, tile)] = tile
+            if not futures:
+                continue
+            completed, _ = concurrent.futures.wait(
+                futures, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in completed:
+                tile = futures.pop(future)
+                try:
+                    result = future.result()
+                except Exception as error:
+                    result = AcquisitionResult(
+                        tile=tile,
+                        status="failed",
+                        response_sha256=None,
+                        pbf_sha256=None,
+                        response_bytes=0,
+                        pbf_bytes=0,
+                        attempts=0,
+                        error=f"worker failure: {error}",
+                    )
+                results[tile.packed] = result
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -808,6 +1238,9 @@ def acquire_manifest(
             "schemaVersion": 1,
             "sampleSha256": expected_sample_sha256.lower(),
             "sourceGenerationId": cache.source_generation_id,
+            "verifiedSourceLockSha256": cache.source.verified_lock_sha256,
+            "populationSha256": cache.source.population.sha256,
+            "populationRowCount": cache.source.population.row_count,
             "inputRowCount": input_row_count,
             "rowCount": len(results),
             "readyCount": ready_count,
@@ -815,6 +1248,8 @@ def acquire_manifest(
             "skippedKnownEmptyCount": skipped_known_empty_count,
             "acquisitionBytes": inventory_bytes,
             "acquisitionSha256": inventory_sha,
+            "maxCacheBytes": cache.max_cache_bytes,
+            "minFreeBytes": cache.min_free_bytes,
         }
         with _atomic_text(summary_path) as summary:
             summary_temp = Path(summary.name)
