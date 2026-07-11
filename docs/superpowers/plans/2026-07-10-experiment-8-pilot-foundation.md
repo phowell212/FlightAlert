@@ -241,7 +241,7 @@ git commit -m "Recover Experiment 8 source size catalog"
 - Consumes: `TileKey`, verified source-lock descriptor, verified population TSV, packed-key source-size TSV, and its hash-bound summary.
 - Produces: `build_sample_manifest()`, Stage A/Stage B `sample.jsonl`, `summary.json`, and `fixtures.jsonl`.
 
-- [ ] **Step 1: Write failing sampler tests**
+- [x] **Step 1: Write failing sampler tests**
 
 Tests assert:
 
@@ -285,7 +285,7 @@ rank(16/63809/42195) = 4e4dc04f4487eba36daa3e5d4da7968673d799c6a9c141c8d32e44d3b
 
 Tests must also prove external-sort output is identical across shuffled input and different chunk sizes, equal-byte tails break ties by ascending packed key, random sampling refills after certainty selection, canonical JSONL is timestamp-free UTF-8/LF with sorted keys and fixed separators, and the exact per-stratum count formula reconciles to the manifest.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```powershell
 python -m unittest tools.experiment8.tests.test_sample -v
@@ -293,7 +293,7 @@ python -m unittest tools.experiment8.tests.test_sample -v
 
 Expected: import failure for `sample`.
 
-- [ ] **Step 3: Implement the sampler and CLI**
+- [x] **Step 3: Implement the sampler and CLI**
 
 Use exact latitude edges `[-90, -41.810315, -19.471221, 0, 19.471221, 41.810315, 90]`, longitude edges every 45 degrees, and SHA-256 rank text `flight-alert-exp8-pilot-v1|z|x|y`. Intervals are half-open with the final upper endpoint inclusive; internal boundaries belong north/east. Compare raw rank digest bytes, then packed keys.
 
@@ -348,7 +348,7 @@ FIXTURE_POINTS = (
 
 Against the pinned population, this fixture set has exactly 90 distinct requested keys: 63 `present` and 27 `known_empty`. The real-population fixture test must reproduce those totals.
 
-- [ ] **Step 4: Run Task 3 and cumulative tests**
+- [x] **Step 4: Run Task 3 and cumulative tests**
 
 ```powershell
 python -m unittest discover -s tools/experiment8/tests -v
@@ -356,7 +356,7 @@ python -m unittest discover -s tools/experiment8/tests -v
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit Task 3**
+- [x] **Step 5: Commit Task 3**
 
 ```powershell
 git add -- tools/experiment8/sample.py tools/experiment8/make_sample.py tools/experiment8/tests/test_sample.py
@@ -470,7 +470,7 @@ E:\FlightAlert-test-artifacts\experiment 6\phase1\world-basemap-v2-classified-ba
 
 Expected: duplicate copies agree; the summary accounts for every population tile either with a source-size record or an explicit uncatalogued certainty key.
 
-- [ ] **Step 4: Generate Stage A, Stage B, and fixture manifests**
+- [x] **Step 4: Generate Stage A, Stage B, and fixture manifests**
 
 Run `make_sample` twice with `--stage a` and `--stage b`.
 
