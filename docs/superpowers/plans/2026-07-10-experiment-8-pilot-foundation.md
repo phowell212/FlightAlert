@@ -388,6 +388,8 @@ Write these six concrete tests, each with a complete arrange/act/assert body:
 - `test_response_coordinate_and_source_generation_are_recorded` asserts the exact z/x/y, source-lock hashes, URL, response hash, decoded PBF hash, byte lengths, and acquisition timestamp fields.
 - `test_worker_count_does_not_change_sorted_acquisition_manifest` acquires the same shuffled input with worker counts 1 and 4 and asserts byte-identical JSONL after normalizing only the intentionally variable acquisition timestamps.
 
+Also test the locked coordinate contract `11/585/783 -> /tile/11/783/585.pbf`, gzip returned despite `Accept-Encoding: identity`, distinct exact wire/decoded hashes, truncated-gzip CRC failure, valid gzip containing malformed PBF, HTTP 200 JSON/provider errors, redirect host/scheme rejection, 429/5xx retry with `Retry-After`, non-429 4xx without retry, orphan payload/sidecar rejection, source-generation mismatch, and zero absolute filesystem paths in deterministic inventory output.
+
 - [ ] **Step 2: Run tests and verify RED**
 
 ```powershell
@@ -416,7 +418,24 @@ class AcquisitionResult:
 
 `PbfCache.acquire(tile: TileKey) -> AcquisitionResult` owns one tile's verified cache lifecycle. `acquire_manifest(sample_path, cache, workers, output_dir) -> AcquisitionSummary` schedules those calls and writes the deterministic manifest and summary.
 
-Use `urllib.request` with HTTPS only for production URLs, explicit timeout, gzip handling, `mapbox_vector_tile.decode` validation, SHA-256, `.tmp` files, `os.replace`, and sidecar JSON. Permit loopback HTTP only when a constructor flag explicitly enables it for tests. Default workers are 8, maximum 16. Retry only timeout/429/5xx with capped exponential backoff and `Retry-After`; 4xx other than 429 fail immediately. Output order is packed-key sorted. A nonzero failed count makes the CLI exit nonzero.
+The locked URL is `https://basemaps.arcgis.com/arcgis/rest/services/World_Basemap_v2/VectorTileServer/tile/{z}/{y}/{x}.pbf`; cache keys remain XYZ `z/x/y`, so URL order deliberately swaps y before x. Require the pinned verified-source-lock file hash and derive a canonical source-generation ID from the service URL/template, service item ID/current version, tile compression/coordinate convention, raw metadata hash, and raw style hash.
+
+Use `urllib.request` with HTTPS only for production URLs, explicit timeout and byte ceilings, SHA-256 of the exact wire response, gzip-magic/CRC/ISIZE validation, bounded inflation, SHA-256 of decoded PBF, and `mapbox_vector_tile.decode(raw, default_options={"y_coord_down": True})`. Esri may return gzip even when the request says `Accept-Encoding: identity`; never rely on filename extension or urllib auto-decompression. Record exact requested/final URL, status/content headers, ETag/Last-Modified as provenance only, source-generation ID, z/x/y, relative cache keys, both hashes/lengths, layer/feature counts, and acquisition UTC in the sidecar. Never put an absolute host path in deterministic inventory output.
+
+Commit wire payload, decoded PBF, and sidecar through unique same-directory temporary files; the sidecar is the trust anchor. A cache hit rehashes both payloads and requires matching generation, lengths, URLs, coordinates, and successful prior decode. Quarantine corrupt/orphan/wrong-generation entries and refetch. Keep variable timestamps/retry history outside the deterministic acquisition inventory. Permit loopback HTTP only when a constructor flag explicitly enables it for tests. Default workers are 8, maximum 16. Retry only timeout/429/5xx with capped exponential backoff and `Retry-After`; 4xx other than 429 fail immediately. Output order is packed-key sorted. A nonzero failed count makes the CLI exit nonzero.
+
+CLI:
+
+```powershell
+python -m tools.experiment8.fetch_sample `
+  --verified-source-lock <verified-source-lock.json> `
+  --expected-verified-source-lock-sha256 <verified-lock-sha256> `
+  --sample <sample.jsonl> `
+  --expected-sample-sha256 <sample-sha256> `
+  --cache <pbf-cache-root> `
+  --out <acquisition-run-directory> `
+  --workers 8
+```
 
 - [ ] **Step 4: Run Task 4 and cumulative tests**
 
