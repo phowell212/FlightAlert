@@ -7,6 +7,15 @@ plugins {
 val externalFlightAlertTestsEnabled = providers.gradleProperty("flightAlertExternalTests")
     .map { it.equals("true", ignoreCase = true) }
     .getOrElse(false)
+val repositoryFlightAlertTestsEnabled = providers.gradleProperty("flightAlertRepositoryTests")
+    .map { it.equals("true", ignoreCase = true) }
+    .getOrElse(false)
+
+if (externalFlightAlertTestsEnabled && repositoryFlightAlertTestsEnabled) {
+    throw GradleException(
+        "flightAlertExternalTests and flightAlertRepositoryTests cannot both be enabled",
+    )
+}
 
 android {
     namespace = "com.flightalert"
@@ -34,6 +43,10 @@ android {
             getByName("androidTest") {
                 setRoot("../FlightAlert-test-artifacts/androidTest")
             }
+        } else if (repositoryFlightAlertTestsEnabled) {
+            getByName("test") {
+                setRoot("tools/experiment8/kotlin-test")
+            }
         }
     }
 
@@ -53,10 +66,9 @@ android {
 
 androidComponents {
     beforeVariants(selector().all()) { variant ->
-        if (!externalFlightAlertTestsEnabled) {
-            variant.enableAndroidTest = false
-            variant.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = false
-        }
+        variant.enableAndroidTest = externalFlightAlertTestsEnabled
+        variant.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable =
+            externalFlightAlertTestsEnabled || repositoryFlightAlertTestsEnabled
     }
 }
 
@@ -65,4 +77,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     //noinspection UseTomlInstead
     implementation("com.github.luben:zstd-jni:1.5.7-11@aar")
+    if (externalFlightAlertTestsEnabled || repositoryFlightAlertTestsEnabled) {
+        testImplementation("junit:junit:4.13.2")
+    }
 }
