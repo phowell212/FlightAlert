@@ -26,6 +26,7 @@ MISSING_SOURCE_BYTES = (1 << 64) - 1
 POPULATION_HEADER = "serviceId\tserviceName\tz\tx\ty"
 SOURCE_SIZE_HEADER = "z\tx\ty\tsourceSha256\tsourceBytes\tdecodedBytes\tfeatureCount"
 FIXTURE_ZOOMS = (5, 8, 11, 13, 16)
+MERGE_FAN_IN = 64
 FIXTURE_POINTS = (
     ("new-york", 40.7128, -74.0060),
     ("london", 51.5074, -0.1278),
@@ -183,6 +184,28 @@ def _write_run(path: Path, packed: list[int]) -> None:
         os.fsync(output.fileno())
 
 
+def _merge_run_files(inputs: Sequence[Path], output_path: Path) -> None:
+    if not 2 <= len(inputs) <= MERGE_FAN_IN:
+        raise SampleError(
+            f"external merge fan-in must be between 2 and {MERGE_FAN_IN}: {len(inputs)}"
+        )
+    iterators = [_run_values(path) for path in inputs]
+    try:
+        with output_path.open("wb") as output:
+            for packed in heapq.merge(*iterators):
+                output.write(_U64.pack(packed))
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        for iterator in iterators:
+            iterator.close()
+
+
+def _delete_runs(paths: Sequence[Path]) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
 def _population_runs(
     population_path: Path,
     work_dir: Path,
@@ -195,8 +218,31 @@ def _population_runs(
     digest = hashlib.sha256()
     counts: Counter[int] = Counter()
     row_count = 0
-    runs: list[Path] = []
+    if MERGE_FAN_IN < 2:
+        raise SampleError(f"MERGE_FAN_IN must be at least 2: {MERGE_FAN_IN}")
+    levels: list[list[Path]] = []
+    initial_serial = 0
+    merge_serial = 0
     chunk: list[int] = []
+
+    def add_run(run: Path) -> None:
+        nonlocal merge_serial
+        level = 0
+        carry = run
+        while True:
+            while len(levels) <= level:
+                levels.append([])
+            levels[level].append(carry)
+            if len(levels[level]) < MERGE_FAN_IN:
+                return
+            group = levels[level]
+            levels[level] = []
+            carry = work_dir / f"merge-{merge_serial:06d}.u64"
+            merge_serial += 1
+            _merge_run_files(group, carry)
+            _delete_runs(group)
+            level += 1
+
     with resolved.open("rb") as source:
         header_raw = source.readline()
         digest.update(header_raw)
@@ -221,14 +267,29 @@ def _population_runs(
             counts[z] += 1
             row_count += 1
             if len(chunk) >= chunk_rows:
-                run = work_dir / f"population-{len(runs):06d}.u64"
+                run = work_dir / f"population-{initial_serial:06d}.u64"
+                initial_serial += 1
                 _write_run(run, chunk)
-                runs.append(run)
+                add_run(run)
                 chunk = []
     if chunk:
-        run = work_dir / f"population-{len(runs):06d}.u64"
+        run = work_dir / f"population-{initial_serial:06d}.u64"
         _write_run(run, chunk)
-        runs.append(run)
+        add_run(run)
+    runs = [path for level in levels for path in level]
+    while len(runs) > MERGE_FAN_IN:
+        collapsed: list[Path] = []
+        for offset in range(0, len(runs), MERGE_FAN_IN):
+            group = runs[offset : offset + MERGE_FAN_IN]
+            if len(group) == 1:
+                collapsed.extend(group)
+                continue
+            merged = work_dir / f"merge-{merge_serial:06d}.u64"
+            merge_serial += 1
+            _merge_run_files(group, merged)
+            _delete_runs(group)
+            collapsed.append(merged)
+        runs = collapsed
     return runs, digest.hexdigest(), row_count, dict(sorted(counts.items()))
 
 

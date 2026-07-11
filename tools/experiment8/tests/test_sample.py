@@ -36,6 +36,12 @@ def _json_lines(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def _independent_rank(tile: TileKey) -> bytes:
+    return hashlib.sha256(
+        f"flight-alert-exp8-pilot-v1|{tile.z}|{tile.x}|{tile.y}".encode("ascii")
+    ).digest()
+
+
 def _write_inputs(
     base: Path,
     population_tiles: list[TileKey],
@@ -182,28 +188,30 @@ class SampleManifestTests(unittest.TestCase):
     def test_census_certainty_tail_and_random_refill_are_exclusive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            census = TileKey(0, 0, 0)
+            census = [TileKey(0, 0, 0)] + [TileKey(1, x, y) for y in range(2) for x in range(2)]
             high = [TileKey(6, x, 20) for x in (10, 11, 12, 13, 14)]
             missing = high[1]
-            sizes = {census: 5, high[0]: 1000, high[2]: 10, high[3]: 20, high[4]: 30}
-            inputs = _write_inputs(base, [high[4], census, high[1], high[2], high[0], high[3]], sizes)
+            sizes = {tile: 5 for tile in census}
+            sizes.update({high[0]: 1000, high[2]: 10, high[3]: 20, high[4]: 30})
+            inputs = _write_inputs(base, [high[4], census[3], high[1], census[0], high[2], census[1], high[0], census[4], high[3], census[2]], sizes)
 
-            result = _build(inputs, base / "out", census_max_z=0, random_per_stratum=2, tail_per_zoom=1)
+            result = _build(inputs, base / "out", census_max_z=1, random_per_stratum=2, tail_per_zoom=1)
             rows = _json_lines(base / "out" / "sample.jsonl")
             by_key = {(row["z"], row["x"], row["y"]): row for row in rows}
 
             self.assertEqual(by_key[(0, 0, 0)]["selection"], "census")
+            self.assertTrue(all(by_key[(1, tile.x, tile.y)]["selection"] == "census" for tile in census[1:]))
             self.assertEqual(by_key[(6, high[0].x, 20)]["selection"], "tail")
             self.assertEqual(by_key[(6, missing.x, 20)]["selection"], "uncatalogued")
             random_rows = [row for row in rows if row["selection"] == "random"]
             candidates = [high[2], high[3], high[4]]
-            expected = sorted(candidates, key=lambda tile: (sample_rank(tile), tile.packed))[:2]
+            expected = sorted(candidates, key=lambda tile: (_independent_rank(tile), tile.packed))[:2]
             self.assertEqual(
                 [TileKey(int(row["z"]), int(row["x"]), int(row["y"])) for row in random_rows],
                 sorted(expected, key=lambda tile: tile.packed),
             )
-            self.assertEqual(result.sample_row_count, 5)
-            self.assertEqual(sum(result.selection_counts.values()), 5)
+            self.assertEqual(result.sample_row_count, 9)
+            self.assertEqual(sum(result.selection_counts.values()), 9)
             self.assertEqual(len({(row["z"], row["x"], row["y"]) for row in rows}), len(rows))
 
     def test_stage_a_keys_are_subset_of_b_when_random_becomes_tail(self) -> None:
@@ -264,6 +272,31 @@ class SampleManifestTests(unittest.TestCase):
             self.assertEqual((base / "one" / "sample.jsonl").read_bytes(), (base / "two" / "sample.jsonl").read_bytes())
             self.assertEqual((base / "one" / "fixtures.jsonl").read_bytes(), (base / "two" / "fixtures.jsonl").read_bytes())
 
+    def test_external_merge_fan_in_is_bounded_when_every_row_is_a_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            tiles = [TileKey(5, x, 10) for x in range(20)]
+            inputs = _write_inputs(base, list(reversed(tiles)), {tile: 100 for tile in tiles})
+            real_run_values = sample_module._run_values
+            active = 0
+            maximum_active = 0
+
+            def monitored_run_values(path: Path):
+                nonlocal active, maximum_active
+                active += 1
+                maximum_active = max(maximum_active, active)
+                try:
+                    yield from real_run_values(path)
+                finally:
+                    active -= 1
+
+            with mock.patch.object(sample_module, "MERGE_FAN_IN", 3, create=True), mock.patch.object(
+                sample_module, "_run_values", new=monitored_run_values
+            ):
+                _build(inputs, base / "out", sort_chunk_rows=1)
+
+            self.assertLessEqual(maximum_active, 3)
+
     def test_fixture_manifest_preserves_names_and_known_empty_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -304,6 +337,25 @@ class SampleManifestTests(unittest.TestCase):
                     stratum["sampleCount"],
                     stratum["certaintyCount"] + stratum["randomSelectedCount"],
                 )
+                self.assertEqual(
+                    stratum["randomSelectedCount"],
+                    min(
+                        summary["parameters"]["randomPerStratum"],
+                        stratum["populationCount"] - stratum["certaintyCount"],
+                    ),
+                )
+
+    @unittest.skipUnless(
+        Path(r"D:\FlightAlert-test-artifacts\experiment 8\samples\stage-a\fixtures.jsonl").is_file(),
+        "authoritative Experiment 8 Stage A fixture evidence is unavailable",
+    )
+    def test_authoritative_fixture_evidence_is_exactly_90_63_27(self) -> None:
+        path = Path(r"D:\FlightAlert-test-artifacts\experiment 8\samples\stage-a\fixtures.jsonl")
+        rows = _json_lines(path)
+        self.assertEqual(len(rows), 90)
+        self.assertEqual(sum(row["sourceState"] == "present" for row in rows), 63)
+        self.assertEqual(sum(row["sourceState"] == "known_empty" for row in rows), 27)
+        self.assertEqual(len({(row["z"], row["x"], row["y"]) for row in rows}), 90)
 
     def test_rejects_population_catalog_and_summary_hash_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
