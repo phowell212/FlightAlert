@@ -418,6 +418,12 @@ class PbfCache:
                             f"cache is held by another Experiment 8 writer: {self.root}"
                         ) from error
                     acquired = True
+                    with self._storage_lock:
+                        if self._reserved_storage_bytes:
+                            raise AcquisitionError(
+                                "cannot start a cache writer while storage reservations are active"
+                            )
+                        self._committed_cache_bytes = _directory_file_bytes(self.root)
                     yield
                 finally:
                     if acquired:
@@ -974,8 +980,12 @@ def _validate_sample_population(
             f"source population is unavailable: {source.population_path}: {error}"
         ) from error
     with population:
-        header_raw = population.readline()
+        header_raw = population.readline(_MAX_POPULATION_LINE_BYTES + 1)
         digest.update(header_raw)
+        if len(header_raw) > _MAX_POPULATION_LINE_BYTES:
+            raise AcquisitionError(
+                f"source population header exceeds {_MAX_POPULATION_LINE_BYTES}-byte limit"
+            )
         header = _population_line(header_raw, 1)
         if header != _POPULATION_HEADER:
             raise AcquisitionError(

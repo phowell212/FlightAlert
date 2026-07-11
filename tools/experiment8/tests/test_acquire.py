@@ -785,6 +785,49 @@ class PbfCacheTests(unittest.TestCase):
                     with caches[1].exclusive_writer():
                         self.fail("second writer must not acquire the same cache")
 
+    def test_sequential_preconstructed_writer_refreshes_cache_bytes_under_lock(self) -> None:
+        pbf = _mvt()
+        wire = _wire(pbf)
+        with tempfile.TemporaryDirectory() as directory, _server([_success(wire)]) as (url, state):
+            base = Path(directory)
+            lock, lock_sha = _write_source_lock(base / "source")
+
+            def new_cache() -> PbfCache:
+                return PbfCache(
+                    root=base / "shared-cache",
+                    verified_source_lock_path=lock,
+                    expected_verified_source_lock_sha256=lock_sha,
+                    request_url_template=f"{url}/tile/{{z}}/{{y}}/{{x}}.pbf",
+                    allow_loopback_http=True,
+                    min_free_bytes=0,
+                    max_cache_bytes=1_000_000,
+                    max_attempts=1,
+                )
+
+            first = new_cache()
+            second = new_cache()
+            with first.exclusive_writer():
+                self.assertEqual(first.acquire(TileKey(2, 1, 1)).status, "ready")
+            committed_bytes = sum(
+                path.stat().st_size for path in (base / "shared-cache").rglob("*") if path.is_file()
+            )
+            second.max_cache_bytes = committed_bytes
+
+            with second.exclusive_writer():
+                rejected = second.acquire(TileKey(2, 2, 1))
+
+            self.assertEqual(rejected.status, "failed")
+            self.assertIn("cache byte budget", rejected.error or "")
+            self.assertEqual(len(state.requests), 2)
+            self.assertEqual(
+                sum(
+                    path.stat().st_size
+                    for path in (base / "shared-cache").rglob("*")
+                    if path.is_file()
+                ),
+                committed_bytes,
+            )
+
     def test_cache_commit_failure_leaves_no_false_ready_entry_and_can_retry(self) -> None:
         pbf = _mvt()
         wire = _wire(pbf)
@@ -929,6 +972,22 @@ class AcquisitionManifestTests(unittest.TestCase):
             cache.source.population_path.write_text("\n".join(population_lines) + "\n", encoding="utf-8")
 
             with self.assertRaisesRegex(AcquisitionError, "population line.*byte limit"):
+                acquire_manifest(sample, _sha(sample.read_bytes()), cache, 1, base / "out")
+
+            self.assertEqual(len(state.requests), 0)
+
+    def test_rejects_oversized_population_header_before_network(self) -> None:
+        pbf = _mvt()
+        with tempfile.TemporaryDirectory() as directory, _server([_success(_wire(pbf))]) as (url, state):
+            base = Path(directory)
+            sample = base / "sample.jsonl"
+            sample.write_text('{"sourceState":"present","z":0,"x":0,"y":0}\n', encoding="utf-8")
+            cache = _cache(base, url)
+            population = cache.source.population_path
+            original = population.read_bytes()
+            population.write_bytes((b"x" * 5000) + b"\n" + original.split(b"\n", 1)[1])
+
+            with self.assertRaisesRegex(AcquisitionError, "population header.*byte limit"):
                 acquire_manifest(sample, _sha(sample.read_bytes()), cache, 1, base / "out")
 
             self.assertEqual(len(state.requests), 0)
