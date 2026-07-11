@@ -25,7 +25,7 @@
 - Never silently ignore an unsupported relevant style expression, ambiguous semantic classification, ID collision, oversized block, malformed geometry, or missing string/style reference.
 - Determinism is required across input order, worker counts, serial/parallel normalization, and repeated cooks.
 - GPU utilization is not a goal. CPU/I/O implementations win unless a bounded real normalization or compression stage is demonstrably faster end-to-end on the GPU.
-- Degenerate label/reference visuals are a fail-fast Experiment 8 rejection, not deferred polish. Structural validity, speed, or size can never compensate for a prominent source-named feature losing its applicable name; oversized text; crushed glyph spacing; fragmented/overlapping words; unstable path rotation; or unreadable collision placement. Preserve source honesty: retain a name only when the pinned Esri source supplies and styles it for the applicable LOD, and never invent one.
+- Degenerate label/reference visuals are a fail-fast Experiment 8 rejection, not deferred polish. Structural validity, speed, or size can never compensate for an applicable prominent sourced name being lost; oversized text; crushed glyph spacing; fragmented/overlapping words; unstable path rotation; or unreadable collision placement. A line name is applicable only when one source occurrence supplies both exact text and exact placement path (or a documented nonzero provider-stable ID joins them), its style/policy display interval contains the zoom, its unmodified rational path intersects the viewport safety region with a continuous segment long enough for the whole shaped run, and deterministic whole-label collision accepts it. The screenshot alone is not evidence that a particular segment owns a name. Equal text, proximity, ancestor tiles, apparent water continuity, similar geometry, or approximate endpoint matches never transfer a name.
 - Keep every memory-mapped index segment below `268,435,456` bytes, every positional-read pack shard at or below `1,610,612,736` bytes (1.5 GiB), and every independently inflated feature/posting/tile block at or below `4,194,304` bytes.
 - Package authorization ceiling is `23,500,000,000` bytes; design target is `22,000,000,000` bytes. Plan 2 records measurements but does not make the statistical world-size decision.
 
@@ -103,6 +103,9 @@ Create complete tests for:
 - a tile-specific source occurrence never becoming the Format B dedupe unit;
 - byte-identical canonical variants being the only reusable Format B unit while tile postings reconstruct the exact Format A renderer multiset and order;
 - exact required fields for numeric draw order, geometry ID, source-style IDs, render-token IDs, placement/collision, land evidence/status, and semantic subtype.
+- exact line-label candidate identity/evidence, source-tile edge domain, source zoom, display band, projection mode, spacing/max-angle/avoid-edge tokens, and viewport-level candidate deduplication;
+- descendant retrieval intersecting the same exact canonical source path without clipping/mutating its identity, while a non-intersecting sibling receives no candidate;
+- multiple retrieval memberships yielding one whole-word viewport candidate, with equal-text disconnected paths remaining distinct.
 
 Run and verify RED:
 
@@ -177,6 +180,10 @@ class TilePosting:
     world_wrap: int
 ```
 
+`NormalizedPlacement` and line-label variants explicitly carry `label_candidate_id`, `text_evidence_kind`, numeric `text_source_field_id`, `placement_source_feature_id`, `placement_geometry_id`, source tile/zoom/edge domain, `projection_mode`, exact display-centizoom interval, spacing, maximum bend angle, collision group, priority, avoid-edge/keep-upright flags, and an active-band limit. Define byte-exact `canonical_line_label_candidate_bytes` over every meaning/eligibility field: source-feature and placement-geometry full digests; evidence kind/source-field ID; exact text; style/policy digest; source tile/zoom/edge domain; projection mode; display interval; spacing/max angle/collision/priority; placement flags; and active-band data. `label_candidate_id = SHA256("FAE8LLB1\\0" || canonical_line_label_candidate_bytes)`. Exclude only documented transport membership fields: requested retrieval tile/metatile, feature page/local ordinal, deterministic owner, and world-wrap copy. PBF ID `0` can never satisfy a join.
+
+Cross-LOD support projects the same occurrence and its complete canonical path into intersecting descendant retrieval/metatile memberships. It never copies a name onto child geometry. The canonical path and candidate ID remain unchanged; clipping is temporary placement work only. Viewport assembly unions and deduplicates memberships by candidate ID before shaping/placement, so retrieval-tile edges cannot split a word. A style-driven `ParentLabelBand` stores one occurrence with source zoom, exact display interval, source/style IDs, and a hard band limit; child tiles are derived arithmetically and never materialized as one posting per descendant.
+
 `SourceOccurrence` is evidence-only and is never joined or required by a phone package reader. The hot renderer record is exactly `TilePosting + CanonicalVariant`; `feature_id` is the complete and sole occurrence-specific field in its package bytes, while `dedupe_id` comes from the variant. The hot record excludes source ordinal, source-layer string, source geometry, the 32-byte audit digest, and raw source properties. Package manifests bind the normalized/source-audit stream hashes, and the independent verifier cross-checks each hot `feature_id` against the external occurrence evidence. This keeps provenance complete without multiplying documentary bytes across the phone package.
 
 `SourceGeometry` preserves declared extent `E` and every signed source-local coordinate exactly. `RendererGeometry` is a lossless canonical world-rational encoding: checked signed-64-bit numerators `(tile*E + coordinate)` over denominator `(2^z*E)`, reduced by the greatest common divisor shared by the denominator and all geometry numerators. It preserves part/ring order, winding, closure, and provider buffers. X reduces modulo one world only for point seam identity/ownership; renderer geometry stays unwrapped and `TilePosting.world_wrap` reconstructs an allowed wrapped point reuse. A fixed common grid is allowed only after proving conversion lossless for every admitted extent. Include x=0/x=max antimeridian and cross-LOD exact-equality goldens. Do not clamp, stitch, round, repair, drop, or merge merely similar geometries.
@@ -192,6 +199,8 @@ Domain-separate every digest and retain every full SHA-256 fingerprint in detach
 Every ID preimage excludes its own numeric/full-digest field and includes an explicit domain/version prefix; the renderer contract documents each preimage byte-for-byte so no identifier is self-referential.
 
 Tests mutate every serialized variant field one at a time and require a different full/hot variant ID. A separate test mutates only provenance fields in `SourceOccurrence` and requires identical canonical variant bytes/ID. Independent package readers recompute every variant ID from package bytes alone without consulting detached occurrence evidence.
+
+Line-label tests additionally prove exact rational path/tile intersection, source-edge rather than descendant-edge avoidance, antimeridian bands, stable global placement phase, whole-run atomic acceptance, 1000 px repeat spacing, 30-degree maximum bend, and viewport deduplication. Mutate every identity field and require a different full/hot candidate ID; mutate only transport membership fields and require the same ID; reject forced 64-bit collisions. Same text on disconnected/similar paths, approximate endpoints, different LODs, and zero provider IDs remain distinct. Runtime clipping cannot alter canonical geometry/candidate hashes, and no semantic or posting stream contains per-character records.
 
 Canonical records use the `N8T1` version/magic and integer/enumerated/NFC-string fields only. A reconstructed hot renderer record is exactly one tile posting joined to its referenced variant; detached `SourceOccurrence` bytes are not part of the phone record. Every adapter returns each requested tile in one order: `(draw_order, priority, layer_group, feature_kind, canonical_variant_id, feature_id, canonical_renderer_bytes)`. The global semantic stream prefixes packed tile key and uses that same order. Its hash is `SHA256("flight-alert-exp8-semantic-v1\\0" || repeated(u32le(record_length) || record_bytes))`; the independent verifier reimplements this serialization from the document rather than importing the writer.
 
@@ -235,6 +244,12 @@ Tests must cover:
 - line casing plus inner stroke ordering;
 - label min/max zoom, opacity/fade, font, halo, placement, priority, repeat distance, and collision group;
 - the locked `Water line/label/Default` rule compiling as one whole-text line label with source values `text-size=10`, `text-letter-spacing=0.07`, `text-max-angle=30`, `symbol-spacing=1000`, `text-max-width=8`, `symbol-avoid-edges=true`, and no per-glyph text records;
+- direct styled line-label candidates retaining their own exact source path; same-name disconnected paths and PBF ID `0` never join;
+- `Water line large scale` retaining real `_name_en` semantic evidence without automatically inheriting the provider's `Water line/label/Default` style;
+- no production policy branch keyed to the literal text `Chester River`;
+- direct z12 style provenance emitting `PINNED_STYLE_LINE_LABEL` from `_name_global`;
+- explicitly enabled fallback provenance emitting `FLIGHT_ALERT_POLICY` from its own `_name_en` occurrence/path with a distinct policy digest/candidate ID;
+- disabled fallback emitting no label from z8 named geometry, and enabled fallback never borrowing another tile/LOD geometry;
 - boundary hierarchy/disputed/coastline/water flags, with boolean values interpreted by value rather than presence;
 - explicit mapping of every relevant label/line/public-land outline source layer to one numeric group;
 - explicit audited exclusion of satellite-base-owned fill/context layers and icon-only rules;
@@ -258,6 +273,8 @@ A feature is admitted only when its exact source layer is policy-allowlisted and
 The typed semantic record retains exact raw selector inputs needed by later placement and presentation, including `_symbol`, `_label_class`, `SelectionPriority`, `Viz`, `DisputeID`, `_minzoom`, `_maxzoom`, `_len`, `DirTravel`, `DisplayID`, `Alt_ID`, matched style order, and token IDs. Text transform remains a style token rather than a destructive string rewrite. A matched label with absent/blank display text emits no fabricated label and increments an audited no-text counter.
 
 The current-phone screenshot is a negative acceptance baseline, not a style source. Its oversized, compressed, fragmented, overlapping path text must never be reproduced. The locked Esri water-line label rule supplies the source style evidence above; the renderer contract preserves each name as one shaped text run plus its complete line path/collision inputs. Later Android integration must prove appropriate smaller on-device sizing, intact glyph spacing/word shaping, stable baseline direction, and collision readability at this exact class of view before success.
+
+Compile `Water line/label/Default` as direct `PINNED_STYLE_LINE_LABEL` provenance. A separately authorized named-geometry fallback must use its own versioned Flight Alert policy/token and `FLIGHT_ALERT_POLICY` provenance, may render only that occurrence's exact path, and cannot name another tile/LOD geometry. Prefer direct styled candidates through deterministic placement priority, never semantic merging.
 
 Land context uses an explicit `land_evidence` enum and `protected_status` (`SOURCE_EXPLICIT`, `NAME_DERIVED`, `AMBIGUOUS`, or `NOT_APPLICABLE`). Only `SOURCE_EXPLICIT` evidence may enter `PUBLIC_LANDS` or receive protected/public presentation. `Park or farming`, `forest or park`, and `openspace or forest` do not prove ownership; name-derived/ambiguous records are either excluded or assigned neutral `CONTEXT`, and may never inherit public-land colors, labels, attribution, or claims. Tests assert final renderer group and render-token identity, not merely an internal boolean.
 
@@ -362,7 +379,7 @@ Active output: `C:\FlightAlert-exp8-work\pilot\smoke\normalized\`. Accepted poli
 
 Expected: 154 input states reconcile to 127 acquired present tiles plus 27 known-empty; zero source/style/geometry failures; nonzero applicable records in every required group; serial and parallel normalized hashes/bytes match; known-empty coordinates have no source file or normalized feature block.
 
-Also acquire and hash-pin a minimal current-phone visual-QA source fixture through the hardened Plan 1 cache after the Stage A writer releases its lock. Independently prove whether the pinned Esri source/style supplies `Chester River` for the applicable source/display LOD. If supplied, normalization must retain the exact name, full geometry/path, zoom interval, and whole-label style/placement fields; omission is a hard failure. If not supplied, evidence records the honest absence and no name is invented. The same fixture asserts that normalization never emits per-character fragments or oversized presentation tokens inconsistent with the locked style evidence.
+Also acquire and hash-pin a minimal current-phone visual-QA source fixture through the hardened Plan 1 cache after the Stage A writer releases its lock. Strictly reverify the complete relevant LOD chain and viewport halo. Normalization must retain every verified occurrence's exact name, full geometry/path, source-tile edge domain, zoom interval, and whole-label style/placement fields; omission is a hard failure where that exact path is applicable. Require `Chester River` in an eastern viewport intersecting its verified sourced path, and require honest absence in the western Radcliffe/Island/Dam viewport unless another verified occurrence supplies a western named path. Never borrow the eastern name through visual continuity. If the user requires the western corridor labeled and Esri supplies no named path at any relevant LOD, add and independently lock a real hydrography source with exact named geometry before claiming success. The fixture also asserts that normalization never emits per-character fragments or oversized presentation tokens inconsistent with locked style evidence.
 
 - [ ] **Step 4: Verify and commit Task 3**
 
@@ -408,6 +425,8 @@ Test golden bytes and rejection for:
 - codec mismatch, truncated stream, trailing bytes, checksum/hash mismatch, zip bomb, and raw block over 4 MiB;
 - exact 72-byte little-endian index entries and rejection of nonzero reserved bits, overlap, overflow, inconsistent lengths/counts, or wrong block digest;
 - mapped index segmentation before 256 MiB and positional pack rollover at 1.5 GiB;
+- bounded `ParentLabelBand` descriptors, exact source-path/metatile membership encoding, deterministic owner keys, and a frozen per-query placement-block/page-touch ceiling;
+- sequential reusable-buffer decoding with aggregate scratch ceilings of 6 MiB for Format A and 10 MiB for Format B, plus a 32 MiB exact-weight reconstructed-renderer heap ceiling;
 - repeated serial/parallel table builds producing byte-identical files.
 
 - [ ] **Step 2: Implement the common contract**
@@ -430,7 +449,7 @@ offset:u64, compressed_length:u32, raw_length:u32,
 crc32:u32, record_count:u32, sha256:bytes[32]
 ```
 
-The package contract defines the `primary_key` per index family: packed requested tile for Format A tile blocks; the lowest `canonical_variant_id` in each contiguous sorted Format B feature block (reader chooses the predecessor block, then requires an exact in-block ID); and packed `(z, metatile-size, metatile-x, metatile-y)` key for Format B postings. Index files are segmented below 256 MiB and may be memory-mapped. A headerless 72-byte segment may contain at most 3,728,270 entries (268,435,440 bytes). Pack shards roll at or below 1.5 GiB and are read by bounded positional reads; they are not whole-file memory maps.
+The package contract defines the `primary_key` per index family: packed requested tile for Format A tile blocks; exact `feature_page_id` for direct Format B page lookup (postings supply page ID/local ordinal and the page verifies the expected canonical variant ID); and packed metatile coordinate `(metatile_x << 29) | metatile_y` for direct/placement postings. Placement files live under `placement/zNN/bBBBB/sSS/`, so their path/header binds display zoom, exact parent-band ID, and adaptive metatile size; the 58-bit metatile coordinate is therefore unambiguous. Index files are segmented below 256 MiB and may be memory-mapped. A headerless 72-byte segment may contain at most 3,728,270 entries (268,435,440 bytes). Pack shards roll at or below 1.5 GiB and are read by bounded positional reads; they are not whole-file memory maps.
 
 Pin codec settings:
 
@@ -453,7 +472,9 @@ zstandard.ZstdCompressor(
 
 Raw DEFLATE additionally pins `strategy=zlib.Z_DEFAULT_STRATEGY` and uses exactly one ordered input stream followed by `flush(zlib.Z_FINISH)`. Manifests record Python, package, `zlib.ZLIB_VERSION`, and `zlib.ZLIB_RUNTIME_VERSION`; any different runtime is a distinct package identity requiring byte-identity reproof. Bounded decompression supplies at most `raw_length+1` output space, requires exactly `raw_length`, `eof=True`, no `unused_data`/`unconsumed_tail`, and no trailing frame/bytes. SHA-256 covers the exact compressed block bytes named by the index; CRC32 covers the exact raw block bytes. Both are checked before a decoded record is trusted.
 
-`docs/experiment8-package-contract.md` is the language-neutral authority for both independent readers. It freezes file/header magics and versions, integer endianness, enum/codec/flag IDs, canonical manifest JSON (`UTF-8`, sorted keys, compact separators, one final LF, no timestamps/absolute paths), string/style/coverage/empty/integrity encodings, per-index primary-key meaning, 72-byte entries, block framing, compressed-vs-raw hash targets, segmentation/sharding, exact EOF, and renderer reconstruction order. Format-specific modules may implement it but cannot be its only specification.
+`docs/experiment8-package-contract.md` is the language-neutral authority for both independent readers. It freezes file/header magics and versions, integer endianness, enum/codec/flag IDs, canonical manifest JSON (`UTF-8`, sorted keys, compact separators, one final LF, no timestamps/absolute paths), string/style/coverage/empty/integrity encodings, per-index primary-key meaning, 72-byte entries, block framing, compressed-vs-raw hash targets, segmentation/sharding, exact EOF, parent-label bands, placement membership/ownership/page-touch limits, and renderer/display-query reconstruction order. Format-specific modules may implement it but cannot be its only specification.
+
+Readers decode sequentially through reusable bounded buffers. Format A peak scratch is one at-most-4-MiB direct/placement block plus at most 2 MiB codec state (`6,291,456` bytes total). Format B peak scratch is one at-most-4-MiB placement/posting block plus one at-most-4-MiB feature page plus at most 2 MiB codec state (`10,485,760` bytes total); touched pages are never inflated simultaneously. Exact documented heap weights cap reconstructed renderer output at `33,554,432` bytes per display query. Cook, verification, and read fail closed when aggregate scratch, page-touch, or reconstructed-heap ceilings would be exceeded.
 
 Every block has explicit codec, raw/compressed length, full SHA-256, CRC32, record ceilings, and exact EOF checks. `integrity.bin` retains full file/table hashes; no 32-bit hash is a trust boundary. The writer retains full 256-bit IDs in evidence and fails the entire cook on any unequal canonical-byte collision under a hot 64-bit ID.
 
@@ -489,7 +510,7 @@ Tests require:
 - sorted sparse 64-bit tile index using exact 72-byte entries, mapped-index segmentation below 256 MiB, 1.5-GiB positional pack rollover, and offsets bounded to their owning pack;
 - one independent compressed block per nonempty normalized tile;
 - present nonempty, proved semantic-empty, incomplete/unavailable, known-empty, and outside-coverage behavior;
-- random access inflating only one tile block;
+- random access inflating one direct tile block plus at most one placement block per active label band, under a frozen active-band limit;
 - complete typed record/count/hash readback and exact EOF;
 - corruption in manifest/index/coverage/string/style/integrity/pack failing closed, never returning empty;
 - no absolute paths or timestamps in deterministic files;
@@ -508,10 +529,12 @@ coverage/zNN.cov
 empty/zNN.empty
 index/zNN/iPPPP.idx
 blocks/zNN/bPPPP.pack
+placement/zNN/bBBBB/sSS/pPPPP.idx
+placement/zNN/bBBBB/sSS/pPPPP.pack
 integrity.bin
 ```
 
-Index only nonempty semantic tiles; every omitted source-present tile must appear in the independently hashed semantic-empty proof set or resolve `Unavailable`. Every reader returns the single Task 1 order `(draw_order, priority, layer_group, feature_kind, canonical_variant_id, feature_id, canonical_renderer_bytes)`. Record exact logical bytes, filesystem bytes, block/raw/record distributions, and decode scratch/heap estimates in a separate deterministic summary.
+Index only nonempty semantic tiles; every omitted source-present tile must appear in the independently hashed semantic-empty proof set or resolve `Unavailable`. Format A inlines complete hot label records in bounded placement-metatile blocks; it does not expand one record into every child tile. Every reader returns the single Task 1 order `(draw_order, priority, layer_group, feature_kind, canonical_variant_id, feature_id, canonical_renderer_bytes)`. Record exact logical bytes, filesystem bytes, direct/placement block/raw/record distributions, active bands, memberships, and decode scratch/heap estimates in a separate deterministic summary.
 
 - [ ] **Step 3: Verify and commit Task 5**
 
@@ -550,8 +573,10 @@ Tests require:
 - a 2x2 posting block still over 4 MiB failing the format rather than silently oversizing;
 - feature blocks content-addressed, sorted, and capped at 4 MiB raw;
 - sorted delta-coded feature IDs/postings and deterministic, explicitly evidenced placement ownership;
+- one deterministic owner metatile from the exact anchor plus packed-key tie-break, at most four exact path/label-envelope membership references, and no child-tile expansion;
+- spatially local feature pages with a frozen page-touch limit per placement query;
 - present semantic-empty/known-empty/outside-coverage truth matching Format A;
-- random access touching only coverage/index, one postings block, and required bounded feature blocks;
+- random access touching only coverage/index, one direct postings block plus at most one placement block per active band, and the frozen maximum number of bounded spatial feature pages;
 - corruption, dangling postings, duplicate ownership, unknown IDs, trailing bytes, and wrong hashes fail closed;
 - worker counts 1 and 8 produce byte-identical packages.
 
@@ -569,10 +594,12 @@ features/fPPPP.idx
 features/fPPPP.pack
 postings/zNN/mPPPP.idx
 postings/zNN/mPPPP.pack
+placement/zNN/bBBBB/sSS/pPPPP.idx
+placement/zNN/bBBBB/sSS/pPPPP.pack
 integrity.bin
 ```
 
-The mainline candidate performs exact content-addressed dedupe only. Point/label ownership uses a stable exact global anchor. Lines and polygons without provider identity retain per-source-tile identity and receive no cross-tile dedupe credit; any later exact variant ownership must use a documented stable anchor (for example, proven bounds center) and independent proof. Do not topologically stitch or infer global identity from names, class fields, or zero/missing source IDs. If an experimental stitching algorithm appears equally promising, preserve it as a separate artifact/branch for later testing; it cannot replace the exact candidate without independent semantic proof.
+The mainline candidate performs exact content-addressed dedupe only. Point/label ownership uses a stable exact global anchor. Lines and polygons without provider identity retain per-source-tile identity and receive no cross-tile/cross-LOD dedupe credit; any later exact variant ownership must use a documented stable anchor and independent proof. Label memberships may repeat one candidate ID for retrieval, but removing duplicate transport references is not semantic dedupe or projection credit. Store Format B variant pages by geographic owner locality rather than global random ID order; postings reference `feature_page_id + local_ordinal + canonical_variant_id`. Do not topologically stitch or infer global identity from names, class fields, zero/missing source IDs, parent tiles, or approximate endpoints. If an experimental stitching algorithm appears equally promising, preserve it as a separate artifact/branch for later testing; it cannot replace the exact candidate without independent semantic proof.
 
 Size projections report both owner-charged exact-dedupe bytes and a conservative no-cross-tile-dedupe bound. Use the larger bound for the under-25-GB decision unless ownership and projection credit are independently proven.
 
@@ -614,9 +641,11 @@ Tests enforce the import boundary with AST/module inspection and prove the verif
 - uses a separately implemented strict raw protobuf/MVT command parser for source parity; it does not import the normalizer's parser or use the high-level decoder as an oracle;
 - rejects shared fake-empty blocks, missing groups, manifest-only count claims, malformed geometry, and unresolved references;
 - produces the same sorted renderer-contract hash for Format A and Format B under both codecs;
+- produces byte-identical display-query candidate/posting multisets, ordering, and deterministic placement traces for A/B under both codecs;
 - detects one-bit corruption in every file family;
 - proves every `Ready(empty)` tile through the semantic-empty set and reports any source-present tile with neither a block nor empty proof as `Unavailable`;
 - records PC encode/decode wall time, CPU time, peak RSS, compressed/raw bytes, and per-block latency without app runtime instrumentation.
+- records p50/p95/p99/max direct/placement blocks, feature pages, path points, membership references, reconstructed heap, and bytes per display query, charging every occurrence/reference and granting no name/cross-LOD dedupe credit.
 
 - [ ] **Step 2: Implement independent readers and deterministic reports**
 
@@ -670,6 +699,8 @@ Expected:
 - all 27 known-empty fixtures remain explicit with no feature/posting/block;
 - every present semantic-empty tile, if any, returns `Ready(empty)`;
 - every block and mapped file stays within its bound;
+- every authorized display query stays within active-band/placement-block/feature-page limits, and missing/corrupt parent placement data returns `Unavailable` rather than empty or child-only fallback;
+- Format A stays at or below 6 MiB aggregate query scratch, Format B at or below 10 MiB with sequential reusable page decode, and reconstructed renderer heap at or below 32 MiB by exact weight; any excess fails the cook/read/verification;
 - no package claims whole-world completeness from the smoke sample.
 
 - [ ] **Step 4: Preserve the better and alternate candidates**
