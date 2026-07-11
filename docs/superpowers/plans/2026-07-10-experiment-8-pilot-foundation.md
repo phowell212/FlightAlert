@@ -521,13 +521,15 @@ python -m tools.experiment8.make_acquisition_smoke `
 
 Expected: the input has 154 rows (`63` present fixtures + `27` source-proven known-empty fixtures + `64` non-overlapping Stage A rows). All known-empty fixtures remain explicit and unrequested; zero present-fixture/sample failures; every acquired PBF decodes; all sidecars and hashes pass an immediate resume run; and no repository file is generated.
 
-- [ ] **Step 6: Start/resume full Stage A acquisition**
+- [x] **Step 6: Start/resume full Stage A acquisition**
 
 Run the bounded acquisition CLI for the complete Stage A manifest. It may resume across goal turns.
 
 Expected completion gate: every Stage A row is `ready`, the sorted acquisition manifest matches the sample exactly, no unresolved source error remains, and total cached bytes/hash inventory are documented. Until this gate passes, Plan 2 may be implemented against the smoke corpus but no Stage A package projection may be claimed.
 
-- [ ] **Step 7: Verify repository preservation**
+Completed 2026-07-11: all `33,175` Stage A rows are unique and `ready`, with zero failed/error/quarantine rows. The run took `2,998.742` seconds; `33,076` tiles completed in one network attempt and `99` were revalidated cache hits. The corpus contains `7,984,767` decoded features, `725,276,065` exact wire bytes, and `1,299,482,740` decoded PBF bytes. `acquisition.jsonl` is `13,452,213` bytes at SHA-256 `891f100e7989a6a4b7eb28d09bf85be586d60ef2034b5e61fd70a6b25e3ccf24`; audit SHA-256 is `07d07e61d2327120f9fdb32358aa45358fb0dde8affefad85fa26b63e1f2b945`; summary SHA-256 is `82b1ee51f0daa90baa7b5a95a3855fba6b4daa4bcc99d2045e4a1ff827444193`. The complete cache copy is `99,684` files / `2,089,475,249` bytes on both D and C; every later C-drive read remains subject to per-file acquisition-ledger rehash.
+
+- [x] **Step 7: Verify repository preservation**
 
 ```powershell
 git status --short --branch
@@ -535,3 +537,5 @@ python -m unittest discover -s tools/experiment8/tests -v
 ```
 
 Expected: only intentional Experiment 8 source commits plus the user's pre-existing Experiment 7 working changes; all tests pass and generated artifacts remain external.
+
+Verified after the isolated hash-locked Plan 2 runtime install: `104` Experiment 8 tests pass. Generated caches/evidence remain external. The user's two modified Experiment 7 Kotlin files, three untracked Experiment 7 files, and the other agent's untracked owned performance-spec document remain preserved and unstaged.
