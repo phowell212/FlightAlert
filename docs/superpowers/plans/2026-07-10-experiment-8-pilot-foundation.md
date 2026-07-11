@@ -503,7 +503,7 @@ Expected, using generated exact counts rather than treating conservative bounds 
 - all hashes and exact stratum counts are present;
 - repeated generation is byte-identical.
 
-- [ ] **Step 5: Run fixture and 64-tile smoke acquisition**
+- [x] **Step 5: Run fixture and 64-tile smoke acquisition**
 
 Validate every fixture state against the pinned population. Acquire every `present` fixture plus the first 64 packed-key Stage A rows to a new cache generation; do not fetch rows proven `known_empty`.
 
