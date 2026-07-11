@@ -399,10 +399,127 @@ control is accepted.
 
 ### Performance
 
-Correctness and visual gates pass first. Measure frame timing, memory, and input
-continuity externally with the same app/package hashes and cold/warm scenarios.
-Shaped-run and decoded-path caches are bounded and their eviction changes only
-recomputation, never information. No app-side profiling code is added.
+Performance is a co-equal blocking Experiment 8 release gate. Correctness and
+visual truth are checked first so a faster candidate cannot pass by omitting,
+delaying, thinning, simplifying, or destabilizing reference information. A
+candidate that is visually correct but misses the performance gates also
+fails; neither dimension compensates for the other.
+
+The final combined-app gate reuses the independently validated external
+Perfetto, `gfxinfo`, input-causality, memory, thermal, and ordinary-UI
+measurement foundation. It adds no app-side profiler, counter, diagnostic
+overlay, hidden gesture, timing log, or test-only production path. Every
+artifact binds the exact source commit, APK SHA-256, installed package SHA-256,
+local-reference package generation/hash, catalog/policy hashes, device build,
+display mode, settings, filters, viewport, cache class, gesture script, and
+active-window timestamps.
+
+Baseline and candidate use the same physical 120 Hz phone and paired AB/BA
+order. A pair is comparable only when orientation, resolution, refresh mode,
+thermal status, compiler/profile state, map bounds, settled zoom, filters,
+aircraft/path/aviation state, provider/cache state, and visible semantic
+population are equivalent. Invalidating one member invalidates and reruns the
+pair. A poor result is never an invalidation.
+
+#### Blocking reference scenarios
+
+Each applicable cell receives three valid 60-second repetitions after a fixed
+settle; all three must pass. Timing and >=120 FPS temporal video are separate
+runs so capture overhead cannot improve or poison frame evidence.
+
+- sustained pan and real two-pointer pinch across both sides of every label,
+  line, polygon, prominence, style, and fade boundary;
+- sparse ocean/coastline, ordinary regional, dense metropolitan, and dense
+  mixed water/place/border/transport viewports;
+- the Chester River corridor at wide, entry, normal, and close zooms;
+- antimeridian wrap, high-latitude Web Mercator limits, and a legitimately
+  empty/offline viewport;
+- cold process/package-cache, warm process/cold decoded-path cache, and fully
+  warm cache classes;
+- rapid reference master/filter/category toggles, coastline-only and
+  administrative-border combinations, rotation where supported, resize,
+  portrait, landscape-short, and large-font UI;
+- ten repeated wide-to-close-to-wide cycles followed by a 30-second settle,
+  while live aircraft, selected real path when available, Esri imagery,
+  aviation layers, ownship, alerts, panels, and chrome remain enabled.
+
+#### Absolute active-rendering tier
+
+Every active pan/pinch cell must satisfy:
+
+- median one-second delivered-present FPS >= 90;
+- full-window delivered-present FPS >= 90;
+- full-window app-frame p95 < 20 ms and p99 < 50 ms;
+- present-interval p99 < 50 ms and no active-window presentation gap >= 100 ms;
+- Android modern jank < 5%; and
+- FrameTimeline jank < 5%.
+
+Quiescent/static cells are not forced to redraw useless frames. Across 30
+declared tap-or-drag trials they instead require input-to-first-present p95 < 20
+ms and maximum < 50 ms, with no added idle redraw cadence. A reference filter
+change must show the first correct frame within 100 ms at p95 and 250 ms at the
+maximum, including collision recomputation; an intermediate frame may not show
+a semantically wrong mixture.
+
+Visible local-reference readiness is measured from the first eligible frame to
+the first complete correct reference frame for the declared viewport:
+
+| Cache class | Wide/regional | Dense/close |
+|---|---:|---:|
+| decoded geometry and shaped runs warm | <= 250 ms | <= 500 ms |
+| process cold, package/index warm | <= 1,000 ms | <= 2,000 ms |
+| process and OS file cache cold | <= 2,000 ms | <= 5,000 ms |
+
+No placeholder, stale wrong-location feature, lower-prominence substitute, or
+partial word is counted as ready.
+
+#### Paired regression tier
+
+The median paired candidate delta may not degrade any already-passing primary
+FPS, p95/p99, jank, input latency, readiness, decode/I/O latency, or peak/settled
+memory metric by more than 10%; the target is materially below 10%. Results
+within 3% for FPS/memory, 1 ms for p95/p99/input latency, 0.5 percentage points
+for jank, or 5% for readiness are treated as tied and expanded to five valid
+pairs. If still tied and both pass, keep the smaller/clearer implementation and
+retain the alternative for later user testing. Crossing the relative gate does
+not excuse missing an absolute gate.
+
+#### Resource and soak tier
+
+Shaped-run, collision, decoded-path, package-page, bitmap, and source caches
+have deterministic entry and byte ceilings. Eviction changes only
+recomputation, never information, prominence, naming, geometry, placement, or
+filter results. The renderer must query/decode by viewport; no whole-world heap
+index or unbounded per-pan allocation is accepted.
+
+After one priming route, the ten-cycle soak must have a median settled-PSS slope
+<= 1 MiB per cycle across the final five cycles, and its final median settled
+PSS must return within the larger of 16 MiB or 10% of primed settled PSS. Record
+Java heap, native heap, graphics/bitmap allocation, total PSS/RSS, page faults,
+package/index reads, decoded bytes, cache ceilings, and disk-cache bytes. No
+OOM, ANR, crash, unbounded growth, repeated retry spin, or whole-package scan is
+accepted.
+
+The complete mandatory steady phone footprint remains < 25,000,000,000 bytes,
+including the installed APK, reference package/index/catalog/manifest, retained
+mandatory install artifacts, and bounded provider caches. Temporary cook or
+install duplication must be absent from steady state. The provisional Esri
+base-imagery disk-cache allocation is <= 1,000,000,000 bytes unless the final
+joint storage ledger assigns a smaller value; it may never grow unbounded.
+
+Timing runs require Android thermal status 0 at preflight, throughout the
+active window, and postflight. A separate 30-minute ordinary-use soak records
+battery energy, current samples, and temperature. Candidate energy use may not
+exceed the valid paired baseline by more than 10%; maximum temperature rise may
+not exceed the larger of the baseline rise plus 1 degree Celsius or 110% of the
+baseline rise. No thermal transition or sustained frequency collapse is
+accepted.
+
+Performance completion requires raw traces, raw `gfxinfo`, input event logs,
+memory samples, cache/storage inventories, thermal/power samples, exact run
+manifests, independently recomputed summaries, and matched temporal video. A
+host unit test, build, screenshot, single run, average FPS number, or another
+deity lane's pass cannot substitute for this combined Experiment 8 gate.
 
 ## Implementation split
 
