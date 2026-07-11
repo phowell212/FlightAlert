@@ -173,7 +173,8 @@ def _server(
             self.send_response(status)
             for name, value in headers.items():
                 self.send_header(name, value)
-            self.send_header("Content-Length", str(len(body)))
+            if not any(name.lower() == "content-length" for name in headers):
+                self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
@@ -438,6 +439,32 @@ class PbfCacheTests(unittest.TestCase):
             self.assertEqual(open_mock.call_count, 0)
             self.assertEqual(paths.sidecar_path.read_bytes(), sidecar_before)
 
+    def test_leading_zero_content_length_is_stable_across_cold_and_offline_warm(self) -> None:
+        pbf = _mvt()
+        wire = _wire(pbf)
+        response = _success(wire)
+        response[2]["Content-Length"] = f"{len(wire):08d}"
+        response[2]["Content-Encoding"] = "gzip "
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            tile = TileKey(5, 10, 12)
+            with _server([response]) as (url, _):
+                cache = _cache(base, url)
+                cold = cache.acquire(tile)
+                self.assertEqual(cold.status, "ready")
+            sidecar = json.loads(cache.entry_paths(tile).sidecar_path.read_text())
+            self.assertEqual(sidecar["response"]["contentLength"], f"{len(wire):08d}")
+            self.assertEqual(sidecar["response"]["contentEncoding"], "gzip ")
+
+            with mock.patch.object(
+                cache._opener, "open", side_effect=AssertionError("warm run must stay offline")
+            ) as open_mock:
+                warm = cache.acquire(tile)
+
+            self.assertEqual(warm.status, "ready")
+            self.assertTrue(warm.cache_hit)
+            self.assertEqual(open_mock.call_count, 0)
+
     def test_cache_sidecar_provenance_tampering_forces_refetch(self) -> None:
         pbf = _mvt()
         wire = _wire(pbf)
@@ -474,20 +501,44 @@ class PbfCacheTests(unittest.TestCase):
                 self.assertEqual(len(quarantined), 1)
                 self.assertEqual(quarantined[0].read_bytes(), mutated_bytes)
 
-    def test_orphan_cache_entry_is_quarantined_and_redirect_origin_is_rejected(self) -> None:
+    def test_wire_pbf_and_sidecar_orphans_are_quarantined_and_refetched(self) -> None:
         pbf = _mvt()
         wire = _wire(pbf)
-        with tempfile.TemporaryDirectory() as directory, _server([_success(wire)]) as (url, state):
-            base = Path(directory)
-            cache = _cache(base, url)
-            tile = TileKey(4, 4, 5)
-            paths = cache.entry_paths(tile)
-            paths.pbf_path.parent.mkdir(parents=True, exist_ok=True)
-            paths.pbf_path.write_bytes(pbf)
+        orphan_bytes = {
+            "wire": wire,
+            "pbf": pbf,
+            "sidecar": b'{}\n',
+        }
+        for orphan, expected_bytes in orphan_bytes.items():
+            with self.subTest(orphan=orphan), tempfile.TemporaryDirectory() as directory, _server(
+                [_success(wire)]
+            ) as (url, state):
+                base = Path(directory)
+                cache = _cache(base, url)
+                tile = TileKey(4, 4, 5)
+                paths = cache.entry_paths(tile)
+                path = {
+                    "wire": paths.wire_path,
+                    "pbf": paths.pbf_path,
+                    "sidecar": paths.sidecar_path,
+                }[orphan]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(expected_bytes)
 
-            self.assertEqual(cache.acquire(tile).status, "ready")
-            self.assertEqual(len(state.requests), 1)
-            self.assertTrue(any((base / "cache" / "quarantine").rglob("*")))
+                result = cache.acquire(tile)
+
+                self.assertEqual(result.status, "ready")
+                self.assertFalse(result.cache_hit)
+                self.assertEqual(len(state.requests), 1)
+                quarantined = list(
+                    (base / "cache" / "quarantine").rglob(path.name)
+                )
+                self.assertEqual(len(quarantined), 1)
+                self.assertEqual(quarantined[0].read_bytes(), expected_bytes)
+
+    def test_redirect_origin_validator_rejects_foreign_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, _server([]) as (url, _):
+            cache = _cache(Path(directory), url)
             with self.assertRaisesRegex(AcquisitionError, "left locked source origin"):
                 cache._validate_final_url(f"{url}/tile/4/5/4.pbf", "https://evil.invalid/tile")
 
@@ -639,6 +690,34 @@ class PbfCacheTests(unittest.TestCase):
             result = _cache(Path(directory), url, max_attempts=1).acquire(TileKey(3, 2, 1))
             self.assertEqual(result.status, "failed")
             self.assertIn("content type", result.error or "")
+
+    def test_rejects_malformed_conflicting_and_wrong_content_length(self) -> None:
+        wire = _wire(_mvt())
+        cases = (
+            ("not-a-number", "invalid Content-Length"),
+            (f"{len(wire)},{len(wire) + 1}", "conflicting Content-Length"),
+            (str(len(wire) + 1), "Content-Length mismatch"),
+        )
+        for content_length, expected_error in cases:
+            response = _success(wire)
+            response[2]["Content-Length"] = content_length
+            with self.subTest(content_length=content_length), tempfile.TemporaryDirectory() as directory, _server(
+                [response]
+            ) as (url, state):
+                base = Path(directory)
+                cache = _cache(base, url, max_attempts=1)
+                tile = TileKey(3, 2, 1)
+
+                result = cache.acquire(tile)
+
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.attempts, 1)
+                self.assertIn(expected_error, result.error or "")
+                self.assertEqual(len(state.requests), 1)
+                paths = cache.entry_paths(tile)
+                self.assertFalse(paths.wire_path.exists())
+                self.assertFalse(paths.pbf_path.exists())
+                self.assertFalse(paths.sidecar_path.exists())
 
     def test_rejects_gzip_wire_without_locked_content_encoding(self) -> None:
         pbf = _mvt()
@@ -806,15 +885,13 @@ class PbfCacheTests(unittest.TestCase):
 
             first = new_cache()
             second = new_cache()
-            with first.exclusive_writer():
-                self.assertEqual(first.acquire(TileKey(2, 1, 1)).status, "ready")
+            self.assertEqual(first.acquire(TileKey(2, 1, 1)).status, "ready")
             committed_bytes = sum(
                 path.stat().st_size for path in (base / "shared-cache").rglob("*") if path.is_file()
             )
             second.max_cache_bytes = committed_bytes
 
-            with second.exclusive_writer():
-                rejected = second.acquire(TileKey(2, 2, 1))
+            rejected = second.acquire(TileKey(2, 2, 1))
 
             self.assertEqual(rejected.status, "failed")
             self.assertIn("cache byte budget", rejected.error or "")
@@ -1153,7 +1230,7 @@ class AcquisitionManifestTests(unittest.TestCase):
                 except BaseException as error:
                     errors.append(error)
 
-            with mock.patch.object(cache, "acquire", side_effect=blocked_acquire), mock.patch(
+            with mock.patch.object(cache, "_acquire_locked", side_effect=blocked_acquire), mock.patch(
                 "tools.experiment8.acquire.concurrent.futures.ThreadPoolExecutor",
                 TrackingExecutor,
             ):

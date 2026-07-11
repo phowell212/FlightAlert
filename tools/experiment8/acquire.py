@@ -28,6 +28,7 @@ from .model import PopulationSummary, TileKey
 
 _HEX_SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
 _UNSIGNED_DECIMAL = re.compile(r"0|[1-9][0-9]*\Z")
+_CONTENT_LENGTH_DECIMAL = re.compile(r"[0-9]+\Z")
 _POPULATION_HEADER = "serviceId\tserviceName\tz\tx\ty"
 # Approved 123,193-row Stage B conservative bound plus the separate 90-key fixture set.
 _MAX_PILOT_SAMPLE_ROWS = 123_283
@@ -114,6 +115,28 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 def _is_octet_stream(value: object) -> bool:
     return str(value).split(";", 1)[0].strip().lower() == "application/octet-stream"
+
+
+def _is_gzip_encoding(value: object) -> bool:
+    return str(value).strip().lower() == "gzip"
+
+
+def _parse_content_length(
+    values: Sequence[object], label: str
+) -> tuple[str | None, int | None]:
+    tokens: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise AcquisitionError(f"{label} has invalid Content-Length {value!r}")
+        tokens.extend(token.strip() for token in value.split(","))
+    if not tokens:
+        return None, None
+    if any(_CONTENT_LENGTH_DECIMAL.fullmatch(token) is None for token in tokens):
+        raise AcquisitionError(f"{label} has invalid Content-Length {tokens!r}")
+    parsed = {int(token) for token in tokens}
+    if len(parsed) != 1:
+        raise AcquisitionError(f"{label} has conflicting Content-Length values {tokens!r}")
+    return tokens[0], parsed.pop()
 
 
 def _directory_file_bytes(root: Path) -> int:
@@ -586,7 +609,7 @@ class PbfCache:
             if (
                 response.get("status") != 200
                 or not _is_octet_stream(response.get("contentType"))
-                or str(response.get("contentEncoding", "")).lower() != "gzip"
+                or not _is_gzip_encoding(response.get("contentEncoding"))
             ):
                 raise AcquisitionError("cache response validation marker mismatch")
             if wire.get("codec") != "gzip" or wire.get("integrity") != "passed":
@@ -600,8 +623,17 @@ class PbfCache:
             wire_bytes = _integer(wire, "bytes", "cache sidecar wire")
             pbf_bytes = _integer(decoded, "bytes", "cache sidecar decoded")
             content_length = response.get("contentLength")
-            if content_length is not None and content_length != str(wire_bytes):
-                raise AcquisitionError("cache response content length mismatch")
+            _, declared_content_length = _parse_content_length(
+                [] if content_length is None else [content_length], "cache response"
+            )
+            if (
+                declared_content_length is not None
+                and declared_content_length != wire_bytes
+            ):
+                raise AcquisitionError(
+                    "cache response Content-Length mismatch: "
+                    f"declared {declared_content_length}, actual {wire_bytes}"
+                )
             wire_sha = _sha_field(wire, "sha256", "cache sidecar wire")
             pbf_sha = _sha_field(decoded, "sha256", "cache sidecar decoded")
             if paths.wire_path.stat().st_size != wire_bytes or _sha256_file(paths.wire_path) != wire_sha:
@@ -626,7 +658,7 @@ class PbfCache:
             return None
 
     def _decode(self, wire: bytes, content_encoding: str) -> tuple[bytes, int, int]:
-        if content_encoding.strip().lower() != "gzip":
+        if not _is_gzip_encoding(content_encoding):
             raise AcquisitionError(
                 f"gzip content encoding mismatch: expected 'gzip', got {content_encoding!r}"
             )
@@ -722,6 +754,22 @@ class PbfCache:
         return min(float(2 ** (attempt - 1)), 8.0)
 
     def acquire(self, tile: TileKey) -> AcquisitionResult:
+        try:
+            with self.exclusive_writer():
+                return self._acquire_locked(tile)
+        except AcquisitionError as error:
+            return AcquisitionResult(
+                tile=tile,
+                status="failed",
+                response_sha256=None,
+                pbf_sha256=None,
+                response_bytes=0,
+                pbf_bytes=0,
+                attempts=0,
+                error=str(error),
+            )
+
+    def _acquire_locked(self, tile: TileKey) -> AcquisitionResult:
         if not self.source.min_lod <= tile.z <= self.source.max_lod:
             return AcquisitionResult(
                 tile=tile,
@@ -756,12 +804,23 @@ class PbfCache:
                         status = int(response.status)
                         content_type = response.headers.get("Content-Type", "")
                         content_encoding = response.headers.get("Content-Encoding", "")
+                        content_length, declared_content_length = _parse_content_length(
+                            response.headers.get_all("Content-Length", []), "source response"
+                        )
                         wire = response.read(self.max_wire_bytes + 1)
                         headers = {name.lower(): value for name, value in response.headers.items()}
                     if status != 200:
                         raise AcquisitionError(f"HTTP {status}")
                     if len(wire) > self.max_wire_bytes:
                         raise AcquisitionError(f"wire response exceeds {self.max_wire_bytes} bytes")
+                    if (
+                        declared_content_length is not None
+                        and declared_content_length != len(wire)
+                    ):
+                        raise AcquisitionError(
+                            "source response Content-Length mismatch: "
+                            f"declared {declared_content_length}, actual {len(wire)}"
+                        )
                     if not _is_octet_stream(content_type):
                         raise AcquisitionError(f"unexpected content type: {content_type!r}")
                     pbf, layer_count, feature_count = self._decode(wire, content_encoding)
@@ -790,7 +849,7 @@ class PbfCache:
                             "status": status,
                             "contentType": content_type,
                             "contentEncoding": content_encoding,
-                            "contentLength": headers.get("content-length"),
+                            "contentLength": content_length,
                             "etag": headers.get("etag"),
                             "lastModified": headers.get("last-modified"),
                             "cacheControl": headers.get("cache-control"),
@@ -1180,7 +1239,7 @@ def _acquire_manifest_locked(
                 except StopIteration:
                     exhausted = True
                     break
-                futures[executor.submit(cache.acquire, tile)] = tile
+                futures[executor.submit(cache._acquire_locked, tile)] = tile
             if not futures:
                 continue
             completed, _ = concurrent.futures.wait(
