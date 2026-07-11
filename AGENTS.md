@@ -126,6 +126,14 @@ Before changing code, read this file and `docs/code-organization.md`.
 
 Use subagents only for low-conflict, bounded work. Do not touch files owned by an active editing subagent unless the user redirects ownership.
 
+When an active deity/project agent is genuinely finished, it must notify every
+other currently active Flight Alert agent that it is signing off, identify the
+scope/files/device state it releases, and explicitly release that scope for
+redistribution or reassignment before leaving the active roster.
+Do not wake or message idle, completed, or already signed-off agents for this
+broadcast. The last active agent signs itself off without triggering another
+agent.
+
 After meaningful code changes, run `.\gradlew.bat assembleDebug` when the touched area warrants it or before release.
 
 ## 17. Documentation
