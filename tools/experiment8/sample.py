@@ -524,6 +524,63 @@ def _atomic_text(path: Path):
     )
 
 
+def _reserve_backup_path(destination: Path) -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix=f".{destination.name}.",
+        suffix=".bak",
+        dir=destination.parent,
+        delete=False,
+    ) as reserved:
+        backup = Path(reserved.name)
+    backup.unlink()
+    return backup
+
+
+def _commit_output_set(replacements: Sequence[tuple[Path, Path]]) -> None:
+    """Publish a group of files or restore the complete previous generation."""
+
+    backups: list[tuple[Path, Path]] = []
+    reserved_backups: list[Path] = []
+    installed: list[Path] = []
+    try:
+        for _, destination in replacements:
+            if not destination.exists():
+                continue
+            backup = _reserve_backup_path(destination)
+            reserved_backups.append(backup)
+            os.replace(destination, backup)
+            backups.append((destination, backup))
+        for source, destination in replacements:
+            os.replace(source, destination)
+            installed.append(destination)
+    except BaseException as error:
+        rollback_errors: list[str] = []
+        for destination in reversed(installed):
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                rollback_errors.append(f"remove {destination}: {rollback_error}")
+        for destination, backup in reversed(backups):
+            try:
+                os.replace(backup, destination)
+            except OSError as rollback_error:
+                rollback_errors.append(f"restore {destination}: {rollback_error}")
+        for backup in reserved_backups:
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                rollback_errors.append(f"clean {backup}: {rollback_error}")
+        if rollback_errors:
+            raise SampleError(
+                "sample output transaction and rollback failed: " + "; ".join(rollback_errors)
+            ) from error
+        raise
+    else:
+        for _, backup in backups:
+            backup.unlink(missing_ok=True)
+
+
 def _write_json_line(output, document: Mapping[str, object]) -> None:
     output.write(json.dumps(document, sort_keys=True, separators=(",", ":")))
     output.write("\n")
@@ -731,8 +788,6 @@ def build_sample_manifest(
     sample_temporary: Path | None = None
     fixture_temporary: Path | None = None
     summary_temporary: Path | None = None
-    sample_replaced = False
-    fixture_replaced = False
     with (
         tempfile.TemporaryDirectory(prefix=".sample-work-", dir=output) as work_text,
         contextlib.ExitStack() as output_cleanup,
@@ -844,23 +899,16 @@ def build_sample_manifest(
             temporary.flush()
             os.fsync(temporary.fileno())
 
-        try:
-            os.replace(sample_temporary, sample_path)
-            sample_temporary = None
-            sample_replaced = True
-            os.replace(fixture_temporary, fixture_path)
-            fixture_temporary = None
-            fixture_replaced = True
-            os.replace(summary_temporary, summary_path)
-            summary_temporary = None
-        except BaseException:
-            if sample_replaced or fixture_replaced:
-                summary_path.unlink(missing_ok=True)
-            raise
-        finally:
-            for temporary_path in (sample_temporary, fixture_temporary, summary_temporary):
-                if temporary_path is not None:
-                    temporary_path.unlink(missing_ok=True)
+        _commit_output_set(
+            (
+                (sample_temporary, sample_path),
+                (fixture_temporary, fixture_path),
+                (summary_temporary, summary_path),
+            )
+        )
+        sample_temporary = None
+        fixture_temporary = None
+        summary_temporary = None
 
     return SampleBuildResult(
         sample_row_count=sample_rows,

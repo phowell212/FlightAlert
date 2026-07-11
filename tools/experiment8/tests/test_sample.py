@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -423,6 +424,75 @@ class SampleManifestTests(unittest.TestCase):
                     _build(inputs, output)
             self.assertEqual(list(output.glob("*.tmp")), [])
             self.assertFalse((output / "summary.json").exists())
+
+    def test_replace_failure_restores_entire_existing_output_set(self) -> None:
+        for failing_name in ("fixtures.jsonl", "summary.json"):
+            with self.subTest(failing_name=failing_name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                first = TileKey(0, 0, 0)
+                baseline_inputs = _write_inputs(base, [first], {first: 10}, population_name="baseline.tsv")
+                output = base / "out"
+                _build(baseline_inputs, output)
+                original = {
+                    name: (output / name).read_bytes()
+                    for name in ("sample.jsonl", "fixtures.jsonl", "summary.json")
+                }
+                second = TileKey(1, 1, 1)
+                changed_inputs = _write_inputs(
+                    base,
+                    [first, second],
+                    {first: 10, second: 20},
+                    population_name="changed.tsv",
+                )
+                real_replace = os.replace
+
+                def fail_install(source: object, destination: object) -> None:
+                    source_path = Path(source)
+                    destination_path = Path(destination)
+                    if destination_path.name == failing_name and source_path.suffix == ".tmp":
+                        raise OSError(f"injected {failing_name} install failure")
+                    real_replace(source, destination)
+
+                with mock.patch("tools.experiment8.sample.os.replace", side_effect=fail_install):
+                    with self.assertRaisesRegex(OSError, "injected"):
+                        _build(changed_inputs, output)
+
+                self.assertEqual(
+                    {name: (output / name).read_bytes() for name in original},
+                    original,
+                )
+                self.assertEqual(list(output.glob("*.tmp")), [])
+                self.assertEqual(list(output.glob("*.bak")), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows locked-destination behavior")
+    def test_locked_summary_cannot_publish_partial_new_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            first = TileKey(0, 0, 0)
+            baseline_inputs = _write_inputs(base, [first], {first: 10}, population_name="baseline.tsv")
+            output = base / "out"
+            _build(baseline_inputs, output)
+            original = {
+                name: (output / name).read_bytes()
+                for name in ("sample.jsonl", "fixtures.jsonl", "summary.json")
+            }
+            second = TileKey(1, 1, 1)
+            changed_inputs = _write_inputs(
+                base,
+                [first, second],
+                {first: 10, second: 20},
+                population_name="changed.tsv",
+            )
+
+            with (output / "summary.json").open("rb") as locked_summary:
+                self.assertTrue(locked_summary.read(1))
+                with self.assertRaises(PermissionError):
+                    _build(changed_inputs, output)
+
+            self.assertEqual(
+                {name: (output / name).read_bytes() for name in original},
+                original,
+            )
 
     def test_module_cli_builds_sample(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
