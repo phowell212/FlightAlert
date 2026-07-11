@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+import struct
 import unittest
 from dataclasses import FrozenInstanceError, replace
+
+import tools.experiment8.semantic_model as semantic_model
 
 from tools.experiment8.model import TileKey
 from tools.experiment8.semantic_model import (
@@ -21,8 +25,9 @@ from tools.experiment8.semantic_model import (
     LayerGroup,
     NormalizedPlacement,
     ParentLabelBand,
+    PlacementSourceKind,
     PlacementMembership,
-    ProjectionMode,
+    ProminenceTier,
     ProtectedStatus,
     RendererGeometry,
     SemanticModelError,
@@ -129,6 +134,13 @@ def _placement(
     source_feature_sha256: bytes = _sha(0x11),
     style_policy_sha256: bytes = _sha(0x33),
     active_band_limit: int = 4,
+    semantic_priority: int = 1120,
+    prominence_tier: ProminenceTier = ProminenceTier.REGIONAL_MAJOR,
+    provider_rank: int | None = 7,
+    complete_geometry_measure_bucket: int = 42,
+    prominence_rule_id: int = 0x123456789ABCDEF0,
+    prominence_decision_sha256: bytes = _sha(0x77),
+    placement_source_kind: PlacementSourceKind = PlacementSourceKind.EXACT_PARENT_PATH,
     identity_registry: HotIdRegistry | None = None,
 ) -> NormalizedPlacement:
     geometry_identity = renderer_geometry_fingerprint(geometry)
@@ -144,13 +156,18 @@ def _placement(
         source_zoom=source_tile.z,
         source_declared_extent=100,
         source_edge_domain=(0, 0, 100, 100),
-        projection_mode=ProjectionMode.EXACT_PARENT_PATH,
+        placement_source_kind=placement_source_kind,
         display_min_zoom_centi=100,
         display_max_zoom_centi=600,
         spacing_px=1000,
         max_angle_degrees=30,
         collision_group=7,
-        priority=50,
+        semantic_priority=semantic_priority,
+        prominence_tier=prominence_tier,
+        provider_rank=provider_rank,
+        complete_geometry_measure_bucket=complete_geometry_measure_bucket,
+        prominence_rule_id=prominence_rule_id,
+        prominence_decision_sha256=prominence_decision_sha256,
         avoid_edges=True,
         keep_upright=True,
         active_band_limit=active_band_limit,
@@ -233,6 +250,31 @@ def _line_variant(
 
 
 class NumericContractTests(unittest.TestCase):
+    def test_placement_source_kind_wire_values_are_explicit_and_stable(self) -> None:
+        self.assertTrue(hasattr(semantic_model, "PlacementSourceKind"))
+        source_kind = semantic_model.PlacementSourceKind
+        self.assertEqual(
+            {member.name: member.value for member in source_kind},
+            {
+                "NONE": 0,
+                "DIRECT_SOURCE_POINT": 1,
+                "SOURCE_OWNED_AREA_LABEL_POINT": 2,
+                "DIRECT_SOURCE_PATH": 3,
+                "EXACT_PARENT_PATH": 4,
+            },
+        )
+
+    def test_prominence_tier_wire_values_are_explicit_and_stable(self) -> None:
+        self.assertEqual(
+            {member.name: member.value for member in ProminenceTier},
+            {
+                "GLOBAL_MAJOR": 0,
+                "REGIONAL_MAJOR": 1,
+                "LOCAL": 2,
+                "FINE": 3,
+            },
+        )
+
     def test_exact_enum_values_are_frozen(self) -> None:
         self.assertEqual(
             {member.name: member.value for member in LayerGroup},
@@ -793,14 +835,19 @@ class IdentityBoundaryTests(unittest.TestCase):
     def test_unlabeled_lines_have_one_enforced_non_applicable_placement(self) -> None:
         line = _line_variant()
         self.assertEqual(line.placement, empty_normalized_placement())
-        with self.assertRaisesRegex(SemanticModelError, "non-applicable placement"):
-            replace_canonical_variant(
-                line,
-                placement=replace(
-                    line.placement,
-                    priority=1,
-                ),
-            )
+        sentinel_mutations = (
+            {"placement_source_kind": PlacementSourceKind.DIRECT_SOURCE_PATH},
+            {"semantic_priority": 1},
+            {"prominence_tier": ProminenceTier.FINE},
+            {"provider_rank": 0},
+            {"complete_geometry_measure_bucket": 1},
+            {"prominence_rule_id": 1},
+            {"prominence_decision_sha256": _sha(0x77)},
+        )
+        for changes in sentinel_mutations:
+            with self.subTest(changes=changes):
+                with self.assertRaisesRegex(SemanticModelError, "non-applicable placement"):
+                    replace(line.placement, **changes)
 
         source_polygon = SourceGeometry(
             GeometryKind.POLYGON,
@@ -839,17 +886,379 @@ class IdentityBoundaryTests(unittest.TestCase):
 
 
 class LabelContinuityTests(unittest.TestCase):
+    def test_projection_mode_is_replaced_by_placement_source_kind(self) -> None:
+        self.assertFalse(hasattr(semantic_model, "ProjectionMode"))
+        field_names = tuple(NormalizedPlacement.__dataclass_fields__)
+        self.assertIn("placement_source_kind", field_names)
+        self.assertNotIn("projection_mode", field_names)
+        parameters = inspect.signature(make_normalized_placement).parameters
+        self.assertIn("placement_source_kind", parameters)
+        self.assertNotIn("projection_mode", parameters)
+
+    def test_applicable_placement_rejects_none_source_kind(self) -> None:
+        placement = _placement(renderer_geometry_from_source(_source_path()))
+        self.assertIs(
+            empty_normalized_placement().placement_source_kind,
+            PlacementSourceKind.NONE,
+        )
+        with self.assertRaisesRegex(
+            SemanticModelError,
+            "applicable placement source kind cannot be NONE",
+        ):
+            replace_normalized_placement(
+                placement,
+                text="Chester River",
+                placement_source_kind=PlacementSourceKind.NONE,
+            )
+
+    def test_point_labels_require_point_placement_source_kinds(self) -> None:
+        point_geometry = renderer_geometry_from_source(_source_point())
+        for source_kind in (
+            PlacementSourceKind.DIRECT_SOURCE_POINT,
+            PlacementSourceKind.SOURCE_OWNED_AREA_LABEL_POINT,
+        ):
+            with self.subTest(source_kind=source_kind):
+                placement = _placement(
+                    point_geometry,
+                    placement_source_kind=source_kind,
+                )
+                variant = _variant(geometry=point_geometry, placement=placement)
+                self.assertEqual(variant.placement, placement)
+                self.assertIs(
+                    decode_canonical_variant(
+                        encode_canonical_variant(variant)
+                    ).placement.placement_source_kind,
+                    source_kind,
+                )
+
+        incompatible = _placement(
+            point_geometry,
+            placement_source_kind=PlacementSourceKind.DIRECT_SOURCE_PATH,
+        )
+        with self.assertRaisesRegex(
+            SemanticModelError,
+            "point LABEL.*point placement source kind",
+        ):
+            _variant(geometry=point_geometry, placement=incompatible)
+
+    def test_path_labels_require_path_placement_source_kinds(self) -> None:
+        path_geometry = renderer_geometry_from_source(_source_path())
+        for source_kind in (
+            PlacementSourceKind.DIRECT_SOURCE_PATH,
+            PlacementSourceKind.EXACT_PARENT_PATH,
+        ):
+            with self.subTest(source_kind=source_kind):
+                placement = _placement(
+                    path_geometry,
+                    placement_source_kind=source_kind,
+                )
+                variant = _variant(geometry=path_geometry, placement=placement)
+                self.assertEqual(variant.placement, placement)
+                self.assertIs(
+                    decode_canonical_variant(
+                        encode_canonical_variant(variant)
+                    ).placement.placement_source_kind,
+                    source_kind,
+                )
+
+        incompatible = _placement(
+            path_geometry,
+            placement_source_kind=PlacementSourceKind.DIRECT_SOURCE_POINT,
+        )
+        with self.assertRaisesRegex(
+            SemanticModelError,
+            "path LABEL.*path placement source kind",
+        ):
+            _variant(geometry=path_geometry, placement=incompatible)
+
+    def test_normalized_placement_exposes_the_explicit_label_order_tuple(self) -> None:
+        field_names = tuple(NormalizedPlacement.__dataclass_fields__)
+        for required in (
+            "semantic_priority",
+            "prominence_tier",
+            "provider_rank",
+            "complete_geometry_measure_bucket",
+            "prominence_rule_id",
+            "prominence_decision_sha256",
+        ):
+            self.assertIn(required, field_names)
+        self.assertNotIn("priority", field_names)
+
+        parameters = inspect.signature(make_normalized_placement).parameters
+        for required in (
+            "semantic_priority",
+            "prominence_tier",
+            "provider_rank",
+            "complete_geometry_measure_bucket",
+            "prominence_rule_id",
+            "prominence_decision_sha256",
+        ):
+            self.assertIn(required, parameters)
+        self.assertNotIn("priority", parameters)
+        self.assertIs(
+            parameters["prominence_decision_sha256"].default,
+            inspect.Parameter.empty,
+        )
+
+    def test_label_order_tuple_round_trips_through_the_canonical_variant(self) -> None:
+        geometry = renderer_geometry_from_source(_source_path())
+        placement = _placement(geometry)
+        variant = _variant(geometry=geometry, placement=placement)
+
+        decoded = decode_canonical_variant(encode_canonical_variant(variant))
+
+        self.assertEqual(decoded.placement, placement)
+        self.assertEqual(decoded.placement.semantic_priority, 1120)
+        self.assertIs(
+            decoded.placement.prominence_tier,
+            ProminenceTier.REGIONAL_MAJOR,
+        )
+        self.assertEqual(decoded.placement.provider_rank, 7)
+        self.assertEqual(decoded.placement.complete_geometry_measure_bucket, 42)
+        self.assertEqual(decoded.placement.prominence_rule_id, 0x123456789ABCDEF0)
+        self.assertEqual(decoded.placement.prominence_decision_sha256, _sha(0x77))
+
+        unranked = replace_normalized_placement(
+            placement,
+            text="Chester River",
+            provider_rank=None,
+        )
+        unranked_variant = _variant(geometry=geometry, placement=unranked)
+        self.assertIsNone(
+            decode_canonical_variant(
+                encode_canonical_variant(unranked_variant)
+            ).placement.provider_rank
+        )
+
+    def test_pre_order_tuple_n8t1_variant_bytes_are_not_silently_accepted(self) -> None:
+        old_variant = bytes.fromhex(
+            "4e3854310796cd8b0456ae8d75dd0100004e385431040807060504030201"
+            "f0e94b8bc08378ea11000000000000000300000000000000020109000000"
+            "020000006500000000000000670000000000000002000000910100000000"
+            "00009201000000000000010d000000436865737465722052697665725a00"
+            "00004e385431020214000000000000000100000000000000040000000100"
+            "000000000000050000000000000009000000000000000500000000000000"
+            "010000000000000005000000000000000900000000000000050000000000"
+            "00006400000058020000190000001e0000001400000032000000f8000000"
+            "4e385431202789bbf903971a6a6a1a9703f9bb89271a16fdfca63270f00b"
+            "8dd1d231c3cab13bd137120fe1139a11111111111111111111111111111111"
+            "11111111111111111111111111111111ea7883c08b4be9f0acdd9e135476"
+            "45338f6c902aa02bc69e9524a4ba30efd356012900000000000000111111"
+            "1111111111f0e94b8bc08378ea0000000000000004016400000000000000"
+            "000000000000000000000000000000006400000000000000640000000000"
+            "0000026400000058020000e80300001e0000000700000000000000320000"
+            "00010104333333333333333333333333333333333333333333333333333333"
+            "3333333300000005000000"
+        )
+
+        with self.assertRaises(CanonicalEncodingError):
+            decode_canonical_variant(old_variant)
+
+    def test_pre_decision_digest_n8t1_variant_bytes_are_not_accepted(self) -> None:
+        old_variant = bytes.fromhex(
+            "4e38543107f9a7cb9123283d18ed0100004e385431040807060504030201"
+            "f0e94b8bc08378ea11000000000000000300000000000000020109000000"
+            "020000006500000000000000670000000000000002000000910100000000"
+            "00009201000000000000010d000000436865737465722052697665725a00"
+            "00004e385431020214000000000000000100000000000000040000000100"
+            "000000000000050000000000000009000000000000000500000000000000"
+            "010000000000000005000000000000000900000000000000050000000000"
+            "00006400000058020000190000001e000000140000003200000008010000"
+            "4e38543120850d5936a121e2b2b2e221a136590d85fede955320a59e0bdd"
+            "1263387ac2b506e092781e7e903a8d11111111111111111111111111111111"
+            "11111111111111111111111111111111ea7883c08b4be9f0acdd9e135476"
+            "45338f6c902aa02bc69e9524a4ba30efd356012900000000000000111111"
+            "1111111111f0e94b8bc08378ea0000000000000004016400000000000000"
+            "000000000000000000000000000000006400000000000000640000000000"
+            "0000046400000058020000e80300001e0000000700000000000000600400"
+            "000101070000002a00f0debc9a785634120101043333333333333333333333"
+            "333333333333333333333333333333333333333333333300000005000000"
+        )
+
+        with self.assertRaises(CanonicalEncodingError):
+            decode_canonical_variant(old_variant)
+
+    def test_label_order_tuple_rejects_noncanonical_numeric_domains(self) -> None:
+        placement = _placement(renderer_geometry_from_source(_source_path()))
+        invalid = (
+            ("semantic priority", {"semantic_priority": 1 << 31}),
+            ("prominence tier", {"prominence_tier": 1}),
+            ("provider rank", {"provider_rank": -(1 << 31) - 1}),
+            (
+                "complete geometry measure bucket",
+                {"complete_geometry_measure_bucket": 1 << 16},
+            ),
+            ("prominence rule ID", {"prominence_rule_id": 1 << 64}),
+        )
+        for message, changes in invalid:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(SemanticModelError, message):
+                    replace(placement, **changes)
+        with self.assertRaisesRegex(SemanticModelError, "prominence rule ID.*positive"):
+            replace(placement, prominence_rule_id=0)
+
+    def test_applicable_prominence_decision_requires_nonzero_sha256(self) -> None:
+        placement = _placement(renderer_geometry_from_source(_source_path()))
+        self.assertEqual(
+            empty_normalized_placement().prominence_decision_sha256,
+            b"\x00" * 32,
+        )
+        with self.assertRaisesRegex(
+            SemanticModelError,
+            "applicable prominence decision SHA-256 cannot be zero",
+        ):
+            replace(placement, prominence_decision_sha256=b"\x00" * 32)
+        with self.assertRaisesRegex(
+            SemanticModelError,
+            "prominence decision SHA-256 must be exactly 32 bytes",
+        ):
+            replace(placement, prominence_decision_sha256=b"short")
+
+    def test_semantic_priority_is_confined_to_its_prominence_tier_stride(self) -> None:
+        placement = _placement(renderer_geometry_from_source(_source_path()))
+        for tier in ProminenceTier:
+            for semantic_priority in (
+                tier.value * 1000,
+                (tier.value + 1) * 1000 - 1,
+            ):
+                with self.subTest(tier=tier, semantic_priority=semantic_priority):
+                    changed = replace(
+                        placement,
+                        prominence_tier=tier,
+                        semantic_priority=semantic_priority,
+                    )
+                    self.assertEqual(changed.semantic_priority, semantic_priority)
+
+        malformed = (
+            (ProminenceTier.GLOBAL_MAJOR, -1),
+            (ProminenceTier.GLOBAL_MAJOR, 1000),
+            (ProminenceTier.REGIONAL_MAJOR, 999),
+            (ProminenceTier.REGIONAL_MAJOR, 2000),
+            (ProminenceTier.LOCAL, 1999),
+            (ProminenceTier.LOCAL, 3000),
+            (ProminenceTier.FINE, -1),
+            (ProminenceTier.FINE, 4000),
+        )
+        for tier, semantic_priority in malformed:
+            with self.subTest(tier=tier, semantic_priority=semantic_priority):
+                with self.assertRaisesRegex(
+                    SemanticModelError,
+                    "semantic priority.*prominence tier stride",
+                ):
+                    replace(
+                        placement,
+                        prominence_tier=tier,
+                        semantic_priority=semantic_priority,
+                    )
+
+    def test_decoder_rejects_fine_tier_with_negative_semantic_priority(self) -> None:
+        encoded = encode_canonical_variant(_variant())
+        canonical_pair = struct.pack("<iB", 1120, ProminenceTier.REGIONAL_MAJOR.value)
+        self.assertEqual(encoded.count(canonical_pair), 1)
+        malformed = encoded.replace(
+            canonical_pair,
+            struct.pack("<iB", -1, ProminenceTier.FINE.value),
+            1,
+        )
+
+        with self.assertRaisesRegex(
+            SemanticModelError,
+            "semantic priority.*prominence tier stride",
+        ):
+            decode_canonical_variant(malformed)
+
+    def test_viewport_candidates_use_the_exact_semantic_order_tuple(self) -> None:
+        geometry = renderer_geometry_from_source(_source_path())
+
+        def candidate(
+            text: str,
+            semantic_priority: int,
+            tier: ProminenceTier,
+            provider_rank: int | None,
+            bucket: int,
+            renderer_priority: int = 50,
+        ) -> CanonicalVariant:
+            placement = _placement(
+                geometry,
+                text=text,
+                semantic_priority=semantic_priority,
+                prominence_tier=tier,
+                provider_rank=provider_rank,
+                complete_geometry_measure_bucket=bucket,
+            )
+            return _variant(
+                text=text,
+                geometry=geometry,
+                placement=placement,
+                priority=renderer_priority,
+            )
+
+        ordered_prefix = (
+            candidate("semantic", 10, ProminenceTier.GLOBAL_MAJOR, None, 0, 999),
+            candidate("ranked", 20, ProminenceTier.GLOBAL_MAJOR, 5, 0),
+            candidate("unranked", 20, ProminenceTier.GLOBAL_MAJOR, None, 65535),
+            candidate("large bucket", 30, ProminenceTier.GLOBAL_MAJOR, None, 100),
+            candidate("small bucket", 30, ProminenceTier.GLOBAL_MAJOR, None, 50),
+            candidate("regional", 1000, ProminenceTier.REGIONAL_MAJOR, None, 0, -999),
+        )
+        tie_candidates = (
+            candidate("tie a", 1100, ProminenceTier.REGIONAL_MAJOR, None, 0),
+            candidate("tie b", 1100, ProminenceTier.REGIONAL_MAJOR, None, 0),
+        )
+        expected_ties = tuple(
+            sorted(tie_candidates, key=lambda item: item.placement.label_candidate_id)
+        )
+        expected = ordered_prefix + expected_ties
+
+        def membership(variant: CanonicalVariant) -> PlacementMembership:
+            return PlacementMembership(
+                requested_tile=TileKey(2, 0, 1),
+                label_candidate_id=variant.placement.label_candidate_id,
+                source_feature_id=variant.placement.placement_source_feature_id,
+                placement_geometry_id=variant.placement.placement_geometry_id,
+                owner_tile=TileKey(1, 0, 0),
+                metatile_id=1,
+                feature_page_id=0,
+                local_ordinal=0,
+                world_wrap=0,
+            )
+
+        scrambled = tuple(reversed(expected))
+        variants = {item.placement.label_candidate_id: item for item in scrambled}
+        forward = viewport_label_candidates(
+            [membership(item) for item in scrambled],
+            variants,
+        )
+        backward = viewport_label_candidates(
+            [membership(item) for item in reversed(scrambled)],
+            variants,
+        )
+
+        self.assertEqual(forward, expected)
+        self.assertEqual(backward, expected)
+
     def test_fae8llb1_binds_every_meaning_field_but_not_transport_membership(self) -> None:
         geometry = renderer_geometry_from_source(_source_path())
         placement = _placement(geometry)
         text = "Chester River"
         original_bytes = canonical_line_label_candidate_bytes(placement, text)
         original = line_label_candidate_fingerprint(placement, text)
+        original_variant = _variant(geometry=geometry, placement=placement)
+        evidence = IdentityEvidence.from_preimage(b"FAE8LLB1\0", original_bytes)
+        variant_evidence = IdentityEvidence.from_preimage(
+            b"FAE8VAR1\0",
+            canonical_variant_bytes(original_variant),
+        )
         self.assertEqual(
             original.full_sha256,
             hashlib.sha256(b"FAE8LLB1\0" + original_bytes).digest(),
         )
         self.assertEqual(placement.label_candidate_id, original.hot_id)
+        self.assertEqual(evidence.full_sha256, placement.label_candidate_sha256)
+        self.assertEqual(
+            variant_evidence.full_sha256,
+            variant_fingerprint(original_variant).full_sha256,
+        )
 
         mutations = {
             "text_evidence_kind": TextEvidenceKind.PROVIDER_STABLE_JOIN,
@@ -857,13 +1266,18 @@ class LabelContinuityTests(unittest.TestCase):
             "source_tile": TileKey(1, 1, 0),
             "source_declared_extent": 101,
             "source_edge_domain": (-1, 0, 100, 100),
-            "projection_mode": ProjectionMode.DIRECT_SOURCE_PATH,
+            "placement_source_kind": PlacementSourceKind.DIRECT_SOURCE_PATH,
             "display_min_zoom_centi": 101,
             "display_max_zoom_centi": 601,
             "spacing_px": 999,
             "max_angle_degrees": 29,
             "collision_group": 8,
-            "priority": 51,
+            "semantic_priority": 1121,
+            "prominence_tier": ProminenceTier.LOCAL,
+            "provider_rank": None,
+            "complete_geometry_measure_bucket": 43,
+            "prominence_rule_id": placement.prominence_rule_id + 1,
+            "prominence_decision_sha256": _sha(0x78),
             "avoid_edges": False,
             "keep_upright": False,
             "active_band_limit": 3,
@@ -877,6 +1291,8 @@ class LabelContinuityTests(unittest.TestCase):
                     changed_fields["source_zoom"] = value.z
                 if field == "text_evidence_kind":
                     changed_fields["provider_feature_id"] = 77
+                if field == "prominence_tier":
+                    changed_fields["semantic_priority"] = 2120
                 changed = replace_normalized_placement(
                     placement,
                     text=text,
@@ -885,6 +1301,14 @@ class LabelContinuityTests(unittest.TestCase):
                 self.assertNotEqual(
                     line_label_candidate_fingerprint(changed, text),
                     original,
+                )
+                changed_variant = replace_canonical_variant(
+                    original_variant,
+                    placement=changed,
+                )
+                self.assertNotEqual(
+                    variant_fingerprint(changed_variant),
+                    variant_fingerprint(original_variant),
                 )
         for source_digest, geometry_digest in (
             (_sha(0x44), placement.placement_geometry_sha256),
@@ -1127,11 +1551,11 @@ class RendererContractTests(unittest.TestCase):
             "source_geometry": "bddfdf310161d6bdc3f89e98a60aa407204017533102dca3b1c748939808761e",
             "renderer_geometry": "de070e99420ac3b9b45ac6784b238e61932dbaa8872303ebc033799e2c4e7ba1",
             "source_occurrence": "9bb7c196db5bb2b7ce73823f8591b434585e8ebc04546abc47a096474b0ca722",
-            "label_candidate": "5903d74b9605fd35e3eaf64fd1d5793c80438a5b6ebffd7f3796459c18fbcca0",
-            "variant_payload": "9e7320be9fd73b9f1616518e6ccfcd597a8c0a6386782fb69bad9806271eb984",
-            "variant_wrapper": "7e63d385ea50fde3e97a95b98c287b1a1c75e89ed5594cdfe148105c8cba1276",
-            "tile_posting": "af940ee3553188877ec7d74daab57b9bfda8ad3b5061cdcf257864668a83d15a",
-            "renderer_record": "abc983f4f6502535afb4a633962972ef68226f56e0533a78f418f8caa01e23cc",
+            "label_candidate": "dbdbdf0035ad8600d4af7423e2e95170f7e264fa1d0b5917a85629c5e12e5784",
+            "variant_payload": "7f593b1f358509530140a2cd483505e6a85a887e247843a4509de2fee5ad7bef",
+            "variant_wrapper": "3d3b0aa6be79420abbdf48eed2f5adc5f8ebf40a354123e47d4ec4f62fc319f3",
+            "tile_posting": "de6aef78fffc7c163275e07cfb3ed38027076b4259511d9e5998870809e4fe90",
+            "renderer_record": "7ade0bc7d06a97313a939eaf8e5487a41b5fe6fcf366e7eb0174e9464f57e170",
             "identity_evidence": "384ff71faa80ffee18358f77b3933a35902d4f529198cd761b7b1b36c639c06b",
         }
 
@@ -1141,7 +1565,7 @@ class RendererContractTests(unittest.TestCase):
         )
         self.assertEqual(
             encode_tile_posting(posting).hex(),
-            "4e3854310501000000000000080b0000000000000096cd8b0456ae8d75000000000000000400000000",
+            "4e3854310501000000000000080b00000000000000badf55e08d982bcf000000000000000400000000",
         )
         self.assertEqual(
             {name: hashlib.sha256(value).hexdigest() for name, value in encoded.items()},
@@ -1149,7 +1573,7 @@ class RendererContractTests(unittest.TestCase):
         )
         self.assertEqual(
             renderer_contract_hash([record]),
-            "27e5c3d634e517e75dc2e5bc39649a01778e45d470814941821a2a13e4e85e2f",
+            "f21dd173f781fbae1847f582c5f0376d315350f318af0e5a3d43ec8511794e13",
         )
 
     def test_owner_and_world_wrap_break_renderer_order_ties_deterministically(self) -> None:
@@ -1244,7 +1668,7 @@ class RendererContractTests(unittest.TestCase):
         self.assertGreater(weight, len(variant.text.encode("utf-8")))
         self.assertEqual(
             weight,
-            256
+            312
             + 2 * 16
             + 1 * 4
             + 4 * 8

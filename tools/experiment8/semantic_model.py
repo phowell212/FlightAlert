@@ -18,7 +18,9 @@ MAX_PLACEMENT_MEMBERSHIPS = 4
 MAX_CANONICAL_STRING_BYTES = 1_048_576
 MAX_CANONICAL_TABLE_REFERENCES = 262_144
 
-HOT_RENDERER_BASE_HEAP_BYTES = 256
+# The fixed base includes one 24-byte aligned presentation-order tuple and the
+# exact 32-byte prominence-decision digest retained by each renderer record.
+HOT_RENDERER_BASE_HEAP_BYTES = 312
 GEOMETRY_POINT_HEAP_BYTES = 16
 GEOMETRY_PART_HEAP_BYTES = 4
 STYLE_REFERENCE_HEAP_BYTES = 8
@@ -27,6 +29,7 @@ _I32_MIN = -(1 << 31)
 _I32_MAX = (1 << 31) - 1
 _I64_MIN = -(1 << 63)
 _I64_MAX = (1 << 63) - 1
+_U16_MAX = (1 << 16) - 1
 _U32_MAX = (1 << 32) - 1
 _ZERO_SHA256 = b"\x00" * 32
 
@@ -87,9 +90,19 @@ class TextEvidenceKind(IntEnum):
     PROVIDER_STABLE_JOIN = 4
 
 
-class ProjectionMode(IntEnum):
-    DIRECT_SOURCE_PATH = 1
-    EXACT_PARENT_PATH = 2
+class PlacementSourceKind(IntEnum):
+    NONE = 0
+    DIRECT_SOURCE_POINT = 1
+    SOURCE_OWNED_AREA_LABEL_POINT = 2
+    DIRECT_SOURCE_PATH = 3
+    EXACT_PARENT_PATH = 4
+
+
+class ProminenceTier(IntEnum):
+    GLOBAL_MAJOR = 0
+    REGIONAL_MAJOR = 1
+    LOCAL = 2
+    FINE = 3
 
 
 class LandEvidence(IntEnum):
@@ -276,6 +289,9 @@ class _Writer:
     def u8(self, value: int) -> None:
         self.data.extend(struct.pack("<B", _require_uint(value, 8, "u8")))
 
+    def u16(self, value: int) -> None:
+        self.data.extend(struct.pack("<H", _require_uint(value, 16, "u16")))
+
     def u32(self, value: int) -> None:
         self.data.extend(struct.pack("<I", _require_uint(value, 32, "u32")))
 
@@ -335,6 +351,9 @@ class _Reader:
 
     def u8(self) -> int:
         return self._unpack("<B", 1)
+
+    def u16(self) -> int:
+        return self._unpack("<H", 2)
 
     def u32(self) -> int:
         return self._unpack("<I", 4)
@@ -906,13 +925,18 @@ class NormalizedPlacement:
     source_zoom: int
     source_declared_extent: int
     source_edge_domain: tuple[int, int, int, int]
-    projection_mode: ProjectionMode
+    placement_source_kind: PlacementSourceKind
     display_min_zoom_centi: int
     display_max_zoom_centi: int
     spacing_px: int
     max_angle_degrees: int
     collision_group: int
-    priority: int
+    semantic_priority: int
+    prominence_tier: ProminenceTier
+    provider_rank: int | None
+    complete_geometry_measure_bucket: int
+    prominence_rule_id: int
+    prominence_decision_sha256: bytes
     avoid_edges: bool
     keep_upright: bool
     active_band_limit: int
@@ -924,6 +948,10 @@ class NormalizedPlacement:
         _require_sha256_bytes(self.label_candidate_sha256, "label candidate SHA-256")
         _require_sha256_bytes(self.source_feature_sha256, "source feature SHA-256")
         _require_sha256_bytes(self.placement_geometry_sha256, "placement geometry SHA-256")
+        _require_sha256_bytes(
+            self.prominence_decision_sha256,
+            "prominence decision SHA-256",
+        )
         _require_enum(self.text_evidence_kind, TextEvidenceKind, "text evidence kind")
         _require_uint(self.text_source_field_id, 64, "text source field ID")
         _require_uint(self.placement_source_feature_id, 64, "placement source feature ID")
@@ -945,7 +973,11 @@ class NormalizedPlacement:
             _require_int(value, _I64_MIN, _I64_MAX, f"source edge domain {index}")
         if domain[0] > domain[2] or domain[1] > domain[3]:
             raise SemanticModelError("source edge domain bounds are reversed")
-        _require_enum(self.projection_mode, ProjectionMode, "projection mode")
+        _require_enum(
+            self.placement_source_kind,
+            PlacementSourceKind,
+            "placement source kind",
+        )
         if self.text_evidence_kind is TextEvidenceKind.NONE:
             expected_non_applicable = (
                 self.label_candidate_id == 0
@@ -959,13 +991,18 @@ class NormalizedPlacement:
                 and self.source_zoom == 0
                 and self.source_declared_extent == 1
                 and self.source_edge_domain == (0, 0, 0, 0)
-                and self.projection_mode is ProjectionMode.DIRECT_SOURCE_PATH
+                and self.placement_source_kind is PlacementSourceKind.NONE
                 and self.display_min_zoom_centi == 0
                 and self.display_max_zoom_centi == 0
                 and self.spacing_px == 0
                 and self.max_angle_degrees == 0
                 and self.collision_group == 0
-                and self.priority == 0
+                and self.semantic_priority == 0
+                and self.prominence_tier is ProminenceTier.GLOBAL_MAJOR
+                and self.provider_rank is None
+                and self.complete_geometry_measure_bucket == 0
+                and self.prominence_rule_id == 0
+                and self.prominence_decision_sha256 == _ZERO_SHA256
                 and self.avoid_edges is False
                 and self.keep_upright is False
                 and self.active_band_limit == 0
@@ -977,6 +1014,10 @@ class NormalizedPlacement:
                     "unlabeled records require the one canonical non-applicable placement"
                 )
             return
+        if self.placement_source_kind is PlacementSourceKind.NONE:
+            raise SemanticModelError(
+                "applicable placement source kind cannot be NONE"
+            )
         expected_source_hot = int.from_bytes(self.source_feature_sha256[:8], "big")
         if self.placement_source_feature_id != expected_source_hot:
             raise SemanticModelError(
@@ -998,7 +1039,33 @@ class NormalizedPlacement:
             raise SemanticModelError("label spacing pixels must be positive")
         _require_int(self.max_angle_degrees, 0, 180, "maximum label angle")
         _require_uint(self.collision_group, 64, "collision group")
-        _require_int(self.priority, _I32_MIN, _I32_MAX, "placement priority")
+        _require_int(
+            self.semantic_priority,
+            _I32_MIN,
+            _I32_MAX,
+            "semantic priority",
+        )
+        _require_enum(self.prominence_tier, ProminenceTier, "prominence tier")
+        tier_stride_start = self.prominence_tier.value * 1000
+        tier_stride_end = tier_stride_start + 1000
+        if not tier_stride_start <= self.semantic_priority < tier_stride_end:
+            raise SemanticModelError(
+                "semantic priority must be within its prominence tier stride"
+            )
+        if self.provider_rank is not None:
+            _require_int(self.provider_rank, _I32_MIN, _I32_MAX, "provider rank")
+        _require_uint(
+            self.complete_geometry_measure_bucket,
+            16,
+            "complete geometry measure bucket",
+        )
+        _require_uint(self.prominence_rule_id, 64, "prominence rule ID")
+        if self.prominence_rule_id == 0:
+            raise SemanticModelError("applicable prominence rule ID must be positive")
+        if self.prominence_decision_sha256 == _ZERO_SHA256:
+            raise SemanticModelError(
+                "applicable prominence decision SHA-256 cannot be zero"
+            )
         _require_bool(self.avoid_edges, "avoid-edges flag")
         _require_bool(self.keep_upright, "keep-upright flag")
         _require_int(self.active_band_limit, 1, 29, "active band limit")
@@ -1038,13 +1105,20 @@ def canonical_line_label_candidate_bytes(
     writer.u64(placement.source_declared_extent)
     for value in placement.source_edge_domain:
         writer.i64(value)
-    writer.u8(placement.projection_mode.value)
+    writer.u8(placement.placement_source_kind.value)
     writer.i32(placement.display_min_zoom_centi)
     writer.i32(placement.display_max_zoom_centi)
     writer.u32(placement.spacing_px)
     writer.u32(placement.max_angle_degrees)
     writer.u64(placement.collision_group)
-    writer.i32(placement.priority)
+    writer.i32(placement.semantic_priority)
+    writer.u8(placement.prominence_tier.value)
+    writer.boolean(placement.provider_rank is not None)
+    if placement.provider_rank is not None:
+        writer.i32(placement.provider_rank)
+    writer.u16(placement.complete_geometry_measure_bucket)
+    writer.u64(placement.prominence_rule_id)
+    writer.raw(placement.prominence_decision_sha256)
     writer.boolean(placement.avoid_edges)
     writer.boolean(placement.keep_upright)
     writer.u8(placement.active_band_limit)
@@ -1074,13 +1148,18 @@ def make_normalized_placement(
     source_zoom: int,
     source_declared_extent: int,
     source_edge_domain: tuple[int, int, int, int],
-    projection_mode: ProjectionMode,
+    placement_source_kind: PlacementSourceKind,
     display_min_zoom_centi: int,
     display_max_zoom_centi: int,
     spacing_px: int,
     max_angle_degrees: int,
     collision_group: int,
-    priority: int,
+    semantic_priority: int,
+    prominence_tier: ProminenceTier,
+    provider_rank: int | None,
+    complete_geometry_measure_bucket: int,
+    prominence_rule_id: int,
+    prominence_decision_sha256: bytes,
     avoid_edges: bool,
     keep_upright: bool,
     active_band_limit: int,
@@ -1101,13 +1180,18 @@ def make_normalized_placement(
         source_zoom=source_zoom,
         source_declared_extent=source_declared_extent,
         source_edge_domain=source_edge_domain,
-        projection_mode=projection_mode,
+        placement_source_kind=placement_source_kind,
         display_min_zoom_centi=display_min_zoom_centi,
         display_max_zoom_centi=display_max_zoom_centi,
         spacing_px=spacing_px,
         max_angle_degrees=max_angle_degrees,
         collision_group=collision_group,
-        priority=priority,
+        semantic_priority=semantic_priority,
+        prominence_tier=prominence_tier,
+        provider_rank=provider_rank,
+        complete_geometry_measure_bucket=complete_geometry_measure_bucket,
+        prominence_rule_id=prominence_rule_id,
+        prominence_decision_sha256=prominence_decision_sha256,
         avoid_edges=avoid_edges,
         keep_upright=keep_upright,
         active_band_limit=active_band_limit,
@@ -1171,13 +1255,20 @@ def _encode_placement(placement: NormalizedPlacement) -> bytes:
     writer.u64(placement.source_declared_extent)
     for value in placement.source_edge_domain:
         writer.i64(value)
-    writer.u8(placement.projection_mode.value)
+    writer.u8(placement.placement_source_kind.value)
     writer.i32(placement.display_min_zoom_centi)
     writer.i32(placement.display_max_zoom_centi)
     writer.u32(placement.spacing_px)
     writer.u32(placement.max_angle_degrees)
     writer.u64(placement.collision_group)
-    writer.i32(placement.priority)
+    writer.i32(placement.semantic_priority)
+    writer.u8(placement.prominence_tier.value)
+    writer.boolean(placement.provider_rank is not None)
+    if placement.provider_rank is not None:
+        writer.i32(placement.provider_rank)
+    writer.u16(placement.complete_geometry_measure_bucket)
+    writer.u64(placement.prominence_rule_id)
+    writer.raw(placement.prominence_decision_sha256)
     writer.boolean(placement.avoid_edges)
     writer.boolean(placement.keep_upright)
     writer.u8(placement.active_band_limit)
@@ -1213,15 +1304,24 @@ def _decode_placement(data: bytes) -> NormalizedPlacement:
         domain_values[3],
     )
     try:
-        projection = ProjectionMode(reader.u8())
+        placement_source_kind = PlacementSourceKind(reader.u8())
     except ValueError as error:
-        raise CanonicalEncodingError("unknown projection mode") from error
+        raise CanonicalEncodingError("unknown placement source kind") from error
     minimum = reader.i32()
     maximum = reader.i32()
     spacing = reader.u32()
     max_angle = reader.u32()
     collision = reader.u64()
-    priority = reader.i32()
+    semantic_priority = reader.i32()
+    try:
+        prominence_tier = ProminenceTier(reader.u8())
+    except ValueError as error:
+        raise CanonicalEncodingError("unknown prominence tier") from error
+    has_provider_rank = reader.boolean()
+    provider_rank = reader.i32() if has_provider_rank else None
+    complete_geometry_measure_bucket = reader.u16()
+    prominence_rule_id = reader.u64()
+    prominence_decision_sha256 = reader.take(32)
     avoid_edges = reader.boolean()
     keep_upright = reader.boolean()
     active_limit = reader.u8()
@@ -1230,30 +1330,35 @@ def _decode_placement(data: bytes) -> NormalizedPlacement:
     provider = reader.u64() if has_provider else None
     reader.finish()
     return NormalizedPlacement(
-        label_id,
-        label_sha,
-        source_sha,
-        geometry_sha,
-        evidence,
-        source_field_id,
-        source_feature_id,
-        geometry_id,
-        source_tile,
-        source_zoom,
-        source_declared_extent,
-        source_domain,
-        projection,
-        minimum,
-        maximum,
-        spacing,
-        max_angle,
-        collision,
-        priority,
-        avoid_edges,
-        keep_upright,
-        active_limit,
-        style_sha,
-        provider,
+        label_candidate_id=label_id,
+        label_candidate_sha256=label_sha,
+        source_feature_sha256=source_sha,
+        placement_geometry_sha256=geometry_sha,
+        text_evidence_kind=evidence,
+        text_source_field_id=source_field_id,
+        placement_source_feature_id=source_feature_id,
+        placement_geometry_id=geometry_id,
+        source_tile=source_tile,
+        source_zoom=source_zoom,
+        source_declared_extent=source_declared_extent,
+        source_edge_domain=source_domain,
+        placement_source_kind=placement_source_kind,
+        display_min_zoom_centi=minimum,
+        display_max_zoom_centi=maximum,
+        spacing_px=spacing,
+        max_angle_degrees=max_angle,
+        collision_group=collision,
+        semantic_priority=semantic_priority,
+        prominence_tier=prominence_tier,
+        provider_rank=provider_rank,
+        complete_geometry_measure_bucket=complete_geometry_measure_bucket,
+        prominence_rule_id=prominence_rule_id,
+        prominence_decision_sha256=prominence_decision_sha256,
+        avoid_edges=avoid_edges,
+        keep_upright=keep_upright,
+        active_band_limit=active_limit,
+        style_policy_sha256=style_sha,
+        provider_feature_id=provider,
     )
 
 
@@ -1271,13 +1376,18 @@ def empty_normalized_placement() -> NormalizedPlacement:
         source_zoom=0,
         source_declared_extent=1,
         source_edge_domain=(0, 0, 0, 0),
-        projection_mode=ProjectionMode.DIRECT_SOURCE_PATH,
+        placement_source_kind=PlacementSourceKind.NONE,
         display_min_zoom_centi=0,
         display_max_zoom_centi=0,
         spacing_px=0,
         max_angle_degrees=0,
         collision_group=0,
-        priority=0,
+        semantic_priority=0,
+        prominence_tier=ProminenceTier.GLOBAL_MAJOR,
+        provider_rank=None,
+        complete_geometry_measure_bucket=0,
+        prominence_rule_id=0,
+        prominence_decision_sha256=_ZERO_SHA256,
         avoid_edges=False,
         keep_upright=False,
         active_band_limit=0,
@@ -1446,6 +1556,26 @@ def _validate_variant_fields(variant: CanonicalVariant) -> None:
             raise SemanticModelError("LABEL variants require one whole visible text run")
         if variant.geometry.kind not in (GeometryKind.POINT, GeometryKind.PATH):
             raise SemanticModelError("LABEL variants require point or path geometry")
+        if variant.geometry.kind is GeometryKind.POINT and (
+            variant.placement.placement_source_kind
+            not in (
+                PlacementSourceKind.DIRECT_SOURCE_POINT,
+                PlacementSourceKind.SOURCE_OWNED_AREA_LABEL_POINT,
+            )
+        ):
+            raise SemanticModelError(
+                "point LABEL variants require a point placement source kind"
+            )
+        if variant.geometry.kind is GeometryKind.PATH and (
+            variant.placement.placement_source_kind
+            not in (
+                PlacementSourceKind.DIRECT_SOURCE_PATH,
+                PlacementSourceKind.EXACT_PARENT_PATH,
+            )
+        ):
+            raise SemanticModelError(
+                "path LABEL variants require a path placement source kind"
+            )
         candidate = line_label_candidate_fingerprint(variant.placement, variant.text)
         if (
             variant.placement.label_candidate_id != candidate.hot_id
@@ -1941,8 +2071,27 @@ def viewport_label_candidates(
     return tuple(
         sorted(
             selected.values(),
-            key=lambda variant: (variant.placement.priority, variant.placement.label_candidate_id),
+            key=lambda variant: label_candidate_order_key(variant.placement),
         )
+    )
+
+
+def label_candidate_order_key(
+    placement: NormalizedPlacement,
+) -> tuple[int, int, int, int, int, int]:
+    if not isinstance(placement, NormalizedPlacement):
+        raise SemanticModelError("label candidate ordering requires NormalizedPlacement")
+    if placement.text_evidence_kind is TextEvidenceKind.NONE:
+        raise SemanticModelError("non-applicable placement has no label candidate order")
+    provider_rank_present_order = 0 if placement.provider_rank is not None else 1
+    provider_rank_order = placement.provider_rank if placement.provider_rank is not None else 0
+    return (
+        placement.semantic_priority,
+        placement.prominence_tier.value,
+        provider_rank_present_order,
+        provider_rank_order,
+        _U16_MAX - placement.complete_geometry_measure_bucket,
+        placement.label_candidate_id,
     )
 
 

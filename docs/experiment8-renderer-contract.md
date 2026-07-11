@@ -24,7 +24,7 @@ Every canonical record starts with ASCII magic `N8T1`, followed by one unsigned 
 
 | Primitive | Encoding |
 | --- | --- |
-| `u8`, `u32`, `u64` | unsigned little-endian integer of the named width |
+| `u8`, `u16`, `u32`, `u64` | unsigned little-endian integer of the named width |
 | `i32`, `i64` | two's-complement little-endian integer of the named width |
 | Boolean | one `u8`, exactly `0` or `1` |
 | Blob | `u32le byte_length`, followed by exactly that many bytes |
@@ -79,12 +79,34 @@ Canonical UTF-8 strings are capped at 1,048,576 bytes and each ordered style/tok
 
 `PROVIDER_STABLE_JOIN` requires an explicit nonzero provider ID. A zero PBF ID cannot satisfy it.
 
-### Projection mode
+### Placement source kind
 
 | Value | Name |
 | ---: | --- |
-| 1 | `DIRECT_SOURCE_PATH` |
-| 2 | `EXACT_PARENT_PATH` |
+| 0 | `NONE` |
+| 1 | `DIRECT_SOURCE_POINT` |
+| 2 | `SOURCE_OWNED_AREA_LABEL_POINT` |
+| 3 | `DIRECT_SOURCE_PATH` |
+| 4 | `EXACT_PARENT_PATH` |
+
+`NONE` is valid only in the non-applicable sentinel. A point label requires
+kind 1 or 2 and an exact source point. A path label requires kind 3 or 4 and
+the complete corresponding source-owned path. There is no inferred-centroid,
+screen-midpoint, or baked-anchor kind.
+
+### Prominence tier
+
+| Value | Name |
+| ---: | --- |
+| 0 | `GLOBAL_MAJOR` |
+| 1 | `REGIONAL_MAJOR` |
+| 2 | `LOCAL` |
+| 3 | `FINE` |
+
+The numeric order is the label-collision order: a smaller value is more
+prominent. The zero value is also the mandatory prominence-tier component of
+the non-applicable placement sentinel; it has no prominence meaning when text
+evidence is `NONE`.
 
 ### Land evidence and protected status
 
@@ -185,6 +207,12 @@ Every derived identity retained for audit has a self-verifying detached record:
 
 The full digest MUST equal `SHA256(domain || preimage)` and the hot ID MUST equal the unsigned-big-endian first eight digest bytes. This makes feature and dedupe identities independently recomputable even though their bulky preimages are absent from the phone record.
 
+Detached `FAE8LLB1` and `FAE8VAR1` evidence uses the same record and MUST carry
+the complete updated candidate or variant preimage. Consequently semantic
+priority, prominence tier, optional provider rank, complete-geometry measure
+bucket, and prominence rule ID are all independently full-digest-verifiable;
+retaining only the 64-bit hot ID is not sufficient evidence.
+
 The source-audit envelope uses tag `0x34`, followed by `u32 evidence_count` and one Blob tag-`0x33` record per entry, lexicographically sorted by the complete encoded evidence bytes. Duplicate `(domain,hot_id)` entries are invalid. The value stored as `SourceOccurrence.source_audit_sha256` is:
 
 ```text
@@ -263,16 +291,21 @@ After `N8T1 06`, in exact order:
 11. `u8 source_zoom`
 12. `u64 source_declared_extent`
 13. four `i64 source_edge_domain` values in signed source-local extent units
-14. `u8 projection_mode`
+14. `u8 placement_source_kind`
 15. `i32 display_min_zoom_centi`
 16. `i32 display_max_zoom_centi`
 17. `u32 spacing_px`
 18. `u32 maximum_bend_angle_degrees`
 19. `u64 collision_group`
-20. `i32 priority`
-21. Boolean `avoid_edges`
-22. Boolean `keep_upright`
-23. `u8 active_band_limit`
+20. `i32 semantic_priority`
+21. `u8 prominence_tier`
+22. Boolean provider-rank presence, then optional `i32 provider_rank`
+23. `u16 complete_geometry_measure_bucket`
+24. `u64 prominence_rule_id`
+25. 32-byte `prominence_decision_sha256`
+26. Boolean `avoid_edges`
+27. Boolean `keep_upright`
+28. `u8 active_band_limit`
 
 ```text
 label candidate fingerprint = SHA256("FAE8LLB1\0" || tag-6 bytes)
@@ -280,13 +313,51 @@ label candidate fingerprint = SHA256("FAE8LLB1\0" || tag-6 bytes)
 
 The candidate numeric ID and full digest are excluded from this preimage. Every listed field is meaning or eligibility and changes the fingerprint. `placement_source_feature_id` MUST equal the unsigned-big-endian first eight bytes of `source_feature_sha256`; the geometry ID has the same required relationship to the geometry digest. Only these transport membership fields are excluded: requested retrieval tile/metatile, feature page, local ordinal, deterministic owner, and world-wrap copy.
 
+`semantic_priority` is the exact compiled cartographic class priority; smaller
+values win. `provider_rank` is present only when the source-specific rank has
+been independently verified; a present rank wins over an absent rank and a
+smaller present value wins. A larger `complete_geometry_measure_bucket` wins.
+`prominence_rule_id` identifies the exact independently reproducible rule and
+MUST be nonzero for an applicable label. The generic placement `priority` field
+from the pre-order-tuple draft no longer exists and MUST NOT be decoded as
+`semantic_priority`.
+
+`prominence_decision_sha256` MUST equal SHA-256 of the complete canonical
+`FAE8PDEC1\0` decision retained in detached source evidence. Zero is forbidden
+for a label. The independent package verifier MUST resolve the digest and prove
+that its subtype, policy, order tuple, evidence, and source context exactly
+reconstruct these candidate fields before admitting the variant.
+
 ### 8.2 Stored NormalizedPlacement, tag `0x20`
 
-The stored placement contains, in order: `u64 label_candidate_id`, 32-byte label candidate digest, 32-byte source-feature digest, 32-byte geometry digest, evidence `u8`, source-field `u64`, placement-source-feature `u64`, placement-geometry `u64`, packed source tile, source zoom `u8`, source declared extent `u64`, four edge-domain `i64`, projection `u8`, min/max display `i32`, spacing `u32`, max angle `u32`, collision group `u64`, priority `i32`, two Boolean flags, active-band-limit `u8`, 32-byte style/policy digest, Boolean provider-ID presence, and optional provider `u64`.
+The stored placement contains, in order: `u64 label_candidate_id`, 32-byte label
+candidate digest, 32-byte source-feature digest, 32-byte geometry digest,
+evidence `u8`, source-field `u64`, placement-source-feature `u64`,
+placement-geometry `u64`, packed source tile, source zoom `u8`, source declared
+extent `u64`, four edge-domain `i64`, placement-source kind `u8`, min/max display `i32`,
+spacing `u32`, max angle `u32`, collision group `u64`, semantic priority `i32`,
+prominence tier `u8`, Boolean provider-rank presence and optional provider rank
+`i32`, complete-geometry measure bucket `u16`, prominence rule ID `u64`,
+32-byte prominence-decision digest, two Boolean placement flags,
+active-band-limit `u8`, 32-byte style/policy digest, Boolean provider-feature-ID
+presence, and optional provider feature ID `u64`.
 
 Its stored candidate ID/digest MUST recompute from the variant's exact whole text and tag-6 meaning fields.
 
-An unlabeled `LINE` or `POLYGON_OUTLINE` uses one mandatory non-applicable placement sentinel: all IDs/digests/intervals/spacing/collision/priority/flags are zero; evidence is `NONE`; source tile is `0/0/0`; declared extent is one; edge domain is `(0,0,0,0)`; projection is `DIRECT_SOURCE_PATH`; and provider ID is absent. Any other unlabeled placement is noncanonical. A `LABEL` cannot use this sentinel.
+An unlabeled `LINE` or `POLYGON_OUTLINE` uses one mandatory non-applicable
+placement sentinel: all IDs, digests, intervals, spacing, collision,
+semantic-priority, measure-bucket, prominence-rule, and flags are zero;
+prominence tier is numeric zero (`GLOBAL_MAJOR`), evidence is `NONE`; source
+tile is `0/0/0`; declared extent is one; edge domain is `(0,0,0,0)`;
+placement-source kind is `NONE`; the prominence-decision and style/policy
+digests are zero; and both provider rank and provider feature ID are absent.
+Any other unlabeled placement is noncanonical. A `LABEL` cannot use this
+sentinel.
+
+The pre-order-tuple, old `projection_mode`, and pre-prominence-decision tag-`6`
+and tag-`0x20` byte layouts are obsolete prerelease encodings. A decoder MUST
+follow the exact field order above and reject those old bytes as malformed; it
+MUST NOT infer defaults for missing order, provenance, or decision fields.
 
 ### 8.3 Parent label bands and membership
 
@@ -302,6 +373,173 @@ Membership derivation is packed-tile sorted, deduplicates requested coordinates,
 `avoid_edges` is evaluated against the recorded source tile and `source_edge_domain`, not descendant retrieval edges. The domain and margin are signed source-local units over `source_declared_extent`; an anchor rational is compared by integer cross multiplication after projecting the source domain with `(tile*E + local)/(2^z*E)`. Crossing a child edge does not split, rename, rehash, or reject an otherwise eligible whole label.
 
 Viewport assembly unions memberships and deduplicates by full candidate identity before shaping and collision. One candidate therefore yields one whole word/run even when multiple tiles retrieve it. Equal text on disconnected paths remains multiple candidates. Stable repeat phase is `label_candidate_id mod spacing_px`; the locked water-label spacing and maximum bend inputs remain exact integers (`1000` px and `30` degrees for that compiled rule). Whole-label placement is atomic: the complete shaped run must fit one continuous eligible segment, satisfy the bend limit, and pass collision. Partial glyph or substring placement is forbidden.
+
+### 8.4 Source-owned point and area-label placement
+
+A point label MUST use `DIRECT_SOURCE_POINT` or
+`SOURCE_OWNED_AREA_LABEL_POINT`. Its one-point renderer geometry, source
+feature, visible-text evidence, source field, and optional stable provider join
+MUST all resolve through detached source audit. The point is projected through
+the current fractional viewport transform every frame. A bake or renderer MUST
+NOT infer a polygon centroid, representative point, screen anchor, nearby
+same-name feature, or fallback position.
+
+`DIRECT_SOURCE_POINT` means the labeled source feature itself owns the exact
+point. `SOURCE_OWNED_AREA_LABEL_POINT` means the provider emitted an explicit
+label point for an area; it does not authorize computing a point from area
+geometry. If the visible text comes through `PROVIDER_STABLE_JOIN`, the exact
+nonzero provider ID and both source occurrences remain in audit evidence.
+
+The complete NFC string is shaped once with the same explicit shaping inputs
+as a line label and `textScaleX=1`. Eligibility requires a positive shaped
+advance and a source-valid point. Collision uses the whole shaped bounding box
+expanded by ascent, descent, halo, and the locked padding; static chrome avoid
+rectangles participate. The entire expanded box must remain inside the locked
+viewport edge clearance or the label is absent. Partial text, abbreviation,
+horizontal condensation, per-glyph records, centroid fallback, and clipped
+edge placement are forbidden. Candidate ordering and filter state use the same
+exact global tuple as path labels.
+
+### 8.5 Adaptive line placement at the current viewport
+
+A line-label record stores the complete exact source-owned path plus placement
+policy; it MUST NOT store one baked anchor, one baked midpoint, one baked
+rotation, or per-glyph positions as the authoritative placement. Those choices
+would be correct only for one projection and zoom.
+
+Viewport zoom eligibility uses `centizoom = roundHalfAwayFromZero(zoom * 100)`;
+nonnegative map zoom therefore uses `floor(zoom * 100 + 0.5)`. Fade alpha is a
+deterministic fixed-point function of this centizoom and the variant's exact
+fade interval. Integer source-tile zoom may select retrieval membership, but it
+cannot stand in for the current fractional viewport zoom when choosing style,
+fit, or placement.
+
+For every current fractional zoom, pan, viewport size, and world wrap, the
+renderer projects every part of the unmodified canonical path into current
+screen space and derives temporary visible contiguous runs. It MUST NOT choose
+the first part or the part with the most points as a placement shortcut.
+Disconnected source parts never join. Temporary clipping, screen-space subpath
+choice, arclength, direction, anchor, and glyph positions are presentation
+state: they do not alter source, geometry, candidate, variant, or package
+identity.
+
+The complete NFC string is shaped once with explicit typeface/font identity,
+locale, bidi direction, density, font scale, user text scale, letter spacing,
+and `textScaleX=1`. The minimum eligible subpath length in current pixels is
+exactly:
+
+```text
+shapedAdvance + 2 * endClearance
+```
+
+No occupancy fraction below one, condensation, horizontal scaling, truncation,
+substring, zero-clamped impossible offset, or per-character record is allowed.
+The temporary path bend is the rounded-up maximum angular span of all nonzero
+segment tangents beneath the text span; the compiled water rule rejects spans
+over 30 degrees. `keep_upright` may reverse only the temporary presentation
+path. It never mutates canonical geometry.
+
+Repeat slots are deterministic alternatives over complete-part source
+arclength. Their phase is `label_candidate_id mod spacing_px`; Experiment 8 v1
+accepts at most one presentation instance per candidate/world wrap in one
+viewport. Collision uses conservative path capsules expanded by shaped
+ascent/descent, halo, and clearance—not a midpoint rectangle. Static chrome
+avoid rectangles participate in collision; moving aircraft do not, preventing
+label jitter.
+
+The selected subpath MUST adapt when zoom changes how the river is visible. The
+renderer may retain the prior subpath while it remains eligible, but it MUST
+re-evaluate against current geometry before text becomes compressed, fragmented,
+off-path, or excessively bent. When the previous run becomes ineligible, the
+renderer chooses the deterministic next eligible whole-word run and uses the
+accepted label fade/handoff behavior; it never pins the old midpoint or draws a
+partial word. If no current run is legible, the whole label is absent.
+
+Global candidate order is the exact ascending tuple:
+
+```text
+(
+  semantic_priority,
+  prominence_tier,
+  0 if provider_rank is present else 1,
+  provider_rank if present else 0,
+  65535 - complete_geometry_measure_bucket,
+  label_candidate_id
+)
+```
+
+Thus verified provider rank presence wins over absence, a smaller present rank
+wins, and a larger complete-geometry bucket wins. The `CanonicalVariant.priority`
+field is separate renderer-record/draw ordering and MUST NOT participate in this
+viewport label-collision order. Within one candidate, eligible runs score
+lexicographically: the previous still-eligible source span first; greater
+minimum screen clearance; lower bend; smaller distance to the largest
+unblocked viewport center; smaller canonical part/segment/source position;
+repeat ordinal; then candidate ID. Input tile, worker, and decode order cannot
+affect either ordering.
+
+The five order fields MUST come from one source-bound canonical prominence
+decision, not unrelated bake heuristics. The presentation policy domain is
+`FAE8PRES1\0`, and the current policy SHA-256 is
+`40f4e98394dacfaaad7cdc195858d0b56fc72ba5c83ccfc1e75d71fff6f6395c`.
+The detached decision begins with `FAE8PDEC1\0` and binds, in order: policy
+digest, subtype `u32`, semantic priority `i32`, tier `u8`, provider-rank
+presence plus optional `i32`, measure bucket `u16`, rule ID `u64`, evidence
+kind `u8`, evidence value `i64`, source-generation digest, classifier digest,
+and nonzero source-field ID `u64`. A bare verification Boolean or legacy
+provider-tier value is not evidence.
+
+Semantic priority is `prominence_tier_code * 1000 +
+within_tier_class_priority`; every within-tier value is unique and below 1000.
+Therefore a stronger tier always wins across every feature family even though
+semantic priority is the tuple's first field. The complete-geometry measure
+bucket is zero unless the appropriate complete measure was independently
+verified; a positive measure uses the locked base-2 exponent plus 10-bit
+fractional-mantissa rule, saturating at 65535. A fragment measure cannot enter
+this field. `prominence_rule_id` is the first eight digest bytes, interpreted
+unsigned big-endian, of `SHA256("FAE8RULE1\0" || subtype_u32le || tier_u8 ||
+evidence_kind_u8)` and MUST be nonzero for a label.
+
+The decision is evidence-self-consistent, not merely well typed. Provider-rank
+evidence requires `evidence_value == provider_rank` and a zero geometry bucket.
+Capital level, population, complete area, complete relation length, and typed
+default each have one exact allowed subtype/value/tier/bucket relationship.
+Typed-default evidence stores the numeric subtype as its value. A provider-rank
+decision cannot mix a separately unbound fallback population, capital, area,
+or length. The `prominence_decision_sha256` in both candidate and stored
+placement binds this complete decision.
+
+Canonical full alpha is exactly 1000 milli-alpha. Label fade is zero at or
+below minimum centizoom and full at or above full-alpha centizoom. Outline fade
+is zero at or below minimum and at or above maximum, rises to full alpha at its
+full-alpha boundary, remains full through its fade-out boundary, then falls to
+zero at maximum. The zero-at-maximum rule takes precedence when fade-out equals
+maximum, so the immediately preceding centizoom remains full and maximum is
+zero. Every division rounds to nearest integer with exact halves
+away from zero. All four tier defaults and the nonnegative centizoom formula
+`floor(zoom * 100 + 0.5)` are part of the policy digest.
+
+Previous placement stores candidate ID, wrap, canonical part/segment, and
+source-position fraction, never a screen midpoint. Every frame reprojects and
+revalidates that source span. An ineligible span hands off between two complete
+runs using complementary alpha for at most 220 ms. Reference labels MUST NOT be
+baked into a retained bitmap that is scaled across zoom. Outlines may use a
+retained bitmap, but labels are drawn live from current validated typed
+candidates.
+
+Runtime caching may retain shaped runs, decoded world paths/cumulative source
+positions, and settled screen placements. Cache keys include every shaping
+input, candidate/geometry/style/filter identity, projection/world wrap, exact
+viewport transform/dimensions, zoom, and chrome-obstacle revision. A cache hit
+cannot bypass current fit, bend, edge, collision, or filter validation;
+eviction causes recomputation, never information loss.
+
+Acceptance is multi-zoom and temporal, not one screenshot: the same Chester
+source candidate must yield intact, appropriately sized `Chester River` runs
+following the visible western river shape at each required zoom; fractional
+zoom and pan must show smooth motion or an accepted whole-label handoff; and no
+sample may exhibit crushed spacing, scattered glyphs, a fixed off-shape anchor,
+or duplicate tile-fragment words.
 
 ## 9. CanonicalVariant
 
@@ -331,6 +569,11 @@ The canonical variant payload excludes its own numeric/full identity and contain
 20. `u8 protected_status`
 21. `u32 flags`
 
+`CanonicalVariant.priority` remains the generic renderer-record priority used
+by the renderer order in section 12 after `draw_order`. It is not a label
+semantic priority, is not a substitute for the explicit placement tuple, and
+cannot affect viewport label collision ordering.
+
 The exact identity is:
 
 ```text
@@ -340,7 +583,15 @@ canonical_variant_id = unsigned-big-endian(full digest[0:8])
 
 The geometry ID and full placement-geometry digest MUST address the exact embedded renderer geometry. The candidate ID/digest MUST address every tag-6 field and exact text. A package reader can therefore recompute the variant ID from package bytes without source evidence.
 
-`LABEL` requires nonempty whole text, point/path geometry, and a verified label placement. `LINE` requires path geometry, no text, and the non-applicable sentinel. `POLYGON_OUTLINE` requires polygon geometry, no text, and that same sentinel. These compatibility rules prevent meaningless placement fields from creating multiple encodings of one unlabeled feature.
+`LABEL` requires nonempty whole text, point/path geometry, a nonzero canonical
+prominence-decision digest, and a compatible non-`NONE` placement-source kind:
+point geometry accepts only the two point kinds and path geometry accepts only
+the two path kinds. Its semantic priority must fall in
+`[tier_code * 1000, (tier_code + 1) * 1000)`. `LINE` requires path geometry, no
+text, and the non-applicable sentinel. `POLYGON_OUTLINE` requires polygon
+geometry, no text, and that same sentinel. These compatibility rules prevent
+inferred point placement, cross-tier priority inversion, and meaningless
+placement fields from creating accepted encodings.
 
 ### 9.2 Encoded variant wrapper, tag `7`
 
@@ -406,28 +657,34 @@ The Task 1 fixture freezes independent regression hashes for the complete tag en
 | source geometry | `bddfdf310161d6bdc3f89e98a60aa407204017533102dca3b1c748939808761e` |
 | renderer geometry | `de070e99420ac3b9b45ac6784b238e61932dbaa8872303ebc033799e2c4e7ba1` |
 | source occurrence | `9bb7c196db5bb2b7ce73823f8591b434585e8ebc04546abc47a096474b0ca722` |
-| FAE8LLB1 candidate bytes | `5903d74b9605fd35e3eaf64fd1d5793c80438a5b6ebffd7f3796459c18fbcca0` |
-| FAE8VAR1 payload | `9e7320be9fd73b9f1616518e6ccfcd597a8c0a6386782fb69bad9806271eb984` |
-| encoded variant wrapper | `7e63d385ea50fde3e97a95b98c287b1a1c75e89ed5594cdfe148105c8cba1276` |
-| tile posting | `af940ee3553188877ec7d74daab57b9bfda8ad3b5061cdcf257864668a83d15a` |
-| renderer record | `abc983f4f6502535afb4a633962972ef68226f56e0533a78f418f8caa01e23cc` |
+| FAE8LLB1 candidate bytes | `dbdbdf0035ad8600d4af7423e2e95170f7e264fa1d0b5917a85629c5e12e5784` |
+| FAE8VAR1 payload | `7f593b1f358509530140a2cd483505e6a85a887e247843a4509de2fee5ad7bef` |
+| encoded variant wrapper | `3d3b0aa6be79420abbdf48eed2f5adc5f8ebf40a354123e47d4ec4f62fc319f3` |
+| tile posting | `de6aef78fffc7c163275e07cfb3ed38027076b4259511d9e5998870809e4fe90` |
+| renderer record | `7ade0bc7d06a97313a939eaf8e5487a41b5fe6fcf366e7eb0174e9464f57e170` |
 | detached identity evidence | `384ff71faa80ffee18358f77b3933a35902d4f529198cd761b7b1b36c639c06b` |
 
-The fixture's renderer-contract hash is `27e5c3d634e517e75dc2e5bc39649a01778e45d470814941821a2a13e4e85e2f`. Tests also freeze complete literal hex for the source-geometry and tile-posting records so endian and field-order errors cannot hide behind writer/reader round trips.
+The fixture's renderer-contract hash is `f21dd173f781fbae1847f582c5f0376d315350f318af0e5a3d43ec8511794e13`. Tests also freeze complete literal hex for the source-geometry and tile-posting records so endian and field-order errors cannot hide behind writer/reader round trips.
 
 ## 13. Exact reconstructed-heap accounting
 
 Every reconstructed occurrence is charged independently; variant reuse or duplicate membership transport does not earn semantic heap credit. The exact weight of one renderer record is:
 
 ```text
-256
+312
 + 16 * renderer_point_count
 +  4 * geometry_part_count
 +  8 * (source_style_id_count + render_token_id_count)
 + UTF8_byte_length(text, or zero)
 ```
 
-The hard display-query ceiling is 33,554,432 bytes. Accumulation is checked after every record and fails closed on the first excess.
+The fixed `312` bytes include one 24-byte aligned presentation-order block:
+semantic priority/tier/provider-rank presence/measure bucket, provider-rank
+storage, and prominence rule ID, plus the 32-byte canonical prominence-decision
+digest. The block and digest are reserved for every reconstructed placement,
+including the non-applicable sentinel, so provider-rank absence does not create
+two heap formulas. The hard display-query ceiling is 33,554,432 bytes.
+Accumulation is checked after every record and fails closed on the first excess.
 
 ## 14. Tile state semantics and Kotlin-facing boundary
 
