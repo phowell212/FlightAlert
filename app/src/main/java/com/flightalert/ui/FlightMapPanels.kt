@@ -20,9 +20,11 @@ import com.flightalert.VisualTheme
 import com.flightalert.ThemeTreatment
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.os.SystemClock
 import androidx.core.graphics.withSave
 import com.flightalert.alerts.MonitoringNotificationHiderStatus
@@ -82,14 +84,18 @@ data class FiltersPanelState(
     val flight_status_filter: FlightStatusFilter,
     val report_age_filter: ReportAgeFilter,
     val alert_volume_filter: Boolean,
-    val reference_layer_controls_visible: Boolean,
-    val place_labels_enabled: Boolean,
-    val water_labels_enabled: Boolean,
-    val region_labels_enabled: Boolean,
-    val public_lands_enabled: Boolean,
     val filters_active: Boolean,
-    val stats_summary: String
-)
+    val stats_summary: String,
+    val reference_panel_plan: ReferenceFiltersPanelPlan,
+    val reference_focused_action_id: String?,
+    val pixels_per_dp: Float,
+) {
+    init {
+        require(pixels_per_dp.isFinite() && pixels_per_dp > 0f) {
+            "filter panel pixel density must be positive"
+        }
+    }
+}
 
 data class PriorityAircraftPanelRow(
     val title: String,
@@ -173,23 +179,20 @@ internal data class FilterPanelTarget(
     val action: FilterPanelAction
 )
 
-internal enum class FilterPanelAction {
-    CLOSE,
-    FOCUS_SEARCH,
-    SUBMIT_SEARCH,
-    CLEAR_SEARCH,
-    NEXT_AIRCRAFT_TYPE,
-    NEXT_ALTITUDE,
-    NEXT_DISTANCE,
-    NEXT_STATUS,
-    NEXT_AGE,
-    TOGGLE_ALERT_VOLUME,
-    TOGGLE_PLACE_LABELS,
-    TOGGLE_WATER_LABELS,
-    TOGGLE_REGION_LABELS,
-    TOGGLE_PUBLIC_LANDS,
-    RESET,
-    CLEAR_SEARCH_FOCUS
+internal sealed interface FilterPanelAction {
+    data object FOCUS_SEARCH : FilterPanelAction
+    data object SUBMIT_SEARCH : FilterPanelAction
+    data object CLEAR_SEARCH : FilterPanelAction
+    data object NEXT_AIRCRAFT_TYPE : FilterPanelAction
+    data object NEXT_ALTITUDE : FilterPanelAction
+    data object NEXT_DISTANCE : FilterPanelAction
+    data object NEXT_STATUS : FilterPanelAction
+    data object NEXT_AGE : FilterPanelAction
+    data object TOGGLE_ALERT_VOLUME : FilterPanelAction
+    data object RESET : FilterPanelAction
+    data object CLEAR_SEARCH_FOCUS : FilterPanelAction
+    data object NONE : FilterPanelAction
+    data class ReferenceIntent(val intent: ReferencePanelIntent) : FilterPanelAction
 }
 
 internal data class PriorityTrackerPanelTarget(
@@ -287,43 +290,41 @@ internal fun FlightMapLayout.filter_panel_targets(
     state: FiltersPanelState
 ): List<FilterPanelTarget> {
     return buildList {
-        add(FilterPanelTarget(close_button_bounds(panel), FilterPanelAction.CLOSE))
-        add(FilterPanelTarget(filter_search_box_bounds(panel), FilterPanelAction.FOCUS_SEARCH))
-        add(FilterPanelTarget(filter_search_find_button_bounds(panel), FilterPanelAction.SUBMIT_SEARCH))
-        add(FilterPanelTarget(filter_search_clear_button_bounds(panel), FilterPanelAction.CLEAR_SEARCH))
-        add(FilterPanelTarget(filter_aircraft_type_button_bounds(panel), FilterPanelAction.NEXT_AIRCRAFT_TYPE))
-        add(FilterPanelTarget(filter_altitude_button_bounds(panel), FilterPanelAction.NEXT_ALTITUDE))
-        add(FilterPanelTarget(filter_distance_button_bounds(panel), FilterPanelAction.NEXT_DISTANCE))
-        add(FilterPanelTarget(filter_status_button_bounds(panel), FilterPanelAction.NEXT_STATUS))
-        add(FilterPanelTarget(filter_age_button_bounds(panel), FilterPanelAction.NEXT_AGE))
-        add(FilterPanelTarget(filter_alert_button_bounds(panel), FilterPanelAction.TOGGLE_ALERT_VOLUME))
-        if (state.reference_layer_controls_visible) {
-            add(
-                FilterPanelTarget(
-                    filter_place_labels_button_bounds(panel),
-                    FilterPanelAction.TOGGLE_PLACE_LABELS
+        val plan = state.reference_panel_plan
+        val contentViewport = plan.contentViewport.to_pixel_rect(panel, state.pixels_per_dp)
+        plan.controls.forEach { control ->
+            val bounds = control.bounds.to_pixel_rect(panel, state.pixels_per_dp)
+            val targetBounds = if (control.kind == ReferenceControlKind.SWITCH) {
+                bounds.intersection_or_null(contentViewport)
+            } else {
+                bounds
+            }
+            targetBounds?.let {
+                add(
+                    FilterPanelTarget(it, FilterPanelAction.ReferenceIntent(control.intent))
                 )
-            )
-            add(
-                FilterPanelTarget(
-                    filter_water_labels_button_bounds(panel),
-                    FilterPanelAction.TOGGLE_WATER_LABELS
-                )
-            )
-            add(
-                FilterPanelTarget(
-                    filter_region_labels_button_bounds(panel),
-                    FilterPanelAction.TOGGLE_REGION_LABELS
-                )
-            )
-            add(
-                FilterPanelTarget(
-                    filter_public_lands_button_bounds(panel),
-                    FilterPanelAction.TOGGLE_PUBLIC_LANDS
-                )
-            )
+            }
         }
-        add(FilterPanelTarget(filter_reset_button_bounds(panel), FilterPanelAction.RESET))
+        if (plan.content == ReferenceFiltersPanelContent.TRAFFIC_SLOT) {
+            val legacyPanel = legacy_traffic_panel_bounds(panel, state)
+            val trafficTargets = listOf(
+                FilterPanelTarget(filter_search_box_bounds(legacyPanel), FilterPanelAction.FOCUS_SEARCH),
+                FilterPanelTarget(filter_search_find_button_bounds(legacyPanel), FilterPanelAction.SUBMIT_SEARCH),
+                FilterPanelTarget(filter_search_clear_button_bounds(legacyPanel), FilterPanelAction.CLEAR_SEARCH),
+                FilterPanelTarget(filter_aircraft_type_button_bounds(legacyPanel), FilterPanelAction.NEXT_AIRCRAFT_TYPE),
+                FilterPanelTarget(filter_altitude_button_bounds(legacyPanel), FilterPanelAction.NEXT_ALTITUDE),
+                FilterPanelTarget(filter_distance_button_bounds(legacyPanel), FilterPanelAction.NEXT_DISTANCE),
+                FilterPanelTarget(filter_status_button_bounds(legacyPanel), FilterPanelAction.NEXT_STATUS),
+                FilterPanelTarget(filter_age_button_bounds(legacyPanel), FilterPanelAction.NEXT_AGE),
+                FilterPanelTarget(filter_alert_button_bounds(legacyPanel), FilterPanelAction.TOGGLE_ALERT_VOLUME),
+                FilterPanelTarget(filter_reset_button_bounds(legacyPanel), FilterPanelAction.RESET),
+            )
+            trafficTargets.forEach { target ->
+                target.bounds.intersection_or_null(contentViewport)?.let { clipped ->
+                    add(target.copy(bounds = clipped))
+                }
+            }
+        }
     }
 }
 
@@ -336,7 +337,42 @@ internal fun FlightMapLayout.filter_panel_action_at(
     return filter_panel_targets(panel, state)
         .firstOrNull { it.bounds.contains(x, y) }
         ?.action
-        ?: FilterPanelAction.CLEAR_SEARCH_FOCUS
+        ?: if (state.reference_panel_plan.content == ReferenceFiltersPanelContent.TRAFFIC_SLOT) {
+            FilterPanelAction.CLEAR_SEARCH_FOCUS
+        } else {
+            FilterPanelAction.NONE
+        }
+}
+
+private fun FlightMapLayout.legacy_traffic_panel_bounds(
+    panel: RectF,
+    state: FiltersPanelState,
+): RectF {
+    val density = state.pixels_per_dp
+    val plan = state.reference_panel_plan
+    val legacySearchTopDp = if (is_compact_settings_panel(panel)) 62f else 74f
+    val top = panel.top +
+        (plan.contentViewport.top - legacySearchTopDp - plan.appliedScrollOffsetDp) * density
+    return RectF(panel.left, top, panel.right, top + panel.height())
+}
+
+private fun ReferenceDpRect.to_pixel_rect(panel: RectF, density: Float): RectF = RectF(
+    panel.left + left * density,
+    panel.top + top * density,
+    panel.left + right * density,
+    panel.top + bottom * density,
+)
+
+private fun RectF.intersection_or_null(other: RectF): RectF? {
+    val clippedLeft = maxOf(left, other.left)
+    val clippedTop = maxOf(top, other.top)
+    val clippedRight = minOf(right, other.right)
+    val clippedBottom = minOf(bottom, other.bottom)
+    return if (clippedRight > clippedLeft && clippedBottom > clippedTop) {
+        RectF(clippedLeft, clippedTop, clippedRight, clippedBottom)
+    } else {
+        null
+    }
 }
 
 internal fun FlightMapLayout.priority_tracker_panel_targets(panel: RectF): List<PriorityTrackerPanelTarget> {
@@ -811,7 +847,7 @@ class FlightMapPanelRenderer(
         }
     }
 
-    // Draw filters as explicit live-traffic filters, including search focus and current match summary.
+    // Draw traffic and package-derived map filters through one typed adaptive panel plan.
     fun draw_filters_panel(
         canvas: Canvas,
         w: Float,
@@ -821,39 +857,335 @@ class FlightMapPanelRenderer(
     ) {
         paint.style = Paint.Style.FILL
         val rect = chrome.layout.settings_panel_bounds(w, h)
-        val compact = chrome.layout.is_compact_settings_panel(rect)
         chrome.draw_panel_surface(
             canvas,
             rect,
             style.visual_theme.colors.panel_alt,
             style.visual_theme.style.modal_panel_alpha
         )
+        draw_reference_panel_header(canvas, rect, style, state)
 
-        draw_panel_title(canvas, rect, "Filters", style)
-        chrome.draw_choice_button(canvas, chrome.layout.close_button_bounds(rect), "Close", false)
+        when (state.reference_panel_plan.content) {
+            ReferenceFiltersPanelContent.TRAFFIC_SLOT -> {
+                draw_traffic_filters_panel(canvas, rect, style, state)
+            }
+            ReferenceFiltersPanelContent.MAP_UNAVAILABLE,
+            ReferenceFiltersPanelContent.MAP_FILTERS -> {
+                draw_reference_map_filters(canvas, rect, style, state)
+            }
+        }
+    }
 
-        draw_filter_search_control(canvas, rect, style, state)
+    private fun draw_reference_panel_header(
+        canvas: Canvas,
+        panel: RectF,
+        style: FlightMapPanelStyle,
+        state: FiltersPanelState,
+    ) {
+        val plan = state.reference_panel_plan
+        plan.title?.let { title ->
+            draw_reference_text_plan(
+                canvas,
+                panel,
+                title,
+                style,
+                style.visual_theme.colors.text,
+            )
+        }
+        plan.controls.filter { it.kind != ReferenceControlKind.SWITCH }.forEach { control ->
+            val focused = control.actionId == state.reference_focused_action_id
+            val selected = control.selected == true || focused
+            chrome.draw_control_surface(
+                canvas,
+                control.bounds.to_pixel_rect(panel, state.pixels_per_dp),
+                style.visual_theme.colors.button_fill,
+                if (selected) {
+                    style.visual_theme.colors.accent_blue
+                } else {
+                    style.visual_theme.colors.button_stroke
+                },
+                selected,
+            )
+            control.labelText?.let { label ->
+                draw_reference_text_plan(
+                    canvas,
+                    panel,
+                    label,
+                    style,
+                    style.visual_theme.colors.text,
+                    centerHorizontally = true,
+                )
+            }
+        }
+    }
 
-        if (compact) {
-            draw_compact_filters_panel_contents(canvas, rect, state)
-        } else {
-            draw_portrait_filters_panel_contents(canvas, rect, state)
+    private fun draw_traffic_filters_panel(
+        canvas: Canvas,
+        panel: RectF,
+        style: FlightMapPanelStyle,
+        state: FiltersPanelState,
+    ) {
+        val compact = chrome.layout.is_compact_settings_panel(panel)
+        val legacyPanel = chrome.layout.legacy_traffic_panel_bounds(panel, state)
+        val viewport = state.reference_panel_plan.contentViewport.to_pixel_rect(
+            panel,
+            state.pixels_per_dp,
+        )
+        canvas.withSave {
+            clipRect(viewport)
+            draw_filter_search_control(this, legacyPanel, style, state)
+            if (compact) {
+                draw_compact_filters_panel_contents(this, legacyPanel, state)
+            } else {
+                draw_portrait_filters_panel_contents(this, legacyPanel, state)
+            }
+            text_paint.textAlign = Paint.Align.LEFT
+            text_paint.isFakeBoldText = false
+            text_paint.textSize = sp(if (compact) 10 else 11)
+            text_paint.color = style.visual_theme.colors.muted
+            val statsBounds = if (compact) {
+                chrome.layout.compact_settings_left_column(legacyPanel)
+            } else {
+                RectF(
+                    legacyPanel.left + dp(18),
+                    legacyPanel.bottom - dp(38),
+                    legacyPanel.right - dp(18),
+                    legacyPanel.bottom,
+                )
+            }
+            val statsY = if (compact) {
+                chrome.layout.filter_reset_button_bounds(legacyPanel).centerY() + dp(4)
+            } else {
+                legacyPanel.bottom - dp(22)
+            }
+            draw_fitted_left_text(
+                this,
+                state.stats_summary,
+                statsBounds.left,
+                statsY,
+                statsBounds.width(),
+                text_paint.textSize,
+                sp(8),
+            )
+        }
+    }
+
+    private fun draw_reference_map_filters(
+        canvas: Canvas,
+        panel: RectF,
+        style: FlightMapPanelStyle,
+        state: FiltersPanelState,
+    ) {
+        val plan = state.reference_panel_plan
+        val viewport = plan.contentViewport.to_pixel_rect(panel, state.pixels_per_dp)
+        canvas.withSave {
+            clipRect(viewport)
+            plan.sections.forEach { section ->
+                section.heading?.let { heading ->
+                    draw_reference_text_plan(
+                        this,
+                        panel,
+                        heading,
+                        style,
+                        style.visual_theme.colors.text,
+                    )
+                }
+            }
+            plan.controls.filter { it.kind == ReferenceControlKind.SWITCH }.forEach { control ->
+                draw_reference_switch(this, panel, style, state, control)
+            }
+            plan.statusMessage?.let { status ->
+                draw_reference_text_plan(
+                    this,
+                    panel,
+                    status,
+                    style,
+                    style.visual_theme.colors.muted,
+                )
+            }
+        }
+    }
+
+    private fun draw_reference_switch(
+        canvas: Canvas,
+        panel: RectF,
+        style: FlightMapPanelStyle,
+        state: FiltersPanelState,
+        control: ReferenceControlPlan,
+    ) {
+        val colors = style.visual_theme.colors
+        val focused = control.actionId == state.reference_focused_action_id
+        val selected = control.onOff == true
+        val masterEnabled = control.sectionMasterEnabled != false
+        chrome.draw_control_surface(
+            canvas,
+            control.bounds.to_pixel_rect(panel, state.pixels_per_dp),
+            colors.button_fill,
+            if (selected || focused) colors.accent_blue else colors.button_stroke,
+            selected || focused,
+        )
+        draw_reference_swatch(
+            canvas,
+            panel,
+            control,
+            state.pixels_per_dp,
+            masterEnabled,
+            style,
+        )
+        val labelColor = if (masterEnabled) colors.text else colors.muted
+        control.labelText?.let { label ->
+            draw_reference_text_plan(canvas, panel, label, style, labelColor)
+        }
+        control.stateText?.let { status ->
+            draw_reference_text_plan(
+                canvas,
+                panel,
+                status,
+                style,
+                if (selected) colors.accent_green else colors.muted,
+            )
+        }
+    }
+
+    private fun draw_reference_swatch(
+        canvas: Canvas,
+        panel: RectF,
+        control: ReferenceControlPlan,
+        density: Float,
+        masterEnabled: Boolean,
+        style: FlightMapPanelStyle,
+    ) {
+        val bounds = control.swatchBounds?.to_pixel_rect(panel, density) ?: return
+        val alpha = if (masterEnabled) 255 else 150
+        when (val swatch = control.swatch) {
+            is ReferenceLabelStyleSwatch -> {
+                val previousTypeface = text_paint.typeface
+                val previousLetterSpacing = text_paint.letterSpacing
+                val previousStyle = text_paint.style
+                val previousAlign = text_paint.textAlign
+                val previousTextSize = text_paint.textSize
+                val previousStrokeWidth = text_paint.strokeWidth
+                val previousColor = text_paint.color
+                val previousFakeBold = text_paint.isFakeBoldText
+                text_paint.textAlign = Paint.Align.CENTER
+                text_paint.textSize = dp(12)
+                text_paint.isFakeBoldText = false
+                val referenceTypeface = Typeface.create(
+                    style.visual_theme.style.font_family,
+                    Typeface.NORMAL,
+                )
+                text_paint.typeface = Typeface.create(
+                    referenceTypeface,
+                    swatch.fontWeight,
+                    swatch.italic,
+                )
+                text_paint.letterSpacing = swatch.letterSpacingEm
+                val metrics = text_paint.fontMetrics
+                val baseline = bounds.centerY() - (metrics.ascent + metrics.descent) / 2f
+                text_paint.style = Paint.Style.STROKE
+                text_paint.strokeWidth = dp(2f)
+                text_paint.color = with_alpha(swatch.haloArgb, alpha)
+                canvas.drawText("Aa", bounds.centerX(), baseline, text_paint)
+                text_paint.style = Paint.Style.FILL
+                text_paint.color = with_alpha(swatch.colorArgb, alpha)
+                canvas.drawText("Aa", bounds.centerX(), baseline, text_paint)
+                text_paint.typeface = previousTypeface
+                text_paint.letterSpacing = previousLetterSpacing
+                text_paint.style = previousStyle
+                text_paint.textAlign = previousAlign
+                text_paint.textSize = previousTextSize
+                text_paint.strokeWidth = previousStrokeWidth
+                text_paint.color = previousColor
+                text_paint.isFakeBoldText = previousFakeBold
+            }
+            is ReferenceOutlineStyleSwatch -> {
+                val previousStyle = stroke_paint.style
+                val previousStrokeCap = stroke_paint.strokeCap
+                val previousPathEffect = stroke_paint.pathEffect
+                val previousStrokeWidth = stroke_paint.strokeWidth
+                val previousColor = stroke_paint.color
+                val centerY = bounds.centerY()
+                stroke_paint.style = Paint.Style.STROKE
+                stroke_paint.strokeCap = Paint.Cap.ROUND
+                stroke_paint.pathEffect = reference_swatch_path_effect(swatch.pattern)
+                stroke_paint.strokeWidth = dp(swatch.lineWidthDp + 2f)
+                stroke_paint.color = with_alpha(swatch.haloArgb, alpha)
+                canvas.drawLine(bounds.left, centerY, bounds.right, centerY, stroke_paint)
+                stroke_paint.strokeWidth = dp(swatch.lineWidthDp)
+                stroke_paint.color = with_alpha(swatch.colorArgb, alpha)
+                canvas.drawLine(bounds.left, centerY, bounds.right, centerY, stroke_paint)
+                stroke_paint.style = previousStyle
+                stroke_paint.strokeCap = previousStrokeCap
+                stroke_paint.pathEffect = previousPathEffect
+                stroke_paint.strokeWidth = previousStrokeWidth
+                stroke_paint.color = previousColor
+            }
+            null -> Unit
+        }
+    }
+
+    private fun reference_swatch_path_effect(pattern: ReferenceOutlinePattern): DashPathEffect? =
+        when (pattern) {
+            ReferenceOutlinePattern.SOLID -> null
+            ReferenceOutlinePattern.LONG_DASH -> DashPathEffect(floatArrayOf(dp(10), dp(5)), 0f)
+            ReferenceOutlinePattern.SHORT_DASH -> DashPathEffect(floatArrayOf(dp(5), dp(4)), 0f)
+            ReferenceOutlinePattern.DASH_DOT -> DashPathEffect(
+                floatArrayOf(dp(8), dp(3), dp(2), dp(3)),
+                0f,
+            )
+            ReferenceOutlinePattern.DOT -> DashPathEffect(floatArrayOf(dp(2), dp(3)), 0f)
         }
 
-        text_paint.textAlign = Paint.Align.LEFT
+    private fun draw_reference_text_plan(
+        canvas: Canvas,
+        panel: RectF,
+        plan: ReferenceTextPlan,
+        style: FlightMapPanelStyle,
+        color: Int,
+        centerHorizontally: Boolean = false,
+    ) {
+        val bounds = plan.bounds.to_pixel_rect(panel, chrome.dp(1f))
+        val previousTypeface = text_paint.typeface
+        val previousStyle = text_paint.style
+        val previousAlign = text_paint.textAlign
+        val previousTextSize = text_paint.textSize
+        val previousColor = text_paint.color
+        val previousFakeBold = text_paint.isFakeBoldText
+        val previousLetterSpacing = text_paint.letterSpacing
+        text_paint.style = Paint.Style.FILL
+        text_paint.textAlign = if (centerHorizontally) Paint.Align.CENTER else Paint.Align.LEFT
+        text_paint.textSize = sp(plan.textSizeSp)
         text_paint.isFakeBoldText = false
-        text_paint.textSize = sp(if (compact) 10 else 11)
-        text_paint.color = style.visual_theme.colors.muted
-        val stats_y = if (compact) rect.bottom - dp(18) else rect.bottom - dp(22)
-        draw_fitted_left_text(
-            canvas,
-            state.stats_summary,
-            rect.left + dp(18),
-            stats_y,
-            rect.width() - dp(36),
-            text_paint.textSize,
-            sp(8)
+        text_paint.letterSpacing = 0f
+        val referenceTypeface = Typeface.create(
+            style.visual_theme.style.font_family,
+            Typeface.NORMAL,
         )
+        text_paint.typeface = Typeface.create(
+            referenceTypeface,
+            plan.fontWeight,
+            plan.italic,
+        )
+        text_paint.color = color
+        val lineHeight = bounds.height() / plan.lines.size.coerceAtLeast(1)
+        val metrics = text_paint.fontMetrics
+        plan.lines.forEachIndexed { index, line ->
+            val lineCenter = bounds.top + lineHeight * (index + 0.5f)
+            val baseline = lineCenter - (metrics.ascent + metrics.descent) / 2f
+            canvas.drawText(
+                line,
+                if (centerHorizontally) bounds.centerX() else bounds.left,
+                baseline,
+                text_paint,
+            )
+        }
+        text_paint.typeface = previousTypeface
+        text_paint.style = previousStyle
+        text_paint.textAlign = previousAlign
+        text_paint.textSize = previousTextSize
+        text_paint.color = previousColor
+        text_paint.isFakeBoldText = previousFakeBold
+        text_paint.letterSpacing = previousLetterSpacing
     }
 
     // Draw alert-volume controls and the current priority queue without inventing aircraft status.
@@ -1331,36 +1663,6 @@ class FlightMapPanelRenderer(
             if (state.alert_volume_filter) "Alert volume only" else "Alert volume: off",
             state.alert_volume_filter
         )
-        if (state.reference_layer_controls_visible) {
-            draw_filter_cycle_row(
-                canvas,
-                chrome.layout.filter_place_labels_button_bounds(rect),
-                if (state.place_labels_enabled) "Places: on" else "Places: off",
-                state.place_labels_enabled
-            )
-            draw_filter_cycle_row(
-                canvas,
-                chrome.layout.filter_water_labels_button_bounds(rect),
-                if (state.water_labels_enabled) "Water: on" else "Water: off",
-                state.water_labels_enabled
-            )
-            draw_filter_cycle_row(
-                canvas,
-                chrome.layout.filter_region_labels_button_bounds(rect),
-                if (state.region_labels_enabled) "Regions: on" else "Regions: off",
-                state.region_labels_enabled
-            )
-            draw_filter_cycle_row(
-                canvas,
-                chrome.layout.filter_public_lands_button_bounds(rect),
-                if (state.public_lands_enabled) {
-                    "Public lands: on"
-                } else {
-                    "Public lands: off"
-                },
-                state.public_lands_enabled
-            )
-        }
         chrome.draw_choice_button(
             canvas,
             chrome.layout.filter_reset_button_bounds(rect),

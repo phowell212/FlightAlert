@@ -107,6 +107,10 @@ class MapTileRenderer(
         }
     }
 
+    fun reference_class_catalog(): ReferenceClassCatalog? {
+        return satellite_renderer.reference_class_catalog()
+    }
+
     fun clear() {
         street_renderer.clear()
         satellite_renderer.clear()
@@ -135,7 +139,9 @@ data class MapTileRenderState(
     val public_lands_enabled: Boolean,
     val map_label_transition_alpha: Float = 1f,
     val user_agent: String,
-    val interaction_active: Boolean = false
+    val interaction_active: Boolean = false,
+    val reference_filter_state: FilterState = FilterState.defaults(),
+    val reference_label_avoid_rects: List<ReferenceScreenRect> = emptyList()
 ) {
     val cache_key: String = map_source.cache_key(map_labels_enabled)
     val reference_overlay_layers: List<ReferenceTileOverlay> =

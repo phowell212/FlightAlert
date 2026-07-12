@@ -448,10 +448,17 @@ class ReferencePresentationPolicyTest {
 
     @Test
     fun filterStateDefaultsAndMasterGatesPreserveStoredChoices() {
-        val initial = FilterState.defaults().with_filter(FilterId.LABELS_STREAMS, false)
+        val initial = FilterState.defaults()
+            .with_filter(FilterId.LABELS_STREAMS, false)
+            .with_filter(FilterId.OUTLINES_COASTLINES, true)
         val labelsOff = initial.with_labels_master(false)
         val labelsBack = labelsOff.with_labels_master(true)
-        assertTrue(FilterId.entries.all { FilterState.defaults().stored_enabled(it) })
+        assertFalse(FilterState.defaults().stored_enabled(FilterId.OUTLINES_COASTLINES))
+        assertTrue(
+            FilterId.entries
+                .filterNot { it == FilterId.OUTLINES_COASTLINES }
+                .all { FilterState.defaults().stored_enabled(it) },
+        )
         assertFalse(labelsOff.effectively_enabled(FilterId.LABELS_RIVERS))
         assertTrue(labelsOff.stored_enabled(FilterId.LABELS_RIVERS))
         assertFalse(labelsBack.effectively_enabled(FilterId.LABELS_STREAMS))

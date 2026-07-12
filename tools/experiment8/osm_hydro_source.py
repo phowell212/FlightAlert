@@ -6,11 +6,12 @@ import os
 import re
 import shutil
 import tempfile
+from collections import Counter
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 
 ALLOWED_DIRECT_WATERWAY_VALUES = frozenset(
@@ -21,8 +22,12 @@ MARYLAND_SOURCE_URL = (
 )
 MARYLAND_SOURCE_BYTES = 212_933_228
 MARYLAND_SOURCE_MD5 = "2642fa017680941a2fab4f96c23d9c03"
+MARYLAND_SOURCE_SHA256 = "7a9c9baf554aa424f27d80e7aa20ccc7d2d412815613afe93b6af06ba703f99f"
+MARYLAND_REGIONAL_PROFILE = (
+    "flight-alert-exp8-geofabrik-maryland-260710-regional-pilot-v1"
+)
 CHESTER_SOURCE_SHA256 = "beea8b394d26fa86e3c372b678420a5fb84af801be7378a681f2f2976f35e99d"
-CHESTER_INSPECTION_SHA256 = "0445785b4f9e0a91c5b9cd09401bbee4ca1bd60d8d893d9b5b5c33a70ea28e6f"
+CHESTER_INSPECTION_SHA256 = "eb997eb532b2e0fc3b8dc81bf32954230769586d988c955871d67f90b62a2ed4"
 CHESTER_CORRIDOR_E7 = (-760_819_530, 390_734_860, -760_087_480, 392_303_250)
 POLICY_SHA256 = "7a2accdefd1ca9fb0604d83b97010e760e327cd02971c969180dc2ccea2bbac2"
 EXPLICITLY_EXCLUDED_WATERWAY_VALUES = frozenset(
@@ -55,6 +60,11 @@ _FALSE_TAG_VALUES = frozenset({"", "0", "false", "no"})
 _LANGUAGE_NAME_KEY = re.compile(
     r"name:([A-Za-z]{2,3})(?:-([A-Za-z0-9]{2,8}))*\Z"
 )
+_CANONICAL_DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]{1,7})?\Z")
+_PLAIN_DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.([0-9]+))?\Z")
+_FORBIDDEN_XML_DECLARATION = re.compile(
+    br"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE
+)
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 _E7 = Decimal(10_000_000)
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
@@ -62,10 +72,33 @@ _OSMIUM_DEB_SHA256 = "d8e791ac3558aaafa95d3f6ac7329b15df2fb502bd6babff881e62830e
 _BOOST_DEB_SHA256 = "389095c7167251ee73667031a4c0f45083a31347cc95faddbdf5b7d22ac4c774"
 _OSMIUM_BINARY_SHA256 = "5575922905fb39fa87262e74ed2b0ac367086b5439468339e45bf3720c1821fc"
 _BOOST_LIBRARY_SHA256 = "16a89b0d75de54bfef18b479eb1d38710e5c242246a17baffa11eb4f2d544663"
+_MAX_OSM_OBJECT_ID = (1 << 63) - 1
+_MAX_OSMIUM_DIAGNOSTIC_BYTES = 16 * 1024 * 1024
+_MAX_OSMIUM_MISSING_IDS = 1_000_000
 
 
 class SourceContractError(ValueError):
     """An OSM source object violated the frozen Experiment 8 source contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class OsmXmlLimits:
+    max_bytes: int = 64 * 1024 * 1024
+    max_objects: int = 2_000_000
+    max_references: int = 10_000_000
+    max_tags: int = 5_000_000
+    max_tag_utf8_bytes: int = 16 * 1024
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("XML byte", self.max_bytes),
+            ("XML object", self.max_objects),
+            ("XML reference", self.max_references),
+            ("XML tag", self.max_tags),
+            ("XML tag UTF-8 byte", self.max_tag_utf8_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise SourceContractError(f"{label} ceiling must be a nonnegative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +125,27 @@ class OsmRelationMember:
     object_type: str
     ref: int
     role: str
+    ordinal: int = -1
+
+    def __post_init__(self) -> None:
+        if self.object_type not in {"node", "way", "relation"}:
+            raise SourceContractError(
+                f"unsupported relation member type: {self.object_type!r}"
+            )
+        if (
+            isinstance(self.ref, bool)
+            or not isinstance(self.ref, int)
+            or not 0 < self.ref <= _MAX_OSM_OBJECT_ID
+        ):
+            raise SourceContractError("relation member ref must be a positive signed-63 integer")
+        if not isinstance(self.role, str):
+            raise SourceContractError("relation member role must be text")
+        if (
+            isinstance(self.ordinal, bool)
+            or not isinstance(self.ordinal, int)
+            or self.ordinal < -1
+        ):
+            raise SourceContractError("relation member ordinal must be -1 or nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,12 +189,75 @@ class VerifiedSourceFile:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class MissingReferences:
+    node_ids: tuple[int, ...]
+    way_ids: tuple[int, ...]
+    relation_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        for label, object_ids in (
+            ("node", self.node_ids),
+            ("way", self.way_ids),
+            ("relation", self.relation_ids),
+        ):
+            if not isinstance(object_ids, tuple):
+                raise SourceContractError(f"missing {label} IDs must be a tuple")
+            previous = 0
+            for object_id in object_ids:
+                if (
+                    isinstance(object_id, bool)
+                    or not isinstance(object_id, int)
+                    or object_id > _MAX_OSM_OBJECT_ID
+                    or object_id <= previous
+                ):
+                    raise SourceContractError(
+                        f"missing {label} IDs must be strictly increasing positive integers"
+                    )
+                previous = object_id
+        if self.count > _MAX_OSMIUM_MISSING_IDS:
+            raise SourceContractError("missing-reference count exceeds the audit ceiling")
+
+    @property
+    def count(self) -> int:
+        return len(self.node_ids) + len(self.way_ids) + len(self.relation_ids)
+
+
+@dataclass(frozen=True, slots=True)
+class IncompleteRelationRoot:
+    relation_id: int
+    direct_missing_members: tuple[OsmRelationMember, ...]
+    dependency_relation_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RegionalClosureClassification:
+    complete_way_ids: tuple[int, ...]
+    complete_relation_ids: tuple[int, ...]
+    incomplete_relations: tuple[IncompleteRelationRoot, ...]
+    missing_references: MissingReferences
+
+
+@dataclass(frozen=True, slots=True)
+class IncompleteRelationClosure:
+    relation_id: int
+    missing_references: MissingReferences
+
+
+@dataclass(frozen=True, slots=True)
+class RelationClosureAudit:
+    complete_relation_ids: tuple[int, ...]
+    incomplete_relations: tuple[IncompleteRelationClosure, ...]
+    global_missing_references: MissingReferences
+    probed_batches: tuple[tuple[int, ...], ...]
+
+
 def _positive_integer(value: str | None, label: str) -> int:
     if value is None or not value.isascii() or not value.isdecimal():
         raise SourceContractError(f"{label} must be a positive decimal integer")
     parsed = int(value)
-    if parsed <= 0:
-        raise SourceContractError(f"{label} must be positive")
+    if parsed <= 0 or parsed > _MAX_OSM_OBJECT_ID:
+        raise SourceContractError(f"{label} must be a positive signed-63 integer")
     return parsed
 
 
@@ -159,6 +276,17 @@ def parse_e7(value: str, *, axis: str) -> int:
         minimum, maximum = -90 * 10_000_000, 90 * 10_000_000
     else:
         raise SourceContractError(f"unsupported coordinate axis: {axis!r}")
+    if isinstance(value, str) and value in {"NaN", "Infinity", "-Infinity"}:
+        raise SourceContractError(f"{axis} must be a finite decimal")
+    if not isinstance(value, str):
+        raise SourceContractError(f"{axis} must use canonical decimal syntax")
+    plain = _PLAIN_DECIMAL.fullmatch(value)
+    if plain is not None and plain.group(1) is not None and len(plain.group(1)) > 7:
+        raise SourceContractError(
+            f"{axis} has more than seven decimal places of nonzero precision"
+        )
+    if _CANONICAL_DECIMAL.fullmatch(value) is None:
+        raise SourceContractError(f"{axis} must use canonical decimal syntax")
     try:
         decimal = Decimal(value)
     except (InvalidOperation, ValueError) as error:
@@ -183,7 +311,10 @@ def _is_supported_name_key(key: str) -> bool:
     match = _LANGUAGE_NAME_KEY.fullmatch(key)
     if match is None:
         return False
-    return match.group(1).lower() not in _NON_LANGUAGE_NAME_SUFFIXES
+    return not any(
+        subtag.casefold() in _NON_LANGUAGE_NAME_SUFFIXES
+        for subtag in key[5:].split("-")
+    )
 
 
 def supported_display_names(
@@ -208,21 +339,26 @@ def _tag_map(tags: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return result
 
 
-def is_direct_way_root(way: OsmWay) -> bool:
+def _direct_way_rejection_reason(way: OsmWay) -> str | None:
     tags = _tag_map(way.tags)
+    if tags.get("waterway") not in ALLOWED_DIRECT_WATERWAY_VALUES:
+        return "unsupported_waterway"
     if len(way.node_refs) < 2 or way.node_refs[0] == way.node_refs[-1]:
-        return False
+        return "insufficient_geometry" if len(way.node_refs) < 2 else "closed"
     if tags.get("area", "").strip().casefold() not in _FALSE_TAG_VALUES:
-        return False
+        return "area"
     for key in _LIFECYCLE_KEYS:
         if tags.get(key, "").strip().casefold() not in _FALSE_TAG_VALUES:
-            return False
+            return "lifecycle"
         if f"{key}:waterway" in tags:
-            return False
-    return (
-        tags.get("waterway") in ALLOWED_DIRECT_WATERWAY_VALUES
-        and bool(supported_display_names(way.tags))
-    )
+            return "lifecycle"
+    if not supported_display_names(way.tags):
+        return "no_display_name"
+    return None
+
+
+def is_direct_way_root(way: OsmWay) -> bool:
+    return _direct_way_rejection_reason(way) is None
 
 
 def is_named_waterway_relation_root(relation: OsmRelation) -> bool:
@@ -230,6 +366,15 @@ def is_named_waterway_relation_root(relation: OsmRelation) -> bool:
     return tags.get("type") == "waterway" and bool(
         supported_display_names(relation.tags)
     )
+
+
+def _relation_rejection_reason(relation: OsmRelation) -> str | None:
+    tags = _tag_map(relation.tags)
+    if tags.get("type") != "waterway":
+        return "unsupported_type"
+    if not supported_display_names(relation.tags):
+        return "no_display_name"
+    return None
 
 
 def canonical_policy_bytes() -> bytes:
@@ -272,19 +417,75 @@ def _insert_unique(
     objects[object_id] = value
 
 
-def parse_osm_xml(path: str | Path) -> OsmDataset:
+def parse_osm_xml(
+    path: str | Path, *, limits: OsmXmlLimits = OsmXmlLimits()
+) -> OsmDataset:
     source = Path(path)
     try:
-        tree = ElementTree.parse(source)
-    except (OSError, ElementTree.ParseError) as error:
-        raise SourceContractError(f"OSM XML is unavailable or invalid: {source}: {error}") from error
-    root = tree.getroot()
+        raw = source.read_bytes()
+    except OSError as error:
+        raise SourceContractError(f"OSM XML is unavailable: {source}: {error}") from error
+    return parse_osm_xml_bytes(raw, source_label=str(source), limits=limits)
+
+
+def parse_osm_xml_bytes(
+    raw: bytes,
+    *,
+    source_label: str = "<bytes>",
+    limits: OsmXmlLimits = OsmXmlLimits(),
+) -> OsmDataset:
+    if not isinstance(raw, bytes):
+        raise SourceContractError("OSM XML input must be bytes")
+    if not isinstance(limits, OsmXmlLimits):
+        raise SourceContractError("OSM XML limits are missing or invalid")
+    if len(raw) > limits.max_bytes:
+        raise SourceContractError(
+            f"OSM XML exceeds the byte ceiling {limits.max_bytes}"
+        )
+    if _FORBIDDEN_XML_DECLARATION.search(raw) is not None:
+        raise SourceContractError("OSM XML DTD or entity declarations are forbidden")
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError as error:
+        raise SourceContractError(
+            f"OSM XML is invalid: {source_label}: {error}"
+        ) from error
     if root.tag != "osm":
         raise SourceContractError(f"OSM XML root must be 'osm', got {root.tag!r}")
     api_version = root.get("version", "")
     if api_version != "0.6":
         raise SourceContractError(f"OSM API version must be '0.6', got {api_version!r}")
     generator = root.get("generator", "")
+
+    object_count = 0
+    reference_count = 0
+    tag_count = 0
+    for element in root:
+        if element.tag in {"node", "way", "relation"}:
+            object_count += 1
+        if element.tag == "way":
+            reference_count += len(element.findall("nd"))
+        elif element.tag == "relation":
+            reference_count += len(element.findall("member"))
+        tags = element.findall("tag")
+        tag_count += len(tags)
+        for tag in tags:
+            key = tag.get("k")
+            value = tag.get("v")
+            if key is not None and len(key.encode("utf-8")) > limits.max_tag_utf8_bytes:
+                raise SourceContractError("OSM tag key exceeds the UTF-8 byte ceiling")
+            if value is not None and len(value.encode("utf-8")) > limits.max_tag_utf8_bytes:
+                raise SourceContractError("OSM tag value exceeds the UTF-8 byte ceiling")
+    if object_count > limits.max_objects:
+        raise SourceContractError(
+            f"OSM XML exceeds the object ceiling {limits.max_objects}"
+        )
+    if reference_count > limits.max_references:
+        raise SourceContractError(
+            f"OSM XML exceeds the reference ceiling {limits.max_references}"
+        )
+    if tag_count > limits.max_tags:
+        raise SourceContractError(f"OSM XML exceeds the tag ceiling {limits.max_tags}")
 
     nodes: dict[int, OsmNode] = {}
     ways: dict[int, OsmWay] = {}
@@ -318,7 +519,7 @@ def parse_osm_xml(path: str | Path) -> OsmDataset:
         elif element.tag == "relation":
             object_id = _positive_integer(element.get("id"), "relation ID")
             members: list[OsmRelationMember] = []
-            for child in element.findall("member"):
+            for ordinal, child in enumerate(element.findall("member")):
                 object_type = child.get("type", "")
                 if object_type not in {"node", "way", "relation"}:
                     raise SourceContractError(
@@ -331,6 +532,7 @@ def parse_osm_xml(path: str | Path) -> OsmDataset:
                             child.get("ref"), f"relation {object_id} member ref"
                         ),
                         role=child.get("role", ""),
+                        ordinal=ordinal,
                     )
                 )
             relation = OsmRelation(
@@ -437,9 +639,455 @@ def compute_reference_closure(
     )
 
 
+_OSMIUM_NOT_FOUND = re.compile(
+    r"\[\s*\d+:\d+\] Did not find ([0-9]+) object\(s\)\.\Z"
+)
+_OSMIUM_FOUND_ALL = re.compile(r"\[\s*\d+:\d+\] Found all objects\.\Z")
+_OSMIUM_MISSING_IDS = re.compile(
+    r"Missing (node|way|relation) IDs:(?: ([0-9]+(?: [0-9]+)*))?\Z"
+)
+_OSMIUM_PEAK = re.compile(
+    r"\[\s*\d+:\d+\] Peak memory used: [0-9]+ MBytes\Z"
+)
+_OSMIUM_DONE = re.compile(r"\[\s*\d+:\d+\] Done\.\Z")
+
+
+def parse_osmium_missing_references(output: str) -> MissingReferences:
+    """Parse the fail-closed terminal summary emitted by pinned osmium getid."""
+
+    if not isinstance(output, str):
+        raise SourceContractError("osmium diagnostic output must be text")
+    try:
+        encoded_size = len(output.encode("utf-8", errors="strict"))
+    except UnicodeEncodeError as error:
+        raise SourceContractError("osmium diagnostic is not canonical UTF-8 text") from error
+    if encoded_size > _MAX_OSMIUM_DIAGNOSTIC_BYTES:
+        raise SourceContractError("osmium diagnostic exceeds the byte ceiling")
+    if any(ord(character) < 32 and character not in "\n\r" for character in output):
+        raise SourceContractError("osmium diagnostic contains control characters")
+
+    lines = output.splitlines()
+    summaries: list[tuple[int, str, int]] = []
+    for index, line in enumerate(lines):
+        if _OSMIUM_FOUND_ALL.fullmatch(line) is not None:
+            summaries.append((index, "found_all", 0))
+        elif (not_found := _OSMIUM_NOT_FOUND.fullmatch(line)) is not None:
+            summaries.append((index, "not_found", int(not_found.group(1))))
+    if len(summaries) != 1:
+        raise SourceContractError(
+            "osmium diagnostic must contain exactly one terminal object-count summary"
+        )
+    summary_index, state, expected_count = summaries[0]
+    tail = lines[summary_index + 1 :]
+    if (
+        len(tail) < 2
+        or _OSMIUM_PEAK.fullmatch(tail[-2]) is None
+        or _OSMIUM_DONE.fullmatch(tail[-1]) is None
+    ):
+        raise SourceContractError(
+            "osmium diagnostic does not end in the pinned terminal sequence"
+        )
+    missing_lines = tail[:-2]
+    if state == "found_all":
+        if missing_lines:
+            raise SourceContractError("osmium diagnostic has output after success")
+        return MissingReferences(node_ids=(), way_ids=(), relation_ids=())
+
+    parsed: dict[str, tuple[int, ...]] = {}
+    type_order = {"node": 0, "way": 1, "relation": 2}
+    previous_type_order = -1
+    for line in missing_lines:
+        missing = _OSMIUM_MISSING_IDS.fullmatch(line)
+        if missing is None:
+            raise SourceContractError(
+                f"unsupported or malformed osmium terminal line: {line!r}"
+            )
+        object_type, values = missing.groups()
+        if object_type in parsed or type_order[object_type] <= previous_type_order:
+            raise SourceContractError(
+                "osmium missing-ID sections are duplicated or out of order"
+            )
+        previous_type_order = type_order[object_type]
+        parsed[object_type] = tuple(
+            int(value) for value in values.split(" ")
+        ) if values else ()
+    result = MissingReferences(
+        node_ids=parsed.get("node", ()),
+        way_ids=parsed.get("way", ()),
+        relation_ids=parsed.get("relation", ()),
+    )
+    if result.count != expected_count or result.count == 0:
+        raise SourceContractError(
+            "osmium missing-reference count does not match its terminal summary"
+        )
+    return result
+
+
+def require_zero_missing_references(
+    missing: MissingReferences, *, context: str
+) -> None:
+    if not isinstance(context, str) or not context.strip():
+        raise SourceContractError("closure context must be nonblank text")
+    if missing.count:
+        raise SourceContractError(
+            f"{context} has {missing.count} missing references; exact closure is required"
+        )
+
+
+def audit_relation_root_closures(
+    relation_ids: tuple[int, ...],
+    probe: Callable[[tuple[int, ...]], MissingReferences],
+) -> RelationClosureAudit:
+    """Attribute a regional extract's missing closure to exact relation roots.
+
+    The deterministic batch bisection is an evidence optimization only. Every
+    failed leaf is reprobed as a singleton, and the singleton union must equal
+    the initial all-root diagnostic exactly.
+    """
+
+    if not isinstance(relation_ids, tuple):
+        raise SourceContractError("relation audit IDs must be a tuple")
+    previous = 0
+    for relation_id in relation_ids:
+        if (
+            isinstance(relation_id, bool)
+            or not isinstance(relation_id, int)
+            or relation_id <= previous
+        ):
+            raise SourceContractError(
+                "relation audit IDs must be strictly increasing positive integers"
+            )
+        previous = relation_id
+    if not relation_ids:
+        empty = MissingReferences(node_ids=(), way_ids=(), relation_ids=())
+        return RelationClosureAudit(
+            complete_relation_ids=(),
+            incomplete_relations=(),
+            global_missing_references=empty,
+            probed_batches=(),
+        )
+
+    probed_batches: list[tuple[int, ...]] = []
+
+    def run(batch: tuple[int, ...]) -> MissingReferences:
+        probed_batches.append(batch)
+        result = probe(batch)
+        if not isinstance(result, MissingReferences):
+            raise SourceContractError(
+                "relation closure probe returned an unsupported result"
+            )
+        return result
+
+    global_missing = run(relation_ids)
+    missing_selected = set(global_missing.relation_ids).intersection(relation_ids)
+    if missing_selected:
+        raise SourceContractError(
+            f"selected relation {min(missing_selected)} is absent from the closure source"
+        )
+
+    complete: set[int] = set()
+    incomplete: dict[int, MissingReferences] = {}
+
+    def bisect(
+        batch: tuple[int, ...], result: MissingReferences | None = None
+    ) -> None:
+        outcome = run(batch) if result is None else result
+        if outcome.count == 0:
+            complete.update(batch)
+            return
+        if len(batch) == 1:
+            incomplete[batch[0]] = outcome
+            return
+        midpoint = len(batch) // 2
+        bisect(batch[:midpoint])
+        bisect(batch[midpoint:])
+
+    bisect(relation_ids, global_missing)
+    if complete.intersection(incomplete) or complete.union(incomplete) != set(
+        relation_ids
+    ):
+        raise SourceContractError("relation closure audit did not classify every root")
+
+    singleton_nodes: set[int] = set()
+    singleton_ways: set[int] = set()
+    singleton_relations: set[int] = set()
+    for missing in incomplete.values():
+        singleton_nodes.update(missing.node_ids)
+        singleton_ways.update(missing.way_ids)
+        singleton_relations.update(missing.relation_ids)
+    singleton_union = MissingReferences(
+        node_ids=tuple(sorted(singleton_nodes)),
+        way_ids=tuple(sorted(singleton_ways)),
+        relation_ids=tuple(sorted(singleton_relations)),
+    )
+    if singleton_union != global_missing:
+        raise SourceContractError(
+            "relation closure singleton union does not match the all-root diagnostic"
+        )
+
+    return RelationClosureAudit(
+        complete_relation_ids=tuple(sorted(complete)),
+        incomplete_relations=tuple(
+            IncompleteRelationClosure(
+                relation_id=relation_id,
+                missing_references=incomplete[relation_id],
+            )
+            for relation_id in sorted(incomplete)
+        ),
+        global_missing_references=global_missing,
+        probed_batches=tuple(probed_batches),
+    )
+
+
+def audit_predicted_relation_root_closures(
+    relation_ids: tuple[int, ...],
+    predicted_incomplete_ids: tuple[int, ...],
+    probe: Callable[[tuple[int, ...]], MissingReferences],
+) -> RelationClosureAudit:
+    """Verify a direct-member prediction with singleton and retained-union probes."""
+
+    for label, object_ids in (
+        ("relation audit", relation_ids),
+        ("predicted incomplete relation", predicted_incomplete_ids),
+    ):
+        if not isinstance(object_ids, tuple):
+            raise SourceContractError(f"{label} IDs must be a tuple")
+        previous = 0
+        for object_id in object_ids:
+            if (
+                isinstance(object_id, bool)
+                or not isinstance(object_id, int)
+                or object_id <= previous
+            ):
+                raise SourceContractError(
+                    f"{label} IDs must be strictly increasing positive integers"
+                )
+            previous = object_id
+    relation_id_set = set(relation_ids)
+    predicted_set = set(predicted_incomplete_ids)
+    if not predicted_set.issubset(relation_id_set):
+        raise SourceContractError(
+            "predicted incomplete relation IDs must be a subset of selected roots"
+        )
+    if not relation_ids:
+        empty = MissingReferences(node_ids=(), way_ids=(), relation_ids=())
+        return RelationClosureAudit((), (), empty, ())
+
+    probed_batches: list[tuple[int, ...]] = []
+
+    def run(batch: tuple[int, ...]) -> MissingReferences:
+        probed_batches.append(batch)
+        result = probe(batch)
+        if not isinstance(result, MissingReferences):
+            raise SourceContractError(
+                "relation closure probe returned an unsupported result"
+            )
+        return result
+
+    global_missing = run(relation_ids)
+    missing_selected = set(global_missing.relation_ids).intersection(relation_ids)
+    if missing_selected:
+        raise SourceContractError(
+            f"selected relation {min(missing_selected)} is absent from the closure source"
+        )
+
+    incomplete: dict[int, MissingReferences] = {}
+    for relation_id in predicted_incomplete_ids:
+        missing = run((relation_id,))
+        if missing.count == 0:
+            raise SourceContractError(
+                f"predicted-incomplete relation {relation_id} has complete closure"
+            )
+        incomplete[relation_id] = missing
+
+    complete_relation_ids = tuple(
+        relation_id
+        for relation_id in relation_ids
+        if relation_id not in predicted_set
+    )
+    if complete_relation_ids:
+        retained_missing = run(complete_relation_ids)
+        if retained_missing.count:
+            raise SourceContractError(
+                "predicted-complete relation union still has missing references"
+            )
+
+    singleton_nodes: set[int] = set()
+    singleton_ways: set[int] = set()
+    singleton_relations: set[int] = set()
+    for missing in incomplete.values():
+        singleton_nodes.update(missing.node_ids)
+        singleton_ways.update(missing.way_ids)
+        singleton_relations.update(missing.relation_ids)
+    singleton_union = MissingReferences(
+        node_ids=tuple(sorted(singleton_nodes)),
+        way_ids=tuple(sorted(singleton_ways)),
+        relation_ids=tuple(sorted(singleton_relations)),
+    )
+    if singleton_union != global_missing:
+        raise SourceContractError(
+            "relation closure singleton union does not match the all-root diagnostic"
+        )
+
+    return RelationClosureAudit(
+        complete_relation_ids=complete_relation_ids,
+        incomplete_relations=tuple(
+            IncompleteRelationClosure(
+                relation_id=relation_id,
+                missing_references=incomplete[relation_id],
+            )
+            for relation_id in predicted_incomplete_ids
+        ),
+        global_missing_references=global_missing,
+        probed_batches=tuple(probed_batches),
+    )
+
+
+def classify_regional_pilot_closure(
+    dataset: OsmDataset,
+    roots: RootSelection,
+    missing: MissingReferences,
+) -> RegionalClosureClassification:
+    """Classify only directly provable boundary clipping in a regional pilot.
+
+    Missing direct-way closure or any missing object that cannot be attributed
+    to a selected relation's explicit member list remains fatal. This function
+    is intentionally not a whole-world acceptance path.
+    """
+
+    if roots != select_roots(dataset):
+        raise SourceContractError(
+            "regional closure roots do not match the canonical source selection"
+        )
+
+    visited_relations: set[int] = set()
+
+    def validate_relation_graph(relation_id: int, stack: tuple[int, ...]) -> None:
+        if relation_id in stack:
+            cycle = " -> ".join(str(value) for value in stack + (relation_id,))
+            raise SourceContractError(f"relation cycle: {cycle}")
+        if relation_id in visited_relations:
+            return
+        relation = dataset.relations.get(relation_id)
+        if relation is None:
+            return
+        next_stack = stack + (relation_id,)
+        for member in relation.members:
+            if member.object_type == "relation" and member.ref in dataset.relations:
+                validate_relation_graph(member.ref, next_stack)
+        visited_relations.add(relation_id)
+
+    for relation_id in roots.relation_ids:
+        validate_relation_graph(relation_id, ())
+
+    selected_way_ids = set(roots.way_ids)
+    selected_relation_ids = set(roots.relation_ids)
+    missing_way_ids = set(missing.way_ids)
+    missing_relation_ids = set(missing.relation_ids)
+    if selected_way_ids & missing_way_ids:
+        object_id = min(selected_way_ids & missing_way_ids)
+        raise SourceContractError(
+            f"selected way {object_id} is absent from the closure source"
+        )
+    if selected_relation_ids & missing_relation_ids:
+        object_id = min(selected_relation_ids & missing_relation_ids)
+        raise SourceContractError(
+            f"selected relation {object_id} is absent from the closure source"
+        )
+
+    missing_node_ids = set(missing.node_ids)
+    for way_id in roots.way_ids:
+        way = dataset.ways.get(way_id)
+        if way is None:
+            raise SourceContractError(f"selected way {way_id} is absent from candidates")
+        damaged_nodes = missing_node_ids.intersection(way.node_refs)
+        if damaged_nodes:
+            raise SourceContractError(
+                f"selected way {way_id} references missing node {min(damaged_nodes)}"
+            )
+
+    missing_keys = {
+        *(('node', object_id) for object_id in missing.node_ids),
+        *(('way', object_id) for object_id in missing.way_ids),
+        *(('relation', object_id) for object_id in missing.relation_ids),
+    }
+    covered_keys: set[tuple[str, int]] = set()
+    direct_missing: dict[int, tuple[OsmRelationMember, ...]] = {}
+    for relation_id in roots.relation_ids:
+        relation = dataset.relations.get(relation_id)
+        if relation is None:
+            raise SourceContractError(
+                f"selected relation {relation_id} is absent from candidates"
+            )
+        members = tuple(
+            member
+            for member in relation.members
+            if (member.object_type, member.ref) in missing_keys
+        )
+        if members:
+            direct_missing[relation_id] = members
+            covered_keys.update(
+                (member.object_type, member.ref) for member in members
+            )
+
+    unowned = missing_keys - covered_keys
+    if unowned:
+        order = {"node": 0, "way": 1, "relation": 2}
+        object_type, object_id = min(
+            unowned, key=lambda item: (order[item[0]], item[1])
+        )
+        raise SourceContractError(
+            f"missing {object_type} {object_id} is not owned directly by any "
+            "selected relation root"
+        )
+
+    incomplete = set(direct_missing)
+    dependencies: dict[int, tuple[int, ...]] = {}
+    changed = True
+    while changed:
+        changed = False
+        for relation_id in roots.relation_ids:
+            relation = dataset.relations[relation_id]
+            dependency_ids = tuple(
+                sorted(
+                    {
+                        member.ref
+                        for member in relation.members
+                        if member.object_type == "relation"
+                        and member.ref in incomplete
+                    }
+                )
+            )
+            if dependency_ids:
+                dependencies[relation_id] = dependency_ids
+                if relation_id not in incomplete:
+                    incomplete.add(relation_id)
+                    changed = True
+
+    incomplete_relations = tuple(
+        IncompleteRelationRoot(
+            relation_id=relation_id,
+            direct_missing_members=direct_missing.get(relation_id, ()),
+            dependency_relation_ids=dependencies.get(relation_id, ()),
+        )
+        for relation_id in sorted(incomplete)
+    )
+    return RegionalClosureClassification(
+        complete_way_ids=roots.way_ids,
+        complete_relation_ids=tuple(
+            relation_id
+            for relation_id in roots.relation_ids
+            if relation_id not in incomplete
+        ),
+        incomplete_relations=incomplete_relations,
+        missing_references=missing,
+    )
+
+
 def assemble_relation_parts(
     relation: OsmRelation,
     *,
+    nodes: Mapping[int, OsmNode],
     ways: Mapping[int, OsmWay],
     relations: Mapping[int, OsmRelation],
     _stack: tuple[int, ...] = (),
@@ -471,12 +1119,25 @@ def assemble_relation_parts(
                 )
             member_parts.extend(
                 assemble_relation_parts(
-                    nested, ways=ways, relations=relations, _stack=stack
+                    nested,
+                    nodes=nodes,
+                    ways=ways,
+                    relations=relations,
+                    _stack=stack,
                 )
             )
+        elif member.object_type == "node":
+            # Point members such as source/mouth remain in the exact source
+            # occurrence but cannot contribute coordinates to a line label.
+            if member.ref not in nodes:
+                raise SourceContractError(
+                    f"relation {relation.object_id} references missing node {member.ref}"
+                )
+            continue
         else:
             raise SourceContractError(
-                f"relation {relation.object_id} has non-line member node {member.ref}"
+                f"relation {relation.object_id} has unsupported member type "
+                f"{member.object_type!r}"
             )
 
     assembled: list[list[int]] = []
@@ -542,7 +1203,7 @@ def inspect_osm_xml(
         raw = source.read_bytes()
     except OSError as error:
         raise SourceContractError(f"OSM XML is unavailable: {source}: {error}") from error
-    dataset = parse_osm_xml(source)
+    dataset = parse_osm_xml_bytes(raw, source_label=str(source))
     roots = select_roots(dataset)
     closure = compute_reference_closure(dataset, roots)
     node_ids = closure.reference_only_node_ids
@@ -560,6 +1221,7 @@ def inspect_osm_xml(
     relation_parts = {
         str(object_id): [list(part) for part in assemble_relation_parts(
             dataset.relations[object_id],
+            nodes=dataset.nodes,
             ways=dataset.ways,
             relations=dataset.relations,
         )]
@@ -569,6 +1231,7 @@ def inspect_osm_xml(
         str(object_id): [
             {
                 "objectType": member.object_type,
+                "ordinal": member.ordinal,
                 "ref": member.ref,
                 "role": member.role,
             }
@@ -699,6 +1362,118 @@ def write_policy(output_path: str | Path) -> str:
     return _atomic_write(output_path, canonical_policy_bytes())
 
 
+def encode_selection_material(candidate_xml: bytes) -> tuple[bytes, bytes]:
+    """Return generic root IDs and selection material with no provenance claims."""
+    actual_policy_sha256 = hashlib.sha256(canonical_policy_bytes()).hexdigest()
+    if actual_policy_sha256 != POLICY_SHA256:
+        raise SourceContractError(
+            "policy SHA-256 drift: "
+            f"expected {POLICY_SHA256}, got {actual_policy_sha256}"
+        )
+    if type(candidate_xml) is not bytes:
+        raise SourceContractError("candidate XML must be immutable bytes")
+    dataset = parse_osm_xml_bytes(
+        candidate_xml,
+        source_label="candidate XML bytes",
+    )
+    if dataset.nodes:
+        raise SourceContractError(
+            "candidate XML must not contain nodes; recursive references belong to closure"
+        )
+    roots = select_roots(dataset)
+
+    id_bytes = b"".join(
+        [*(f"w{object_id}\n".encode("ascii") for object_id in roots.way_ids),
+         *(f"r{object_id}\n".encode("ascii") for object_id in roots.relation_ids)]
+    )
+    id_sha256 = hashlib.sha256(id_bytes).hexdigest()
+    rejected_way_entries = [
+        {"id": object_id, "reason": reason}
+        for object_id, way in sorted(dataset.ways.items())
+        if (reason := _direct_way_rejection_reason(way)) is not None
+    ]
+    rejected_relation_entries = [
+        {"id": object_id, "reason": reason}
+        for object_id, relation in sorted(dataset.relations.items())
+        if (reason := _relation_rejection_reason(relation)) is not None
+    ]
+    rejected_ways = Counter(
+        str(entry["reason"]) for entry in rejected_way_entries
+    )
+    rejected_relations = Counter(
+        str(entry["reason"]) for entry in rejected_relation_entries
+    )
+    root_entries: list[dict[str, object]] = []
+    for object_id in roots.way_ids:
+        way = dataset.ways[object_id]
+        source_object: dict[str, object] = {
+            "id": object_id,
+            "nodeRefs": list(way.node_refs),
+            "objectType": "way",
+            "tags": [list(item) for item in way.tags],
+            "timestamp": way.timestamp,
+            "version": way.version,
+        }
+        root_entries.append(
+            {
+                **source_object,
+                "displayNames": [list(item) for item in supported_display_names(way.tags)],
+                "objectSha256": hashlib.sha256(
+                    _canonical_json_bytes(source_object)
+                ).hexdigest(),
+                "waterway": _tag_map(way.tags)["waterway"],
+            }
+        )
+    for object_id in roots.relation_ids:
+        relation = dataset.relations[object_id]
+        source_object = {
+            "id": object_id,
+            "members": [
+                {
+                    "objectType": member.object_type,
+                    "ordinal": member.ordinal,
+                    "ref": member.ref,
+                    "role": member.role,
+                }
+                for member in relation.members
+            ],
+            "objectType": "relation",
+            "tags": [list(item) for item in relation.tags],
+            "timestamp": relation.timestamp,
+            "version": relation.version,
+        }
+        root_entries.append(
+            {
+                **source_object,
+                "displayNames": [
+                    list(item) for item in supported_display_names(relation.tags)
+                ],
+                "objectSha256": hashlib.sha256(
+                    _canonical_json_bytes(source_object)
+                ).hexdigest(),
+            }
+        )
+    document: dict[str, object] = {
+        "candidateCounts": {
+            "nodes": len(dataset.nodes),
+            "relations": len(dataset.relations),
+            "ways": len(dataset.ways),
+        },
+        "rejectedRelationCounts": dict(sorted(rejected_relations.items())),
+        "rejectedRelations": rejected_relation_entries,
+        "rejectedWayCounts": dict(sorted(rejected_ways.items())),
+        "rejectedWays": rejected_way_entries,
+        "rootIdsSha256": id_sha256,
+        "roots": root_entries,
+        "schema": "flight-alert-exp8-osm-selection-material-v1",
+        "selectedCounts": {
+            "relations": len(roots.relation_ids),
+            "ways": len(roots.way_ids),
+        },
+    }
+    return id_bytes, _canonical_json_bytes(document)
+
+
 def verify_maryland_source(path: str | Path) -> VerifiedSourceFile:
     source = Path(path)
     try:
@@ -726,16 +1501,22 @@ def verify_maryland_source(path: str | Path) -> VerifiedSourceFile:
     except OSError as error:
         raise SourceContractError(f"Maryland source became unreadable: {resolved}: {error}") from error
     actual_md5 = md5.hexdigest()
+    actual_sha256 = sha256.hexdigest()
     if actual_md5 != MARYLAND_SOURCE_MD5:
         raise SourceContractError(
             "Maryland source MD5 mismatch: "
             f"expected {MARYLAND_SOURCE_MD5}, got {actual_md5}"
         )
+    if actual_sha256 != MARYLAND_SOURCE_SHA256:
+        raise SourceContractError(
+            "Maryland source SHA-256 mismatch: "
+            f"expected {MARYLAND_SOURCE_SHA256}, got {actual_sha256}"
+        )
     return VerifiedSourceFile(
         path=resolved,
         bytes=size,
         md5=actual_md5,
-        sha256=sha256.hexdigest(),
+        sha256=actual_sha256,
     )
 
 
@@ -852,29 +1633,44 @@ __all__ = [
     "CHESTER_INSPECTION_SHA256",
     "CHESTER_SOURCE_SHA256",
     "EXPLICITLY_EXCLUDED_WATERWAY_VALUES",
+    "IncompleteRelationRoot",
+    "IncompleteRelationClosure",
+    "MissingReferences",
     "OsmDataset",
     "OsmNode",
     "OsmRelation",
     "OsmRelationMember",
     "OsmWay",
+    "OsmXmlLimits",
     "MARYLAND_SOURCE_BYTES",
     "MARYLAND_SOURCE_MD5",
+    "MARYLAND_SOURCE_SHA256",
     "MARYLAND_SOURCE_URL",
+    "MARYLAND_REGIONAL_PROFILE",
     "POLICY_SHA256",
     "ReferenceClosure",
+    "RegionalClosureClassification",
+    "RelationClosureAudit",
     "RootSelection",
     "SourceContractError",
     "VerifiedSourceFile",
     "assemble_relation_parts",
+    "audit_relation_root_closures",
+    "audit_predicted_relation_root_closures",
     "build_storage_preflight",
     "canonical_policy_bytes",
+    "classify_regional_pilot_closure",
     "compute_reference_closure",
+    "encode_selection_material",
     "inspect_osm_xml",
     "is_direct_way_root",
     "is_named_waterway_relation_root",
     "parse_e7",
+    "parse_osmium_missing_references",
     "parse_osm_xml",
+    "parse_osm_xml_bytes",
     "select_roots",
+    "require_zero_missing_references",
     "supported_display_names",
     "verify_locked_chester_fixture",
     "verify_maryland_source",

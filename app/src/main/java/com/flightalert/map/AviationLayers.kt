@@ -1890,10 +1890,9 @@ internal class AviationLayerRenderer(
         )
         val min_lon = polygons.minOf { it.min_x }.toDouble() / TILE_SIZE * 360.0 - 180.0
         val max_lon = polygons.maxOf { it.max_x }.toDouble() / TILE_SIZE * 360.0 - 180.0
-        val label = AviationMapTextAdapter.airspace(feature).primary_text
         return PreparedAirspaceFeature(
             source = feature,
-            label = label,
+            map_text = feature.map_text,
             center = AviationLayerPoint(center_geo.lat, center_geo.lon),
             point_count = polygons.sumOf { it.point_count },
             min_unwrapped_lon = min_lon,
@@ -2234,14 +2233,30 @@ internal class AviationLayerRenderer(
         text_paint.textSize =
             sp(if (feature.source.type.equals("R", ignoreCase = true)) 11f else 10f)
         text_paint.color = with_alpha(style.text, 224)
-        val display = ellipsize(feature.label, dp(142f))
-        val width = text_paint.measureText(display) + dp(14f)
-        val rect = RectF(
-            screen.x - width / 2f,
-            screen.y - dp(20f),
-            screen.x + width / 2f,
-            screen.y + dp(3f)
+        val label = prepare_sourced_map_label(
+            text = feature.map_text,
+            primary_text_size = text_paint.textSize,
+            max_width = dp(142f),
         )
+        val width = label.width + dp(14f)
+        val anchor_baseline = screen.y + dp(3f) - dp(7f)
+        val rect = if (label.english == null) {
+            RectF(
+                screen.x - width / 2f,
+                screen.y - dp(20f),
+                screen.x + width / 2f,
+                screen.y + dp(3f),
+            )
+        } else {
+            val height = max(dp(23f), label.collision_height)
+            val center_y = anchor_baseline + label.collision_center_offset
+            RectF(
+                screen.x - width / 2f,
+                center_y - height / 2f,
+                screen.x + width / 2f,
+                center_y + height / 2f,
+            )
+        }
         if (!rect.intersects(0f, 0f, viewport.width, viewport.height)) return null
         val padded = rect.padded_copy(dp(3f))
         if (label_rects.any { RectF.intersects(padded, it) }) return null
@@ -2249,7 +2264,7 @@ internal class AviationLayerRenderer(
         paint.style = Paint.Style.FILL
         paint.color = with_alpha(style.panel, 184)
         canvas.drawRoundRect(rect, dp(4f), dp(4f), paint)
-        canvas.drawText(display, rect.centerX(), rect.bottom - dp(7f), text_paint)
+        draw_sourced_map_label(canvas, label, rect.centerX(), anchor_baseline)
         text_paint.isFakeBoldText = false
         return AviationAcceptedLabelGeometry(
             point = screen,
@@ -2276,7 +2291,6 @@ internal class AviationLayerRenderer(
         text_paint.color = style.accent_pink
 
         tracks.forEach { track ->
-            val label = AviationMapTextAdapter.oceanic_track(track).primary_text
             var track_label_point: ScreenPoint? = null
             track.drawable_segments.forEach segment_loop@{ segment ->
                 val points = ring_to_screen_points(segment, viewport)
@@ -2295,13 +2309,28 @@ internal class AviationLayerRenderer(
                 this.style = Paint.Style.FILL
                 color = style.accent_pink
             })
-            val label_width = text_paint.measureText(label)
-            val label_rect = RectF(
-                label_point.x - label_width / 2f,
-                label_point.y - dp(24f),
-                label_point.x + label_width / 2f,
-                label_point.y - dp(8f)
+            val label = prepare_sourced_map_label(
+                text = track.map_text,
+                primary_text_size = text_paint.textSize,
+                max_width = null,
             )
+            val anchor_baseline = label_point.y - dp(8f)
+            val label_rect = if (label.english == null) {
+                RectF(
+                    label_point.x - label.width / 2f,
+                    label_point.y - dp(24f),
+                    label_point.x + label.width / 2f,
+                    label_point.y - dp(8f),
+                )
+            } else {
+                val center_y = anchor_baseline + label.collision_center_offset
+                RectF(
+                    label_point.x - label.width / 2f,
+                    center_y - label.collision_height / 2f,
+                    label_point.x + label.width / 2f,
+                    center_y + label.collision_height / 2f,
+                )
+            }
             val padded = label_rect.padded_copy(dp(4f))
             if (!label_rect.intersects(0f, 0f, viewport.width, viewport.height) ||
                 label_rects.any { RectF.intersects(padded, it) }
@@ -2309,9 +2338,10 @@ internal class AviationLayerRenderer(
                 return@forEach
             }
             label_rects += padded
-            canvas.drawText(label, label_point.x, label_point.y - dp(8f), text_paint)
+            draw_sourced_map_label(canvas, label, label_point.x, anchor_baseline)
         }
         text_paint.isFakeBoldText = false
+        text_paint.textSkewX = 0f
         stroke_paint.strokeCap = Paint.Cap.BUTT
         stroke_paint.strokeJoin = Paint.Join.MITER
     }
@@ -2375,12 +2405,15 @@ internal class AviationLayerRenderer(
         text_paint.isFakeBoldText = true
         text_paint.textSize = sp(10f)
         visible.forEach { (airport, point) ->
-            val label = AviationMapTextAdapter.airport(airport).primary_text
             val color = if (airport.military) style.military_gray else style.accent_yellow
             val max_width = dp(if (viewport.zoom >= 10.0) 98f else 62f)
             text_paint.color = color
-            val display = ellipsize(label, max_width)
-            val width = text_paint.measureText(display) + dp(10f)
+            val label = prepare_sourced_map_label(
+                text = airport.map_text,
+                primary_text_size = text_paint.textSize,
+                max_width = max_width,
+            )
+            val width = label.width + dp(10f)
             val preferred_left = if (point.x + dp(5f) + width <= viewport.width - dp(2f)) {
                 point.x + dp(5f)
             } else {
@@ -2390,8 +2423,21 @@ internal class AviationLayerRenderer(
                 dp(2f),
                 (viewport.width - width - dp(2f)).coerceAtLeast(dp(2f))
             )
-            val top = (point.y - dp(16f)).coerceIn(dp(2f), viewport.height - dp(22f))
-            val rect = RectF(left, top, left + width, top + dp(20f))
+            val height = if (label.english == null) dp(20f) else max(dp(20f), label.collision_height)
+            val minimum_top = dp(2f)
+            val maximum_top = (viewport.height - height - dp(2f)).coerceAtLeast(minimum_top)
+            val top: Float
+            val anchor_baseline: Float
+            if (label.english == null) {
+                top = (point.y - dp(16f)).coerceIn(minimum_top, maximum_top)
+                anchor_baseline = top + dp(14f)
+            } else {
+                val desired_anchor_baseline = point.y - dp(2f)
+                val desired_center = desired_anchor_baseline + label.collision_center_offset
+                top = (desired_center - height / 2f).coerceIn(minimum_top, maximum_top)
+                anchor_baseline = top + height / 2f - label.collision_center_offset
+            }
+            val rect = RectF(left, top, left + width, top + height)
             if (!rect.intersects(0f, 0f, viewport.width, viewport.height)) return@forEach
             val padded = rect.padded_copy(dp(3f))
             if (label_rects.any { RectF.intersects(padded, it) }) return@forEach
@@ -2401,7 +2447,7 @@ internal class AviationLayerRenderer(
             canvas.drawRoundRect(rect, dp(4f), dp(4f), paint)
             paint.color = color
             canvas.drawCircle(point.x, point.y, dp(3f), paint)
-            canvas.drawText(display, rect.left + dp(5f), rect.bottom - dp(6f), text_paint)
+            draw_sourced_map_label(canvas, label, rect.left + dp(5f), anchor_baseline)
             selection_hit_collector.accept_airport_marker(
                 airport,
                 point,
@@ -2409,6 +2455,63 @@ internal class AviationLayerRenderer(
             )
         }
         text_paint.isFakeBoldText = false
+        text_paint.textSkewX = 0f
+    }
+
+    private fun prepare_sourced_map_label(
+        text: SourcedMapText,
+        primary_text_size: Float,
+        max_width: Float?,
+    ): PreparedSourcedMapLabel {
+        val presentation = SourcedMapTextPresentation.plan(text, primary_text_size)
+        fun prepare(line: SourcedMapTextLinePlan): PreparedSourcedMapLabelLine {
+            text_paint.textSize = line.textSize
+            text_paint.textSkewX = if (line.forceItalic) {
+                SourcedMapTextPresentation.forcedItalicSkewX
+            } else {
+                0f
+            }
+            val display = max_width?.let { ellipsize(line.text, it) } ?: line.text
+            return PreparedSourcedMapLabelLine(
+                text = display,
+                text_size = line.textSize,
+                baseline_offset = line.baselineOffset,
+                force_italic = line.forceItalic,
+                width = text_paint.measureText(display),
+            )
+        }
+        val primary = prepare(presentation.primary)
+        val english = presentation.english?.let(::prepare)
+        text_paint.textSize = presentation.primary.textSize
+        text_paint.textSkewX = 0f
+        return PreparedSourcedMapLabel(
+            primary = primary,
+            english = english,
+            width = max(primary.width, english?.width ?: 0f),
+            collision_height = presentation.collisionHeightEm * primary_text_size,
+            collision_center_offset = presentation.collisionCenterOffset,
+        )
+    }
+
+    private fun draw_sourced_map_label(
+        canvas: Canvas,
+        label: PreparedSourcedMapLabel,
+        x: Float,
+        anchor_baseline: Float,
+    ) {
+        fun draw(line: PreparedSourcedMapLabelLine) {
+            text_paint.textSize = line.text_size
+            text_paint.textSkewX = if (line.force_italic) {
+                SourcedMapTextPresentation.forcedItalicSkewX
+            } else {
+                0f
+            }
+            canvas.drawText(line.text, x, anchor_baseline + line.baseline_offset, text_paint)
+        }
+        draw(label.primary)
+        label.english?.let(::draw)
+        text_paint.textSize = label.primary.text_size
+        text_paint.textSkewX = 0f
     }
 
     private fun draw_selected_airport(
@@ -2511,12 +2614,28 @@ internal class AviationLayerRenderer(
 
     private data class PreparedAirspaceFeature(
         val source: AviationAirspaceFeature,
-        val label: String,
+        val map_text: SourcedMapText,
         val center: AviationLayerPoint,
         val point_count: Int,
         val min_unwrapped_lon: Double,
         val max_unwrapped_lon: Double,
         val polygons: List<PreparedAirspacePolygon>
+    )
+
+    private data class PreparedSourcedMapLabelLine(
+        val text: String,
+        val text_size: Float,
+        val baseline_offset: Float,
+        val force_italic: Boolean,
+        val width: Float,
+    )
+
+    private data class PreparedSourcedMapLabel(
+        val primary: PreparedSourcedMapLabelLine,
+        val english: PreparedSourcedMapLabelLine?,
+        val width: Float,
+        val collision_height: Float,
+        val collision_center_offset: Float,
     )
 
     private data class PreparedAirspacePolygon(

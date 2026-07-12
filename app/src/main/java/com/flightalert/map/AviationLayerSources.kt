@@ -1229,7 +1229,11 @@ object AviationGeoJsonParser {
             val feature = features.optJSONObject(index) ?: continue
             val properties = feature.optJSONObject("properties") ?: continue
             val object_id = properties.object_id_or_null() ?: continue
-            val record = parse_airspace_feature(feature, properties, object_id)
+            val record = try {
+                parse_airspace_feature(feature, properties, object_id)
+            } catch (_: SourcedMapTextException) {
+                null
+            }
             if (record == null) {
                 invalid_object_ids += object_id
             } else {
@@ -1251,7 +1255,11 @@ object AviationGeoJsonParser {
             val feature = features.optJSONObject(index) ?: continue
             val properties = feature.optJSONObject("properties") ?: continue
             val object_id = properties.object_id_or_null() ?: continue
-            val record = parse_airport_feature(feature, properties, object_id)
+            val record = try {
+                parse_airport_feature(feature, properties, object_id)
+            } catch (_: SourcedMapTextException) {
+                null
+            }
             if (record == null) {
                 invalid_object_ids += object_id
             } else {
@@ -1272,9 +1280,9 @@ object AviationGeoJsonParser {
         val type = properties.clean_string("TYPE_CODE")
             ?: properties.clean_string("LOCAL_TYPE")
             ?: return null
-        val name = properties.clean_string("NAME")
-            ?: properties.clean_string("IDENT")
-            ?: return null
+        val source_name = properties.source_text("NAME")
+        val source_ident = properties.source_text("IDENT")
+        val name = source_name ?: source_ident ?: return null
         return AviationAirspaceFeature(
             object_id = object_id,
             name = name,
@@ -1285,7 +1293,12 @@ object AviationGeoJsonParser {
             city = properties.clean_string("CITY"),
             state = properties.clean_string("STATE"),
             geometry = geometry,
-            bounds = geometry.all_rings.flatten().to_bounds()
+            bounds = geometry.all_rings.flatten().to_bounds(),
+            map_text_source_field = if (source_name != null) {
+                AviationMapTextSourceField.AIRSPACE_NAME
+            } else {
+                AviationMapTextSourceField.AIRSPACE_IDENT
+            },
         )
     }
 
@@ -1301,19 +1314,26 @@ object AviationGeoJsonParser {
             ?: return null
         val lat = coordinates.coordinate_number_or_null(1)?.takeIf { it in -90.0..90.0 }
             ?: return null
-        val ident = properties.clean_string("ICAO_ID")
-            ?: properties.clean_string("IDENT")
-            ?: return null
+        val icao_id = properties.source_text("ICAO_ID")
+        val faa_ident = properties.source_text("IDENT")
+        val source_name = properties.source_text("NAME")
+        val ident = icao_id ?: faa_ident ?: ""
+        val name = source_name ?: ident.takeIf(String::isNotEmpty) ?: return null
         val type = properties.clean_string("TYPE_CODE") ?: return null
         val military_code = properties.clean_string("MIL_CODE") ?: return null
         return AviationAirportFeature(
             object_id = object_id,
             ident = ident,
-            name = properties.clean_string("NAME") ?: ident,
+            name = name,
             type = type,
             military_code = military_code,
             lat = lat,
-            lon = lon
+            lon = lon,
+            map_text_ident_source_field = when {
+                icao_id != null -> AviationMapTextSourceField.AIRPORT_ICAO_ID
+                faa_ident != null -> AviationMapTextSourceField.AIRPORT_IDENT
+                else -> null
+            },
         )
     }
 
@@ -1374,6 +1394,11 @@ object AviationGeoJsonParser {
     private fun JSONObject.clean_string(key: String): String? {
         if (!has(key) || isNull(key)) return null
         return (opt(key) as? String)?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun JSONObject.source_text(key: String): String? {
+        if (!has(key) || isNull(key)) return null
+        return opt(key) as? String
     }
 
     private fun JSONObject.number_or_null(key: String): Double? {

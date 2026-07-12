@@ -45,8 +45,25 @@ class ReferenceFilterPreferencesTest {
     }
 
     @Test
+    fun coastlineOutlineDefaultsOffButCanBeEnabledAndReset() {
+        val defaults = FilterState.defaults()
+
+        assertFalse(defaults.stored_enabled(FilterId.OUTLINES_COASTLINES))
+        assertTrue(defaults.stored_enabled(FilterId.OUTLINES_INTERNATIONAL))
+
+        val coastlineEnabled = defaults.with_filter(FilterId.OUTLINES_COASTLINES, true)
+        assertTrue(coastlineEnabled.stored_enabled(FilterId.OUTLINES_COASTLINES))
+        assertFalse(
+            ReferenceFilterPreferences.reset(coastlineEnabled)
+                .stored_enabled(FilterId.OUTLINES_COASTLINES),
+        )
+    }
+
+    @Test
     fun masterGatesPreserveStoredSubtypeChoices() {
-        val initial = FilterState.defaults().with_filter(FilterId.LABELS_STREAMS, false)
+        val initial = FilterState.defaults()
+            .with_filter(FilterId.LABELS_STREAMS, false)
+            .with_filter(FilterId.OUTLINES_COASTLINES, true)
         val labels_off = initial.with_labels_master(false)
         val labels_back_on = labels_off.with_labels_master(true)
 
@@ -151,6 +168,33 @@ class ReferenceFilterPreferencesTest {
             .with_filter(FilterId.OUTLINES_OTHER, false)
 
         assertEquals(FilterState.defaults(), ReferenceFilterPreferences.reset(changed))
-        assertTrue(FilterId.entries.all { FilterState.defaults().stored_enabled(it) })
+        assertFalse(FilterState.defaults().stored_enabled(FilterId.OUTLINES_COASTLINES))
+        assertTrue(
+            FilterId.entries
+                .filterNot { it == FilterId.OUTLINES_COASTLINES }
+                .all { FilterState.defaults().stored_enabled(it) },
+        )
+    }
+
+    @Test
+    fun legacyGroupMigrationMapsOnlyTheClassesTheOldControlsOwned() {
+        val migrated = ReferenceFilterPreferences.fromLegacyGroups(
+            placesEnabled = false,
+            waterEnabled = false,
+            regionsEnabled = false,
+            publicLandsEnabled = false,
+        )
+
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_PLACES))
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_ISLANDS))
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_MAJOR_WATER))
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_RIVERS))
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_STREAMS))
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_CANALS))
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_REGIONS))
+        assertFalse(migrated.stored_enabled(FilterId.LABELS_PROTECTED_LANDS))
+        assertFalse(migrated.stored_enabled(FilterId.OUTLINES_PROTECTED_AREAS))
+        assertFalse(migrated.stored_enabled(FilterId.OUTLINES_COASTLINES))
+        assertTrue(migrated.stored_enabled(FilterId.OUTLINES_INTERNATIONAL))
     }
 }

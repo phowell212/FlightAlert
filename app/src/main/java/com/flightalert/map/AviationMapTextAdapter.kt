@@ -7,77 +7,58 @@ package com.flightalert.map
  * The shared sourced-map-text runtime owns those decisions; aviation supplies
  * only source text and the fields that justify it.
  */
-internal enum class AviationMapTextSourceField {
-    AIRSPACE_NAME,
-    AIRSPACE_TYPE,
-    AIRPORT_IDENT,
-    AIRPORT_NAME,
-    NAT_DESIGNATOR
+enum class AviationMapTextSourceField(
+    val stable_source_field_id: ULong,
+) {
+    AIRSPACE_NAME(0x4641_4141_0001_0001uL),
+    AIRSPACE_IDENT(0x4641_4141_0001_0002uL),
+    AIRPORT_ICAO_ID(0x4641_4141_0002_0001uL),
+    AIRPORT_IDENT(0x4641_4141_0002_0002uL),
+    AIRPORT_NAME(0x4641_4141_0002_0003uL),
+    NAT_DESIGNATOR(0x4641_414e_0001_0001uL),
 }
 
 internal class AviationMapTextSource(
     primary_text: String,
     source_fields: List<AviationMapTextSourceField>
 ) {
-    val primary_text: String = primary_text.also {
-        require(it.isNotBlank()) { "aviation map text must not be blank" }
-    }
+    val primary_text: String = primary_text
     val source_fields: List<AviationMapTextSourceField> = source_fields.toList().also {
-        require(it.isNotEmpty()) { "aviation map text requires source-field provenance" }
-        require(it.distinct().size == it.size) {
-            "aviation map text source-field provenance must not contain duplicates"
-        }
+        require(it.size == 1) { "aviation map text requires one exact source field" }
     }
+    val sourced_text: SourcedMapText = SourcedMapTextPolicy.create(
+        primary = this.primary_text,
+        primarySourceFieldId = this.source_fields.single().stable_source_field_id,
+    )
 }
 
 internal object AviationMapTextAdapter {
     fun airspace(feature: AviationAirspaceFeature): AviationMapTextSource {
-        val name = feature.name
-        val type = feature.type.trim()
-        if (type.isBlank() || type.equals(name, ignoreCase = true)) {
-            return AviationMapTextSource(
-                name,
-                listOf(AviationMapTextSourceField.AIRSPACE_NAME)
-            )
-        }
-        val type_already_in_name = Regex(
-            "\\b${Regex.escape(type)}\\b",
-            RegexOption.IGNORE_CASE
-        ).containsMatchIn(name)
-        return if (type_already_in_name) {
-            AviationMapTextSource(
-                name,
-                listOf(AviationMapTextSourceField.AIRSPACE_NAME)
-            )
-        } else {
-            AviationMapTextSource(
-                "$name $type",
-                listOf(
-                    AviationMapTextSourceField.AIRSPACE_NAME,
-                    AviationMapTextSourceField.AIRSPACE_TYPE
-                )
-            )
-        }
+        return AviationMapTextSource(
+            feature.name,
+            listOf(feature.map_text_source_field),
+        )
     }
 
     fun airport(feature: AviationAirportFeature): AviationMapTextSource {
-        return if (feature.ident.isNotBlank()) {
+        val ident_source_field = feature.map_text_ident_source_field
+        return if (ident_source_field != null) {
             AviationMapTextSource(
                 feature.ident,
-                listOf(AviationMapTextSourceField.AIRPORT_IDENT)
+                listOf(ident_source_field),
             )
         } else {
             AviationMapTextSource(
                 feature.name,
-                listOf(AviationMapTextSourceField.AIRPORT_NAME)
+                listOf(AviationMapTextSourceField.AIRPORT_NAME),
             )
         }
     }
 
     fun oceanic_track(track: AviationOceanicTrack): AviationMapTextSource {
         return AviationMapTextSource(
-            track.name,
-            listOf(AviationMapTextSourceField.NAT_DESIGNATOR)
+            track.designator,
+            listOf(AviationMapTextSourceField.NAT_DESIGNATOR),
         )
     }
 }

@@ -63,6 +63,7 @@ object FlightAlertSettings {
     const val KEY_FILTER_FLIGHT_STATUS = "filter_flight_status"
     const val KEY_FILTER_REPORT_AGE = "filter_report_age"
     const val KEY_FILTER_ALERT_VOLUME = "filter_alert_volume"
+    const val KEY_REFERENCE_FILTER_STATE = "reference_filter_state"
 
     const val DEFAULT_ALERT_DISTANCE_FEET = 5000f
     const val DEFAULT_ALERT_ALTITUDE_FEET = 1000f

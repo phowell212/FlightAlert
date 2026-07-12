@@ -119,12 +119,17 @@ import com.flightalert.map.AviationSelectionPolicy
 import com.flightalert.map.AviationSelection
 import com.flightalert.map.Bounds
 import com.flightalert.map.DeviceHeadingProvider
+import com.flightalert.map.FilterId
+import com.flightalert.map.FilterState
+import com.flightalert.map.ReferenceClassCatalog
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapMeasurementFormatter
 import com.flightalert.map.MapProjection
 import com.flightalert.map.MapTileRenderState
 import com.flightalert.map.MapTileRenderStyle
 import com.flightalert.map.MapTileRenderer
+import com.flightalert.map.ReferenceLabelAvoidance
+import com.flightalert.map.ReferenceScreenRect
 import com.flightalert.map.ScaleLabel
 import com.flightalert.map.ScreenPoint
 import com.flightalert.map.TileSource
@@ -182,6 +187,14 @@ import com.flightalert.ui.PriorityRangeButtonFillState
 import com.flightalert.ui.PriorityRangeValue
 import com.flightalert.ui.PriorityTrackerPanelAction
 import com.flightalert.ui.PriorityTrackerPanelState
+import com.flightalert.ui.ReferenceFilterPreferences
+import com.flightalert.ui.ReferenceFiltersPanelController
+import com.flightalert.ui.ReferenceFiltersPanelPlan
+import com.flightalert.ui.ReferenceFiltersPanelSession
+import com.flightalert.ui.ReferenceFiltersTextMeasurer
+import com.flightalert.ui.ReferenceFiltersViewport
+import com.flightalert.ui.ReferencePanelIntent
+import com.flightalert.ui.ReferencePanelKey
 import com.flightalert.ui.SettingsPanelAction
 import com.flightalert.ui.SettingsPanelHitState
 import com.flightalert.ui.SettingsPanelState
@@ -209,6 +222,21 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+
+internal class ReferenceFilterCatalogPanelCache {
+    private var catalog: ReferenceClassCatalog? = null
+
+    fun update(
+        next: ReferenceClassCatalog?,
+        on_identity_changed: () -> Unit,
+    ): ReferenceClassCatalog? {
+        if (next !== catalog) {
+            catalog = next
+            on_identity_changed()
+        }
+        return catalog
+    }
+}
 
 // Custom map cockpit: real map tiles, real aircraft feeds, and canvas UI that adapts to device shape.
 @SuppressLint("ViewConstructor")
@@ -301,6 +329,9 @@ class FlightMapView(
         stroke_paint = stroke_paint,
         text_paint = text_paint,
         chrome = chrome_bridge
+    )
+    private val reference_filters_panel_controller = ReferenceFiltersPanelController(
+        ReferenceFiltersTextMeasurer(::measure_reference_filter_text)
     )
     private val details_panel_renderer = AircraftDetailsPanelRenderer(
         paint = paint,
@@ -594,6 +625,18 @@ class FlightMapView(
         FlightAlertSettings.KEY_LAYER_PUBLIC_LANDS_ENABLED,
         FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED
     )
+    private var reference_filter_state = prefs
+        .getString(FlightAlertSettings.KEY_REFERENCE_FILTER_STATE, null)
+        ?.let { encoded ->
+            runCatching { ReferenceFilterPreferences.decode(encoded) }.getOrNull()
+        }
+        ?: ReferenceFilterPreferences.fromLegacyGroups(
+            placesEnabled = place_labels_layer_enabled,
+            waterEnabled = water_labels_layer_enabled,
+            regionsEnabled = region_labels_layer_enabled,
+            publicLandsEnabled = public_lands_layer_enabled,
+        )
+    private val reference_filter_catalog_cache = ReferenceFilterCatalogPanelCache()
     private var aircraft_feed_mode = FlightAlertSettings.read_aircraft_feed_mode(prefs)
     private var globe_bin_craft_source_enabled = aircraft_feed_mode.uses_globe
     private val app_opened_elapsed_ms = SystemClock.elapsedRealtime()
@@ -644,6 +687,10 @@ class FlightMapView(
     private var priority_tracker_open = false
     private var filters_open = false
     private var filter_search_focused = false
+    private var reference_filters_panel_session = ReferenceFiltersPanelSession()
+    private var filter_panel_scroll_start_offset_dp = 0f
+    private var reference_filters_panel_plan_cache_key: ReferenceFiltersPanelPlanCacheKey? = null
+    private var reference_filters_panel_plan_cache: ReferenceFiltersPanelPlan? = null
     private var impact_methodology_open = false
     private var priority_adjust_hold: PriorityAdjustHold? = null
     private var map_label_text_slider_dragging = false
@@ -950,6 +997,9 @@ class FlightMapView(
     // Android calls this after rotations, folds, and resizes. Refit the map to the new screen.
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        if (filters_open && content_width() > 0f && content_height() > 0f) {
+            reference_filters_panel_plan(content_width(), content_height())
+        }
         apply_initial_mavic_range_zoom_if_needed()
         request_deferred_aircraft_refresh()
     }
@@ -1073,6 +1123,13 @@ class FlightMapView(
                 } else {
                     details_scroll_y
                 }
+                if (filters_open) {
+                    val plan = reference_filters_panel_plan(content_width(), content_height())
+                    reference_filters_panel_session = reference_filters_panel_session.copy(
+                        requestedScrollOffsetDp = plan.appliedScrollOffsetDp,
+                    )
+                    filter_panel_scroll_start_offset_dp = plan.appliedScrollOffsetDp
+                }
                 drag_started = false
                 drag_blocked = !map_touch_active
                 drag_start_center = if (map_touch_active) current_interaction_viewport()?.let {
@@ -1086,6 +1143,7 @@ class FlightMapView(
             MotionEvent.ACTION_MOVE -> {
                 if (update_map_label_text_slider_drag(x)) return true
                 if (update_priority_adjust_hold(x, y)) return true
+                if (update_filter_panel_scroll(y)) return true
                 if (selected_aviation_key != null && aviation_details_max_scroll_y > 0f) {
                     val dy = y - details_scroll_start_y
                     if (!drag_started && abs(dy) > dp(6)) drag_started = true
@@ -1261,6 +1319,9 @@ class FlightMapView(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (filters_open && handle_reference_filter_panel_key(keyCode, event)) {
+            return true
+        }
         if (filters_open && filter_search_focused && handle_filter_search_key(keyCode, event)) {
             return true
         }
@@ -1285,6 +1346,38 @@ class FlightMapView(
             return true
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    private fun handle_reference_filter_panel_key(keyCode: Int, event: KeyEvent): Boolean {
+        val key = when (keyCode) {
+            KeyEvent.KEYCODE_BACK,
+            KeyEvent.KEYCODE_ESCAPE -> ReferencePanelKey.BACK
+            KeyEvent.KEYCODE_TAB -> if (event.isShiftPressed) {
+                ReferencePanelKey.PREVIOUS
+            } else {
+                ReferencePanelKey.NEXT
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_RIGHT -> ReferencePanelKey.NEXT
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_LEFT -> ReferencePanelKey.PREVIOUS
+            KeyEvent.KEYCODE_PAGE_DOWN -> ReferencePanelKey.SCROLL_FORWARD
+            KeyEvent.KEYCODE_PAGE_UP -> ReferencePanelKey.SCROLL_BACKWARD
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_SPACE -> if (filter_search_focused) null else ReferencePanelKey.ACTIVATE
+            else -> null
+        } ?: return false
+        val plan = reference_filters_panel_plan(content_width(), content_height())
+        val intent = reference_filters_panel_controller.keyIntent(
+            plan,
+            reference_filters_panel_session,
+            key,
+        ) ?: return false
+        handle_reference_filter_panel_intent(intent)
+        invalidate()
+        return true
     }
 
     private fun begin_pinch(event: MotionEvent) {
@@ -1571,12 +1664,12 @@ class FlightMapView(
         map_status = map_tile_renderer.draw_tiles(
             canvas = canvas,
             viewport = viewport,
-            state = map_tile_state(),
+            state = map_tile_state(viewport),
             style = map_tile_style()
         )
     }
 
-    private fun map_tile_state(): MapTileRenderState {
+    private fun map_tile_state(viewport: Viewport): MapTileRenderState {
         return MapTileRenderState(
             map_source = map_source,
             map_labels_enabled = active_map_labels_enabled(),
@@ -1588,8 +1681,42 @@ class FlightMapView(
             public_lands_enabled = public_lands_layer_enabled,
             map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
             user_agent = USER_AGENT,
-            interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime())
+            interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime()),
+            reference_filter_state = reference_filter_state,
+            reference_label_avoid_rects = reference_label_avoid_rects(viewport)
         )
+    }
+
+    private fun reference_label_avoid_rects(viewport: Viewport): List<ReferenceScreenRect> {
+        val padding = dp(8f).toDouble()
+        val result = layout.map_obstacles(
+            content_width(),
+            content_height(),
+            layout_state()
+        ).mapTo(mutableListOf()) { bounds ->
+            ReferenceScreenRect(
+                bounds.left.toDouble(),
+                bounds.top.toDouble(),
+                bounds.right.toDouble(),
+                bounds.bottom.toDouble()
+            ).padded(padding)
+        }
+        latest_location?.let { location ->
+            val ownship = screen_point_for(
+                GeoPoint(location.latitude, location.longitude),
+                viewport
+            )
+            result += ReferenceLabelAvoidance.ownship_rect(
+                center_x = ownship.x.toDouble(),
+                center_y = ownship.y.toDouble(),
+                marker_radius_px = dp(28f).toDouble(),
+                pill_half_width_px = dp(35f).toDouble(),
+                pill_top_offset_px = dp(30f).toDouble(),
+                pill_height_px = dp(22f).toDouble(),
+                padding_px = padding
+            )
+        }
+        return result
     }
 
     private fun map_label_transition_alpha(now: Long): Float {
@@ -2801,7 +2928,7 @@ class FlightMapView(
     }
 
     private fun draw_filters_panel(canvas: Canvas, w: Float, h: Float) {
-        panel_renderer.draw_filters_panel(canvas, w, h, panel_style(), filters_panel_state())
+        panel_renderer.draw_filters_panel(canvas, w, h, panel_style(), filters_panel_state(w, h))
     }
 
     private fun draw_priority_tracker_panel(canvas: Canvas, w: Float, h: Float) {
@@ -2865,7 +2992,55 @@ class FlightMapView(
         return ImpactMethodologyPanelState(source_labels = AircraftImpactEstimator.source_labels)
     }
 
-    private fun filters_panel_state(): FiltersPanelState {
+    private fun reference_filter_catalog_for_panel(): ReferenceClassCatalog? {
+        return reference_filter_catalog_cache.update(
+            map_tile_renderer.reference_class_catalog(),
+        ) {
+            reference_filters_panel_plan_cache_key = null
+            reference_filters_panel_plan_cache = null
+        }
+    }
+
+    private fun reference_filters_panel_plan(w: Float, h: Float): ReferenceFiltersPanelPlan {
+        val panel = layout.settings_panel_bounds(w, h)
+        val density = resources.displayMetrics.density
+        val compact = layout.is_compact_settings_panel(panel)
+        val legacySearchTopDp = if (compact) 62f else 74f
+        val trafficContentHeightDp = (panel.height() / density - legacySearchTopDp).coerceAtLeast(0f)
+        val fontScale = resources.configuration.fontScale.coerceAtLeast(0.01f)
+        val fontFamily = theme_style.font_family
+        val catalog = reference_filter_catalog_for_panel()
+        val cacheKey = ReferenceFiltersPanelPlanCacheKey(
+            panelWidthPx = panel.width(),
+            panelHeightPx = panel.height(),
+            density = density,
+            fontScale = fontScale,
+            fontFamily = fontFamily,
+            compact = compact,
+            session = reference_filters_panel_session,
+            catalog = catalog,
+            filterState = reference_filter_state,
+        )
+        if (cacheKey == reference_filters_panel_plan_cache_key) {
+            reference_filters_panel_plan_cache?.let { return it }
+        }
+        return reference_filters_panel_controller.plan(
+            viewport = ReferenceFiltersViewport(
+                widthDp = panel.width() / density,
+                heightDp = panel.height() / density,
+                fontScale = fontScale,
+            ),
+            session = reference_filters_panel_session,
+            catalog = catalog,
+            filterState = reference_filter_state,
+            trafficContentHeightDp = trafficContentHeightDp,
+        ).also { plan ->
+            reference_filters_panel_plan_cache_key = cacheKey
+            reference_filters_panel_plan_cache = plan
+        }
+    }
+
+    private fun filters_panel_state(w: Float, h: Float): FiltersPanelState {
         return FiltersPanelState(
             filter_search_query = aircraft_filter_controller.search_query,
             filter_search_focused = filter_search_focused,
@@ -2875,13 +3050,11 @@ class FlightMapView(
             flight_status_filter = aircraft_filter_controller.flight_status,
             report_age_filter = aircraft_filter_controller.report_age,
             alert_volume_filter = aircraft_filter_controller.alert_volume_only,
-            reference_layer_controls_visible = reference_layer_filters_visible(),
-            place_labels_enabled = place_labels_layer_enabled,
-            water_labels_enabled = water_labels_layer_enabled,
-            region_labels_enabled = region_labels_layer_enabled,
-            public_lands_enabled = public_lands_layer_enabled,
             filters_active = filters_active() || reference_layer_filters_active(),
-            stats_summary = filter_stats().summary
+            stats_summary = filter_stats().summary,
+            reference_panel_plan = reference_filters_panel_plan(w, h),
+            reference_focused_action_id = reference_filters_panel_session.focusedActionId,
+            pixels_per_dp = resources.displayMetrics.density,
         )
     }
 
@@ -3052,19 +3225,43 @@ class FlightMapView(
 
     private fun handle_filters_panel_tap(x: Float, y: Float): Boolean {
         if (!filters_open) return false
-        val panel = layout.settings_panel_bounds(content_width(), content_height())
-        handle_filter_panel_action(layout.filter_panel_action_at(panel, x, y, filters_panel_state()))
+        val w = content_width()
+        val h = content_height()
+        val panel = layout.settings_panel_bounds(w, h)
+        handle_filter_panel_action(layout.filter_panel_action_at(panel, x, y, filters_panel_state(w, h)))
         invalidate()
+        return true
+    }
+
+    private fun update_filter_panel_scroll(y: Float): Boolean {
+        if (!filters_open) return false
+        val plan = reference_filters_panel_plan(content_width(), content_height())
+        if (plan.maxScrollOffsetDp <= 0f) return false
+        val panel = layout.settings_panel_bounds(content_width(), content_height())
+        val density = resources.displayMetrics.density
+        val content = plan.contentViewport
+        val downInsideContent = down_x >= panel.left + content.left * density &&
+                down_x <= panel.left + content.right * density &&
+                details_scroll_start_y >= panel.top + content.top * density &&
+                details_scroll_start_y <= panel.top + content.bottom * density
+        if (!downInsideContent) return false
+        val dy = y - details_scroll_start_y
+        if (!drag_started && abs(dy) > dp(6)) {
+            drag_started = true
+            reference_filters_panel_session = reference_filters_panel_session.copy(
+                focusedActionId = null,
+            )
+        }
+        if (!drag_started) return false
+        val next = (filter_panel_scroll_start_offset_dp - dy / density)
+            .coerceIn(0f, plan.maxScrollOffsetDp)
+        handle_reference_filter_panel_intent(ReferencePanelIntent.SetScrollOffset(next))
+        postInvalidateOnAnimation()
         return true
     }
 
     private fun handle_filter_panel_action(action: FilterPanelAction) {
         when (action) {
-            FilterPanelAction.CLOSE -> {
-                filters_open = false
-                clear_filter_search_focus()
-            }
-
             FilterPanelAction.FOCUS_SEARCH -> focus_filter_search()
             FilterPanelAction.SUBMIT_SEARCH -> submit_filter_search()
             FilterPanelAction.CLEAR_SEARCH -> set_filter_search_query("")
@@ -3089,20 +3286,41 @@ class FlightMapView(
             )
 
             FilterPanelAction.TOGGLE_ALERT_VOLUME -> set_alert_volume_filter(!aircraft_filter_controller.alert_volume_only)
-            FilterPanelAction.TOGGLE_PLACE_LABELS -> set_place_labels_layer_enabled(
-                !place_labels_layer_enabled
-            )
-            FilterPanelAction.TOGGLE_WATER_LABELS -> set_water_labels_layer_enabled(
-                !water_labels_layer_enabled
-            )
-            FilterPanelAction.TOGGLE_REGION_LABELS -> set_region_labels_layer_enabled(
-                !region_labels_layer_enabled
-            )
-            FilterPanelAction.TOGGLE_PUBLIC_LANDS -> set_public_lands_layer_enabled(
-                !public_lands_layer_enabled
-            )
             FilterPanelAction.RESET -> reset_filters()
             FilterPanelAction.CLEAR_SEARCH_FOCUS -> clear_filter_search_focus()
+            FilterPanelAction.NONE -> Unit
+            is FilterPanelAction.ReferenceIntent -> handle_reference_filter_panel_intent(action.intent)
+        }
+        if (filters_open) {
+            reference_filters_panel_plan(content_width(), content_height())
+        }
+    }
+
+    private fun handle_reference_filter_panel_intent(intent: ReferencePanelIntent) {
+        val result = reference_filters_panel_controller.reduce(
+            session = reference_filters_panel_session,
+            filterState = reference_filter_state,
+            intent = intent,
+        )
+        reference_filters_panel_session = result.session
+        if (result.clearTrafficSearchFocus) {
+            clear_filter_search_focus()
+        }
+        if (result.dismissRequested) {
+            filters_open = false
+        }
+        if (result.filterStateChanged) {
+            reference_filter_state = result.filterState
+            prefs.edit {
+                putString(
+                    FlightAlertSettings.KEY_REFERENCE_FILTER_STATE,
+                    requireNotNull(result.encodedFilterState),
+                )
+            }
+            map_tile_renderer.reset_transitions()
+        }
+        if (filters_open) {
+            reference_filters_panel_plan(content_width(), content_height())
         }
     }
 
@@ -3428,6 +3646,7 @@ class FlightMapView(
                 filters_open = true
                 settings_open = false
                 close_all_settings_subpages()
+                reference_filters_panel_plan(w, h)
             }
 
             MapSurfaceAction.OPEN_TRAFFIC_DETAILS -> displayed_traffic().aircraft?.let {
@@ -3731,11 +3950,18 @@ class FlightMapView(
     private fun set_public_lands_layer_enabled(enabled: Boolean) {
         if (public_lands_layer_enabled == enabled) return
         public_lands_layer_enabled = enabled
+        reference_filter_state = reference_filter_state
+            .with_filter(FilterId.LABELS_PROTECTED_LANDS, enabled)
+            .with_filter(FilterId.OUTLINES_PROTECTED_AREAS, enabled)
         map_tile_renderer.reset_transitions()
         prefs.edit {
             putBoolean(
                 FlightAlertSettings.KEY_LAYER_PUBLIC_LANDS_ENABLED,
                 public_lands_layer_enabled
+            )
+            putString(
+                FlightAlertSettings.KEY_REFERENCE_FILTER_STATE,
+                ReferenceFilterPreferences.encode(reference_filter_state),
             )
         }
         invalidate()
@@ -3744,11 +3970,18 @@ class FlightMapView(
     private fun set_place_labels_layer_enabled(enabled: Boolean) {
         if (place_labels_layer_enabled == enabled) return
         place_labels_layer_enabled = enabled
+        reference_filter_state = reference_filter_state
+            .with_filter(FilterId.LABELS_PLACES, enabled)
+            .with_filter(FilterId.LABELS_ISLANDS, enabled)
         map_tile_renderer.reset_transitions()
         prefs.edit {
             putBoolean(
                 FlightAlertSettings.KEY_LAYER_PLACE_LABELS_ENABLED,
                 place_labels_layer_enabled
+            )
+            putString(
+                FlightAlertSettings.KEY_REFERENCE_FILTER_STATE,
+                ReferenceFilterPreferences.encode(reference_filter_state),
             )
         }
         invalidate()
@@ -3757,11 +3990,20 @@ class FlightMapView(
     private fun set_water_labels_layer_enabled(enabled: Boolean) {
         if (water_labels_layer_enabled == enabled) return
         water_labels_layer_enabled = enabled
+        reference_filter_state = reference_filter_state
+            .with_filter(FilterId.LABELS_MAJOR_WATER, enabled)
+            .with_filter(FilterId.LABELS_RIVERS, enabled)
+            .with_filter(FilterId.LABELS_STREAMS, enabled)
+            .with_filter(FilterId.LABELS_CANALS, enabled)
         map_tile_renderer.reset_transitions()
         prefs.edit {
             putBoolean(
                 FlightAlertSettings.KEY_LAYER_WATER_LABELS_ENABLED,
                 water_labels_layer_enabled
+            )
+            putString(
+                FlightAlertSettings.KEY_REFERENCE_FILTER_STATE,
+                ReferenceFilterPreferences.encode(reference_filter_state),
             )
         }
         invalidate()
@@ -3770,11 +4012,17 @@ class FlightMapView(
     private fun set_region_labels_layer_enabled(enabled: Boolean) {
         if (region_labels_layer_enabled == enabled) return
         region_labels_layer_enabled = enabled
+        reference_filter_state = reference_filter_state
+            .with_filter(FilterId.LABELS_REGIONS, enabled)
         map_tile_renderer.reset_transitions()
         prefs.edit {
             putBoolean(
                 FlightAlertSettings.KEY_LAYER_REGION_LABELS_ENABLED,
                 region_labels_layer_enabled
+            )
+            putString(
+                FlightAlertSettings.KEY_REFERENCE_FILTER_STATE,
+                ReferenceFilterPreferences.encode(reference_filter_state),
             )
         }
         invalidate()
@@ -3996,10 +4244,12 @@ class FlightMapView(
         val next_water = FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED
         val next_regions = FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED
         val next_public_lands = FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED
+        val next_reference_filters = ReferenceFilterPreferences.reset(reference_filter_state)
         if (place_labels_layer_enabled == next_places &&
             water_labels_layer_enabled == next_water &&
             region_labels_layer_enabled == next_regions &&
-            public_lands_layer_enabled == next_public_lands
+            public_lands_layer_enabled == next_public_lands &&
+            reference_filter_state == next_reference_filters
         ) {
             return
         }
@@ -4007,12 +4257,17 @@ class FlightMapView(
         water_labels_layer_enabled = next_water
         region_labels_layer_enabled = next_regions
         public_lands_layer_enabled = next_public_lands
+        reference_filter_state = next_reference_filters
         map_tile_renderer.reset_transitions()
         prefs.edit {
             putBoolean(FlightAlertSettings.KEY_LAYER_PLACE_LABELS_ENABLED, place_labels_layer_enabled)
             putBoolean(FlightAlertSettings.KEY_LAYER_WATER_LABELS_ENABLED, water_labels_layer_enabled)
             putBoolean(FlightAlertSettings.KEY_LAYER_REGION_LABELS_ENABLED, region_labels_layer_enabled)
             putBoolean(FlightAlertSettings.KEY_LAYER_PUBLIC_LANDS_ENABLED, public_lands_layer_enabled)
+            putString(
+                FlightAlertSettings.KEY_REFERENCE_FILTER_STATE,
+                ReferenceFilterPreferences.encode(reference_filter_state),
+            )
         }
     }
 
@@ -4089,7 +4344,8 @@ class FlightMapView(
         return place_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED ||
                 water_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED ||
                 region_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED ||
-                public_lands_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED
+                public_lands_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED ||
+                reference_filter_state != FilterState.defaults()
     }
 
     private fun filters_restrict_aircraft(): Boolean {
@@ -4418,6 +4674,31 @@ class FlightMapView(
         return value * metrics.density * resources.configuration.fontScale
     }
 
+    private fun measure_reference_filter_text(
+        text: String,
+        text_size_sp: Float,
+        font_scale: Float,
+        font_weight: Int,
+        italic: Boolean,
+    ): Float {
+        val previousTypeface = text_paint.typeface
+        val previousTextSize = text_paint.textSize
+        val previousFakeBold = text_paint.isFakeBoldText
+        val previousLetterSpacing = text_paint.letterSpacing
+        val density = resources.displayMetrics.density
+        text_paint.textSize = text_size_sp * density * font_scale
+        text_paint.isFakeBoldText = false
+        text_paint.letterSpacing = 0f
+        val referenceTypeface = Typeface.create(theme_style.font_family, Typeface.NORMAL)
+        text_paint.typeface = Typeface.create(referenceTypeface, font_weight, italic)
+        val measured_dp = text_paint.measureText(text) / density
+        text_paint.typeface = previousTypeface
+        text_paint.textSize = previousTextSize
+        text_paint.isFakeBoldText = previousFakeBold
+        text_paint.letterSpacing = previousLetterSpacing
+        return measured_dp
+    }
+
     private fun chrome_style(): FlightMapChromeStyle = FlightMapChromeStyle(visual_theme)
 
     private fun control_radius(): Float = chrome_renderer.control_radius(chrome_style())
@@ -4460,6 +4741,18 @@ class FlightMapView(
 
     private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float =
         safe_smooth_step(edge0, edge1, value)
+
+    private data class ReferenceFiltersPanelPlanCacheKey(
+        val panelWidthPx: Float,
+        val panelHeightPx: Float,
+        val density: Float,
+        val fontScale: Float,
+        val fontFamily: String,
+        val compact: Boolean,
+        val session: ReferenceFiltersPanelSession,
+        val catalog: ReferenceClassCatalog?,
+        val filterState: FilterState,
+    )
 
     private data class PriorityAdjustHold(
         val button: PriorityRangeAdjustButton,

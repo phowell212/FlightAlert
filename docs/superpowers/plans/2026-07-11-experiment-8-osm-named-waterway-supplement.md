@@ -7,8 +7,11 @@
 **Goal:** Add a source-honest, logically separable OpenStreetMap named-waterway
 lane that can label prominent rivers such as the western Chester River without
 copying a name onto Esri geometry, while keeping the complete Experiment 8
-on-phone reference footprint inside the existing `23,500,000,000`-byte package
-authorization ceiling and the ultimate `25,000,000,000`-byte device ceiling.
+on-phone reference footprint inside the preferred `23,500,000,000`-byte package
+gate and preferred `25,000,000,000`-byte device target. The user-authorized
+fallback remains a package below `38,500,000,000` bytes and a complete device
+below `40,000,000,000` bytes; it is not a reason to spend bytes without a
+documented coverage or visual-fidelity benefit.
 
 **Architecture:** The Esri and OSM sources remain different authorities. Exact
 OSM root objects, relation membership, signed E7 coordinates, tags, versions,
@@ -122,13 +125,33 @@ Do not download a planet or any non-Maryland regional PBF in Task 0.
   `waterway` ways and `type=waterway` relations without references; then apply
   the name predicate to that candidate stream; finally run `osmium getid -r`
   against the original locked PBF using only the selected root IDs.
+- [ ] Keep the production selector provenance-incapable: its only public
+  selection operation accepts immutable candidate XML bytes and returns
+  in-memory canonical generic root-ID and selection-material bytes. It performs
+  no final writes and cannot name Maryland, a runtime, or a source PBF. Require
+  the live-verified provenance wrapper to invoke that exact imported callable,
+  revalidate and reconcile both returned byte strings, bind their hashes and
+  lengths to the candidate/source/runtime/command/policy identities, then own
+  the only transactional final publication path.
 - [ ] Implement an independent project-owned rescan that applies the predicates
   without importing the production selector, reconciles every root ID and
   object version, distinguishes selected roots from reference-only objects,
-  proves recursive closure, and fails on additions, omissions, or missing refs.
-- [ ] Require production selection exit 0, `getid -r` exit 0, `check-refs`
-  success, exact root/reference counts, deterministic sorted root manifests,
-  and identical cold/warm results.
+  proves recursive closure, and fails on additions, omissions, invalid objects,
+  or unexplained missing refs.
+- [ ] Emit separately hashed all-root selection, per-root closure-audit, and
+  admitted-root manifests. The exact Maryland regional profile may mark only
+  independently proven clipped relation roots as
+  `Unavailable(source_incomplete)`; it may not reclassify them empty or silently
+  drop them. Every selected direct way must close.
+- [ ] For the Maryland profile, require one global closure probe, exact direct
+  member attribution, independent singleton probes for predicted-incomplete
+  relations, dependency propagation, singleton-union equality, one zero-missing
+  predicted-complete relation union, then an admitted way-plus-relation
+  `getid -r` exit 0 and `check-refs` success. Require exact counts,
+  deterministic manifests, and identical cold/warm semantic results.
+- [ ] Keep the future planet gate strictly stronger:
+  `selected == complete == admitted`; any missing reference aborts the build and
+  no regional quarantine rule is available.
 
 ### Task 2: Extend the typed renderer contract for exact OSM geometry
 
@@ -164,7 +187,9 @@ reinterpret those semantics.
 - [ ] A named relation owns only explicitly referenced member geometry. Keep
   provider member order and roles. Join adjacent members only when their exact
   node IDs meet in the stated order; preserve every discontinuity as a new part.
-  Reject unresolved nested cycles and audit branches rather than guessing.
+  Retain point members such as `source` and `mouth` in exact source/closure audit
+  but never turn them into line geometry or line text. Reject unresolved nested
+  cycles and audit branches rather than guessing.
 - [ ] Direct named ways and named relations remain separate source occurrences.
   Freeze deterministic relation-versus-way placement priority, while retaining
   both in audit evidence and allowing whole-label collision to select at most
@@ -178,8 +203,15 @@ reinterpret those semantics.
   `0.07` em letter spacing, 30-degree maximum bend, 1000-pixel repeat distance,
   avoid edges, keep upright, deterministic global phase, atomic whole-run
   acceptance, and viewport candidate dedupe.
-- [ ] Require the exact western Chester source path to produce an applicable
-  intact `Chester River` candidate at the screenshot zoom/corridor. Require the
+- [ ] Store the complete source-owned river run and policy, never one baked
+  midpoint/anchor/rotation. At each current fractional zoom and viewport, derive
+  an eligible visible screen-space subpath from the full run, shape the word
+  once, and adapt placement as the displayed river shape changes. Preserve
+  stable pan/zoom continuity with retained-run validation and whole-label
+  fade/handoff; hide the whole label when no legible run exists.
+- [ ] Require the exact western Chester source path to produce applicable,
+  intact `Chester River` candidates following the visible river at a frozen
+  multi-zoom/fractional-zoom/pan matrix around the screenshot corridor. Require the
   unrelated eastern Esri and western OSM candidates to retain different IDs and
   provenance, with no cross-source semantic dedupe or geometry join.
 
@@ -208,10 +240,11 @@ reinterpret those semantics.
   normalized/spool bytes, unique strings, A/B package bytes, postings,
   placement memberships, page touches, block distributions, decode memory,
   elapsed time, and peak host memory/scratch.
-- [ ] Independently reconcile the complete Maryland selection and package. Any missing
-  prominent sourced name, inappropriate admitted type, corrupted relation,
-  degenerate whole-label record, or unexplained source/package mismatch blocks
-  the pilot.
+- [ ] Independently account for every Maryland-selected root and reconcile the
+  admitted complete subset and package. Any unaccounted missing reference,
+  missing prominent in-coverage sourced name, inappropriate admitted type,
+  corrupted relation, degenerate whole-label record, or unexplained
+  source/package mismatch blocks the pilot.
 - [ ] Report Maryland ratios only as bounded pilot measurements. Do not call
   them a global projection and do not extrapolate them into planet authority.
 
@@ -252,7 +285,9 @@ proven:
 
 - exact immutable Maryland/runtime/license locks and deterministic rebuilds;
 - true conjunctive root selection plus independent full reconciliation;
-- exact root/reference separation and zero missing references;
+- exact selection/closure/admission accounting, zero incomplete direct ways,
+  zero unexplained missing references, and zero missing references in the final
+  admitted closure;
 - exact E7 geometry/projection semantics and cross-codec equality;
 - relation assembly without inferred name/geometry transfer;
 - Chester data-level and renderer-level success with no degenerate labels;

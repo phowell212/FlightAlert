@@ -10,17 +10,133 @@ package com.flightalert.map
 
 import android.content.Context
 import android.os.SystemClock
-import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
-import java.io.RandomAccessFile
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.nio.channels.FileChannel
 import java.security.MessageDigest
 import java.util.zip.DataFormatException
 import java.util.zip.Inflater
+import org.json.JSONObject
+
+internal enum class ReferenceDictionaryRuntimeSchema {
+    LEGACY_JSON,
+    HOT_JSON_V2,
+    BINARY_V3,
+}
+
+internal object ReferenceDictionaryRuntimeSchemaResolver {
+    private const val binaryV3PayloadSchema = "flightalert.reference.renderer-tile.v1"
+
+    fun resolve(
+        schemaVersion: Int,
+        hasPayloadSchema: Boolean,
+        payloadSchema: String,
+        emptyPresentTilesSharePayload: Boolean,
+        presentationPolicySha256: String,
+        sourcedTextPolicySha256: String,
+        unicodeScriptProfileSha256: String,
+    ): ReferenceDictionaryRuntimeSchema {
+        if (schemaVersion == 3) {
+            if (!hasPayloadSchema || payloadSchema != binaryV3PayloadSchema ||
+                presentationPolicySha256 != ReferencePresentationPolicy.canonical_policy_sha256 ||
+                sourcedTextPolicySha256 != SourcedMapTextBinaryCodec.policySha256 ||
+                unicodeScriptProfileSha256 != SourcedMapTextBinaryCodec.unicodeScriptProfileSha256
+            ) {
+                throw IOException("Unsupported Experiment 8 binary package policy identity")
+            }
+            return ReferenceDictionaryRuntimeSchema.BINARY_V3
+        }
+        return if (hasPayloadSchema || emptyPresentTilesSharePayload || schemaVersion >= 2) {
+            ReferenceDictionaryRuntimeSchema.HOT_JSON_V2
+        } else {
+            ReferenceDictionaryRuntimeSchema.LEGACY_JSON
+        }
+    }
+}
+
+internal data class ReferenceDictionaryV3ClassCatalogManifest(
+    val catalog_sha256: String?,
+    val renderer_contract_sha256: String?,
+)
+
+internal object ReferenceDictionaryV3ClassCatalogLoader {
+    fun load(
+        package_dir: File,
+        runtime_schema: ReferenceDictionaryRuntimeSchema,
+        renderer_semantic_stream_sha256: String?,
+        class_catalog_manifest: ReferenceDictionaryV3ClassCatalogManifest?,
+        presentation_policy_sha256: String,
+        read_catalog_bytes: (File) -> ByteArray = { file -> file.readBytes() },
+    ): ReferenceClassCatalog {
+        if (runtime_schema != ReferenceDictionaryRuntimeSchema.BINARY_V3) {
+            return unavailable("class catalog is not defined for this reference package schema")
+        }
+        val renderer_semantic_sha256 = renderer_semantic_stream_sha256
+        if (renderer_semantic_sha256 == null || !renderer_semantic_sha256.is_sha256()) {
+            return unavailable(
+                "V3 manifest rendererSemanticStreamSha256 is missing or malformed",
+            )
+        }
+        val catalog_manifest = class_catalog_manifest
+            ?: return unavailable("V3 manifest classCatalog object is missing or malformed")
+        val catalog_sha256 = catalog_manifest.catalog_sha256
+        if (catalog_sha256 == null || !catalog_sha256.is_sha256()) {
+            return unavailable("V3 manifest classCatalog.catalogSha256 is missing or malformed")
+        }
+        val renderer_contract_sha256 = catalog_manifest.renderer_contract_sha256
+        if (renderer_contract_sha256 == null || !renderer_contract_sha256.is_sha256()) {
+            return unavailable(
+                "V3 manifest classCatalog.rendererContractSha256 is missing or malformed",
+            )
+        }
+        if (renderer_contract_sha256 != renderer_semantic_sha256) {
+            return unavailable(
+                "V3 manifest classCatalog.rendererContractSha256 must exactly equal " +
+                    "rendererSemanticStreamSha256",
+            )
+        }
+        val catalog_file = File(package_dir, CLASS_CATALOG_FILE_NAME)
+        return try {
+            if (!catalog_file.isFile) {
+                return unavailable("class-catalog.bin is missing")
+            }
+            if (catalog_file.length() != CLASS_CATALOG_BYTE_COUNT.toLong()) {
+                return unavailable("class-catalog.bin length is not the canonical 754 bytes")
+            }
+            val catalog_bytes = read_catalog_bytes(catalog_file)
+            if (catalog_bytes.size != CLASS_CATALOG_BYTE_COUNT) {
+                return unavailable("class-catalog.bin length is not the canonical 754 bytes")
+            }
+            ReferenceClassCatalog.from_installed_bytes(
+                catalog_bytes = catalog_bytes,
+                expected_catalog_sha256 = catalog_sha256,
+                expected_renderer_semantic_stream_sha256 = renderer_semantic_sha256,
+                expected_renderer_contract_sha256 = renderer_contract_sha256,
+                expected_presentation_policy_sha256 = presentation_policy_sha256,
+            )
+        } catch (exception: Exception) {
+            unavailable(
+                "class-catalog.bin validation failed: " +
+                    (exception.message ?: exception::class.java.simpleName),
+            )
+        }
+    }
+
+    private fun String.is_sha256(): Boolean =
+        length == 64 && all { character ->
+            character in '0'..'9' || character in 'a'..'f'
+        }
+
+    private fun unavailable(reason: String): ReferenceClassCatalog =
+        ReferenceClassCatalog.unavailable(reason)
+
+    private const val CLASS_CATALOG_FILE_NAME = "class-catalog.bin"
+    private const val CLASS_CATALOG_BYTE_COUNT = 754
+}
 
 internal data class ReferenceDictionaryPackageInfo(
     val package_id: String,
@@ -29,7 +145,28 @@ internal data class ReferenceDictionaryPackageInfo(
     val zooms: Set<Int>,
     val complete_declared_scope: Boolean,
     val complete_whole_earth_dictionary: Boolean,
+    val runtime_schema: ReferenceDictionaryRuntimeSchema,
     val package_dir: File
+)
+
+internal data class ReferenceDictionaryZoomRange(
+    val z: Int,
+    val x_min: Int,
+    val x_max: Int,
+    val y_min: Int,
+    val y_max: Int,
+    val tile_count: Long,
+    val first_ordinal: Long,
+) {
+    val width: Int = x_max - x_min + 1
+}
+
+internal data class ReferenceDictionaryParsedManifest(
+    val info: ReferenceDictionaryPackageInfo,
+    val zoom_ranges: List<ReferenceDictionaryZoomRange>,
+    val renderer_semantic_stream_sha256: String?,
+    val class_catalog_manifest: ReferenceDictionaryV3ClassCatalogManifest?,
+    val presentation_policy_sha256: String,
 )
 
 internal data class ReferenceDictionaryTileCoordinate(
@@ -47,19 +184,43 @@ internal data class ReferenceDictionaryTileCounts(
 internal data class ReferenceDictionaryTilePayload(
     val coordinate: ReferenceDictionaryTileCoordinate,
     val counts: ReferenceDictionaryTileCounts,
+    val runtime_schema: ReferenceDictionaryRuntimeSchema,
+    val raw_bytes: ByteArray,
+) {
     val raw_json: String
-)
+        get() = raw_bytes.toString(Charsets.UTF_8)
+}
 
 internal class ReferenceDictionaryPackageStore(
-    private val context: Context,
-    private val package_id: String? = null
+    private val candidate_provider: () -> List<File>,
+    private val package_opener: (File) -> ReferenceDictionaryPackage?,
+    private val elapsed_realtime_ms: () -> Long,
 ) : Closeable {
+    constructor(
+        context: Context,
+        package_id: String? = null,
+    ) : this(
+        candidate_provider = {
+            ReferenceDictionaryPackage.package_candidates(context, package_id)
+        },
+        package_opener = { candidate ->
+            ReferenceDictionaryPackage.open_if_available(candidate)
+        },
+        elapsed_realtime_ms = { SystemClock.elapsedRealtime() },
+    )
+
     private var package_checked = false
     private var last_package_check_ms = 0L
+    private val package_lock = Any()
+    @Volatile
     private var package_ref: ReferenceDictionaryPackage? = null
 
     fun package_info_if_available(): ReferenceDictionaryPackageInfo? {
         return open_package_if_available()?.info
+    }
+
+    fun reference_class_catalog_if_available(): ReferenceClassCatalog? {
+        return open_package_if_available()?.reference_class_catalog
     }
 
     fun read_tile_payload(
@@ -77,27 +238,32 @@ internal class ReferenceDictionaryPackageStore(
     }
 
     override fun close() {
-        package_ref?.close()
-        package_ref = null
-        package_checked = false
+        synchronized(package_lock) {
+            package_ref?.close()
+            package_ref = null
+            package_checked = false
+        }
     }
 
     private fun open_package_if_available(): ReferenceDictionaryPackage? {
         package_ref?.let { return it }
-        val now_ms = SystemClock.elapsedRealtime()
-        if (package_checked && now_ms - last_package_check_ms < PACKAGE_MISSING_RETRY_MS) {
-            return null
-        }
-        package_checked = true
-        last_package_check_ms = now_ms
-        for (candidate in ReferenceDictionaryPackage.package_candidates(context, package_id)) {
-            val opened = ReferenceDictionaryPackage.open_if_available(candidate)
-            if (opened != null) {
-                package_ref = opened
-                return opened
+        return synchronized(package_lock) {
+            package_ref?.let { return@synchronized it }
+            val now_ms = elapsed_realtime_ms()
+            if (package_checked && now_ms - last_package_check_ms < PACKAGE_MISSING_RETRY_MS) {
+                return@synchronized null
             }
+            package_checked = true
+            last_package_check_ms = now_ms
+            for (candidate in candidate_provider()) {
+                val opened = package_opener(candidate)
+                if (opened != null) {
+                    package_ref = opened
+                    return@synchronized opened
+                }
+            }
+            null
         }
-        return null
     }
 
     private companion object {
@@ -107,32 +273,29 @@ internal class ReferenceDictionaryPackageStore(
 
 internal class ReferenceDictionaryPackage private constructor(
     val info: ReferenceDictionaryPackageInfo,
-    private val records_file: RandomAccessFile,
-    private val index_file: RandomAccessFile,
-    private val zoom_ranges: List<ZoomRange>
+    val reference_class_catalog: ReferenceClassCatalog,
+    private val records_channel: FileChannel,
+    private val index_bytes: ByteArray,
+    private val zoom_ranges: List<ReferenceDictionaryZoomRange>
 ) : Closeable {
-    private val read_lock = Any()
-
     fun read_tile_payload(
         z: Int,
         x: Int,
         y: Int,
         verify_hash: Boolean = false
-    ): ReferenceDictionaryTilePayload? = synchronized(read_lock) {
-        val range = zoom_ranges.firstOrNull { it.z == z } ?: return@synchronized null
+    ): ReferenceDictionaryTilePayload? {
+        val range = zoom_ranges.firstOrNull { it.z == z } ?: return null
         if (x < range.x_min || x > range.x_max || y < range.y_min || y > range.y_max) {
-            return@synchronized null
+            return null
         }
         val ordinal = range.first_ordinal +
                 (y - range.y_min).toLong() * range.width.toLong() +
                 (x - range.x_min).toLong()
-        val entry = read_index_entry(ordinal) ?: return@synchronized null
+        val entry = read_index_entry(ordinal) ?: return null
         if (entry.compressed_length <= 0 || entry.raw_length <= 0) {
-            return@synchronized null
+            return null
         }
-        val compressed = ByteArray(entry.compressed_length)
-        records_file.seek(entry.offset)
-        records_file.readFully(compressed)
+        val compressed = read_record_bytes(entry.offset, entry.compressed_length)
         val raw_bytes = inflate_raw_deflate(
             compressed = compressed,
             expected_size = entry.raw_length
@@ -140,39 +303,45 @@ internal class ReferenceDictionaryPackage private constructor(
         if (verify_hash && raw_hash32(raw_bytes) != entry.raw_hash32) {
             throw IOException("Reference dictionary tile hash mismatch for $z/$x/$y")
         }
-        val raw_json = raw_bytes.toString(Charsets.UTF_8)
-        val counts = JSONObject(raw_json).optJSONObject("counts")
-        ReferenceDictionaryTilePayload(
+        return ReferenceDictionaryTilePayload(
             coordinate = ReferenceDictionaryTileCoordinate(z = z, x = x, y = y),
             counts = ReferenceDictionaryTileCounts(
-                labels = counts?.optInt("labels") ?: 0,
-                boundaries = counts?.optInt("boundaries") ?: 0,
-                transportation = counts?.optInt("transportation") ?: 0
+                labels = 0,
+                boundaries = 0,
+                transportation = 0
             ),
-            raw_json = raw_json
+            runtime_schema = info.runtime_schema,
+            raw_bytes = raw_bytes,
         )
     }
 
     override fun close() {
-        index_file.use {
-            records_file.close()
-        }
+        records_channel.close()
     }
 
     private fun read_index_entry(ordinal: Long): IndexEntry? {
         val byte_offset = ordinal * INDEX_ENTRY_BYTES.toLong()
-        if (byte_offset < 0L || byte_offset + INDEX_ENTRY_BYTES > index_file.length()) return null
-        val bytes = ByteArray(INDEX_ENTRY_BYTES)
-        index_file.seek(byte_offset)
-        index_file.readFully(bytes)
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        if (byte_offset < 0L || byte_offset + INDEX_ENTRY_BYTES > index_bytes.size) return null
+        val offset = byte_offset.toInt()
         return IndexEntry(
-            offset = buffer.long,
-            compressed_length = buffer.int,
-            raw_length = buffer.int,
-            raw_hash32 = buffer.int,
-            flags = buffer.int
+            offset = little_endian_long(index_bytes, offset),
+            compressed_length = little_endian_int(index_bytes, offset + 8),
+            raw_length = little_endian_int(index_bytes, offset + 12),
+            raw_hash32 = little_endian_int(index_bytes, offset + 16),
+            flags = little_endian_int(index_bytes, offset + 20)
         )
+    }
+
+    private fun read_record_bytes(offset: Long, length: Int): ByteArray {
+        val bytes = ByteArray(length)
+        val buffer = ByteBuffer.wrap(bytes)
+        var read = 0
+        while (buffer.hasRemaining()) {
+            val count = records_channel.read(buffer, offset + read)
+            if (count < 0) throw IOException("Reference dictionary tile record ended early")
+            read += count
+        }
+        return bytes
     }
 
     private data class IndexEntry(
@@ -183,35 +352,38 @@ internal class ReferenceDictionaryPackage private constructor(
         val flags: Int
     )
 
-    private data class ZoomRange(
-        val z: Int,
-        val x_min: Int,
-        val x_max: Int,
-        val y_min: Int,
-        val y_max: Int,
-        val tile_count: Long,
-        val first_ordinal: Long
-    ) {
-        val width: Int = x_max - x_min + 1
-    }
-
     companion object {
+        const val EXPERIMENT8_PACKAGE_ID = "world-experiment8-binary-v3"
         const val DEFAULT_PACKAGE_ID = "world-z5-6-7-8-9-10-11-lossless-deflate-v1"
         val PREFERRED_PACKAGE_IDS = listOf(
+            EXPERIMENT8_PACKAGE_ID,
             DEFAULT_PACKAGE_ID
         )
 
         fun package_candidates(context: Context, package_id: String? = null): List<File> {
-            val roots = buildList {
-                context.getExternalFilesDir("reference")?.let { add(it) }
-                add(File("/storage/emulated/0/Android/data/${context.packageName}/files/reference"))
-                add(File(context.filesDir, "reference"))
-                add(File(context.noBackupFilesDir, "reference"))
+            val roots = reference_roots(context)
+            if (package_id != null) {
+                return roots.map { root -> File(root, package_id) }
+                    .distinctBy { it.absolutePath }
             }
-            val package_ids = package_id?.let { listOf(it) } ?: PREFERRED_PACKAGE_IDS
+            val package_ids = PREFERRED_PACKAGE_IDS
             val candidates = ArrayList<File>(roots.size * package_ids.size)
             for (id in package_ids) {
                 roots.forEach { root -> candidates += File(root, id) }
+            }
+            for (root in roots) {
+                val children = root.listFiles()
+                    ?.filter { child -> child.isDirectory }
+                    ?.sortedBy { child -> child.name }
+                    ?: continue
+                for (child in children) {
+                    if (package_ids.any { id -> File(root, id).absolutePath == child.absolutePath }) {
+                        continue
+                    }
+                    if (is_compatible_package_dir(child)) {
+                        candidates += child
+                    }
+                }
             }
             return candidates.distinctBy { it.absolutePath }
         }
@@ -240,15 +412,15 @@ internal class ReferenceDictionaryPackage private constructor(
             index_file: File
         ): ReferenceDictionaryPackage {
             val manifest = JSONObject(manifest_file.readText())
+            if (!supported_schema_version(manifest.optInt("schemaVersion", 0))) {
+                throw IOException("Unsupported reference dictionary schema version")
+            }
+            val runtime_schema = runtime_schema_for(manifest)
             val zoom_ranges = parse_zoom_ranges(manifest)
             val declared_tile_count = manifest
                 .optJSONObject("coverage")
                 ?.optLong("tileCount")
                 ?: zoom_ranges.sumOf { it.tile_count }
-            val expected_index_bytes = declared_tile_count * INDEX_ENTRY_BYTES.toLong()
-            if (index_file.length() < expected_index_bytes) {
-                throw IOException("Reference dictionary index is shorter than its manifest coverage")
-            }
             val package_id = manifest.optString("packageId", package_dir.name)
             val info = ReferenceDictionaryPackageInfo(
                 package_id = package_id,
@@ -263,35 +435,159 @@ internal class ReferenceDictionaryPackage private constructor(
                     .optJSONObject("coverage")
                     ?.optBoolean("completeWholeEarthDictionary")
                     ?: false,
+                runtime_schema = runtime_schema,
                 package_dir = package_dir
             )
-            var opened_records: RandomAccessFile? = null
-            var opened_index: RandomAccessFile? = null
-            try {
-                opened_records = RandomAccessFile(records_file, "r")
-                opened_index = RandomAccessFile(index_file, "r")
-                return ReferenceDictionaryPackage(
+            return open_from_manifest(
+                manifest = ReferenceDictionaryParsedManifest(
                     info = info,
-                    records_file = opened_records,
-                    index_file = opened_index,
-                    zoom_ranges = zoom_ranges
+                    zoom_ranges = zoom_ranges,
+                    renderer_semantic_stream_sha256 =
+                        manifest.exact_string("rendererSemanticStreamSha256"),
+                    class_catalog_manifest = class_catalog_manifest(manifest),
+                    presentation_policy_sha256 = manifest.optString("presentationPolicySha256"),
+                ),
+                records_file = records_file,
+                index_file = index_file,
+            )
+        }
+
+        internal fun open_from_manifest(
+            manifest: ReferenceDictionaryParsedManifest,
+            records_file: File,
+            index_file: File,
+            read_catalog_bytes: (File) -> ByteArray = { file -> file.readBytes() },
+        ): ReferenceDictionaryPackage {
+            val expected_index_bytes = manifest.info.tile_count * INDEX_ENTRY_BYTES.toLong()
+            if (index_file.length() < expected_index_bytes) {
+                throw IOException("Reference dictionary index is shorter than its manifest coverage")
+            }
+            val reference_class_catalog = ReferenceDictionaryV3ClassCatalogLoader.load(
+                package_dir = manifest.info.package_dir,
+                runtime_schema = manifest.info.runtime_schema,
+                renderer_semantic_stream_sha256 = manifest.renderer_semantic_stream_sha256,
+                class_catalog_manifest = manifest.class_catalog_manifest,
+                presentation_policy_sha256 = manifest.presentation_policy_sha256,
+                read_catalog_bytes = read_catalog_bytes,
+            )
+            var opened_records: FileChannel? = null
+            try {
+                val index_bytes = read_index_bytes(index_file, expected_index_bytes)
+                opened_records = FileInputStream(records_file).channel
+                return ReferenceDictionaryPackage(
+                    info = manifest.info,
+                    reference_class_catalog = reference_class_catalog,
+                    records_channel = opened_records,
+                    index_bytes = index_bytes,
+                    zoom_ranges = manifest.zoom_ranges,
                 )
             } catch (exception: Exception) {
                 opened_records?.close()
-                opened_index?.close()
                 throw exception
             }
         }
 
-        private fun parse_zoom_ranges(manifest: JSONObject): List<ZoomRange> {
+        private fun reference_roots(context: Context): List<File> {
+            return buildList {
+                context.getExternalFilesDir("reference")?.let { add(it) }
+                add(File("/storage/emulated/0/Android/data/${context.packageName}/files/reference"))
+                add(File(context.filesDir, "reference"))
+                add(File(context.noBackupFilesDir, "reference"))
+            }.distinctBy { it.absolutePath }
+        }
+
+        private fun is_compatible_package_dir(package_dir: File): Boolean {
+            val manifest_file = File(package_dir, "manifest.json")
+            val records_file = File(package_dir, "records.fadictpack")
+            val index_file = File(package_dir, "tile-index.bin")
+            if (!manifest_file.isFile || !records_file.isFile || !index_file.isFile) return false
+            return try {
+                val manifest = JSONObject(manifest_file.readText())
+                if (!supported_schema_version(manifest.optInt("schemaVersion", 0))) return false
+                val package_id = manifest.optString("packageId", package_dir.name)
+                if (package_id.isBlank()) return false
+                val zoom_ranges = parse_zoom_ranges(manifest)
+                val declared_tile_count = manifest
+                    .optJSONObject("coverage")
+                    ?.optLong("tileCount")
+                    ?: zoom_ranges.sumOf { it.tile_count }
+                declared_tile_count > 0L &&
+                        index_file.length() >= declared_tile_count * INDEX_ENTRY_BYTES.toLong()
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        private fun supported_schema_version(schema_version: Int): Boolean {
+            return schema_version in 1..3
+        }
+
+        private fun runtime_schema_for(manifest: JSONObject): ReferenceDictionaryRuntimeSchema {
+            val compatibility = manifest.optJSONObject("compatibility")
+            return ReferenceDictionaryRuntimeSchemaResolver.resolve(
+                schemaVersion = manifest.optInt("schemaVersion", 0),
+                hasPayloadSchema = manifest.has("payloadSchema"),
+                payloadSchema = manifest.optString("payloadSchema"),
+                emptyPresentTilesSharePayload =
+                    compatibility?.optBoolean("emptyPresentTilesSharePayload") == true,
+                presentationPolicySha256 = manifest.optString("presentationPolicySha256"),
+                sourcedTextPolicySha256 = manifest.optString("sourcedTextPolicySha256"),
+                unicodeScriptProfileSha256 = manifest.optString("unicodeScriptProfileSha256"),
+            )
+        }
+
+        private fun class_catalog_manifest(
+            manifest: JSONObject,
+        ): ReferenceDictionaryV3ClassCatalogManifest? {
+            val class_catalog = manifest.optJSONObject("classCatalog") ?: return null
+            return ReferenceDictionaryV3ClassCatalogManifest(
+                catalog_sha256 = class_catalog.exact_string("catalogSha256"),
+                renderer_contract_sha256 = class_catalog.exact_string("rendererContractSha256"),
+            )
+        }
+
+        private fun JSONObject.exact_string(key: String): String? = opt(key) as? String
+
+        private fun read_index_bytes(index_file: File, expected_index_bytes: Long): ByteArray {
+            if (expected_index_bytes > Int.MAX_VALUE) {
+                throw IOException("Reference dictionary index is too large to load")
+            }
+            val bytes = ByteArray(expected_index_bytes.toInt())
+            FileInputStream(index_file).use { input ->
+                var offset = 0
+                while (offset < bytes.size) {
+                    val count = input.read(bytes, offset, bytes.size - offset)
+                    if (count < 0) throw IOException("Reference dictionary index ended early")
+                    offset += count
+                }
+            }
+            return bytes
+        }
+
+        private fun little_endian_int(bytes: ByteArray, offset: Int): Int {
+            return (bytes[offset].toInt() and 0xff) or
+                    ((bytes[offset + 1].toInt() and 0xff) shl 8) or
+                    ((bytes[offset + 2].toInt() and 0xff) shl 16) or
+                    ((bytes[offset + 3].toInt() and 0xff) shl 24)
+        }
+
+        private fun little_endian_long(bytes: ByteArray, offset: Int): Long {
+            var value = 0L
+            for (index in 0 until 8) {
+                value = value or ((bytes[offset + index].toLong() and 0xffL) shl (index * 8))
+            }
+            return value
+        }
+
+        private fun parse_zoom_ranges(manifest: JSONObject): List<ReferenceDictionaryZoomRange> {
             val coverage = manifest.getJSONObject("coverage")
             val ranges = coverage.getJSONArray("zoomRanges")
-            val parsed = ArrayList<ZoomRange>(ranges.length())
+            val parsed = ArrayList<ReferenceDictionaryZoomRange>(ranges.length())
             var first_ordinal = 0L
             for (index in 0 until ranges.length()) {
                 val range = ranges.getJSONObject(index)
                 val tile_count = range.optLong("tileCount")
-                val parsed_range = ZoomRange(
+                val parsed_range = ReferenceDictionaryZoomRange(
                     z = range.getInt("z"),
                     x_min = range.getInt("xMin"),
                     x_max = range.getInt("xMax"),

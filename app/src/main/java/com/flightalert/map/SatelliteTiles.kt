@@ -157,6 +157,10 @@ internal class SatelliteMapTileRenderer(
         )
     }
 
+    fun reference_class_catalog(): ReferenceClassCatalog? {
+        return dictionary_reference_renderer.reference_class_catalog()
+    }
+
     private fun draw_reference_layers(
         canvas: Canvas,
         viewport: Viewport,
@@ -177,7 +181,9 @@ internal class SatelliteMapTileRenderer(
             water_labels_enabled = state.water_labels_enabled,
             region_labels_enabled = state.region_labels_enabled,
             public_lands_enabled = state.public_lands_enabled,
-            interaction_active = state.interaction_active
+            filter_state = state.reference_filter_state,
+            interaction_active = state.interaction_active,
+            label_avoid_rects = state.reference_label_avoid_rects,
         )
         if (dictionary_stats.available) {
             return TileLayerDrawStats(

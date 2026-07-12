@@ -126,7 +126,11 @@ data class FilterState private constructor(
         of(enabled_filters, labels_master_enabled, enabled)
 
     companion object {
-        fun defaults(): FilterState = of(FilterId.entries.toSet(), true, true)
+        fun defaults(): FilterState = of(
+            FilterId.entries.toSet() - FilterId.OUTLINES_COASTLINES,
+            labels_master_enabled = true,
+            outlines_master_enabled = true,
+        )
 
         fun of(
             enabled: Collection<FilterId>,
@@ -137,6 +141,34 @@ data class FilterState private constructor(
             labels_master_enabled,
             outlines_master_enabled,
         )
+    }
+}
+
+@JvmInline
+internal value class ReferenceFilterMask private constructor(
+    private val enabledBits: Int,
+) {
+    val cacheKey: Int get() = enabledBits
+
+    fun allows(filterId: FilterId): Boolean =
+        enabledBits and (1 shl filterId.ordinal) != 0
+
+    fun allows(filterId: FilterId?, legacyAllowed: Boolean): Boolean =
+        filterId?.let(::allows) ?: legacyAllowed
+
+    companion object {
+        fun from(state: FilterState): ReferenceFilterMask {
+            require(FilterId.entries.size < Int.SIZE_BITS) {
+                "reference filters no longer fit the hot-path mask"
+            }
+            var bits = 0
+            FilterId.entries.forEach { filterId ->
+                if (state.effectively_enabled(filterId)) {
+                    bits = bits or (1 shl filterId.ordinal)
+                }
+            }
+            return ReferenceFilterMask(bits)
+        }
     }
 }
 

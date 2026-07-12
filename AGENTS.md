@@ -24,6 +24,14 @@ Performance wins that introduce flicker, pop, missing layers, wrong motion, chan
 
 Use the current branch/release as the normal baseline unless the user explicitly requests another comparison.
 
+### Implementation-First Feedback Loop
+
+When the implementation choice and prerequisite state are under our control, choose the best-known correct option, run the real app or the narrowest representative test, and let the result expose wrong assumptions or setup. Correct what the test reveals and continue the loop.
+
+Do not delay implementation with redundant pre-verification of settings or choices we just made. Research, modeling, and host checks are useful when they are necessary to choose a source-honest implementation, prevent irreversible harm, or explain an observed failure; they must not become substitutes for building and testing the actual app.
+
+Structural validity, theoretical benefit, and passing host tests are intermediate evidence. User-visible behavior on the real app is the acceptance target whenever the requested work is visible or temporal.
+
 ## 1. No Pretending
 
 Never fake aircraft, map, route, photo, alert, altitude, location, or source data.
@@ -108,7 +116,11 @@ Keep one real project: one manifest, one root Gradle setup, and no duplicate gen
 
 Build before release. Use lint and unit/instrumented tests when the touched area warrants them.
 
+Before judging a feature, set every prerequisite app setting to the state that actually exercises it. A disabled layer, wrong map source, incompatible filter, or stale test preference is an invalid test state, not a feature pass or failure. Restore the user's prior settings after the test. Do not add a separate settings-readback step unless observed app behavior makes the selected state uncertain.
+
 Use emulators for layout/aspect/theme checks. Use physical-device video for timing, responsiveness, smoothness, flicker, popping, aircraft continuity, border behavior, and road/reference-layer motion when the requested work warrants it. Screenshots are scouting evidence only for temporal rendering bugs.
+
+For coordinated physical-device gates, retain the raw thermal status and every reported temperature. Thermal status 1, 2, or 3 is not by itself a blocker when every reported temperature is below 60 degrees Celsius. Stop the device workload immediately if any reported temperature is 60 degrees Celsius or higher.
 
 ## 15. Code Organization
 

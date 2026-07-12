@@ -1,0 +1,10 @@
+n1 v7 dV c700 t2026-06-29T00:00:01Z i11 ufixture Tcapital=yes,name=Αθήνα,name:en=Athens,place=city,population=664046 x23.727539 y37.98381
+n2 v5 dV c701 t2026-06-29T00:00:02Z i12 ufixture Tcapital=yes,name=%0627%%0644%%0642%%0627%%0647%%0631%%0629%,name:en=Cairo,place=city,population=10102597 x31.235712 y30.04442
+n3 v9 dV c702 t2026-06-29T00:00:03Z i13 ufixture Tname=%5317%%4eac%%5e02%,name:en=Beijing,place=city,population=21893095 x116.407526 y39.90403
+n4 v3 dV c703 t2026-06-29T00:00:04Z i14 ufixture Tname=Madrid,name:en=Madrid,place=town,population=3223334 x-3.70379 y40.416775
+n5 v2 dV c704 t2026-06-29T00:00:05Z i15 ufixture Tname=España,name:en=Spain,place=country x-3.74922 y40.463667
+n6 v1 dV c705 t2026-06-29T00:00:06Z i16 ufixture Tname=Χωριό,name:en=Village,place=village,population=500 x22.5 y38.1
+n7 v1 dV c706 t2026-06-29T00:00:07Z i17 ufixture Tname=%20%,place=town x10 y10
+n8 v1 dV c707 t2026-06-29T00:00:08Z i18 ufixture Tname=Unsupported%20%Island,place=island x20 y20
+n9 v1 dV c708 t2026-06-29T00:00:09Z i19 ufixture Tcapital=probably,name=Bad%20%Evidence%20%City,place=city,population=1%2c%000%2c%000 x8 y50
+n10 v4 dV c709 t2026-06-29T00:00:10Z i20 ufixture Tname=Αττική,name:en=Attica,place=state x23.7 y38

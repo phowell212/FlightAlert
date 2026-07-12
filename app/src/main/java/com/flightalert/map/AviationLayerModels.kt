@@ -95,9 +95,12 @@ data class AviationAirspaceFeature(
     val city: String?,
     val state: String?,
     val geometry: AviationMultiPolygon,
-    val bounds: AviationGeoBounds
+    val bounds: AviationGeoBounds,
+    internal val map_text_source_field: AviationMapTextSourceField =
+        AviationMapTextSourceField.AIRSPACE_NAME,
 ) {
     val rings: List<List<AviationLayerPoint>> = geometry.all_rings
+    val map_text: SourcedMapText = AviationMapTextAdapter.airspace(this).sourced_text
 }
 
 data class AviationAirportFeature(
@@ -107,9 +110,12 @@ data class AviationAirportFeature(
     val type: String,
     val military_code: String,
     val lat: Double,
-    val lon: Double
+    val lon: Double,
+    internal val map_text_ident_source_field: AviationMapTextSourceField? =
+        if (ident.isNotEmpty()) AviationMapTextSourceField.AIRPORT_IDENT else null,
 ) {
     val military: Boolean = military_code.equals("MIL", ignoreCase = true)
+    val map_text: SourcedMapText = AviationMapTextAdapter.airport(this).sourced_text
 }
 
 sealed interface AviationNatWaypoint {
@@ -146,6 +152,7 @@ class AviationOceanicTrack(
     drawable_segments: List<List<AviationLayerPoint>>
 ) {
     val name: String = "NAT $designator"
+    val map_text: SourcedMapText = AviationMapTextAdapter.oceanic_track(this).sourced_text
     val source: String = source_notam ?: icao_id ?: "FAA NMS"
     val active_window: String? = listOfNotNull(start_datetime, end_datetime)
         .joinToString(" to ")

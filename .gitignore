@@ -16,4 +16,7 @@
 /*.png
 /tools/perf/
 /tmp/
+__pycache__/
+*.py[cod]
+/.pytest_cache/
 ~$*.xlsx

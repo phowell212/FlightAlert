@@ -75,6 +75,36 @@ object ReferenceFilterPreferences {
         return FilterState.defaults()
     }
 
+    fun fromLegacyGroups(
+        placesEnabled: Boolean,
+        waterEnabled: Boolean,
+        regionsEnabled: Boolean,
+        publicLandsEnabled: Boolean,
+    ): FilterState {
+        var state = FilterState.defaults()
+        if (!placesEnabled) {
+            state = state
+                .with_filter(FilterId.LABELS_PLACES, false)
+                .with_filter(FilterId.LABELS_ISLANDS, false)
+        }
+        if (!waterEnabled) {
+            state = state
+                .with_filter(FilterId.LABELS_MAJOR_WATER, false)
+                .with_filter(FilterId.LABELS_RIVERS, false)
+                .with_filter(FilterId.LABELS_STREAMS, false)
+                .with_filter(FilterId.LABELS_CANALS, false)
+        }
+        if (!regionsEnabled) {
+            state = state.with_filter(FilterId.LABELS_REGIONS, false)
+        }
+        if (!publicLandsEnabled) {
+            state = state
+                .with_filter(FilterId.LABELS_PROTECTED_LANDS, false)
+                .with_filter(FilterId.OUTLINES_PROTECTED_AREAS, false)
+        }
+        return state
+    }
+
     private fun boolean_token(value: Boolean): Char = if (value) '1' else '0'
 
     private fun parse_boolean_token(value: String): Boolean {

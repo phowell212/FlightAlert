@@ -14,21 +14,33 @@ from tools.experiment8.osm_hydro_source import (
     CHESTER_SOURCE_SHA256,
     MARYLAND_SOURCE_BYTES,
     MARYLAND_SOURCE_MD5,
+    MARYLAND_REGIONAL_PROFILE,
+    MARYLAND_SOURCE_SHA256,
     MARYLAND_SOURCE_URL,
+    MissingReferences,
     POLICY_SHA256,
     build_storage_preflight,
+    OsmNode,
+    OsmXmlLimits,
     OsmRelation,
     OsmRelationMember,
     OsmWay,
     SourceContractError,
     assemble_relation_parts,
+    audit_relation_root_closures,
+    audit_predicted_relation_root_closures,
     canonical_policy_bytes,
     compute_reference_closure,
+    encode_selection_material,
     inspect_osm_xml,
     is_direct_way_root,
     is_named_waterway_relation_root,
     parse_e7,
+    parse_osmium_missing_references,
     parse_osm_xml,
+    parse_osm_xml_bytes,
+    classify_regional_pilot_closure,
+    require_zero_missing_references,
     select_roots,
     supported_display_names,
     verify_locked_chester_fixture,
@@ -76,6 +88,30 @@ class ExactCoordinateTests(unittest.TestCase):
             parse_e7("-90.0000001", axis="latitude")
         with self.assertRaisesRegex(SourceContractError, "finite decimal"):
             parse_e7("NaN", axis="latitude")
+        for noncanonical in (" 1.0", "1.0 ", "+1.0", "1e0", "1_0", "01.0", ".5"):
+            with self.subTest(noncanonical=noncanonical):
+                with self.assertRaisesRegex(SourceContractError, "canonical decimal"):
+                    parse_e7(noncanonical, axis="longitude")
+
+    def test_xml_parser_rejects_dtd_overflow_and_noncanonical_ids(self) -> None:
+        with self.assertRaisesRegex(SourceContractError, "DTD or entity"):
+            parse_osm_xml_bytes(
+                b'<!DOCTYPE osm [<!ENTITY x "boom">]><osm version="0.6"/>'
+            )
+        with self.assertRaisesRegex(SourceContractError, "byte ceiling"):
+            parse_osm_xml_bytes(
+                b'<osm version="0.6"/>',
+                limits=OsmXmlLimits(max_bytes=10),
+            )
+        with self.assertRaisesRegex(SourceContractError, "object ceiling"):
+            parse_osm_xml_bytes(
+                b'<osm version="0.6"><node id="1" version="1" timestamp="2026-01-01T00:00:00Z" lat="0" lon="0"/></osm>',
+                limits=OsmXmlLimits(max_objects=0),
+            )
+        with self.assertRaisesRegex(SourceContractError, "positive signed-63"):
+            parse_osm_xml_bytes(
+                b'<osm version="0.6"><node id="9223372036854775808" version="1" timestamp="2026-01-01T00:00:00Z" lat="0" lon="0"/></osm>'
+            )
 
 
 class SelectionPolicyTests(unittest.TestCase):
@@ -132,6 +168,9 @@ class SelectionPolicyTests(unittest.TestCase):
                 official_name="Official River",
                 **{
                     "name:en": "English River",
+                    "name:en-US": "US English River",
+                    "name:en-old": "Former English River",
+                    "name:en-source": "Citation text",
                     "name:zh-Hant": "繁體河",
                     "name:left": "Left bank",
                     "name:pronunciation": "not display text",
@@ -145,6 +184,7 @@ class SelectionPolicyTests(unittest.TestCase):
                 ("int_name", "International River"),
                 ("name", decomposed),
                 ("name:en", "English River"),
+                ("name:en-US", "US English River"),
                 ("name:zh-Hant", "繁體河"),
                 ("official_name", "Official River"),
             ),
@@ -187,7 +227,7 @@ class SelectionPolicyTests(unittest.TestCase):
         self.assertEqual(MARYLAND_SOURCE_BYTES, 212_933_228)
         self.assertEqual(MARYLAND_SOURCE_MD5, "2642fa017680941a2fab4f96c23d9c03")
         self.assertEqual(CHESTER_SOURCE_SHA256, "beea8b394d26fa86e3c372b678420a5fb84af801be7378a681f2f2976f35e99d")
-        self.assertEqual(CHESTER_INSPECTION_SHA256, "0445785b4f9e0a91c5b9cd09401bbee4ca1bd60d8d893d9b5b5c33a70ea28e6f")
+        self.assertEqual(CHESTER_INSPECTION_SHA256, "eb997eb532b2e0fc3b8dc81bf32954230769586d988c955871d67f90b62a2ed4")
 
 
 class ClosureAndRelationTests(unittest.TestCase):
@@ -219,6 +259,10 @@ class ClosureAndRelationTests(unittest.TestCase):
         roots = select_roots(dataset)
         self.assertEqual(roots.way_ids, (10,))
         self.assertEqual(roots.relation_ids, (20,))
+        self.assertEqual(
+            tuple(member.ordinal for member in dataset.relations[20].members),
+            (0, 1),
+        )
         closure = compute_reference_closure(dataset, roots)
         self.assertEqual(closure.selected_way_ids, (10,))
         self.assertEqual(closure.selected_relation_ids, (20,))
@@ -252,7 +296,9 @@ class ClosureAndRelationTests(unittest.TestCase):
             _tags(type="waterway", name="River Test"),
         )
         self.assertEqual(
-            assemble_relation_parts(relation, ways=ways, relations={50: relation}),
+            assemble_relation_parts(
+                relation, nodes={}, ways=ways, relations={50: relation}
+            ),
             ((10, 11, 12), (20, 21)),
         )
 
@@ -270,8 +316,57 @@ class ClosureAndRelationTests(unittest.TestCase):
             _tags(type="waterway", name="River Test"),
         )
         self.assertEqual(
-            assemble_relation_parts(relation, ways=ways, relations={50: relation}),
+            assemble_relation_parts(
+                relation, nodes={}, ways=ways, relations={50: relation}
+            ),
             ((10, 11), (12, 11), (30, 31)),
+        )
+
+    def test_point_members_remain_audited_but_do_not_become_line_geometry(self) -> None:
+        ways = {1: _way(1, (10, 11)), 2: _way(2, (11, 12))}
+        relation = OsmRelation(
+            50,
+            1,
+            "2026-01-02T03:04:05Z",
+            (
+                OsmRelationMember("way", 1, "main_stream"),
+                OsmRelationMember("node", 99, "mouth"),
+                OsmRelationMember("way", 2, "main_stream"),
+            ),
+            _tags(type="waterway", name="River Test"),
+        )
+        nodes = {
+            99: OsmNode(
+                object_id=99,
+                version=1,
+                timestamp="2026-01-02T03:04:05Z",
+                longitude_e7=0,
+                latitude_e7=0,
+            )
+        }
+        self.assertEqual(
+            assemble_relation_parts(
+                relation, nodes=nodes, ways=ways, relations={50: relation}
+            ),
+            ((10, 11, 12),),
+        )
+        with self.assertRaisesRegex(SourceContractError, "missing node 99"):
+            assemble_relation_parts(
+                relation, nodes={}, ways=ways, relations={50: relation}
+            )
+
+        node_only = OsmRelation(
+            51,
+            1,
+            "2026-01-02T03:04:05Z",
+            (OsmRelationMember("node", 99, "source"),),
+            _tags(type="waterway", name="Point-only River"),
+        )
+        self.assertEqual(
+            assemble_relation_parts(
+                node_only, nodes=nodes, ways={}, relations={51: node_only}
+            ),
+            (),
         )
 
     def test_nested_relation_cycle_is_fatal(self) -> None:
@@ -290,7 +385,9 @@ class ClosureAndRelationTests(unittest.TestCase):
             _tags(type="waterway", name="River Test"),
         )
         with self.assertRaisesRegex(SourceContractError, "relation cycle.*50.*51.*50"):
-            assemble_relation_parts(first, ways={}, relations={50: first, 51: second})
+            assemble_relation_parts(
+                first, nodes={}, ways={}, relations={50: first, 51: second}
+            )
 
 
 class XmlInspectionTests(unittest.TestCase):
@@ -347,7 +444,16 @@ class XmlInspectionTests(unittest.TestCase):
             report = inspect_osm_xml(source)
         self.assertEqual(
             report["relationMembers"],
-            {"20": [{"objectType": "way", "ref": 10, "role": "main_stream"}]},
+            {
+                "20": [
+                    {
+                        "objectType": "way",
+                        "ordinal": 0,
+                        "ref": 10,
+                        "role": "main_stream",
+                    }
+                ]
+            },
         )
 
     def test_report_and_policy_writes_are_canonical_atomic_and_hash_checked(self) -> None:
@@ -460,11 +566,30 @@ class LockedEvidenceTests(unittest.TestCase):
             with patch("tools.experiment8.osm_hydro_source.MARYLAND_SOURCE_BYTES", len(payload)), patch(
                 "tools.experiment8.osm_hydro_source.MARYLAND_SOURCE_MD5",
                 hashlib.md5(payload).hexdigest(),
+            ), patch(
+                "tools.experiment8.osm_hydro_source.MARYLAND_SOURCE_SHA256",
+                hashlib.sha256(payload).hexdigest(),
             ):
                 verified = verify_maryland_source(source)
         self.assertEqual(verified.bytes, len(payload))
         self.assertEqual(verified.md5, hashlib.md5(payload).hexdigest())
         self.assertEqual(verified.sha256, hashlib.sha256(payload).hexdigest())
+
+    def test_maryland_verifier_rejects_wrong_sha256_after_provider_checks(self) -> None:
+        payload = b"locked maryland test payload"
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary, "maryland.osm.pbf")
+            source.write_bytes(payload)
+            with patch(
+                "tools.experiment8.osm_hydro_source.MARYLAND_SOURCE_BYTES", len(payload)
+            ), patch(
+                "tools.experiment8.osm_hydro_source.MARYLAND_SOURCE_MD5",
+                hashlib.md5(payload).hexdigest(),
+            ), patch(
+                "tools.experiment8.osm_hydro_source.MARYLAND_SOURCE_SHA256", "0" * 64
+            ):
+                with self.assertRaisesRegex(SourceContractError, "SHA-256 mismatch"):
+                    verify_maryland_source(source)
 
     def test_maryland_verifier_rejects_wrong_length_before_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -492,6 +617,391 @@ class LockedEvidenceTests(unittest.TestCase):
                     verify_locked_chester_fixture(source),
                     hashlib.sha256(report_bytes).hexdigest(),
                 )
+
+
+class SelectionMaterialTests(unittest.TestCase):
+    def test_selection_material_parses_only_the_supplied_immutable_bytes(self) -> None:
+        xml = b"""<osm version="0.6" generator="fixture">
+  <way id="10" version="2" timestamp="2026-01-01T00:00:00Z"><nd ref="1"/><nd ref="2"/><tag k="waterway" v="river"/><tag k="name" v="River"/></way>
+</osm>"""
+        with patch(
+            "tools.experiment8.osm_hydro_source.parse_osm_xml",
+            side_effect=AssertionError("path parser must not be called"),
+        ):
+            root_ids, material = encode_selection_material(xml)
+        self.assertEqual(root_ids, b"w10\n")
+        self.assertIs(type(root_ids), bytes)
+        self.assertIs(type(material), bytes)
+
+    def test_selection_material_applies_exact_policy_and_is_deterministic(self) -> None:
+        xml = """<osm version="0.6" generator="fixture">
+  <way id="10" version="2" timestamp="2026-01-01T00:00:00Z"><nd ref="1"/><nd ref="2"/><tag k="waterway" v="river"/><tag k="name" v="River"/></way>
+  <way id="11" version="3" timestamp="2026-01-01T00:00:00Z"><nd ref="1"/><nd ref="2"/><nd ref="1"/><tag k="waterway" v="river"/><tag k="name" v="Area"/></way>
+  <way id="12" version="4" timestamp="2026-01-01T00:00:00Z"><nd ref="1"/><nd ref="2"/><tag k="waterway" v="river"/><tag k="name:pronunciation" v="not a display name"/></way>
+  <relation id="20" version="5" timestamp="2026-01-01T00:00:00Z"><member type="way" ref="10" role="main_stream"/><tag k="type" v="waterway"/><tag k="name" v="River relation"/></relation>
+</osm>"""
+        source_bytes = xml.encode("utf-8")
+        first_ids, first_material = encode_selection_material(source_bytes)
+        second_ids, second_material = encode_selection_material(source_bytes)
+
+        self.assertEqual(first_ids, b"w10\nr20\n")
+        self.assertEqual((first_ids, first_material), (second_ids, second_material))
+        document = json.loads(first_material)
+        self.assertEqual(
+            document["schema"],
+            "flight-alert-exp8-osm-selection-material-v1",
+        )
+        for forbidden in (
+            "candidateXmlSha256",
+            "policySha256",
+            "profile",
+            "provenance",
+            "source",
+            "runtimeManifestSha256",
+            "selectionCommandManifestSha256",
+            "sourceIdentitySha256",
+            "waterwayCandidatesPbfSha256",
+        ):
+            self.assertNotIn(forbidden, document)
+        self.assertEqual(document["selectedCounts"], {"relations": 1, "ways": 1})
+        self.assertEqual(document["rejectedWayCounts"], {"closed": 1, "no_display_name": 1})
+        self.assertEqual(
+            document["rejectedWays"],
+            [
+                {"id": 11, "reason": "closed"},
+                {"id": 12, "reason": "no_display_name"},
+            ],
+        )
+        self.assertEqual(document["rejectedRelations"], [])
+        way_root, relation_root = document["roots"]
+        self.assertEqual(way_root["nodeRefs"], [1, 2])
+        self.assertEqual(
+            way_root["tags"], [["name", "River"], ["waterway", "river"]]
+        )
+        self.assertEqual(
+            relation_root["tags"],
+            [["name", "River relation"], ["type", "waterway"]],
+        )
+        for root in (way_root, relation_root):
+            canonical_object = {
+                key: root[key]
+                for key in (
+                    "id",
+                    "members" if root["objectType"] == "relation" else "nodeRefs",
+                    "objectType",
+                    "tags",
+                    "timestamp",
+                    "version",
+                )
+            }
+            canonical_bytes = (
+                json.dumps(
+                    canonical_object,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+            self.assertEqual(
+                root["objectSha256"], hashlib.sha256(canonical_bytes).hexdigest()
+            )
+        self.assertEqual(
+            document["rootIdsSha256"], hashlib.sha256(first_ids).hexdigest()
+        )
+        self.assertEqual(
+            first_material,
+            (
+                json.dumps(
+                    document,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+
+    def test_selection_material_rejects_mutable_or_nonbyte_inputs(self) -> None:
+        for value in (bytearray(b"<osm version=\"0.6\"/>"), "<osm/>", None):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaisesRegex(SourceContractError, "immutable bytes"):
+                    encode_selection_material(value)  # type: ignore[arg-type]
+
+    def test_selection_material_rejects_reference_nodes_in_candidate_stage(self) -> None:
+        xml = b"""<osm version="0.6" generator="fixture">
+  <node id="1" version="1" timestamp="2026-01-01T00:00:00Z" lat="39" lon="-76"/>
+</osm>"""
+        with self.assertRaisesRegex(SourceContractError, "candidate XML must not contain nodes"):
+            encode_selection_material(xml)
+
+    def test_selection_material_rejects_runtime_policy_hash_drift(self) -> None:
+        xml = b"""<osm version="0.6" generator="fixture">
+  <way id="10" version="2" timestamp="2026-01-01T00:00:00Z"><nd ref="1"/><nd ref="2"/><tag k="waterway" v="river"/><tag k="name" v="River"/></way>
+</osm>"""
+        with patch(
+            "tools.experiment8.osm_hydro_source.canonical_policy_bytes",
+            return_value=b"tampered-policy\n",
+        ):
+            with self.assertRaisesRegex(SourceContractError, "policy SHA-256 drift"):
+                encode_selection_material(xml)
+
+
+class OsmiumClosureDiagnosticTests(unittest.TestCase):
+    def test_parser_accepts_exact_success_and_missing_diagnostics(self) -> None:
+        self.assertEqual(
+            parse_osmium_missing_references(
+                "[ 0:03] Found all objects.\n"
+                "[ 0:03] Peak memory used: 0 MBytes\n"
+                "[ 0:03] Done.\n"
+            ),
+            MissingReferences(node_ids=(), way_ids=(), relation_ids=()),
+        )
+
+        diagnostic = """[ 0:05] Did not find 4 object(s).
+Missing node IDs: 2 9
+Missing way IDs: 10
+Missing relation IDs: 20
+[ 0:05] Peak memory used: 0 MBytes
+[ 0:05] Done.
+"""
+        self.assertEqual(
+            parse_osmium_missing_references(diagnostic),
+            MissingReferences(
+                node_ids=(2, 9), way_ids=(10,), relation_ids=(20,)
+            ),
+        )
+
+    def test_parser_rejects_ambiguous_or_noncanonical_diagnostics(self) -> None:
+        invalid = (
+            "[ 0:05] Did not find 2 object(s).\nMissing way IDs: 10\n",
+            "[ 0:05] Did not find 2 object(s).\nMissing way IDs: 10 10\n",
+            "[ 0:05] Did not find 2 object(s).\nMissing way IDs: 11 10\n",
+            "[ 0:05] Found all objects.\nMissing way IDs: 10\n",
+            "[ 0:05] Found all objects.\nError: output write failed\n[ 0:05] Peak memory used: 0 MBytes\n[ 0:05] Done.\n",
+            "[ 0:05] Did not find 1 object(s).\nMissing way IDs: 9223372036854775808\n[ 0:05] Peak memory used: 0 MBytes\n[ 0:05] Done.\n",
+            "[ 0:05] Found all objects.\n\x1b[31merror\x1b[0m\n[ 0:05] Peak memory used: 0 MBytes\n[ 0:05] Done.\n",
+            "Missing changeset IDs: 10\n",
+            "[ 0:05] Done.\n",
+        )
+        for diagnostic in invalid:
+            with self.subTest(diagnostic=diagnostic):
+                with self.assertRaises(SourceContractError):
+                    parse_osmium_missing_references(diagnostic)
+
+    def test_regional_classifier_quarantines_only_audited_relation_roots(self) -> None:
+        xml = """<osm version="0.6" generator="fixture">
+  <way id="10" version="1" timestamp="2026-01-01T00:00:00Z"><nd ref="1"/><nd ref="2"/><tag k="waterway" v="river"/><tag k="name" v="Direct River"/></way>
+  <relation id="20" version="1" timestamp="2026-01-01T00:00:00Z"><member type="way" ref="99" role="main_stream"/><tag k="type" v="waterway"/><tag k="name" v="Clipped River"/></relation>
+  <relation id="21" version="1" timestamp="2026-01-01T00:00:00Z"><member type="way" ref="10" role="main_stream"/><tag k="type" v="waterway"/><tag k="name" v="Complete River"/></relation>
+  <relation id="22" version="1" timestamp="2026-01-01T00:00:00Z"><member type="relation" ref="20" role="tributary"/><tag k="type" v="waterway"/><tag k="name" v="Dependent River"/></relation>
+</osm>"""
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary, "candidates.osm")
+            source.write_text(xml, encoding="utf-8", newline="\n")
+            dataset = parse_osm_xml(source)
+
+        result = classify_regional_pilot_closure(
+            dataset,
+            select_roots(dataset),
+            MissingReferences(node_ids=(), way_ids=(99,), relation_ids=()),
+        )
+
+        self.assertEqual(result.complete_way_ids, (10,))
+        self.assertEqual(result.complete_relation_ids, (21,))
+        self.assertEqual(
+            tuple(item.relation_id for item in result.incomplete_relations),
+            (20, 22),
+        )
+        self.assertEqual(
+            result.incomplete_relations[0].direct_missing_members,
+            (OsmRelationMember("way", 99, "main_stream", ordinal=0),),
+        )
+        self.assertEqual(result.incomplete_relations[0].dependency_relation_ids, ())
+        self.assertEqual(result.incomplete_relations[1].direct_missing_members, ())
+        self.assertEqual(result.incomplete_relations[1].dependency_relation_ids, (20,))
+
+    def test_regional_classifier_never_quarantines_way_damage_or_unowned_refs(self) -> None:
+        xml = """<osm version="0.6" generator="fixture">
+  <way id="10" version="1" timestamp="2026-01-01T00:00:00Z"><nd ref="1"/><nd ref="2"/><tag k="waterway" v="river"/><tag k="name" v="Direct River"/></way>
+  <relation id="20" version="1" timestamp="2026-01-01T00:00:00Z"><member type="way" ref="99" role="main_stream"/><tag k="type" v="waterway"/><tag k="name" v="Clipped River"/></relation>
+</osm>"""
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary, "candidates.osm")
+            source.write_text(xml, encoding="utf-8", newline="\n")
+            dataset = parse_osm_xml(source)
+        roots = select_roots(dataset)
+
+        with self.assertRaisesRegex(SourceContractError, "selected way 10"):
+            classify_regional_pilot_closure(
+                dataset,
+                roots,
+                MissingReferences(node_ids=(2,), way_ids=(99,), relation_ids=()),
+            )
+        with self.assertRaisesRegex(SourceContractError, "not owned directly"):
+            classify_regional_pilot_closure(
+                dataset,
+                roots,
+                MissingReferences(node_ids=(), way_ids=(98, 99), relation_ids=()),
+            )
+
+    def test_whole_world_gate_requires_exactly_zero_missing_references(self) -> None:
+        require_zero_missing_references(
+            MissingReferences(node_ids=(), way_ids=(), relation_ids=()),
+            context="whole-world source",
+        )
+        with self.assertRaisesRegex(
+            SourceContractError, "whole-world source.*4 missing references"
+        ):
+            require_zero_missing_references(
+                MissingReferences(
+                    node_ids=(1, 2), way_ids=(3,), relation_ids=(4,)
+                ),
+                context="whole-world source",
+            )
+
+    def test_regional_classifier_never_quarantines_or_admits_relation_cycles(self) -> None:
+        xml = """<osm version="0.6" generator="fixture">
+  <relation id="20" version="1" timestamp="2026-01-01T00:00:00Z"><member type="relation" ref="21" role="tributary"/><tag k="type" v="waterway"/><tag k="name" v="First"/></relation>
+  <relation id="21" version="1" timestamp="2026-01-01T00:00:00Z"><member type="relation" ref="20" role="tributary"/><tag k="type" v="waterway"/><tag k="name" v="Second"/></relation>
+</osm>"""
+        dataset = parse_osm_xml_bytes(xml.encode("utf-8"))
+        with self.assertRaisesRegex(SourceContractError, "relation cycle.*20.*21.*20"):
+            classify_regional_pilot_closure(
+                dataset,
+                select_roots(dataset),
+                MissingReferences(node_ids=(), way_ids=(), relation_ids=()),
+            )
+
+    def test_relation_audit_bisects_failures_and_attributes_each_root(self) -> None:
+        empty = MissingReferences(node_ids=(), way_ids=(), relation_ids=())
+        missing_99 = MissingReferences(node_ids=(), way_ids=(99,), relation_ids=())
+        missing_100 = MissingReferences(node_ids=(), way_ids=(100,), relation_ids=())
+        missing_both = MissingReferences(
+            node_ids=(), way_ids=(99, 100), relation_ids=()
+        )
+        outcomes = {
+            (20, 21, 22, 23): missing_both,
+            (20, 21): missing_99,
+            (20,): empty,
+            (21,): missing_99,
+            (22, 23): missing_100,
+            (22,): missing_100,
+            (23,): empty,
+        }
+        calls: list[tuple[int, ...]] = []
+
+        def probe(relation_ids: tuple[int, ...]) -> MissingReferences:
+            calls.append(relation_ids)
+            return outcomes[relation_ids]
+
+        audit = audit_relation_root_closures((20, 21, 22, 23), probe)
+
+        self.assertEqual(audit.complete_relation_ids, (20, 23))
+        self.assertEqual(
+            tuple(item.relation_id for item in audit.incomplete_relations),
+            (21, 22),
+        )
+        self.assertEqual(audit.incomplete_relations[0].missing_references, missing_99)
+        self.assertEqual(audit.incomplete_relations[1].missing_references, missing_100)
+        self.assertEqual(audit.global_missing_references, missing_both)
+        self.assertEqual(audit.probed_batches, tuple(calls))
+
+    def test_relation_audit_handles_shared_refs_and_rejects_union_mismatch(self) -> None:
+        shared = MissingReferences(node_ids=(), way_ids=(99,), relation_ids=())
+        calls = {
+            (20, 21): shared,
+            (20,): shared,
+            (21,): shared,
+        }
+        audit = audit_relation_root_closures((20, 21), calls.__getitem__)
+        self.assertEqual(
+            tuple(item.relation_id for item in audit.incomplete_relations),
+            (20, 21),
+        )
+
+        wrong = MissingReferences(node_ids=(), way_ids=(98,), relation_ids=())
+        inconsistent = {
+            (20, 21): shared,
+            (20,): wrong,
+            (21,): MissingReferences(node_ids=(), way_ids=(), relation_ids=()),
+        }
+        with self.assertRaisesRegex(SourceContractError, "singleton union"):
+            audit_relation_root_closures((20, 21), inconsistent.__getitem__)
+
+    def test_relation_audit_rejects_a_missing_selected_root(self) -> None:
+        missing_root = MissingReferences(
+            node_ids=(), way_ids=(), relation_ids=(20,)
+        )
+        with self.assertRaisesRegex(SourceContractError, "selected relation 20"):
+            audit_relation_root_closures((20,), lambda _: missing_root)
+
+    def test_predicted_relation_audit_proves_singletons_and_retained_union(self) -> None:
+        empty = MissingReferences(node_ids=(), way_ids=(), relation_ids=())
+        missing_99 = MissingReferences(node_ids=(), way_ids=(99,), relation_ids=())
+        missing_100 = MissingReferences(node_ids=(), way_ids=(100,), relation_ids=())
+        missing_both = MissingReferences(
+            node_ids=(), way_ids=(99, 100), relation_ids=()
+        )
+        outcomes = {
+            (20, 21, 22, 23): missing_both,
+            (21,): missing_99,
+            (22,): missing_100,
+            (20, 23): empty,
+        }
+        calls: list[tuple[int, ...]] = []
+
+        def probe(relation_ids: tuple[int, ...]) -> MissingReferences:
+            calls.append(relation_ids)
+            return outcomes[relation_ids]
+
+        audit = audit_predicted_relation_root_closures(
+            (20, 21, 22, 23), (21, 22), probe
+        )
+
+        self.assertEqual(audit.complete_relation_ids, (20, 23))
+        self.assertEqual(
+            tuple(item.relation_id for item in audit.incomplete_relations),
+            (21, 22),
+        )
+        self.assertEqual(audit.global_missing_references, missing_both)
+        self.assertEqual(
+            audit.probed_batches,
+            ((20, 21, 22, 23), (21,), (22,), (20, 23)),
+        )
+        self.assertEqual(audit.probed_batches, tuple(calls))
+
+    def test_predicted_relation_audit_rejects_bad_prediction_or_union(self) -> None:
+        empty = MissingReferences(node_ids=(), way_ids=(), relation_ids=())
+        missing_99 = MissingReferences(node_ids=(), way_ids=(99,), relation_ids=())
+        missing_100 = MissingReferences(node_ids=(), way_ids=(100,), relation_ids=())
+
+        with self.assertRaisesRegex(SourceContractError, "predicted-complete"):
+            audit_predicted_relation_root_closures(
+                (20, 21),
+                (21,),
+                lambda batch: {
+                    (20, 21): missing_99,
+                    (21,): missing_99,
+                    (20,): missing_100,
+                }[batch],
+            )
+
+        with self.assertRaisesRegex(SourceContractError, "singleton union"):
+            audit_predicted_relation_root_closures(
+                (20, 21),
+                (21,),
+                lambda batch: {
+                    (20, 21): missing_99,
+                    (21,): missing_100,
+                    (20,): empty,
+                }[batch],
+            )
+
+        with self.assertRaisesRegex(SourceContractError, "subset"):
+            audit_predicted_relation_root_closures(
+                (20, 21), (22,), lambda _: empty
+            )
 
 
 if __name__ == "__main__":
