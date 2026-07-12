@@ -4,13 +4,13 @@
 
 ## Objective
 
-Experiment 8 must produce a source-honest, genuinely usable, whole-world offline reference system on the phone with documentary proof. The complete required on-phone footprint must remain below `25,000,000,000` bytes.
+Experiment 8 must produce a source-honest, genuinely usable, whole-world offline reference system on the phone with documentary proof. The preferred complete required on-phone footprint remains below `25,000,000,000` bytes. Per the user's 2026-07-11 budget update, `40,000,000,000` bytes is the hard fallback ceiling, not the design target.
 
 This specification covers the first Experiment 8 subproject: build an evidence-grade package pilot that selects the storage format and proves whether a full world bake is allowed. It does not declare Experiment 8 successful. Later subprojects cover the full bake, Android integration, installation, and physical-device acceptance.
 
 ## Success Accounting
 
-The final `25,000,000,000`-byte ceiling counts the greater of logical and allocated bytes for:
+Both the preferred `25,000,000,000`-byte target and hard `40,000,000,000`-byte ceiling count the greater of logical and allocated bytes for:
 
 - the installed release APK;
 - the single active reference package;
@@ -20,7 +20,7 @@ The final `25,000,000,000`-byte ceiling counts the greater of logical and alloca
 
 Old packages, duplicate inactive copies, temporary staging files, videos, traces, source PBFs, and detached audit evidence do not belong on the accepted phone. They remain on the PC.
 
-The runtime package has a `23,500,000,000`-byte authorization ceiling and a `22,000,000,000`-byte design target. The remaining space protects the final total against the APK, filesystem allocation, mandatory caches, and estimation error.
+The runtime package retains a `22,000,000,000`-byte design target and a `23,500,000,000`-byte preferred gate. A package above that preferred gate is allowed only when the additional bytes materially preserve independently verified world coverage or non-degenerate visual fidelity; it must remain below the `38,500,000,000`-byte hard fallback package ceiling and must still leave documented room for the APK, filesystem allocation, mandatory caches, and estimation error under the complete-device ceiling.
 
 ## Whole-World and Usability Definition
 
@@ -116,7 +116,7 @@ Risk:
 
 ### C. Grouped Pre-Rendered Raster Metatiles — Rejected for This Pilot
 
-Experiment 6 reached approximately `27.794` GB before preserving real text/semantic records and failed the 25 GB ceiling. Raster/class masks cannot reconstruct honest labels or boundaries. This result remains preserved as the low-phone-work comparison, but it is not rebuilt in Experiment 8's semantic pilot.
+Experiment 6 reached approximately `27.794` GB before preserving real text/semantic records and exceeded the preferred 25 GB target. Raster/class masks cannot reconstruct honest labels or boundaries, so the later 40 GB fallback ceiling does not rehabilitate it. This result remains preserved as the low-phone-work comparison, but it is not rebuilt in Experiment 8's semantic pilot.
 
 ## Common Normalized Record Contract
 
@@ -277,8 +277,8 @@ Neither format may proceed to a world bake unless Stage B demonstrates all of th
 - zero semantic/source/integrity failures;
 - A/B normalized renderer hashes match for required content;
 - nonzero real records for every applicable required group;
-- full-world package 99% upper bound at or below `23,500,000,000` bytes;
-- design estimate at or below `22,000,000,000` bytes, or an explicit margin analysis proving the complete phone total remains below the hard ceiling;
+- full-world package 99% upper bound at or below the preferred `23,500,000,000`-byte gate, or an explicit evidence-backed fidelity/coverage justification for using the hard fallback lane;
+- design estimate at or below `22,000,000,000` bytes whenever feasible; every fallback-lane package must remain below `38,500,000,000` bytes and include a margin analysis proving the complete phone total remains below `40,000,000,000` bytes;
 - projected mapped-index and runtime working set fit the phone memory contract;
 - no per-tile JSON or whole-world heap index is required.
 

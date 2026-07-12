@@ -96,9 +96,29 @@ or suffixes never determine or promote the subtype.
 | 560 | watershed/water boundary | `outlines.water_boundaries` |
 | 570 | other sourced outline | `outlines.other` |
 
-The filter partition is exact: every subtype belongs to one and only one stable
-filter. Labels and outlines never share a filter. Coastline is independently
-controllable and cannot be implied by the general border master.
+The filter partition is exact for these 23 filter-addressable subtypes: every
+listed subtype belongs to one and only one stable filter. Labels and outlines
+never share a filter. Coastline is independently controllable and cannot be
+implied by the general border master.
+
+Unlabeled water geometry is a separate master-only semantic domain. It must not
+masquerade as a label merely because the corresponding feature may also have a
+name, and it must not masquerade as a border merely because both are drawn as
+lines. The canonical IDs are:
+
+| ID | Master-only geometry subtype | Control |
+|---:|---|---|
+| 2000 | watercourse line | overall reference-layer master only |
+| 2010 | water-area outline | overall reference-layer master only |
+
+These two IDs are disjoint from all label, outline, and transportation subtype
+IDs. They never appear in a `FilterSpec`, the labels master cannot hide the
+geometry, and the border/coastline controls cannot claim ownership of it. Their
+exact source class, styling, and visibility remain bound by the renderer
+variant and source-style evidence. The current locked style has exactly six
+included watercourse-line rules and seven included water-area-outline rules;
+the style compiler and independent verifier require that reverse census so an
+extra master-only rule cannot enter silently.
 
 ## Universal prominence model
 
@@ -260,6 +280,16 @@ The package stores the complete source-owned path and policy. It does not store
 one authoritative screen anchor, midpoint, rotation, tile fragment, or set of
 glyph positions.
 
+The cook emits every reachable constant style interval for every matching
+direct source-style rule. Each interval is resolved only with a centizoom inside
+that same interval; the source tile's integer zoom is membership evidence, not
+a viewport-style sample. An interval ending at or below `source_zoom * 100` is
+unreachable and may be omitted. Otherwise separate rules, text-field stops, or
+visibility/placement stops produce separate candidates with their own exact
+text, source-style identity, policy digest, and half-open interval. The cook
+cannot select the earliest rule or leak one rule's resolution centizoom into
+another.
+
 For each current fractional zoom, pan, viewport size, and world wrap:
 
 1. retrieve and deduplicate whole candidates by full candidate identity;
@@ -353,12 +383,72 @@ pilot/source unit, the evidence chain separately proves:
 The Maryland regional pilot may quarantine proven clipped relations. The
 whole-world build may not: selected, complete, and admitted sets must be equal.
 
+## Style-policy identity and evidence publication
+
+The semantic-policy document includes an independently versioned behavior block
+whose accepted domains are mechanically derived from the immutable tables that
+the policy hashes. Digest construction executes Boolean, float, string,
+missing, and unknown vectors through every public classifier and
+`classification_for_style_rule`, including known-source/unowned-style cases.
+The style-rule vectors also exercise an owned source/style pair with a wrong
+layer type against the accepted types derived from the source-policy table. A
+runtime mutation such as coercing `bool` to `int`, accepting an unknown water
+symbol, or assigning a fake style to a known source therefore invalidates or
+fails policy identity instead of silently retaining the same digest.
+
+Style evidence is published under `generations/<generation-sha256>/`, with the
+three exact `audit.json`, `catalog.json`, and `manifest.json` files bound by the
+content-addressed generation identity. A canonical `current.json` names one
+generation, but a production consumer must also receive that generation SHA-256
+from an independently trusted handoff; a pointer cannot authenticate itself.
+The strict reader validates canonical schemas, manifest lengths/hashes, every
+semantic cross-link, single-link regular files, stable identities, and
+non-reparse ancestry. Nested typed rule objects and mechanically derivable
+aggregates are reconstructed rather than accepted because their local hashes
+were recomputed. It rejects junction aliases and recomputed mixed
+audit/catalog/manifest generations.
+
+The persistent lock inside the canonical output is an OS advisory lock, so
+process death releases ownership without leaving the output wedged. Generation
+publication requires a pre-existing canonical, non-reparse immediate parent
+that the operator trusts against concurrent namespace replacement; the writer
+never creates a missing parent hierarchy. Generation
+and pointer commits use Windows write-through replacement or POSIX replacement
+plus a parent-directory metadata `fsync`; unsupported durability semantics fail
+closed. The writer completes and reads back the immutable generation before
+committing the pointer and never moves the current output directory out of the
+way. Cleanup touches only identity-checked staging artifacts or an unreferenced
+generation created by the failing writer; if a barrier reports failure after a
+visible pointer rename, cleanup retains the generation named by that pointer.
+Directory replacement atomicity,
+including on NTFS, is not part of the design.
+
+During migration, legacy top-level evidence files may remain beside
+`current.json` and `generations/`. Generation-aware readers ignore the flat
+files. Each normalizer captures and validates the independently pinned current
+generation once before creating workers, retains those exact bytes and the same
+generation ID for the entire run/resume identity, and consumes plural
+`line_label_candidates` so every reachable interval survives. It never falls
+back to the ambiguous singular call. The writer does not delete legacy or
+unrelated files; explicit removal is safe only after every consumer uses the
+pinned generation interface.
+
 ## Acceptance gates
 
 ### Data and policy
 
 - Exact policy bytes and SHA-256 agree between Python, Kotlin, bake output, and
   independent verifier.
+- Every public classifier's invalid-type, missing-value, unknown-selector, and
+  unowned-style behavior agrees with the semantic policy's table-derived
+  vectors; digest construction fails on behavior drift.
+- Every matching direct style rule contributes every reachable constant
+  candidate interval through `line_label_candidates` without sampling
+  source-tile zoom as viewport zoom; the singular API rejects ambiguity.
+- At every generation/pointer publication boundary, a reader of an existing
+  output validates an independently trusted generation and obtains the exact old
+  or exact new evidence generation, never a missing, partial, mixed, hardlinked,
+  or reparse-aliased set.
 - Every `N8T1` label candidate carries the authoritative semantic priority,
   tier, optional provider rank, complete-geometry measure bucket, and rule ID;
   all five fields, the placement-source kind, and the canonical-decision digest
@@ -500,10 +590,14 @@ package/index reads, decoded bytes, cache ceilings, and disk-cache bytes. No
 OOM, ANR, crash, unbounded growth, repeated retry spin, or whole-package scan is
 accepted.
 
-The complete mandatory steady phone footprint remains < 25,000,000,000 bytes,
-including the installed APK, reference package/index/catalog/manifest, retained
-mandatory install artifacts, and bounded provider caches. Temporary cook or
-install duplication must be absent from steady state. The provisional Esri
+The preferred complete mandatory steady phone footprint remains
+< 25,000,000,000 bytes. The user-authorized hard fallback ceiling is
+< 40,000,000,000 bytes, and may be used only when the added bytes materially
+preserve independently verified world coverage or non-degenerate visual
+fidelity. Both ledgers include the installed APK, reference
+package/index/catalog/manifest, retained mandatory install artifacts, and
+bounded provider caches. Temporary cook or install duplication must be absent
+from steady state. The provisional Esri
 base-imagery disk-cache allocation is <= 1,000,000,000 bytes unless the final
 joint storage ledger assigns a smaller value; it may never grow unbounded.
 

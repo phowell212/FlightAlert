@@ -59,6 +59,44 @@ Canonical UTF-8 strings are capped at 1,048,576 bytes and each ordered style/tok
 | 2 | `LINE` |
 | 3 | `POLYGON_OUTLINE` |
 
+### Semantic subtype domains
+
+`CanonicalVariant.semantic_subtype` is a `u32`, but its meaning is constrained
+by feature kind and one of two disjoint domains:
+
+- the 23 filter-addressable label/outline IDs `100..570` are defined by the
+  exact `FAE8PRES1` presentation policy and belong to one stable label or
+  outline `FilterSpec`; and
+- master-only water geometry uses `2000 WATERCOURSE_LINE` for `LINE` and `2010
+  WATER_AREA_OUTLINE` for `POLYGON_OUTLINE`.
+
+IDs 2000 and 2010 MUST NOT occur in a `FilterSpec` and MUST NOT be interpreted
+through the label or outline master gates. They are controlled only by the
+overall reference-layer master. A water line cannot borrow a river/stream/canal
+label subtype, and a watercourse or water-area edge cannot borrow an
+administrative, coastline, or other-border subtype. The source semantic kind,
+render token, exact source-style identity, and canonical rule/policy digest
+remain mandatory even for master-only geometry.
+
+Any other subtype/feature-kind combination is noncanonical unless a later
+version of this contract explicitly defines it. This rule prevents a filter
+toggle from removing unrelated geometry or falsely claiming that water
+geometry is a named label or legal/administrative boundary.
+
+The canonical semantic-policy identity binds failure behavior as well as valid
+classification tables. Its independently versioned classifier-behavior block
+mechanically records accepted domains from the same immutable boundary, water,
+road, one-way, disputed-label, land, transportation-place, and source/style
+ownership tables hashed by the policy. It executes Boolean, floating-point,
+string, missing, and unknown inputs through every public `classify_*` function
+and `classification_for_style_rule`, including known-source/unowned-style and
+owned-pair/wrong-layer-type cases. Policy digest construction MUST fail closed if any executed outcome
+differs from its declared outcome. In particular, Python's `bool`/`int`
+relationship must never allow `true` or `false` to satisfy an exact integer
+property without changing or invalidating the semantic-policy identity, and a
+new style-layer string cannot inherit a known source's classification without
+an owned source/style identity.
+
 ### Geometry kind
 
 | Value | Name |
@@ -313,6 +351,18 @@ label candidate fingerprint = SHA256("FAE8LLB1\0" || tag-6 bytes)
 
 The candidate numeric ID and full digest are excluded from this preimage. Every listed field is meaning or eligibility and changes the fingerprint. `placement_source_feature_id` MUST equal the unsigned-big-endian first eight bytes of `source_feature_sha256`; the geometry ID has the same required relationship to the geometry digest. Only these transport membership fields are excluded: requested retrieval tile/metatile, feature page, local ordinal, deterministic owner, and world-wrap copy.
 
+Style compilation enumerates every reachable constant direct-label style
+interval for every matching source rule. Each candidate resolves its text
+field, visibility, placement, and Boolean placement inputs at a centizoom
+inside that candidate's own half-open interval. It MUST NOT use the integer
+source-tile zoom as the style-resolution centizoom, choose the earliest style
+rule, or reuse a resolution centizoom across rules. Multiple reachable
+intervals produce multiple candidates with independently bound interval,
+source-style, text-field, text, and policy identities. An interval whose upper
+bound is at or below `source_zoom * 100` may be omitted because the membership
+rule below makes it unreachable; this reachability check is not permission to
+sample source zoom for style values.
+
 `semantic_priority` is the exact compiled cartographic class priority; smaller
 values win. `provider_rank` is present only when the source-specific rank has
 been independently verified; a present rank wins over an absent rank and a
@@ -373,6 +423,12 @@ Membership derivation is packed-tile sorted, deduplicates requested coordinates,
 `avoid_edges` is evaluated against the recorded source tile and `source_edge_domain`, not descendant retrieval edges. The domain and margin are signed source-local units over `source_declared_extent`; an anchor rational is compared by integer cross multiplication after projecting the source domain with `(tile*E + local)/(2^z*E)`. Crossing a child edge does not split, rename, rehash, or reject an otherwise eligible whole label.
 
 Viewport assembly unions memberships and deduplicates by full candidate identity before shaping and collision. One candidate therefore yields one whole word/run even when multiple tiles retrieve it. Equal text on disconnected paths remains multiple candidates. Stable repeat phase is `label_candidate_id mod spacing_px`; the locked water-label spacing and maximum bend inputs remain exact integers (`1000` px and `30` degrees for that compiled rule). Whole-label placement is atomic: the complete shaped run must fit one continuous eligible segment, satisfy the bend limit, and pass collision. Partial glyph or substring placement is forbidden.
+
+Normalization consumes the plural `line_label_candidates` result for each
+source occurrence and retains every reachable, nonempty half-open style/text
+interval. The compatibility `line_label_candidate` call is not a normalizer
+interface: it MUST raise when more than one interval is reachable rather than
+choosing one from ambiguous evidence.
 
 ### 8.4 Source-owned point and area-label placement
 
@@ -712,3 +768,85 @@ The states are distinct:
 - `Unavailable` covers a missing, corrupt, malformed, mismatched, incomplete, over-limit, or unresolved present tile.
 
 Absence from a block index is never, by itself, evidence of empty. A reader MUST fail closed rather than return empty on an integrity, identity, bounds, EOF, membership, or reference error.
+
+## 15. Host style-evidence generations
+
+The style compiler publishes its host-side audit evidence with this layout:
+
+```text
+<output>/
+  .writer.lock
+  current.json
+  generations/
+    <generation-sha256>/
+      audit.json
+      catalog.json
+      manifest.json
+```
+
+`<generation-sha256>` is the lowercase SHA-256 of `FAE8STYLEGEN1\0` followed
+by canonical JSON that binds the generation schema and the sorted filename,
+byte length, and SHA-256 of all three evidence files. `current.json` is exact
+canonical JSON with schema `flight-alert-exp8-style-evidence-current-v1` and
+that one `generationSha256`.
+
+A production reader MUST receive `expected_generation_sha256` from an
+independently trusted handoff or input lock. Reading `current.json` and then
+trusting the value it just supplied is not authentication. The reader requires
+the pointer to equal the trusted value, opens that exact generation, and
+accepts only canonical audit/catalog/manifest JSON with their exact schemas,
+declared byte lengths and hashes, and every raw-style, style-policy,
+presentation-policy, semantic-policy, layer/rule count, rule ownership, and
+audit/catalog/manifest cross-link reconciled. Catalog validation reconstructs
+the typed nested filter, layout, paint, label, line, and area objects and
+rederives zoom/fade bounds, style applicability, draw order, retained
+properties, fallback fields, source/style IDs, classifications, and aggregate
+layer-type counts; recomputing a manifest or generation digest cannot bless a
+coherent lie in those fields. It rejects extra generation
+files, reparse or symlink ancestry, junction aliases, nonregular files,
+hardlinks, unstable path/file identities, and a generation identity unequal to
+the trusted value, pointer, or directory name.
+
+The persistent `.writer.lock` is a real single-link file inside the canonical,
+non-reparse output target. Writers hold an OS advisory lock on it for the whole
+publication, so the operating system releases ownership after normal exit,
+exception, or abrupt process death; the file itself is not deleted. The writer
+writes only beneath an immediate parent that already exists, is canonical and
+non-reparse, and is an operator-trusted namespace anchor against concurrent
+replacement. It never recursively creates a missing parent hierarchy. The writer
+writes and flushes one private generation staging directory, reads every byte
+back, and finalizes the content-addressed generation before preparing the
+pointer. Generation and pointer commits both use an explicit durability
+primitive: Windows `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`, or same-directory
+`replace` followed by a parent-directory `fsync` on POSIX. Unsupported platform
+semantics fail closed rather than pretending to provide a barrier.
+
+The only reader-visible selector commit is replacement of `current.json`.
+Generation-directory replacement is not an atomicity premise and this contract
+makes no claim that directory replacement is atomic on NTFS or any other
+filesystem. A reader captures and validates one trusted generation before
+starting work, retains those immutable bytes and that generation ID throughout
+the operation, and never rereads a mutable mix. Old immutable generations
+remain available so an in-flight reader can finish without racing cleanup.
+
+The publication test hook exposes, in order,
+`before_generation_readback`, `before_generation_publish`,
+`after_generation_published`, `before_pointer_readback`,
+`before_current_replace`, `after_current_replaced`, and
+`after_current_readback`. Injected failure at every boundary must leave an
+existing output readable as the exact old or exact new generation, never as a
+missing or mixed file set. A failure before the first pointer commit exposes no
+generation as current. A replace primitive may report a durability-barrier
+failure after the pointer rename has already become visible; cleanup therefore
+reads the committed pointer and MUST NOT delete a generation it may reference.
+
+Under the required operator-trusted-parent namespace assumption, automatic
+cleanup is limited to identity-checked unique staging directories,
+pointer staging files, and an unreferenced generation created by the failing
+writer. It rejects an observed reparse point and does not delete unrelated files, the
+persistent advisory-lock file, or a previous generation. A legacy flat output
+with top-level `audit.json`, `catalog.json`, and `manifest.json` may coexist
+during migration, but new readers ignore those files completely and read only
+the independently pinned `generations/<generation-sha256>/` set. The writer
+does not delete legacy files; operators may remove them explicitly only after
+all consumers use the pinned generation-aware reader.

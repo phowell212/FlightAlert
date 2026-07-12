@@ -27,7 +27,7 @@
 - GPU utilization is not a goal. CPU/I/O implementations win unless a bounded real normalization or compression stage is demonstrably faster end-to-end on the GPU.
 - Degenerate label/reference visuals are a fail-fast Experiment 8 rejection, not deferred polish. Structural validity, speed, or size can never compensate for an applicable prominent sourced name being lost; oversized text; crushed glyph spacing; fragmented/overlapping words; unstable path rotation; or unreadable collision placement. A line name is applicable only when one source occurrence supplies both exact text and exact placement path (or a documented nonzero provider-stable ID joins them), its style/policy display interval contains the zoom, its unmodified rational path intersects the viewport safety region with a continuous segment long enough for the whole shaped run, and deterministic whole-label collision accepts it. The screenshot alone is not evidence that a particular segment owns a name. Equal text, proximity, ancestor tiles, apparent water continuity, similar geometry, or approximate endpoint matches never transfer a name.
 - Keep every memory-mapped index segment below `268,435,456` bytes, every positional-read pack shard at or below `1,610,612,736` bytes (1.5 GiB), and every independently inflated feature/posting/tile block at or below `4,194,304` bytes.
-- Package authorization ceiling is `23,500,000,000` bytes; design target is `22,000,000,000` bytes. Plan 2 records measurements but does not make the statistical world-size decision.
+- Package design target is `22,000,000,000` bytes and the preferred package gate is `23,500,000,000` bytes. Per the user's 2026-07-11 update, `38,500,000,000` bytes is the hard fallback package ceiling, not the target; entering that lane requires an evidence-backed coverage/fidelity benefit and a complete-phone projection below `40,000,000,000` bytes. Plan 2 records measurements but does not make the statistical world-size decision.
 
 ## Authoritative Inputs
 
@@ -235,7 +235,7 @@ with the separate OSM-pilot tests included.
 - Create: `tools/experiment8/tests/test_style_contract.py`
 
 **Interfaces:**
-- Produces: `compile_style_contract()`, explicit source-layer/group policy, canonical style tokens, compiled feature filters, text resolution rules, and a complete include/exclude audit over all pinned style layers.
+- Produces: `compile_style_contract()`, plural `StyleContract.line_label_candidates(...)`, ambiguity-rejecting compatibility `line_label_candidate(...)`, `write_style_evidence(...)`, and `read_style_evidence(..., expected_generation_sha256=<trusted SHA-256>)`, plus explicit source-layer/group policy, canonical style tokens, compiled feature filters, text resolution rules, and a complete include/exclude audit over all pinned style layers.
 - Consumes: Task 1 fixed-point style and enum types.
 
 - [ ] **Step 1: Write failing style/policy tests**
@@ -257,12 +257,15 @@ Tests must cover:
 - explicitly enabled fallback provenance emitting `FLIGHT_ALERT_POLICY` from its own `_name_en` occurrence/path with a distinct policy digest/candidate ID;
 - disabled fallback emitting no label from z8 named geometry, and enabled fallback never borrowing another tile/LOD geometry;
 - boundary hierarchy/disputed/coastline/water flags, with boolean values interpreted by value rather than presence;
+- table-derived Boolean/float/string/missing/unknown behavior vectors executed through every public classifier and `classification_for_style_rule`, with known-source/unowned-style and owned-pair/wrong-layer-type inputs rejected and any permissive classifier mutation invalidating or failing the semantic digest;
 - explicit mapping of every relevant label/line/public-land outline source layer to one numeric group;
 - explicit audited exclusion of satellite-base-owned fill/context layers and icon-only rules;
 - public-land evidence that permits only source-explicit public/protected evidence into `PUBLIC_LANDS`, while name-derived or ambiguous forest/park/openspace/farming records are excluded or assigned neutral `CONTEXT` tokens;
 - half-open style zoom intervals combined with provider decizoom `_minzoom`/`_maxzoom` into exact centizoom integers parsed through `Decimal`, never binary float;
 - a hard failure for an unsupported expression on an included rule;
 - a complete audit whose included plus excluded style-layer IDs equal all `916` pinned layers with no duplicate ownership.
+- strict generation reads requiring an independently trusted generation SHA-256, canonical audit/catalog/manifest schemas, declared length/hash checks, reconstructed nested typed rules and derived aggregates, and complete semantic cross-link reconciliation; recomputed mixed generations or coherent semantic lies, hardlinks, symlinks, reparse/junction aliases, and unstable identities fail closed;
+- a persistent canonical-target OS advisory lock that survives as a file but releases on `os._exit`, a required pre-existing canonical/non-reparse trusted immediate parent with no recursive writer-created hierarchy, plus durable Windows write-through or POSIX parent-directory metadata barriers after generation and pointer commits.
 
 Run and verify RED:
 
@@ -294,11 +297,19 @@ Every style layer receives exactly one audit outcome:
 
 Do not use free-form source-layer substring heuristics after compilation. The tracked policy owns the mapping. Runtime package records contain numeric group/style IDs only.
 
+The compatibility singular line-candidate API may return zero or one candidate,
+but it must raise on two or more reachable intervals. Task 3 and every bulk
+consumer use only `line_label_candidates` and retain the full ordered result.
+
 - [ ] **Step 3: Bind the real pinned style**
 
-Run the compiler twice against the authoritative style. Write byte-identical audit/catalog evidence under:
+Run the compiler twice against the authoritative style. Write byte-identical
+audit/catalog evidence as one content-addressed generation, record its trusted
+generation SHA-256 in the Task 2 handoff, and verify it by passing that value to
+`read_style_evidence`; never derive the trust argument from the pointer inside
+the same read.
 
-Write active outputs under `C:\FlightAlert-exp8-work\pilot\style-contract\`, then hash-verify and mirror the accepted audit/catalog/manifest evidence under `D:\FlightAlert-test-artifacts\experiment 8\pilot\style-contract\`.
+Write active outputs under `C:\FlightAlert-exp8-work\pilot\style-contract\`, then hash-verify and mirror the accepted `current.json` plus exact `generations/<trusted-generation-sha256>/{audit.json,catalog.json,manifest.json}` evidence under `D:\FlightAlert-test-artifacts\experiment 8\pilot\style-contract\`. Legacy top-level audit/catalog/manifest files are not inputs to the generation-aware reader.
 
 Require exact input/output hashes, 916-layer reconciliation, nonzero included rules for labels, boundaries, water, public lands, and transportation, and zero unsupported included expressions.
 
@@ -327,7 +338,7 @@ Do not begin Task 3 until an independent specification reviewer approves the com
 
 **Interfaces:**
 - Produces: strict typed MVT source events, hash-addressed `.fanorm` source-occurrence/variant/posting files, `normalized-inventory.jsonl`, `normalized-summary.json`, and an explicit coverage-state inventory.
-- Consumes: verified acquisition inventory/cache, Task 1 semantic model, Task 2 style contract.
+- Consumes: verified acquisition inventory/cache, Task 1 semantic model, Task 2 style-evidence root, and the independently trusted Task 2 `expected_style_generation_sha256`. `normalize_sample` captures and validates that exact current generation once before worker creation, ignores legacy top-level style files, and gives every worker the same immutable catalog/audit bytes and generation ID.
 
 - [ ] **Step 1: Write failing normalizer tests**
 
@@ -338,9 +349,12 @@ Use hand-authored raw protobuf/geometry-command goldens plus independently encod
 - MoveTo/LineTo/ClosePath cardinality, truncated/overflowed deltas, repeated close, missing close, invalid geometry-type command sequence, degenerate ring/line, and zero-area ring are rejected rather than repaired or silently dropped;
 - y-down coordinates and every observed source extent (4,096, 32,768, 131,072, 1,048,576, 8,388,608, and 33,554,432), negative/over-extent provider buffers, asymmetric geometry, exact source-local coordinates, reduced-rational cross-LOD equality, and antimeridian wrap identity are honored without rounding/clamping;
 - exact source PBF/sidecar/generation/hash validation occurs before normalize;
+- omission of `expected_style_generation_sha256`, a pointer that differs from the trusted value, mixed audit/catalog/manifest files, hardlinks, or reparse ancestry fails before any tile is normalized;
+- changing `current.json` after startup cannot change the already captured style generation, and resume/cache identity rejects output made with another style generation;
 - point, multiline, polygon-outline, and buffered/out-of-tile coordinates globalize correctly;
 - only style-matched records are emitted and every omission has an audit reason;
 - label text, line placement path, anchor, rank, collision fields, and zoom/fade intervals survive;
+- normalization calls plural `line_label_candidates` and retains every reachable candidate interval in deterministic order; a multi-interval fixture proves the singular `line_label_candidate` API raises instead of selecting one;
 - `DisputeID=0` is false and nonzero is true;
 - PBF ID `0` never becomes a trusted source global ID;
 - exact point-label seam duplicates with the same text/class/global anchor receive the same dedupe ID;
@@ -362,18 +376,19 @@ Run and verify RED:
 
 - [ ] **Step 2: Implement bounded resumable normalization**
 
-`normalize_sample` accepts the hash-pinned acquisition inventory, source-honest sample, verified lock, style contract, cache root, workers `1..16`, and output directory. It:
+`normalize_sample` accepts the hash-pinned acquisition inventory, source-honest sample, verified lock, style-evidence root, required independently trusted `expected_style_generation_sha256`, cache root, workers `1..16`, and output directory. It:
 
-1. rehashes each PBF and sidecar and checks the acquisition inventory;
-2. decodes protobuf and MVT geometry commands with the strict raw reader, preserving exact typed values/float bits and rejecting malformed or duplicate-key features rather than repairing them;
-3. applies compiled feature filters and style rules;
-4. writes canonical per-tile normalized bytes through same-directory temporary files;
-5. records full fingerprints, numeric IDs, counts, source audit hashes, and coverage state;
-6. reuses a tile only when every input/output identity revalidates;
-7. keeps at most twice the worker count in flight;
-8. publishes inventory/summary atomically and deterministically.
+1. calls `read_style_evidence(style_evidence_root, expected_generation_sha256=expected_style_generation_sha256)` exactly once before creating workers, strictly validates the generation, freezes those bytes plus the generation ID in the normalization context, and never reads legacy flat files;
+2. rehashes each PBF and sidecar and checks the acquisition inventory;
+3. decodes protobuf and MVT geometry commands with the strict raw reader, preserving exact typed values/float bits and rejecting malformed or duplicate-key features rather than repairing them;
+4. applies compiled feature filters and style rules, calling `line_label_candidates` for path-label occurrences and flattening every returned interval without invoking the singular API;
+5. writes canonical per-tile normalized bytes through same-directory temporary files;
+6. records the trusted style generation, full fingerprints, numeric IDs, counts, source audit hashes, and coverage state;
+7. reuses a tile only when every input/output identity, including the same style generation, revalidates;
+8. keeps at most twice the worker count in flight;
+9. publishes inventory/summary atomically and deterministically.
 
-The normalized evidence set contains `normalization-policy.json`, `style-catalog.json`, `normalized-inventory.jsonl`, per-tile `.fanorm` files, `normalized-summary.json`, `source-audit.jsonl`, `unsupported.jsonl`, `semantic-hashes.json`, and `independent-verification.json`. Source audit hashes bind the exact PBF SHA, generation, z/x/y, layer, feature ordinal, canonical typed source properties, and decoded geometry. A valid source-present tile with zero accepted records receives a distinct hashed empty proof; failed decode/style/geometry work never does.
+The normalized evidence set contains `normalization-policy.json`, `style-catalog.json`, `normalized-inventory.jsonl`, per-tile `.fanorm` files, `normalized-summary.json`, `source-audit.jsonl`, `unsupported.jsonl`, `semantic-hashes.json`, and `independent-verification.json`. `normalization-policy.json`, every cache key, summary, and independent verification bind the same captured style-generation SHA-256. Source audit hashes bind the exact PBF SHA, generation, z/x/y, layer, feature ordinal, canonical typed source properties, and decoded geometry. A valid source-present tile with zero accepted records receives a distinct hashed empty proof; failed decode/style/geometry work never does.
 
 Use process workers only if measured faster for real MVT decode/normalization; otherwise use bounded threads/serial work. Do not add GPU work.
 
@@ -382,6 +397,11 @@ Use process workers only if measured faster for real MVT decode/normalization; o
 Output:
 
 Active output: `C:\FlightAlert-exp8-work\pilot\smoke\normalized\`. Accepted policy, style catalog, summary, source audit, unsupported inventory, semantic hashes, and independent-verification evidence are hash-verified and mirrored to `D:\FlightAlert-test-artifacts\experiment 8\pilot\smoke\normalized\`.
+
+The invocation supplies the exact Task 2 handoff generation as
+`--expected-style-generation-sha256`; the accepted normalization summary must
+repeat that value. Do not discover it by reading `current.json` inside the
+normalization command.
 
 Expected: 154 input states reconcile to 127 acquired present tiles plus 27 known-empty; zero source/style/geometry failures; nonzero applicable records in every required group; serial and parallel normalized hashes/bytes match; known-empty coordinates have no source file or normalized feature block.
 
@@ -607,7 +627,7 @@ integrity.bin
 
 The mainline candidate performs exact content-addressed dedupe only. Point/label ownership uses a stable exact global anchor. Lines and polygons without provider identity retain per-source-tile identity and receive no cross-tile/cross-LOD dedupe credit; any later exact variant ownership must use a documented stable anchor and independent proof. Label memberships may repeat one candidate ID for retrieval, but removing duplicate transport references is not semantic dedupe or projection credit. Store Format B variant pages by geographic owner locality rather than global random ID order; postings reference `feature_page_id + local_ordinal + canonical_variant_id`. Do not topologically stitch or infer global identity from names, class fields, zero/missing source IDs, parent tiles, or approximate endpoints. If an experimental stitching algorithm appears equally promising, preserve it as a separate artifact/branch for later testing; it cannot replace the exact candidate without independent semantic proof.
 
-Size projections report both owner-charged exact-dedupe bytes and a conservative no-cross-tile-dedupe bound. Use the larger bound for the under-25-GB decision unless ownership and projection credit are independently proven.
+Size projections report both owner-charged exact-dedupe bytes and a conservative no-cross-tile-dedupe bound. Use the larger bound for the preferred under-25-GB decision and for the hard under-40-GB fallback decision unless ownership and projection credit are independently proven.
 
 - [ ] **Step 3: Verify and commit Task 6**
 
