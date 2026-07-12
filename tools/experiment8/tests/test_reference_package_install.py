@@ -533,6 +533,7 @@ class ProductionBoundaryTest(unittest.TestCase):
             b"List of devices attached\nSERIAL offline transport_id:1\n",
             b"List of devices attached\nA device transport_id:1\nB device transport_id:2\n",
             b"daemon noise\nList of devices attached\nSERIAL device transport_id:1\n",
+            b"List of devices attached\nemulator-5554 device product:sdk_phone model:sdk device:generic transport_id:1\n",
         ):
             with self.subTest(raw=raw):
                 with self.assertRaises(ReferencePackageInstallError):

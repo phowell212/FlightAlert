@@ -583,6 +583,18 @@ def parse_adb_devices(raw: bytes) -> str:
     serial = columns[0]
     if re.fullmatch(r"[A-Za-z0-9._:-]+", serial) is None:
         raise ReferencePackageInstallError("adb serial is malformed")
+    attributes = {
+        item.split(":", 1)[0]: item.split(":", 1)[1]
+        for item in columns[2:]
+        if ":" in item
+    }
+    emulator_markers = " ".join(
+        attributes.get(key, "").casefold() for key in ("product", "model", "device")
+    )
+    if serial.casefold().startswith("emulator-") or any(
+        marker in emulator_markers for marker in ("emulator", "generic", "sdk_")
+    ):
+        raise ReferencePackageInstallError("sole adb row is not a physical device")
     return serial
 
 
