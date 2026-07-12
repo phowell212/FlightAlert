@@ -170,7 +170,8 @@ internal class SatelliteBaseTileRenderer(
             canvas = canvas,
             viewport = viewport,
             state = state,
-            style = style
+            style = style,
+            allow_speculative_requests = true
         )
         if (result.reusable_for_pan_cache &&
             should_record_pan_cache(
@@ -195,6 +196,7 @@ internal class SatelliteBaseTileRenderer(
                         viewport = cache_viewport,
                         state = state,
                         style = style,
+                        allow_speculative_requests = false,
                         draw_reference_layers = false
                     )
                     MapLayerPanCacheRecordResult(
@@ -216,6 +218,7 @@ internal class SatelliteBaseTileRenderer(
         viewport: Viewport,
         state: MapTileRenderState,
         style: MapTileRenderStyle,
+        allow_speculative_requests: Boolean,
         draw_reference_layers: Boolean = true
     ): SatelliteTileDrawResult {
         val now_ms = SystemClock.elapsedRealtime()
@@ -254,7 +257,8 @@ internal class SatelliteBaseTileRenderer(
             draw_unavailable_if_missing = true,
             allow_parent_fallback = true,
             loaded_interim_tiles = loaded_interim_tile_buffer,
-            request_generation = request_generation
+            request_generation = request_generation,
+            allow_speculative_requests = allow_speculative_requests
         )
 
         val upper_stats = if (lod.has_upper_lod && lod.upper_lod_alpha > MIN_LAYER_ALPHA) {
@@ -269,10 +273,11 @@ internal class SatelliteBaseTileRenderer(
                 draw_unavailable_if_missing = false,
                 allow_parent_fallback = false,
                 loaded_interim_tiles = loaded_interim_tile_buffer,
-                request_generation = request_generation
+                request_generation = request_generation,
+                allow_speculative_requests = allow_speculative_requests
             )
         } else {
-            if (lod.prefetch_upper_lod) {
+            if (allow_speculative_requests && lod.prefetch_upper_lod) {
                 request_satellite_prefetch_grid(
                     viewport = viewport,
                     state = state,
@@ -456,7 +461,8 @@ internal class SatelliteBaseTileRenderer(
         draw_unavailable_if_missing: Boolean,
         allow_parent_fallback: Boolean,
         loaded_interim_tiles: MutableList<InterimRasterTile>,
-        request_generation: Long
+        request_generation: Long,
+        allow_speculative_requests: Boolean
     ): TileLayerDrawStats {
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
@@ -585,17 +591,19 @@ internal class SatelliteBaseTileRenderer(
             }
         }
 
-        request_satellite_buffer_tiles(
-            tile_zoom = tile_zoom,
-            first_tile_x = first_tile_x,
-            last_tile_x = last_tile_x,
-            first_tile_y = first_tile_y,
-            last_tile_y = last_tile_y,
-            max_tile = max_tile,
-            state = state,
-            now_ms = now_ms,
-            request_generation = request_generation
-        )
+        if (allow_speculative_requests) {
+            request_satellite_buffer_tiles(
+                tile_zoom = tile_zoom,
+                first_tile_x = first_tile_x,
+                last_tile_x = last_tile_x,
+                first_tile_y = first_tile_y,
+                last_tile_y = last_tile_y,
+                max_tile = max_tile,
+                state = state,
+                now_ms = now_ms,
+                request_generation = request_generation
+            )
+        }
 
         return TileLayerDrawStats(
             visible = visible,
