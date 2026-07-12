@@ -236,7 +236,7 @@ class PackageCatalogAndPersistenceTests(unittest.TestCase):
         self.assertEqual(len(catalog_bytes), 754)
         self.assertEqual(
             hashlib.sha256(catalog_bytes).hexdigest(),
-            "73106fa5d993b921aa29e6af573c1f1f1b09424782a4099d2f4e150644ed75a5",
+            "71164d7270709c9f9e88f178bab44953ddbce1d203f3f9eddca8f1b1ca32067a",
         )
         catalog = ReferenceClassCatalog.from_verified_bytes(
             catalog_bytes,
@@ -432,6 +432,42 @@ class WaterwayProminenceTests(unittest.TestCase):
                 with self.subTest(subtype=subtype, tier=tier):
                     self.assertGreater(rule.min_zoom_centi, 628)
                     self.assertEqual(label_alpha_milli(rule, 628), 0)
+
+    def test_unpromoted_local_places_and_minor_waterways_start_in_child_lods(self) -> None:
+        local_place = visibility_rule_for_label(
+            LabelFacts(subtype=SemanticSubtype.LOCAL_PLACE)
+        )
+        low_population_town = visibility_rule_for_label(
+            LabelFacts(
+                subtype=SemanticSubtype.CITY_TOWN,
+                population=500,
+                population_verified=True,
+            )
+        )
+        minor_river = visibility_rule_for_waterway(
+            WaterwayFacts(subtype=SemanticSubtype.RIVER)
+        )
+        creek = visibility_rule_for_waterway(
+            WaterwayFacts(subtype=SemanticSubtype.STREAM_CREEK)
+        )
+        unspecified = visibility_rule_for_waterway(
+            WaterwayFacts(subtype=SemanticSubtype.UNSPECIFIED_WATERCOURSE)
+        )
+
+        self.assertEqual((825, 865), (local_place.min_zoom_centi, local_place.full_alpha_zoom_centi))
+        self.assertEqual((775, 815), (low_population_town.min_zoom_centi, low_population_town.full_alpha_zoom_centi))
+        self.assertEqual((800, 835), (minor_river.min_zoom_centi, minor_river.full_alpha_zoom_centi))
+        self.assertEqual((850, 885), (creek.min_zoom_centi, creek.full_alpha_zoom_centi))
+        self.assertEqual((850, 885), (unspecified.min_zoom_centi, unspecified.full_alpha_zoom_centi))
+
+        promoted_river = visibility_rule_for_waterway(
+            WaterwayFacts(
+                subtype=SemanticSubtype.RIVER,
+                complete_named_relation=True,
+                complete_relation_length_m=25_000,
+            )
+        )
+        self.assertEqual(593, promoted_river.min_zoom_centi)
 
     def test_legacy_unbound_provider_prominence_cannot_enter_the_policy(self) -> None:
         with self.assertRaises(TypeError):
@@ -653,11 +689,11 @@ class UniversalLabelProminenceTests(unittest.TestCase):
         self.assertEqual(len(encoded), 143)
         self.assertEqual(
             hashlib.sha256(encoded).hexdigest(),
-            "e074e9a7e062abe5fdfd2c057b6ac136de6d16bc239c333f8091df273954dd31",
+            "6fe913ae8f42bf1c68971b9d94565196cd1a495a63f70b8918cd98c1d68e9fb9",
         )
         self.assertEqual(
             prominence_decision_sha256(decision),
-            "e074e9a7e062abe5fdfd2c057b6ac136de6d16bc239c333f8091df273954dd31",
+            "6fe913ae8f42bf1c68971b9d94565196cd1a495a63f70b8918cd98c1d68e9fb9",
         )
 
     def test_provider_prominence_requires_generation_classifier_field_and_rank(self) -> None:

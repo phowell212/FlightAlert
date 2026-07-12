@@ -231,7 +231,7 @@ data class FilterPanelCatalog private constructor(
 
 object ReferencePresentationPolicy {
     private const val reviewed_policy_sha256 =
-        "40f4e98394dacfaaad7cdc195858d0b56fc72ba5c83ccfc1e75d71fff6f6395c"
+        "0e79551e8a7dab8fe6a300f30f2768a0dc3a013fdd3ce182bb7a6f08e42399b6"
     val canonical_policy_sha256: String by lazy {
         val computed = sha256_hex(
             "FAE8PRES1\u0000".toByteArray(Charsets.US_ASCII) +

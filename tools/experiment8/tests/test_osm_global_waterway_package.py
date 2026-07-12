@@ -1463,7 +1463,7 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
         relation = rendered[("relation", 200)]
         stream = rendered[("way", 102)]
         self.assertEqual(5, min(tile.z for tile in relation.tiles))
-        self.assertEqual(7, min(tile.z for tile in stream.tiles))
+        self.assertEqual(8, min(tile.z for tile in stream.tiles))
         relation_record = next(iter(next(iter(relation.tiles.values()))))
         self.assertEqual(LayoutMode.PRIMARY_WITH_ENGLISH, relation_record.sourced_text.layout_mode)
         self.assertEqual("Великая река", relation_record.sourced_text.primary_text)

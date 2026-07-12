@@ -130,13 +130,13 @@ internal object ReferencePresentationTables {
         ProminenceTier.GLOBAL_MAJOR to water_rule("water.river.global_major", 550, 585, 11_000, 70),
         ProminenceTier.REGIONAL_MAJOR to water_rule("water.river.regional_major", 593, 628, 10_500, 70),
         ProminenceTier.LOCAL to water_rule("water.river.local", 688, 718, 9_750, 70),
-        ProminenceTier.FINE to water_rule("water.river.fine", 748, 783, 9_250, 70),
+        ProminenceTier.FINE to water_rule("water.river.fine", 800, 835, 9_250, 70),
     )
     private val stream_rules = mapOf(
         ProminenceTier.GLOBAL_MAJOR to water_rule("water.stream_creek.global_major", 668, 698, 9_750, 45),
         ProminenceTier.REGIONAL_MAJOR to water_rule("water.stream_creek.regional_major", 708, 738, 9_500, 45),
         ProminenceTier.LOCAL to water_rule("water.stream_creek.local", 748, 778, 9_250, 45),
-        ProminenceTier.FINE to water_rule("water.stream_creek.fine", 778, 813, 9_000, 45),
+        ProminenceTier.FINE to water_rule("water.stream_creek.fine", 850, 885, 9_000, 45),
     )
     private val canal_rules = mapOf(
         ProminenceTier.GLOBAL_MAJOR to water_rule("water.canal_channel.global_major", 668, 698, 9_750, 35),
@@ -148,7 +148,7 @@ internal object ReferencePresentationTables {
         ProminenceTier.GLOBAL_MAJOR to water_rule("water.unspecified_course.global_major", 708, 738, 9_500, 40),
         ProminenceTier.REGIONAL_MAJOR to water_rule("water.unspecified_course.regional_major", 738, 768, 9_250, 40),
         ProminenceTier.LOCAL to water_rule("water.unspecified_course.local", 768, 798, 9_000, 40),
-        ProminenceTier.FINE to water_rule("water.unspecified_course.fine", 798, 833, 8_750, 40),
+        ProminenceTier.FINE to water_rule("water.unspecified_course.fine", 850, 885, 8_750, 40),
     )
 
     private val generic_bands = mapOf(
@@ -233,6 +233,15 @@ internal object ReferencePresentationTables {
             SemanticSubtype.CANAL_CHANNEL -> return canal_rules.getValue(tier)
             SemanticSubtype.UNSPECIFIED_WATERCOURSE -> return unspecified_rules.getValue(tier)
             else -> Unit
+        }
+        if (subtype == SemanticSubtype.LOCAL_PLACE && tier == ProminenceTier.FINE) {
+            return LabelVisibilityRule(
+                "local_place.fine",
+                825,
+                865,
+                9_000,
+                letter_spacing_milli_em = style_spec(subtype).letter_spacing_milli_em,
+            )
         }
         val family = family_by_subtype[subtype]
             ?: throw ReferencePolicyException("label subtype has no visibility family")

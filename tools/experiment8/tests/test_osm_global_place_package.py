@@ -1539,7 +1539,7 @@ class GlobalPlaceRendererTests(unittest.TestCase):
             madrid = by_name["Madrid"][0][1]
             self.assertEqual(LayoutMode.SINGLE, madrid.layout_mode)
             self.assertIsNone(madrid.english_text)
-            self.assertEqual(set(range(7, 12)), {tile.z for tile, _ in by_name["Χωριό"]})
+            self.assertEqual(set(range(8, 12)), {tile.z for tile, _ in by_name["Χωριό"]})
             self.assertEqual(set(range(4, 12)), {tile.z for tile, _ in by_name["Αθήνα"]})
             self.assertEqual(
                 renderer_contract_hash(all_renderer_records),

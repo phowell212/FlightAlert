@@ -1241,7 +1241,7 @@ class RejectedReviewRegressionTests(StyleContractTestCase):
         self.assertIn("presentationFilters", self.contract.catalog_document)
         self.assertEqual(
             PRESENTATION_POLICY_SHA256,
-            "40f4e98394dacfaaad7cdc195858d0b56fc72ba5c83ccfc1e75d71fff6f6395c",
+            "0e79551e8a7dab8fe6a300f30f2768a0dc3a013fdd3ce182bb7a6f08e42399b6",
         )
         self.assertEqual(
             self.contract.catalog_document["presentationPolicySha256"],

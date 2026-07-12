@@ -204,7 +204,7 @@ class OsmPlaceRendererTest(unittest.TestCase):
         fine_locality = self._build(7, zooms=(4, 5, 6, 7, 8))
 
         self.assertEqual((6, 7, 8), tuple(tile.z for tile in local_city.tiles))
-        self.assertEqual((7, 8), tuple(tile.z for tile in fine_locality.tiles))
+        self.assertEqual((8,), tuple(tile.z for tile in fine_locality.tiles))
 
     def test_relations_unknown_place_types_and_missing_names_cannot_supply_points(self) -> None:
         dataset = parse_osm_xml_bytes(_OSM)

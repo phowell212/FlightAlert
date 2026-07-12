@@ -39,7 +39,7 @@ LABEL_EDGE_CLEARANCE_MILLI_EM = 250
 LABEL_MAX_PRESENTATIONS_PER_CANDIDATE_WRAP = 1
 LABEL_HANDOFF_MAX_MS = 220
 PRESENTATION_POLICY_SHA256 = (
-    "40f4e98394dacfaaad7cdc195858d0b56fc72ba5c83ccfc1e75d71fff6f6395c"
+    "0e79551e8a7dab8fe6a300f30f2768a0dc3a013fdd3ce182bb7a6f08e42399b6"
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -1254,7 +1254,7 @@ _RIVER_RULES = {
         "water.river.local", 688, 718, 9_750, 70
     ),
     ProminenceTier.FINE: _water_visibility_rule(
-        "water.river.fine", 748, 783, 9_250, 70
+        "water.river.fine", 800, 835, 9_250, 70
     ),
 }
 _STREAM_RULES = {
@@ -1268,7 +1268,7 @@ _STREAM_RULES = {
         "water.stream_creek.local", 748, 778, 9_250, 45
     ),
     ProminenceTier.FINE: _water_visibility_rule(
-        "water.stream_creek.fine", 778, 813, 9_000, 45
+        "water.stream_creek.fine", 850, 885, 9_000, 45
     ),
 }
 _CANAL_RULES = {
@@ -1296,7 +1296,7 @@ _UNSPECIFIED_WATERCOURSE_RULES = {
         "water.unspecified_course.local", 768, 798, 9_000, 40
     ),
     ProminenceTier.FINE: _water_visibility_rule(
-        "water.unspecified_course.fine", 798, 833, 8_750, 40
+        "water.unspecified_course.fine", 850, 885, 8_750, 40
     ),
 }
 
@@ -2051,6 +2051,16 @@ def _visibility_rule_for_subtype_tier(
         return _CANAL_RULES[tier]
     if subtype is SemanticSubtype.UNSPECIFIED_WATERCOURSE:
         return _UNSPECIFIED_WATERCOURSE_RULES[tier]
+    if subtype is SemanticSubtype.LOCAL_PLACE and tier is ProminenceTier.FINE:
+        return LabelVisibilityRule(
+            rule_id="local_place.fine",
+            min_zoom_centi=825,
+            full_alpha_zoom_centi=865,
+            text_size_milli_sp=9_000,
+            letter_spacing_milli_em=style_spec_for_subtype(
+                subtype
+            ).letter_spacing_milli_em,
+        )
     family = _VISIBILITY_FAMILY_BY_SUBTYPE.get(subtype)
     if family is None:
         raise ReferencePolicyError("label subtype has no visibility family")
