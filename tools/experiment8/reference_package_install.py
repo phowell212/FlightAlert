@@ -244,6 +244,51 @@ class AppProcessState:
     pids: tuple[str, ...]
     resumed_component: str | None
     focused_component: str | None
+    screen_interactive: bool = True
+    device_locked: bool = False
+    active_services: tuple[str, ...] = ()
+    running_reason: str = ""
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.screen_interactive) is not bool
+            or type(self.device_locked) is not bool
+        ):
+            raise ReferencePackageInstallError("screen/lock process state is malformed")
+        if any(
+            type(component) is not str
+            or not component.startswith("com.flightalert/")
+            for component in self.active_services
+        ) or tuple(sorted(set(self.active_services))) != self.active_services:
+            raise ReferencePackageInstallError("active Flight Alert services are malformed")
+        reason = self.running_reason
+        if not reason:
+            if not self.pids:
+                reason = "stopped"
+            elif (
+                self.screen_interactive
+                and not self.device_locked
+                and self.resumed_component is not None
+                and self.resumed_component.startswith("com.flightalert/")
+            ):
+                reason = "foreground-activity"
+            elif self.active_services:
+                reason = "service"
+            else:
+                reason = "background-only"
+            object.__setattr__(self, "running_reason", reason)
+        if reason not in {
+            "stopped",
+            "foreground-activity",
+            "bound-notification-listener",
+            "service",
+            "background-only",
+        }:
+            raise ReferencePackageInstallError("process running reason is malformed")
+        if (reason == "stopped" and self.pids) or (
+            reason != "stopped" and not self.pids
+        ):
+            raise ReferencePackageInstallError("process running reason contradicts PIDs")
 
     @property
     def running(self) -> bool:
@@ -286,16 +331,26 @@ class DevicePrestate:
 
 
 class DeviceLease(Protocol):
+    def acquisition_intent(self, **arguments: object) -> Mapping[str, object]: ...
+
     def acquire(self, **arguments: object) -> str: ...
 
     def heartbeat(self, token: str) -> None: ...
 
     def release(self, token: str) -> None: ...
 
-    def reconcile_unfinished(self, token: str) -> None: ...
+    def confirm_acquisition(self, intent: Mapping[str, object]) -> str | None: ...
+
+    def reconcile_acquisition(self, intent: Mapping[str, object]) -> None: ...
+
+    def reconcile_unfinished(
+        self, token: str, intent: Mapping[str, object] | None = None
+    ) -> None: ...
 
 
 class InstallDevice(Protocol):
+    def set_mutation_guard(self, guard: Callable[[], None] | None) -> None: ...
+
     def require_single_ready_device(self) -> str: ...
 
     def prepare_evidence_directory(self, evidence_directory: Path) -> None: ...
@@ -332,7 +387,14 @@ class InstallDevice(Protocol):
 
     def move_no_replace(self, source: str, destination: str) -> None: ...
 
-    def install_apk(self, path: Path) -> None: ...
+    def install_apk(
+        self,
+        path: Path,
+        *,
+        expected_bytes: int,
+        expected_sha256: str,
+        expected_stat_identity: tuple[int, int, int, int, int],
+    ) -> None: ...
 
     def restore_preferences(self, present: bool, raw: bytes) -> None: ...
 
@@ -341,8 +403,6 @@ class InstallDevice(Protocol):
     def restore_listener(self, state: ListenerState) -> None: ...
 
     def restore_process_state(self, state: AppProcessState) -> None: ...
-
-    def restore_running(self, was_running: bool) -> None: ...
 
     def restore_apk(self, path: Path) -> None: ...
 
@@ -399,8 +459,7 @@ class ReferencePackageInstaller:
         released = False
         primary_error: Exception | None = None
         try:
-            token = self._acquire_lease("install")
-            journal = self._record_lease_acquired(journal, token, "install")
+            token = self._acquire_lease(journal, "install", "install")
             serial = self._guarded(token, "select device", self._select_device)
             self.device.prepare_evidence_directory(self.evidence_directory)
             if journal.get("prestate") is None:
@@ -477,8 +536,9 @@ class ReferencePackageInstaller:
         footprint: dict[str, object] | None = None
         final_inventory: tuple[RemoteEntryIdentity, ...] | None = None
         try:
-            token = self._acquire_lease("finalize acceptance")
-            journal = self._record_lease_acquired(journal, token, "finalize")
+            token = self._acquire_lease(
+                journal, "finalize acceptance", "finalize"
+            )
             serial = self._guarded(token, "select device", self._select_device)
             self.device.prepare_evidence_directory(self.evidence_directory)
             prestate = _prestate_from_document(journal["prestate"])
@@ -574,8 +634,9 @@ class ReferencePackageInstaller:
         released = False
         errors: list[str] = []
         try:
-            token = self._acquire_lease("rollback pending acceptance")
-            journal = self._record_lease_acquired(journal, token, "rollback")
+            token = self._acquire_lease(
+                journal, "rollback pending acceptance", "rollback"
+            )
             serial = self._guarded(token, "select device", self._select_device)
             self.device.prepare_evidence_directory(self.evidence_directory)
             prestate = _prestate_from_document(journal["prestate"])
@@ -623,8 +684,9 @@ class ReferencePackageInstaller:
         token: str | None = None
         released = False
         try:
-            token = self._acquire_lease("revalidate pending acceptance")
-            journal = self._record_lease_acquired(journal, token, "pending-receipt")
+            token = self._acquire_lease(
+                journal, "revalidate pending acceptance", "pending-receipt"
+            )
             serial = self._guarded(token, "select device", self._select_device)
             self.device.prepare_evidence_directory(self.evidence_directory)
             prestate = _prestate_from_document(journal["prestate"])
@@ -664,6 +726,7 @@ class ReferencePackageInstaller:
             "activeLeaseToken": None,
             "deviceSerial": None,
             "deviceMutationStarted": False,
+            "leaseAcquisitionIntent": None,
             "leaseReleased": False,
             "paths": None,
             "phase": "host-plan-bound",
@@ -728,6 +791,24 @@ class ReferencePackageInstaller:
     ) -> None:
         if prestate.serial != serial:
             raise ReferencePackageInstallError("device serial changed during prestate")
+        if prestate.process_state.running_reason == "background-only":
+            raise ReferencePackageInstallError(
+                "background-only app state cannot be restored safely"
+            )
+        if (
+            prestate.process_state.running_reason == "bound-notification-listener"
+            and not prestate.listener_state.bound
+        ):
+            raise ReferencePackageInstallError(
+                "bound-listener process state has no bound listener"
+            )
+        if (
+            prestate.process_state.running_reason == "service"
+            and not prestate.process_state.active_services
+        ):
+            raise ReferencePackageInstallError(
+                "service process state has no restorable service"
+            )
         final = self._guarded(
             token,
             "recheck prestate final package identity",
@@ -875,18 +956,25 @@ class ReferencePackageInstaller:
         journal = self._write_journal(journal, "after-new-publish")
 
         journal = self._write_journal(journal, "before-apk-install")
-        _assert_install_file_unchanged(
-            InstallFile(
-                self.plan.apk_path.name,
-                self.plan.apk_path,
-                self.plan.apk_bytes,
-                self.plan.apk_sha256,
-                _identity(self.plan.apk_path.stat(follow_symlinks=False)),
-            )
-        )
+        _assert_apk_plan_unchanged(self.plan)
         self._guarded(
-            token, "install APK", lambda: self.device.install_apk(self.plan.apk_path)
+            token,
+            "install APK",
+            lambda: self.device.install_apk(
+                self.plan.apk_path,
+                expected_bytes=self.plan.apk_bytes,
+                expected_sha256=self.plan.apk_sha256,
+                expected_stat_identity=self.plan.apk_stat_identity,
+            ),
         )
+        installed = self._guarded(
+            token, "verify installed APK immediately", self.device.verify_installed_apk
+        )
+        if (
+            installed.byte_length != self.plan.apk_bytes
+            or installed.sha256 != self.plan.apk_sha256
+        ):
+            raise ReferencePackageInstallError("installed APK identity differs")
         journal = self._write_journal(journal, "after-apk-install")
         self._restore_application_prestate(prestate, token)
         journal = self._write_journal(journal, "after-prestate-restored")
@@ -928,6 +1016,19 @@ class ReferencePackageInstaller:
         )
         if actual_new is None or not expected_new.same_object(actual_new):
             raise ReferencePackageInstallError("active package root identity differs")
+        active_inventory = self._guarded(
+            token,
+            "verify active package inventory",
+            lambda: self.device.immediate_inventory(self.FINAL_PACKAGE_PATH),
+        )
+        if tuple(item.name for item in active_inventory) != PACKAGE_FILE_NAMES:
+            raise ReferencePackageInstallError(
+                "active package does not have the exact six-file inventory"
+            )
+        if any(item.kind != "regular" for item in active_inventory):
+            raise ReferencePackageInstallError(
+                "active package inventory must contain only regular files"
+            )
         for item in self.plan.package_files:
             actual = self._guarded(
                 token,
@@ -965,8 +1066,9 @@ class ReferencePackageInstaller:
         errors: list[str] = []
         token: str | None = None
         try:
-            token = self._acquire_lease("journal-driven recovery")
-            journal = self._record_lease_acquired(journal, token, "recovery")
+            token = self._acquire_lease(
+                journal, "journal-driven recovery", "recovery"
+            )
             serial = self._guarded(token, "select recovery device", self._select_device)
             self.device.prepare_evidence_directory(self.evidence_directory)
             prestate = _prestate_from_document(journal["prestate"])
@@ -1332,26 +1434,40 @@ class ReferencePackageInstaller:
     ) -> dict[str, object]:
         journal["activeLeaseToken"] = token
         journal["leaseReleased"] = False
-        return self._write_journal(journal, f"{operation}-lease-acquired")
+        return self._write_journal(journal, f"{operation}-lease-token-recorded")
 
     def _record_lease_released(
         self, journal: dict[str, object], operation: str
     ) -> dict[str, object]:
         journal["leaseReleased"] = True
         journal["activeLeaseToken"] = None
+        journal["leaseAcquisitionIntent"] = None
         return self._write_journal(journal, f"{operation}-lease-released")
 
     def _reconcile_journal_lease(
         self, journal: dict[str, object]
     ) -> dict[str, object]:
         active = journal.get("activeLeaseToken")
-        if active is None:
+        raw_intent = journal.get("leaseAcquisitionIntent")
+        intent = (
+            dict(_exact_mapping(raw_intent, "lease acquisition intent"))
+            if raw_intent is not None
+            else None
+        )
+        if active is None and intent is None:
             return journal
-        if type(active) is not str or re.fullmatch(r"[0-9a-f]{32}", active) is None:
-            raise ReferencePackageInstallError(
-                "unfinished journal lease token is malformed"
-            )
-        self.lease.reconcile_unfinished(active)
+        if active is not None:
+            if type(active) is not str or re.fullmatch(r"[0-9a-f]{32}", active) is None:
+                raise ReferencePackageInstallError(
+                    "unfinished journal lease token is malformed"
+                )
+            self.lease.reconcile_unfinished(active, intent)
+        else:
+            if intent is None:
+                raise ReferencePackageInstallError(
+                    "unfinished lease acquisition intent is missing"
+                )
+            self.lease.reconcile_acquisition(intent)
         return self._record_lease_released(journal, "stale")
 
     def _guarded(
@@ -1367,23 +1483,66 @@ class ReferencePackageInstaller:
                 raise
             raise ReferencePackageInstallError(f"{label} failed: {error}") from error
 
-    def _acquire_lease(self, operation: str) -> str:
-        token = self.lease.acquire(
-            owner="Zeus/Experiment8",
-            purpose=f"{operation} finalized whole-world Experiment 8 package",
-            scenario=f"transactional reference package {operation}",
-            stateful_effects=(
+    def _lease_arguments(self, operation: str) -> dict[str, object]:
+        return {
+            "owner": "Zeus/Experiment8",
+            "purpose": f"{operation} finalized whole-world Experiment 8 package",
+            "scenario": f"transactional reference package {operation}",
+            "stateful_effects": (
                 "same-signature APK replacement and atomic external reference-package swap; "
                 "no app-data or cache clear"
             ),
-            expected_minutes=180,
-        )
-        if re.fullmatch(r"[0-9a-f]{32}", token) is None:
-            raise ReferencePackageInstallError("device lease token is malformed")
-        self.lease.heartbeat(token)
-        return token
+            "expected_minutes": 180,
+        }
+
+    def _acquire_lease(
+        self, journal: dict[str, object], operation: str, phase_label: str
+    ) -> str:
+        arguments = self._lease_arguments(operation)
+        identity = dict(self.lease.acquisition_intent(**arguments))
+        intent: dict[str, object] = {
+            **identity,
+            "deviceOperation": operation,
+        }
+        _validate_lease_acquisition_intent(intent, arguments, operation)
+        journal["leaseAcquisitionIntent"] = intent
+        journal["activeLeaseToken"] = None
+        journal["leaseReleased"] = False
+        self._write_journal(journal, f"{phase_label}-lease-acquisition-intent")
+
+        token: str | None = None
+        try:
+            token = self.lease.acquire(**arguments)
+            if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+                raise ReferencePackageInstallError("device lease token is malformed")
+            self._record_lease_acquired(journal, token, phase_label)
+            try:
+                self.lease.heartbeat(token)
+            except Exception as heartbeat_error:
+                confirmed = self.lease.confirm_acquisition(intent)
+                if confirmed != token:
+                    raise ReferencePackageInstallError(
+                        "device lease ownership could not be confirmed after heartbeat failure"
+                    ) from heartbeat_error
+            self.device.set_mutation_guard(lambda: self.lease.heartbeat(token))
+            return token
+        except BaseException:
+            if token is not None:
+                released = self._release_independently(token)
+                if released:
+                    self._record_lease_released(journal, phase_label)
+                elif re.fullmatch(r"[0-9a-f]{32}", token) is not None:
+                    journal["activeLeaseToken"] = token
+                    try:
+                        self._write_journal(
+                            journal, f"{phase_label}-lease-release-unconfirmed"
+                        )
+                    except BaseException:
+                        pass
+            raise
 
     def _release_independently(self, token: str) -> bool:
+        self.device.set_mutation_guard(None)
         try:
             self.lease.release(token)
             return True
@@ -1579,11 +1738,41 @@ def _parse_component_line(raw: bytes, marker: str, label: str) -> str | None:
     return next(iter(components))
 
 
+def _parse_screen_interactive(raw: bytes) -> bool:
+    text = _strict_utf8_text(raw, "power state", maximum=MAX_JSON_BYTES)
+    states = re.findall(r"(?m)^\s*mWakefulness=(Awake|Asleep|Dozing|Dreaming)\s*$", text)
+    if len(states) != 1:
+        raise ReferencePackageInstallError("power wakefulness state is ambiguous")
+    return states[0] == "Awake"
+
+
+def _parse_device_locked(raw: bytes) -> bool:
+    text = _strict_utf8_text(raw, "window policy state", maximum=MAX_JSON_BYTES)
+    values = re.findall(
+        r"(?m)^\s*(?:mShowingLockscreen|keyguardShowing|showing)=(true|false)\s*$",
+        text,
+    )
+    if not values or len(set(values)) != 1:
+        raise ReferencePackageInstallError("device lock state is ambiguous")
+    return values[0] == "true"
+
+
+def _parse_active_app_services(raw: bytes) -> tuple[str, ...]:
+    text = _strict_utf8_text(raw, "Flight Alert service state", maximum=MAX_JSON_BYTES)
+    pattern = re.compile(
+        r"\b(com\.flightalert/(?:\.[A-Za-z0-9_.$]+|com\.flightalert\.[A-Za-z0-9_.$]+))\b"
+    )
+    return tuple(sorted(set(pattern.findall(text))))
+
+
 def _app_state_equivalent(actual: AppProcessState, expected: AppProcessState) -> bool:
     return (
         actual.running is expected.running
         and actual.resumed_component == expected.resumed_component
         and actual.focused_component == expected.focused_component
+        and actual.screen_interactive is expected.screen_interactive
+        and actual.device_locked is expected.device_locked
+        and actual.active_services == expected.active_services
     )
 
 
@@ -1611,10 +1800,9 @@ class AtomicDeviceLeaseClient:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._background_error: BaseException | None = None
+        self._active_intent: Mapping[str, object] | None = None
 
-    def acquire(self, **arguments: object) -> str:
-        if self._token is not None:
-            raise ReferencePackageInstallError("device lease is already active here")
+    def acquisition_intent(self, **arguments: object) -> Mapping[str, object]:
         owner = _required_argument(arguments, "owner")
         purpose = _required_argument(arguments, "purpose")
         scenario = _required_argument(arguments, "scenario")
@@ -1622,27 +1810,54 @@ class AtomicDeviceLeaseClient:
         minutes = arguments.get("expected_minutes")
         if type(minutes) is not int or minutes <= 0:
             raise ReferencePackageInstallError("device lease minutes are malformed")
-        document = self._call(
-            "acquire",
-            "-Owner",
-            owner,
-            "-ThreadId",
-            self.thread_id,
-            "-Purpose",
-            purpose,
-            "-Scenario",
-            scenario,
-            "-StatefulEffects",
-            effects,
-            "-ExpectedMinutes",
-            str(minutes),
-        )
+        return {
+            "expectedMinutes": minutes,
+            "owner": owner,
+            "purpose": purpose,
+            "scenario": scenario,
+            "statefulEffects": effects,
+            "threadId": self.thread_id,
+        }
+
+    def acquire(self, **arguments: object) -> str:
+        if self._token is not None:
+            raise ReferencePackageInstallError("device lease is already active here")
+        intent = self.acquisition_intent(**arguments)
+        try:
+            document = self._call(
+                "acquire",
+                "-Owner",
+                str(intent["owner"]),
+                "-ThreadId",
+                self.thread_id,
+                "-Purpose",
+                str(intent["purpose"]),
+                "-Scenario",
+                str(intent["scenario"]),
+                "-StatefulEffects",
+                str(intent["statefulEffects"]),
+                "-ExpectedMinutes",
+                str(intent["expectedMinutes"]),
+            )
+        except Exception as acquire_error:
+            token = self._status_token_for_intent(intent)
+            if token is None:
+                raise acquire_error
+            self._activate_token(token, intent)
+            return token
         token = _exact_string(document.get("token"), "device lease token")
         if not _exact_bool(document.get("held"), "device lease held state"):
             raise ReferencePackageInstallError("device lease acquire did not hold the lease")
         if re.fullmatch(r"[0-9a-f]{32}", token) is None:
             raise ReferencePackageInstallError("device lease token is malformed")
+        self._activate_token(token, intent)
+        return token
+
+    def _activate_token(
+        self, token: str, intent: Mapping[str, object]
+    ) -> None:
         self._token = token
+        self._active_intent = dict(intent)
         self._stop.clear()
         self._background_error = None
         self._thread = threading.Thread(
@@ -1651,18 +1866,11 @@ class AtomicDeviceLeaseClient:
             daemon=True,
         )
         self._thread.start()
-        return token
 
     def heartbeat(self, token: str) -> None:
         self._assert_token(token)
         self._raise_background_error()
-        with self._lock:
-            document = self._call("heartbeat", "-Token", token)
-        if not _exact_bool(document.get("held"), "device heartbeat held state"):
-            raise ReferencePackageInstallError("device heartbeat lost the lease")
-        returned = _exact_string(document.get("token"), "device heartbeat token")
-        if returned != token:
-            raise ReferencePackageInstallError("device heartbeat token differs")
+        self._heartbeat_with_reconciliation(token)
 
     def release(self, token: str) -> None:
         self._assert_token(token)
@@ -1690,22 +1898,46 @@ class AtomicDeviceLeaseClient:
         self._token = None
         self._thread = None
         self._background_error = None
+        self._active_intent = None
 
-    def reconcile_unfinished(self, token: str) -> None:
+    def confirm_acquisition(self, intent: Mapping[str, object]) -> str | None:
+        with self._lock:
+            token = self._status_token_for_intent(intent)
+        if token is not None and self._token not in (None, token):
+            raise ReferencePackageInstallError(
+                "confirmed device lease token differs from local ownership"
+            )
+        return token
+
+    def reconcile_acquisition(self, intent: Mapping[str, object]) -> None:
+        if self._token is not None:
+            raise ReferencePackageInstallError(
+                "cannot reconcile an acquisition intent while a lease is active"
+            )
+        token = self._status_token_for_intent(intent)
+        if token is None:
+            return
+        released = self._call("release", "-Token", token)
+        if _exact_bool(released.get("held"), "intent lease release state"):
+            raise ReferencePackageInstallError(
+                "acquisition-intent device lease remains held"
+            )
+        self._assert_status_unheld(self._call("status"), "intent lease final status")
+
+    def reconcile_unfinished(
+        self, token: str, intent: Mapping[str, object] | None = None
+    ) -> None:
         if self._token is not None:
             raise ReferencePackageInstallError(
                 "cannot reconcile an unfinished lease while one is active"
             )
         if re.fullmatch(r"[0-9a-f]{32}", token) is None:
             raise ReferencePackageInstallError("unfinished lease token is malformed")
-        status = self._call("status")
-        held = _exact_bool(status.get("held"), "unfinished lease status")
-        returned = status.get("token")
-        if not held:
-            if returned not in (None, ""):
-                raise ReferencePackageInstallError(
-                    "unfinished lease status is internally inconsistent"
-                )
+        if intent is not None:
+            returned = self._status_token_for_intent(intent)
+        else:
+            returned = self._status_token(self._call("status"), "unfinished lease status")
+        if returned is None:
             return
         if returned != token:
             raise ReferencePackageInstallError(
@@ -1714,15 +1946,67 @@ class AtomicDeviceLeaseClient:
         released = self._call("release", "-Token", token)
         if _exact_bool(released.get("held"), "unfinished lease release state"):
             raise ReferencePackageInstallError("unfinished device lease remains held")
-        confirmed = self._call("status")
-        if _exact_bool(confirmed.get("held"), "unfinished lease final status"):
+        self._assert_status_unheld(
+            self._call("status"), "unfinished lease final status"
+        )
+
+    def _status_token_for_intent(
+        self, intent: Mapping[str, object]
+    ) -> str | None:
+        status = self._call("status")
+        token = self._status_token(status, "lease acquisition status")
+        if token is None:
+            return None
+        lease = _exact_mapping(status.get("lease"), "held lease identity")
+        expected = {
+            "owner": intent.get("owner"),
+            "threadId": intent.get("threadId"),
+            "purpose": intent.get("purpose"),
+            "scenario": intent.get("scenario"),
+            "statefulEffects": intent.get("statefulEffects"),
+        }
+        for name, value in expected.items():
+            if lease.get(name) != value:
+                raise ReferencePackageInstallError(
+                    f"held lease {name} does not match acquisition intent"
+                )
+        if lease.get("token") != token:
             raise ReferencePackageInstallError(
-                "unfinished device lease release was not confirmed"
+                "held lease token does not match acquisition status"
             )
-        if confirmed.get("token") not in (None, ""):
-            raise ReferencePackageInstallError(
-                "unfinished lease final status retains a token"
-            )
+        return token
+
+    @staticmethod
+    def _status_token(
+        status: Mapping[str, object], label: str
+    ) -> str | None:
+        held = _exact_bool(status.get("held"), label)
+        if not held:
+            AtomicDeviceLeaseClient._assert_status_unheld(status, label)
+            return None
+        lease_value = status.get("lease")
+        if type(lease_value) is dict:
+            token = lease_value.get("token")
+        else:
+            token = status.get("token")
+        if type(token) is not str or re.fullmatch(r"[0-9a-f]{32}", token) is None:
+            raise ReferencePackageInstallError(f"{label} token is malformed")
+        top_token = status.get("token")
+        if top_token not in (None, "", token):
+            raise ReferencePackageInstallError(f"{label} top-level token differs")
+        return token
+
+    @staticmethod
+    def _assert_status_unheld(
+        status: Mapping[str, object], label: str
+    ) -> None:
+        if _exact_bool(status.get("held"), label):
+            raise ReferencePackageInstallError(f"{label} remains held")
+        if status.get("token") not in (None, "") or status.get("lease") not in (
+            None,
+            "",
+        ):
+            raise ReferencePackageInstallError(f"{label} retains lease identity")
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(self.heartbeat_interval_seconds):
@@ -1730,22 +2014,40 @@ class AtomicDeviceLeaseClient:
             if token is None:
                 return
             try:
-                with self._lock:
-                    document = self._call("heartbeat", "-Token", token)
-                if (
-                    not _exact_bool(document.get("held"), "background heartbeat held state")
-                    or _exact_string(
-                        document.get("token"), "background heartbeat token"
-                    )
-                    != token
-                ):
-                    raise ReferencePackageInstallError(
-                        "background device heartbeat identity differs"
-                    )
+                self._heartbeat_with_reconciliation(token)
             except BaseException as error:
                 self._background_error = error
                 self._stop.set()
                 return
+
+    def _heartbeat_with_reconciliation(self, token: str) -> None:
+        heartbeat_error: Exception | None = None
+        try:
+            with self._lock:
+                document = self._call("heartbeat", "-Token", token)
+            if not _exact_bool(document.get("held"), "device heartbeat held state"):
+                raise ReferencePackageInstallError("device heartbeat lost the lease")
+            returned = _exact_string(document.get("token"), "device heartbeat token")
+            if returned != token:
+                raise ReferencePackageInstallError("device heartbeat token differs")
+            return
+        except Exception as error:
+            heartbeat_error = error
+
+        intent = self._active_intent
+        if intent is not None:
+            try:
+                with self._lock:
+                    confirmed = self._status_token_for_intent(intent)
+                if confirmed == token:
+                    return
+            except Exception as status_error:
+                raise ReferencePackageInstallError(
+                    "device heartbeat failed and ownership status was ambiguous"
+                ) from status_error
+        raise ReferencePackageInstallError(
+            "device heartbeat failed and exact ownership was not retained"
+        ) from heartbeat_error
 
     def _call(self, action: str, *arguments: str) -> Mapping[str, object]:
         result = self.runner.run(
@@ -1780,11 +2082,22 @@ class AtomicDeviceLeaseClient:
 
 class AdbInstallDevice:
     APP_ID = "com.flightalert"
-    MAIN_ACTIVITY = "com.flightalert/.MainActivity"
+    ALERT_SERVICE_COMPONENTS = frozenset(
+        {
+            "com.flightalert/.alerts.AircraftAlertService",
+            "com.flightalert/com.flightalert.alerts.AircraftAlertService",
+        }
+    )
     PREFERENCE_PATH = "shared_prefs/flight_alert.xml"
     LISTENER_COMPONENT = (
         "com.flightalert/"
         "com.flightalert.alerts.MonitoringNotificationHiderService"
+    )
+    LISTENER_SERVICE_COMPONENTS = frozenset(
+        {
+            LISTENER_COMPONENT,
+            "com.flightalert/.alerts.MonitoringNotificationHiderService",
+        }
     )
 
     def __init__(self, *, adb: str, runner: CommandRunner) -> None:
@@ -1793,6 +2106,12 @@ class AdbInstallDevice:
         self.serial: str | None = None
         self.evidence_directory: Path | None = None
         self._verification_counter = 0
+        self._mutation_guard: Callable[[], None] | None = None
+
+    def set_mutation_guard(self, guard: Callable[[], None] | None) -> None:
+        if guard is not None and not callable(guard):
+            raise ReferencePackageInstallError("device mutation guard is malformed")
+        self._mutation_guard = guard
 
     def require_single_ready_device(self) -> str:
         result = self.runner.run((self.adb, "devices", "-l"), timeout_seconds=30.0)
@@ -1824,6 +2143,20 @@ class AdbInstallDevice:
             )
         listener = self.listener_state()
         process = self.app_process_state()
+        if (
+            process.running
+            and listener.bound
+            and process.running_reason != "foreground-activity"
+        ):
+            process = AppProcessState(
+                pids=process.pids,
+                resumed_component=process.resumed_component,
+                focused_component=process.focused_component,
+                screen_interactive=process.screen_interactive,
+                device_locked=process.device_locked,
+                active_services=process.active_services,
+                running_reason="bound-notification-listener",
+            )
         inventory = self.immediate_inventory(ReferencePackageInstaller.REFERENCE_ROOT)
         final_entry = self.entry_identity(final_package_path)
         return DevicePrestate(
@@ -1938,12 +2271,12 @@ class AdbInstallDevice:
         return "inactive-package"
 
     def make_directory(self, path: str) -> None:
-        self._checked(("shell", "mkdir", "-p", "--", path), timeout=30.0)
+        self._mutating_checked(("shell", "mkdir", "-p", "--", path), timeout=30.0)
         if not self.path_exists(path):
             raise ReferencePackageInstallError("device directory creation did not persist")
 
     def push_file(self, local: Path, remote: str) -> None:
-        self._checked(("push", str(local), remote), timeout=None)
+        self._mutating_checked(("push", str(local), remote), timeout=None)
 
     def remote_file_identity(self, path: str) -> RemoteFileIdentity:
         size_result = self._checked(
@@ -1964,7 +2297,7 @@ class AdbInstallDevice:
         return RemoteFileIdentity(byte_length=int(size_text), sha256=match.group(1))
 
     def force_stop(self) -> None:
-        self._checked(("shell", "am", "force-stop", self.APP_ID), timeout=30.0)
+        self._mutating_checked(("shell", "am", "force-stop", self.APP_ID), timeout=30.0)
 
     def listener_state(self) -> ListenerState:
         approval_result = self._checked(
@@ -1987,7 +2320,7 @@ class AdbInstallDevice:
         )
 
     def disallow_listener(self) -> None:
-        self._checked(
+        self._mutating_checked(
             (
                 "shell",
                 "cmd",
@@ -2025,6 +2358,14 @@ class AdbInstallDevice:
         window = self._checked(
             ("shell", "dumpsys", "window", "windows"), timeout=60.0
         )
+        power = self._checked(("shell", "dumpsys", "power"), timeout=60.0)
+        policy = self._checked(
+            ("shell", "dumpsys", "window", "policy"), timeout=60.0
+        )
+        services = self._checked(
+            ("shell", "dumpsys", "activity", "services", self.APP_ID),
+            timeout=60.0,
+        )
         return AppProcessState(
             pids=pids,
             resumed_component=_parse_component_line(
@@ -2033,18 +2374,36 @@ class AdbInstallDevice:
             focused_component=_parse_component_line(
                 window.stdout, "mCurrentFocus", "focused window"
             ),
+            screen_interactive=_parse_screen_interactive(power.stdout),
+            device_locked=_parse_device_locked(policy.stdout),
+            active_services=_parse_active_app_services(services.stdout),
         )
 
     def move_no_replace(self, source: str, destination: str) -> None:
         if not self.path_exists(source) or self.path_exists(destination):
             raise ReferencePackageInstallError("device atomic move precondition differs")
-        self._checked(
+        self._mutating_checked(
             ("shell", "mv", "-n", "--", source, destination), timeout=60.0
         )
         if self.path_exists(source) or not self.path_exists(destination):
             raise ReferencePackageInstallError("device atomic move did not persist")
 
-    def install_apk(self, path: Path) -> None:
+    def install_apk(
+        self,
+        path: Path,
+        *,
+        expected_bytes: int,
+        expected_sha256: str,
+        expected_stat_identity: tuple[int, int, int, int, int],
+    ) -> None:
+        self._guard_device_mutation()
+        actual = _hash_regular_file(path, "APK immediately before adb install")
+        if (
+            actual.byte_length != expected_bytes
+            or actual.sha256 != expected_sha256
+            or actual.stat_identity != expected_stat_identity
+        ):
+            raise ReferencePackageInstallError("APK changed after final lease guard")
         result = self._checked(("install", "-r", str(path)), timeout=300.0)
         text = _strict_ascii_text(result.stdout, "adb install output", maximum=128 * 1024)
         if not any(line.strip() == "Success" for line in text.splitlines()):
@@ -2083,7 +2442,7 @@ class AdbInstallDevice:
                 raise ReferencePackageInstallError(
                     "absent preference state contains bytes"
                 )
-            self._checked(
+            self._mutating_checked(
                 (
                     "shell",
                     "run-as",
@@ -2107,17 +2466,17 @@ class AdbInstallDevice:
         private_stage = f"shared_prefs/.flight_alert.xml.exp8-{token}.tmp"
         _atomic_write_bytes(host, raw)
         try:
-            self._checked(("push", str(host), remote), timeout=60.0)
-            self._checked(("shell", "chmod", "0644", remote), timeout=30.0)
-            self._checked(
+            self._mutating_checked(("push", str(host), remote), timeout=60.0)
+            self._mutating_checked(("shell", "chmod", "0644", remote), timeout=30.0)
+            self._mutating_checked(
                 ("shell", "run-as", self.APP_ID, "cp", remote, private_stage),
                 timeout=30.0,
             )
-            self._checked(
+            self._mutating_checked(
                 ("shell", "run-as", self.APP_ID, "chmod", "0600", private_stage),
                 timeout=30.0,
             )
-            self._checked(
+            self._mutating_checked(
                 (
                     "shell",
                     "run-as",
@@ -2131,7 +2490,7 @@ class AdbInstallDevice:
                 timeout=30.0,
             )
         finally:
-            self._adb(
+            self._mutating_adb(
                 ("shell", "rm", "-f", "--", remote),
                 timeout=30.0,
                 allow_failure=True,
@@ -2140,7 +2499,7 @@ class AdbInstallDevice:
             raise ReferencePackageInstallError("preference restoration readback differs")
 
     def restore_listener(self, state: ListenerState) -> None:
-        self._checked(
+        self._mutating_checked(
             (
                 "shell",
                 "cmd",
@@ -2151,7 +2510,7 @@ class AdbInstallDevice:
             timeout=30.0,
         )
         if state.approval:
-            self._checked(
+            self._mutating_checked(
                 (
                     "shell",
                     "settings",
@@ -2163,7 +2522,7 @@ class AdbInstallDevice:
                 timeout=30.0,
             )
         else:
-            self._checked(
+            self._mutating_checked(
                 (
                     "shell",
                     "settings",
@@ -2182,30 +2541,48 @@ class AdbInstallDevice:
         if not state.running:
             self.force_stop()
         else:
-            self._checked(
-                ("shell", "am", "start", "-n", self.MAIN_ACTIVITY), timeout=60.0
-            )
-            for component in (state.resumed_component, state.focused_component):
-                if component is not None and component != self.MAIN_ACTIVITY:
-                    self._checked(
-                        ("shell", "am", "start", "-n", component), timeout=60.0
+            for component in state.active_services:
+                if component in self.LISTENER_SERVICE_COMPONENTS:
+                    continue
+                start_verb = (
+                    "start-foreground-service"
+                    if component in self.ALERT_SERVICE_COMPONENTS
+                    else "startservice"
+                )
+                self._mutating_checked(
+                    ("shell", "am", start_verb, "-n", component),
+                    timeout=60.0,
+                )
+            if state.running_reason == "foreground-activity":
+                if (
+                    not state.screen_interactive
+                    or state.device_locked
+                    or not _component_is_app(state.resumed_component)
+                ):
+                    raise ReferencePackageInstallError(
+                        "foreground process state is unsafe to restore"
                     )
+                self._mutating_checked(
+                    ("shell", "am", "start", "-n", state.resumed_component),
+                    timeout=60.0,
+                )
+            elif state.running_reason not in {
+                "bound-notification-listener",
+                "service",
+            }:
+                raise ReferencePackageInstallError(
+                    "background-only process state cannot be restored safely"
+                )
         if not _app_state_equivalent(self.app_process_state(), state):
             raise ReferencePackageInstallError(
                 "process/focus restoration readback differs"
             )
 
-    def restore_running(self, was_running: bool) -> None:
-        if was_running:
-            self._checked(
-                ("shell", "am", "start", "-n", self.MAIN_ACTIVITY), timeout=60.0
-            )
-        else:
-            self.force_stop()
-
     def restore_apk(self, path: Path) -> None:
         expected = _hash_regular_file(path, "prestate APK for restoration")
-        result = self._checked(("install", "-r", "-d", str(path)), timeout=300.0)
+        result = self._mutating_checked(
+            ("install", "-r", "-d", str(path)), timeout=300.0
+        )
         text = _strict_ascii_text(
             result.stdout, "adb rollback install output", maximum=128 * 1024
         )
@@ -2227,7 +2604,9 @@ class AdbInstallDevice:
             raise ReferencePackageInstallError("refusing unsafe device tree removal")
         if not path.startswith(ReferencePackageInstaller.REFERENCE_ROOT + "/"):
             raise ReferencePackageInstallError("device removal is outside reference root")
-        self._checked(("shell", "rm", "-rf", "--", path), timeout=180.0)
+        self._mutating_checked(
+            ("shell", "rm", "-rf", "--", path), timeout=180.0
+        )
         if self.path_exists(path):
             raise ReferencePackageInstallError("device tree remains after removal")
 
@@ -2241,7 +2620,9 @@ class AdbInstallDevice:
         actual = self.entry_identity(path)
         if actual is None or actual != expected:
             raise ReferencePackageInstallError("bound removal identity differs")
-        self._checked(("shell", "rm", "-rf", "--", path), timeout=180.0)
+        self._mutating_checked(
+            ("shell", "rm", "-rf", "--", path), timeout=180.0
+        )
         if self.entry_identity(path) is not None:
             raise ReferencePackageInstallError("bound device entry remains after removal")
 
@@ -2351,6 +2732,36 @@ class AdbInstallDevice:
                 f"adb command failed ({arguments[0]}): {_bounded_error(result.stderr)}"
             )
         return result
+
+    def _mutating_checked(
+        self, arguments: Sequence[str], *, timeout: float | None
+    ) -> CommandResult:
+        result = self._mutating_adb(
+            arguments, timeout=timeout, allow_failure=True
+        )
+        if result.return_code != 0:
+            raise ReferencePackageInstallError(
+                f"adb command failed ({arguments[0]}): {_bounded_error(result.stderr)}"
+            )
+        return result
+
+    def _mutating_adb(
+        self,
+        arguments: Sequence[str],
+        *,
+        timeout: float | None,
+        allow_failure: bool,
+    ) -> CommandResult:
+        self._guard_device_mutation()
+        return self._adb(arguments, timeout=timeout, allow_failure=allow_failure)
+
+    def _guard_device_mutation(self) -> None:
+        guard = self._mutation_guard
+        if guard is None:
+            raise ReferencePackageInstallError(
+                "device mutation requires an active lease guard"
+            )
+        guard()
 
     def _adb(
         self,
@@ -2491,9 +2902,13 @@ def _prestate_document(prestate: DevicePrestate) -> dict[str, object]:
             "present": prestate.preferences_present,
         },
         "process": {
+            "activeServices": list(prestate.process_state.active_services),
+            "deviceLocked": prestate.process_state.device_locked,
             "focusedComponent": prestate.process_state.focused_component,
             "pids": list(prestate.process_state.pids),
             "resumedComponent": prestate.process_state.resumed_component,
+            "runningReason": prestate.process_state.running_reason,
+            "screenInteractive": prestate.process_state.screen_interactive,
         },
         "referenceInventory": [
             _entry_document(item) for item in prestate.reference_inventory
@@ -2543,6 +2958,14 @@ def _prestate_from_document(value: object) -> DevicePrestate:
         raise ReferencePackageInstallError("journal resumed component is malformed")
     if focused is not None and type(focused) is not str:
         raise ReferencePackageInstallError("journal focused component is malformed")
+    raw_services = process.get("activeServices")
+    if type(raw_services) is not list or any(
+        type(component) is not str for component in raw_services
+    ):
+        raise ReferencePackageInstallError("journal active services are malformed")
+    running_reason = _exact_string(
+        process.get("runningReason"), "journal process running reason"
+    )
     raw_inventory = document.get("referenceInventory")
     if type(raw_inventory) is not list:
         raise ReferencePackageInstallError("journal reference inventory is malformed")
@@ -2567,7 +2990,19 @@ def _prestate_from_document(value: object) -> DevicePrestate:
             approval=approval,
             bound=_exact_bool(listener.get("bound"), "journal listener binding"),
         ),
-        process_state=AppProcessState(tuple(raw_pids), resumed, focused),
+        process_state=AppProcessState(
+            pids=tuple(raw_pids),
+            resumed_component=resumed,
+            focused_component=focused,
+            screen_interactive=_exact_bool(
+                process.get("screenInteractive"), "journal screen interactive state"
+            ),
+            device_locked=_exact_bool(
+                process.get("deviceLocked"), "journal device locked state"
+            ),
+            active_services=tuple(raw_services),
+            running_reason=running_reason,
+        ),
         reference_inventory=inventory,
         final_package_entry=final_entry,
     )
@@ -3300,8 +3735,19 @@ def _assert_host_plan_unchanged(plan: HostInstallPlan) -> None:
         raise ReferencePackageInstallError(
             "package directory inventory changed before execution"
         )
-    for item in (*plan.package_files,):
+    for item in plan.package_files:
         _assert_install_file_unchanged(item)
+    _assert_apk_plan_unchanged(plan)
+
+
+def _assert_apk_plan_unchanged(plan: HostInstallPlan) -> None:
+    apk = _hash_regular_file(plan.apk_path, "APK")
+    if (
+        apk.byte_length != plan.apk_bytes
+        or apk.sha256 != plan.apk_sha256
+        or apk.stat_identity != plan.apk_stat_identity
+    ):
+        raise ReferencePackageInstallError("APK changed after validation")
 
 
 def _canonical_json_bytes(document: object) -> bytes:
@@ -3413,6 +3859,44 @@ def _required_argument(arguments: Mapping[str, object], name: str) -> str:
     if type(value) is not str or not value.strip():
         raise ReferencePackageInstallError(f"device lease {name} is required")
     return value
+
+
+def _validate_lease_acquisition_intent(
+    intent: Mapping[str, object],
+    arguments: Mapping[str, object],
+    operation: str,
+) -> None:
+    _exact_fields(
+        intent,
+        {
+            "deviceOperation",
+            "expectedMinutes",
+            "owner",
+            "purpose",
+            "scenario",
+            "statefulEffects",
+            "threadId",
+        },
+        "lease acquisition intent fields",
+    )
+    expected = {
+        "deviceOperation": operation,
+        "expectedMinutes": arguments["expected_minutes"],
+        "owner": arguments["owner"],
+        "purpose": arguments["purpose"],
+        "scenario": arguments["scenario"],
+        "statefulEffects": arguments["stateful_effects"],
+    }
+    for name, value in expected.items():
+        if intent.get(name) != value:
+            raise ReferencePackageInstallError(
+                f"lease acquisition intent {name} differs"
+            )
+    thread_id = intent.get("threadId")
+    if type(thread_id) is not str or not thread_id.strip():
+        raise ReferencePackageInstallError(
+            "lease acquisition intent thread ID is malformed"
+        )
 
 
 def _bounded_error(raw: bytes) -> str:

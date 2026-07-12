@@ -29,10 +29,10 @@ if ($selectedModes -ne 1) {
 }
 if (-not $ValidateOnly) {
     if ([string]::IsNullOrWhiteSpace($ThreadId)) {
-        throw '-ThreadId is required with -Execute.'
+        throw '-ThreadId is required with device transaction modes.'
     }
     if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
-        throw '-EvidenceDirectory is required with -Execute.'
+        throw '-EvidenceDirectory is required with device transaction modes.'
     }
     if (-not (Test-Path -LiteralPath $LeaseHelper -PathType Leaf)) {
         throw "Device lease helper is missing: $LeaseHelper"
