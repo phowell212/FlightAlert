@@ -11,6 +11,8 @@ param(
 
     [switch]$ValidateOnly,
     [switch]$Execute,
+    [switch]$FinalizeAcceptance,
+    [switch]$Rollback,
 
     [string]$LeaseHelper = 'C:\Users\Phineas\Documents\FlightAlert-test-artifacts\coordination\device-lease.ps1',
     [string]$ThreadId,
@@ -21,10 +23,11 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if ([bool]$ValidateOnly -eq [bool]$Execute) {
-    throw 'Select exactly one of -ValidateOnly or -Execute.'
+$selectedModes = @($ValidateOnly, $Execute, $FinalizeAcceptance, $Rollback).Where({ [bool]$_ }).Count
+if ($selectedModes -ne 1) {
+    throw 'Select exactly one transaction mode.'
 }
-if ($Execute) {
+if (-not $ValidateOnly) {
     if ([string]::IsNullOrWhiteSpace($ThreadId)) {
         throw '-ThreadId is required with -Execute.'
     }
@@ -60,8 +63,15 @@ foreach ($value in @(
 if ($ValidateOnly) {
     $arguments.Add('--validate-only')
 } else {
+    $modeArgument = if ($Execute) {
+        '--execute'
+    } elseif ($FinalizeAcceptance) {
+        '--finalize-acceptance'
+    } else {
+        '--rollback'
+    }
     foreach ($value in @(
-            '--execute',
+            $modeArgument,
             '--adb',
             $Adb,
             '--powershell',

@@ -61,6 +61,18 @@ class _ValidInstallFixture:
         renderer_sha256 = "7" * 64
         merger_sha256 = self._tool_sha256("v3_package_merger.py")
         finalizer_sha256 = self._tool_sha256("v3_class_catalog_finalizer.py")
+        input_bindings = [
+            {
+                "manifestBytes": 101,
+                "manifestSha256": "4" * 64,
+                "packageId": "world-primary-v3",
+                "recordsBytes": 202,
+                "recordsSha256": "5" * 64,
+                "role": "primary",
+                "tileIndexBytes": 303,
+                "tileIndexSha256": "6" * 64,
+            }
+        ]
         manifest = {
             "classCatalog": {
                 "catalogSha256": _sha256(catalog),
@@ -76,6 +88,7 @@ class _ValidInstallFixture:
                 ],
             },
             "merge": {
+                "inputs": input_bindings,
                 "mergerSha256": merger_sha256,
                 "output": {
                     "recordsBytes": len(records),
@@ -94,6 +107,7 @@ class _ValidInstallFixture:
             "unicodeScriptProfileSha256": "3" * 64,
         }
         manifest_raw = _canonical(manifest)
+        base_manifest_raw = b"pre-finalizer-manifest\n"
         runtime_bindings = [
             self._binding("manifest.json", manifest_raw),
             self._binding("records.fadictpack", records),
@@ -101,11 +115,18 @@ class _ValidInstallFixture:
             self._binding("class-catalog.bin", catalog),
         ]
         merge_receipt = {
-            "coverage": {"completeWholeEarthDictionary": True, "tileCount": 1},
-            "inputs": [],
+            "coverage": {
+                "completeDeclaredScope": True,
+                "completeWholeEarthDictionary": True,
+                "presentTileCount": 1,
+                "primaryWholeEarthPreserved": True,
+                "tileCount": 1,
+                "zoomRanges": manifest["coverage"]["zoomRanges"],
+            },
+            "inputs": input_bindings,
             "mergerSha256": merger_sha256,
             "outputFiles": [
-                self._binding("manifest.json", b"pre-finalizer-manifest\n"),
+                self._binding("manifest.json", base_manifest_raw),
                 self._binding("records.fadictpack", records),
                 self._binding("tile-index.bin", tile_index),
             ],
@@ -119,10 +140,17 @@ class _ValidInstallFixture:
                 "declaredTileCount": 1,
                 "missingTileCount": 0,
                 "presentTileCount": 1,
-                "rendererRecordCount": 1,
+                "rendererRecordCount": 0,
             },
             "finalizerSha256": finalizer_sha256,
-            "inputFiles": [],
+            "inputFiles": [
+                {
+                    **self._binding("manifest.json", base_manifest_raw),
+                    "role": "base-manifest-without-class-catalog",
+                },
+                self._binding("records.fadictpack", records),
+                self._binding("tile-index.bin", tile_index),
+            ],
             "outputFiles": runtime_bindings,
             "packageId": PACKAGE_ID,
             "rendererContractSha256": renderer_sha256,
@@ -373,8 +401,9 @@ class DeviceTransactionTest(unittest.TestCase):
             final_result_path=self.fixture.result,
         )
         self.evidence = self.root / "evidence"
-        self.lease = _FakeLease()
-        self.device = _FakeDevice(self.root)
+        self.events: list[str] = []
+        self.lease = _StatefulLease(self.events)
+        self.device = _StatefulDevice(self.root, self.events)
 
     def install(self) -> None:
         ReferencePackageInstaller(
@@ -391,9 +420,9 @@ class DeviceTransactionTest(unittest.TestCase):
 
         self.install()
 
-        self.assertTrue(self.lease.acquired)
-        self.assertTrue(self.lease.released)
-        self.assertTrue(self.device.running)
+        self.assertEqual(1, self.lease.acquire_count)
+        self.assertEqual(1, self.lease.release_count)
+        self.assertTrue(self.device.app_process_state().running)
         self.assertEqual(expected_preferences, self.device.preferences)
         self.assertEqual(self.fixture.apk.read_bytes(), self.device.installed_apk)
         self.assertEqual(
@@ -401,80 +430,102 @@ class DeviceTransactionTest(unittest.TestCase):
             self.device.files[f"{final}/manifest.json"],
         )
         self.assertLess(
-            self.device.calls.index("force_stop"),
-            self.device.calls.index("push:manifest.json"),
+            self.events.index("mutate:force-stop"),
+            self.events.index("mutate:push:manifest.json"),
         )
-        self.assertFalse(
-            any(".exp8-install-" in path for path in self.device.directories)
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
         )
+        self.assertIsNotNone(self.device.entry_identity(journal["paths"]["backup"]))
 
     def test_install_failure_restores_exact_package_apk_preferences_and_running_state(self) -> None:
         final = ReferencePackageInstaller.FINAL_PACKAGE_PATH
         self.device.seed_package(final, b"old-manifest")
-        before_files = dict(self.device.files)
+        old_entry = self.device.entry_identity(final)
         before_apk = self.device.installed_apk
         before_preferences = self.device.preferences
-        self.device.fail_at = "install_apk"
+        before_process = self.device.app_process_state()
+        self.device.fail_operation = "install-apk-after-effect"
 
-        with self.assertRaisesRegex(ReferencePackageInstallError, "install failure"):
+        with self.assertRaisesRegex(ReferencePackageInstallError, "upgrade"):
             self.install()
 
-        self.assertTrue(self.lease.released)
-        self.assertEqual(before_files, self.device.files)
+        self.assertEqual(self.lease.acquire_count, self.lease.release_count)
+        self.assertEqual(old_entry.inode, self.device.entry_identity(final).inode)
         self.assertEqual(before_apk, self.device.installed_apk)
         self.assertEqual(before_preferences, self.device.preferences)
-        self.assertTrue(self.device.running)
+        self.assertEqual(before_process, self.device.app_process_state())
         failure = json.loads((self.evidence / "install-failure.json").read_text("utf-8"))
         self.assertEqual("recovered", failure["state"])
         self.assertEqual([], failure["cleanupFailures"])
         self.assertFalse(
-            any(".exp8-install-" in path for path in self.device.directories)
+            any(".exp8-install-" in path for path in self.device.entries)
         )
 
     def test_push_failure_leaves_no_visible_partial_package(self) -> None:
-        self.device.fail_at = "push:records.fadictpack"
+        self.device.fail_operation = "push:records.fadictpack"
 
         with self.assertRaisesRegex(ReferencePackageInstallError, "push failure"):
             self.install()
 
-        self.assertNotIn(
-            ReferencePackageInstaller.FINAL_PACKAGE_PATH, self.device.directories
-        )
-        self.assertTrue(self.lease.released)
+        self.assertNotIn(ReferencePackageInstaller.FINAL_PACKAGE_PATH, self.device.entries)
+        self.assertEqual(self.lease.acquire_count, self.lease.release_count)
         self.assertFalse(
-            any(".exp8-install-" in path for path in self.device.directories)
+            any(".exp8-install-" in path for path in self.device.entries)
         )
 
     def test_backup_cleanup_failure_rolls_back_and_invalidates_success_receipt(self) -> None:
         final = ReferencePackageInstaller.FINAL_PACKAGE_PATH
         self.device.seed_package(final, b"old-manifest")
-        before_files = dict(self.device.files)
-        self.device.fail_at = "remove_once"
+        self.install()
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        backup = journal["paths"]["backup"]
 
-        with self.assertRaisesRegex(ReferencePackageInstallError, "remove failure"):
-            self.install()
+        with mock.patch.object(
+            self.device,
+            "remove_bound_entry",
+            side_effect=ReferencePackageInstallError("injected remove failure"),
+        ):
+            with self.assertRaisesRegex(ReferencePackageInstallError, "remove failure"):
+                ReferencePackageInstaller(
+                    plan=self.plan,
+                    device=self.device,
+                    lease=self.lease,
+                    evidence_directory=self.evidence,
+                ).finalize_acceptance()
 
-        self.assertEqual(before_files, self.device.files)
-        self.assertFalse((self.evidence / "install-receipt.json").exists())
-        self.assertTrue(self.lease.released)
+        self.assertIsNotNone(self.device.entry_identity(backup))
+        self.assertFalse((self.evidence / "final-success.json").exists())
+        self.assertEqual(self.lease.acquire_count, self.lease.release_count)
 
     def test_receipt_failure_cannot_delete_the_only_rollback_package(self) -> None:
         final = ReferencePackageInstaller.FINAL_PACKAGE_PATH
         self.device.seed_package(final, b"old-manifest")
-        before_files = dict(self.device.files)
+        original = installer_module._atomic_write_json
 
-        with mock.patch.object(
-            ReferencePackageInstaller,
-            "_write_receipt",
-            side_effect=ReferencePackageInstallError("injected receipt failure"),
-        ):
+        def fail_pending(path: Path, document: object) -> None:
+            if path.name == "pending-acceptance.json":
+                raise ReferencePackageInstallError("injected receipt failure")
+            original(path, document)
+
+        with mock.patch.object(installer_module, "_atomic_write_json", side_effect=fail_pending):
             with self.assertRaisesRegex(
                 ReferencePackageInstallError, "receipt failure"
             ):
                 self.install()
 
-        self.assertEqual(before_files, self.device.files)
-        self.assertTrue(self.lease.released)
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        self.assertEqual("pending-acceptance", journal["state"])
+        self.assertIsNotNone(self.device.entry_identity(journal["paths"]["backup"]))
+        self.assertEqual(1, self.lease.release_count)
+
+        self.install()
+
+        self.assertTrue((self.evidence / "pending-acceptance.json").is_file())
 
     def test_insufficient_space_fails_before_stage_creation(self) -> None:
         self.device.available = self.plan.package_bytes - 1
@@ -482,19 +533,704 @@ class DeviceTransactionTest(unittest.TestCase):
         with self.assertRaisesRegex(ReferencePackageInstallError, "free space"):
             self.install()
 
-        self.assertFalse(any(call.startswith("mkdir:") for call in self.device.calls))
-        self.assertNotIn("force_stop", self.device.calls)
-        self.assertNotIn("restore_apk", self.device.calls)
-        self.assertNotIn("restore_preferences", self.device.calls)
-        self.assertTrue(self.lease.released)
+        self.assertFalse(any("mutate:mkdir:" in event for event in self.events))
+        self.assertNotIn("mutate:force-stop", self.events)
+        self.assertNotIn("mutate:restore-apk-downgrade", self.events)
+        self.assertNotIn("mutate:restore-preferences", self.events)
+        self.assertEqual(self.lease.acquire_count, self.lease.release_count)
 
     def test_held_lease_prevents_every_device_call(self) -> None:
-        self.lease.held = True
+        self.lease = _FakeLease(held=True)
 
         with self.assertRaisesRegex(ReferencePackageInstallError, "already held"):
             self.install()
 
-        self.assertEqual([], self.device.calls)
+        self.assertEqual([], self.events)
+
+
+class _ProcessKilled(BaseException):
+    pass
+
+
+class _StatefulLease:
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.events = events if events is not None else []
+        self.acquire_count = 0
+        self.release_count = 0
+        self.heartbeat_count = 0
+        self.fail_heartbeat_at: int | None = None
+        self.active_token: str | None = None
+
+    def acquire(self, **_: object) -> str:
+        if self.active_token is not None:
+            raise ReferencePackageInstallError("fake lease is already held")
+        self.acquire_count += 1
+        token = f"{self.acquire_count:032x}"
+        self.active_token = token
+        self.events.append(f"lease-acquire:{self.acquire_count}")
+        return token
+
+    def heartbeat(self, token: str) -> None:
+        self.heartbeat_count += 1
+        self.events.append(f"lease-heartbeat:{self.acquire_count}")
+        if token != self.active_token:
+            raise ReferencePackageInstallError("fake lease ownership differs")
+        if self.fail_heartbeat_at == self.heartbeat_count:
+            self.active_token = None
+            raise ReferencePackageInstallError("injected lease loss")
+
+    def release(self, token: str) -> None:
+        self.events.append(f"lease-release:{self.acquire_count}")
+        if self.active_token is not None and token != self.active_token:
+            raise ReferencePackageInstallError("fake release token differs")
+        self.active_token = None
+        self.release_count += 1
+
+    def reconcile_unfinished(self, token: str) -> None:
+        self.events.append(f"lease-reconcile:{token}")
+        if self.active_token is not None and self.active_token != token:
+            raise ReferencePackageInstallError("stale lease token differs")
+        self.active_token = None
+
+
+class _StatefulDevice:
+    def __init__(self, root: Path, events: list[str] | None = None) -> None:
+        self.root = root
+        self.events = events if events is not None else []
+        self.serial = "SERIAL"
+        self.available = 80_000_000_000
+        self.files: dict[str, bytes] = {}
+        self.entries: dict[str, tuple[str, int, int]] = {}
+        self.next_inode = 100
+        self.installed_apk = b"old-apk"
+        self.preferences_present = True
+        self.preferences = b"<map><boolean name=\"outlines.coastlines\" value=\"true\" /></map>"
+        self.listener_approval = (
+            "com.flightalert/com.flightalert.alerts.MonitoringNotificationHiderService"
+        )
+        self.listener_bound = True
+        self.pids = ("4242",)
+        self.resumed_component = "com.flightalert/.MainActivity"
+        self.focused_component = "com.flightalert/.MainActivity"
+        self.fail_operation: str | None = None
+        self.post_effect_error_source: str | None = None
+        self.probe_failures: set[str] = set()
+        self.recovery_probe_failure_path: str | None = None
+        self.identity_mismatch_path: str | None = None
+        self.classifications: dict[str, str] = {}
+        self.footprints: dict[str, tuple[int, int]] = {}
+        self.restore_apk_used_downgrade = False
+
+    def _entry(self, path: str) -> object:
+        entry_type = getattr(installer_module, "RemoteEntryIdentity", None)
+        if entry_type is None:
+            raise AssertionError("RemoteEntryIdentity is missing")
+        kind, device, inode = self.entries[path]
+        return entry_type(name=path.rsplit("/", 1)[-1], kind=kind, device=device, inode=inode)
+
+    def _listener(self) -> object:
+        state_type = getattr(installer_module, "ListenerState", None)
+        if state_type is None:
+            raise AssertionError("ListenerState is missing")
+        return state_type(approval=self.listener_approval, bound=self.listener_bound)
+
+    def _process(self) -> object:
+        state_type = getattr(installer_module, "AppProcessState", None)
+        if state_type is None:
+            raise AssertionError("AppProcessState is missing")
+        return state_type(
+            pids=self.pids,
+            resumed_component=self.resumed_component,
+            focused_component=self.focused_component,
+        )
+
+    def _footprint(self, path: str) -> object:
+        footprint_type = getattr(installer_module, "StorageFootprint", None)
+        if footprint_type is None:
+            raise AssertionError("StorageFootprint is missing")
+        logical, allocated = self.footprints.get(path, (0, 0))
+        return footprint_type(logical_bytes=logical, allocated_bytes=allocated)
+
+    def add_entry(self, path: str, *, kind: str = "directory", classification: str = "unknown") -> None:
+        self.next_inode += 1
+        self.entries[path] = (kind, 1, self.next_inode)
+        self.classifications[path] = classification
+
+    def seed_package(self, path: str, marker: bytes = b"old-manifest") -> None:
+        self.add_entry(path, classification="previous-active-package")
+        self.files[f"{path}/manifest.json"] = marker
+
+    def prepare_evidence_directory(self, _: Path) -> None:
+        self.events.append("prepare-evidence")
+
+    def require_single_ready_device(self) -> str:
+        self.events.append("select-device")
+        return self.serial
+
+    def capture_prestate(self, evidence_directory: Path, final_package_path: str) -> DevicePrestate:
+        backup = evidence_directory / "installed-prestate.apk"
+        backup.write_bytes(self.installed_apk)
+        kwargs: dict[str, object] = {
+            "serial": self.serial,
+            "apk_backup_path": backup,
+            "apk_bytes": len(self.installed_apk),
+            "apk_sha256": _sha256(self.installed_apk),
+            "preferences": self.preferences,
+            "app_was_running": bool(self.pids),
+            "final_package_was_present": final_package_path in self.entries,
+        }
+        fields = getattr(DevicePrestate, "__dataclass_fields__", {})
+        if "preferences_present" in fields:
+            kwargs = {
+                "serial": self.serial,
+                "apk_backup_path": backup,
+                "apk_bytes": len(self.installed_apk),
+                "apk_sha256": _sha256(self.installed_apk),
+                "preferences_present": self.preferences_present,
+                "preferences": self.preferences,
+                "app_was_running": bool(self.pids),
+                "final_package_was_present": final_package_path in self.entries,
+                "listener_state": self._listener(),
+                "process_state": self._process(),
+                "reference_inventory": self.immediate_inventory(
+                    ReferencePackageInstaller.REFERENCE_ROOT
+                ),
+                "final_package_entry": (
+                    self._entry(final_package_path)
+                    if final_package_path in self.entries
+                    else None
+                ),
+            }
+        return DevicePrestate(**kwargs)
+
+    def available_bytes(self, _: str) -> int:
+        return self.available
+
+    def path_exists(self, path: str) -> bool:
+        if path in self.probe_failures:
+            raise ReferencePackageInstallError(f"injected path probe failure: {path}")
+        return path in self.entries or path in self.files
+
+    def entry_identity(self, path: str) -> object | None:
+        if path in self.probe_failures:
+            raise ReferencePackageInstallError(f"injected identity probe failure: {path}")
+        return self._entry(path) if path in self.entries else None
+
+    def immediate_inventory(self, root: str) -> tuple[object, ...]:
+        prefix = root + "/"
+        result = []
+        for path in sorted(self.entries):
+            suffix = path[len(prefix) :] if path.startswith(prefix) else ""
+            if suffix and "/" not in suffix:
+                result.append(self._entry(path))
+        return tuple(result)
+
+    def classify_reference_entry(self, root: str, entry: object) -> str:
+        return self.classifications.get(f"{root}/{entry.name}", "unknown")
+
+    def make_directory(self, path: str) -> None:
+        self.events.append(f"mutate:mkdir:{path}")
+        if path not in self.entries:
+            self.add_entry(path)
+
+    def push_file(self, local: Path, remote: str) -> None:
+        self.events.append(f"mutate:push:{Path(remote).name}")
+        if self.fail_operation == f"push:{Path(remote).name}":
+            raise ReferencePackageInstallError("injected push failure")
+        self.files[remote] = local.read_bytes()
+
+    def remote_file_identity(self, path: str) -> RemoteFileIdentity:
+        raw = self.files[path]
+        sha = _sha256(raw)
+        if self.identity_mismatch_path == path:
+            sha = "0" * 64
+        return RemoteFileIdentity(byte_length=len(raw), sha256=sha)
+
+    def listener_state(self) -> object:
+        return self._listener()
+
+    def disallow_listener(self) -> None:
+        self.events.append("mutate:disallow-listener")
+        component = (
+            "com.flightalert/com.flightalert.alerts.MonitoringNotificationHiderService"
+        )
+        self.listener_approval = ":".join(
+            item for item in self.listener_approval.split(":") if item != component
+        )
+        self.listener_bound = False
+
+    def app_process_state(self) -> object:
+        return self._process()
+
+    def force_stop(self) -> None:
+        self.events.append("mutate:force-stop")
+        self.pids = ()
+        self.resumed_component = None
+        self.focused_component = None
+
+    def move_no_replace(self, source: str, destination: str) -> None:
+        self.events.append(f"mutate:move:{source}->{destination}")
+        if self.fail_operation == "move-before-effect":
+            raise ReferencePackageInstallError("injected move failure")
+        if source not in self.entries or destination in self.entries:
+            raise ReferencePackageInstallError("move precondition differs")
+        self.entries[destination] = self.entries.pop(source)
+        self.classifications[destination] = self.classifications.pop(source, "unknown")
+        moved = {
+            destination + path[len(source) :]: raw
+            for path, raw in self.files.items()
+            if path.startswith(source + "/")
+        }
+        self.files = {
+            path: raw
+            for path, raw in self.files.items()
+            if not path.startswith(source + "/")
+        }
+        self.files.update(moved)
+        if self.post_effect_error_source == source:
+            self.post_effect_error_source = None
+            raise ReferencePackageInstallError("injected post-effect move timeout")
+
+    def install_apk(self, path: Path) -> None:
+        self.events.append("mutate:install-apk")
+        self.installed_apk = path.read_bytes()
+        if self.fail_operation == "install-apk-after-effect":
+            if self.recovery_probe_failure_path is not None:
+                self.probe_failures.add(self.recovery_probe_failure_path)
+            raise ReferencePackageInstallError("injected install failure after upgrade")
+
+    def restore_preferences(self, present: object, raw: bytes | None = None) -> None:
+        self.events.append("mutate:restore-preferences")
+        if raw is None:
+            self.preferences_present = True
+            self.preferences = present  # type: ignore[assignment]
+        else:
+            self.preferences_present = bool(present)
+            self.preferences = raw if self.preferences_present else b""
+
+    def preference_state(self) -> tuple[bool, bytes]:
+        return self.preferences_present, self.preferences
+
+    def restore_listener(self, state: object) -> None:
+        self.events.append("mutate:restore-listener")
+        self.listener_approval = state.approval
+        self.listener_bound = state.bound
+
+    def restore_process_state(self, state: object) -> None:
+        self.events.append("mutate:restore-process")
+        self.pids = state.pids
+        self.resumed_component = state.resumed_component
+        self.focused_component = state.focused_component
+
+    def restore_running(self, was_running: bool) -> None:
+        self.events.append("mutate:restore-running")
+        self.pids = ("9999",) if was_running else ()
+
+    def restore_apk(self, path: Path) -> None:
+        self.events.append("mutate:restore-apk-downgrade")
+        self.restore_apk_used_downgrade = True
+        self.installed_apk = path.read_bytes()
+
+    def remove_tree(self, path: str) -> None:
+        self.events.append(f"mutate:remove:{path}")
+        self.entries.pop(path, None)
+        self.classifications.pop(path, None)
+        self.files = {
+            item: raw
+            for item, raw in self.files.items()
+            if not item.startswith(path + "/")
+        }
+
+    def remove_bound_entry(self, path: str, expected: object) -> None:
+        actual = self.entry_identity(path)
+        if actual != expected:
+            raise ReferencePackageInstallError("bound removal identity differs")
+        self.remove_tree(path)
+
+    def verify_installed_apk(self) -> RemoteFileIdentity:
+        sha = _sha256(self.installed_apk)
+        if self.fail_operation == "verify-installed-apk":
+            sha = "0" * 64
+        return RemoteFileIdentity(len(self.installed_apk), sha)
+
+    def storage_footprint(self, path: str, *, private: bool = False) -> object:
+        del private
+        return self._footprint(path)
+
+
+class DurableTransactionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        for name in (
+            "RemoteEntryIdentity",
+            "ListenerState",
+            "AppProcessState",
+            "StorageFootprint",
+        ):
+            self.assertTrue(hasattr(installer_module, name), f"{name} is missing")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.fixture = _ValidInstallFixture(self.root)
+        self.plan = HostInstallPlan.validate(
+            package_directory=self.fixture.package,
+            apk_path=self.fixture.apk,
+            final_result_path=self.fixture.result,
+        )
+        self.evidence = self.root / "evidence"
+        self.events: list[str] = []
+        self.lease = _StatefulLease(self.events)
+        self.device = _StatefulDevice(self.root, self.events)
+        self.final = ReferencePackageInstaller.FINAL_PACKAGE_PATH
+
+    def installer(self, **arguments: object) -> ReferencePackageInstaller:
+        return ReferencePackageInstaller(
+            plan=self.plan,
+            device=self.device,
+            lease=self.lease,
+            evidence_directory=self.evidence,
+            **arguments,
+        )
+
+    def test_install_ends_pending_acceptance_with_exact_backup_and_durable_journal(self) -> None:
+        self.device.seed_package(self.final)
+        old_entry = self.device.entry_identity(self.final)
+        old_apk = self.device.installed_apk
+        old_preferences = self.device.preferences
+        old_listener = self.device.listener_state()
+        old_process = self.device.app_process_state()
+
+        self.installer().install()
+
+        pending = json.loads((self.evidence / "pending-acceptance.json").read_text("utf-8"))
+        journal = json.loads((self.evidence / "transaction-journal.json").read_text("utf-8"))
+        backup = journal["paths"]["backup"]
+        self.assertEqual("pending-acceptance", pending["state"])
+        self.assertEqual("pending-acceptance", journal["state"])
+        self.assertIsNone(journal["activeLeaseToken"])
+        self.assertEqual(
+            journal["prestate"]["referenceInventory"],
+            pending["referenceRootInventoryBefore"],
+        )
+        self.assertEqual(old_entry.inode, self.device.entry_identity(backup).inode)
+        self.assertEqual(self.fixture.apk.read_bytes(), self.device.installed_apk)
+        self.assertNotEqual(old_apk, self.device.installed_apk)
+        self.assertEqual(old_preferences, self.device.preferences)
+        self.assertEqual(old_listener, self.device.listener_state())
+        self.assertEqual(old_process, self.device.app_process_state())
+        self.assertEqual(1, self.lease.release_count)
+        self.assertLess(
+            self.events.index("mutate:disallow-listener"),
+            self.events.index("mutate:force-stop"),
+        )
+        first_push = next(i for i, event in enumerate(self.events) if event.startswith("mutate:push:"))
+        self.assertLess(self.events.index("mutate:force-stop"), first_push)
+
+    def test_disabling_this_listener_preserves_other_approval_bytes(self) -> None:
+        own = "com.flightalert/com.flightalert.alerts.MonitoringNotificationHiderService"
+        self.device.listener_approval = f"other.package/Listener:{own}"
+        expected = self.device.listener_state()
+
+        self.installer().install()
+
+        self.assertEqual(expected, self.device.listener_state())
+
+    def test_package_inventory_is_rechecked_after_quiescence_before_first_push(self) -> None:
+        def mutate_source(phase: str) -> None:
+            if phase == "after-force-stop":
+                (self.fixture.package / "late-race.bin").write_bytes(b"raced")
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "inventory changed"):
+            self.installer(phase_hook=mutate_source).install()
+
+        self.assertFalse(any(event.startswith("mutate:push:") for event in self.events))
+
+    def test_post_effect_old_move_error_restores_only_old_package(self) -> None:
+        self.device.seed_package(self.final)
+        old_entry = self.device.entry_identity(self.final)
+        self.device.post_effect_error_source = self.final
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "post-effect"):
+            self.installer().install()
+
+        self.assertEqual(old_entry.inode, self.device.entry_identity(self.final).inode)
+        self.assertEqual(b"old-apk", self.device.installed_apk)
+        self.assertGreaterEqual(self.lease.acquire_count, 2)
+        self.assertEqual(self.lease.acquire_count, self.lease.release_count)
+
+    def test_post_effect_publish_error_restores_old_package(self) -> None:
+        self.device.seed_package(self.final)
+        old_entry = self.device.entry_identity(self.final)
+        token = f"{1:032x}"
+        stage = f"{ReferencePackageInstaller.REFERENCE_ROOT}/.{PACKAGE_ID}.exp8-install-{token}.stage"
+        self.device.post_effect_error_source = stage
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "post-effect"):
+            self.installer().install()
+
+        self.assertEqual(old_entry.inode, self.device.entry_identity(self.final).inode)
+        self.assertEqual(b"old-apk", self.device.installed_apk)
+
+    def test_recovery_probe_failure_does_not_skip_app_restore_or_lease_release(self) -> None:
+        self.device.seed_package(self.final)
+        self.device.fail_operation = "install-apk-after-effect"
+        token = f"{1:032x}"
+        stage = f"{ReferencePackageInstaller.REFERENCE_ROOT}/.{PACKAGE_ID}.exp8-install-{token}.stage"
+        self.device.recovery_probe_failure_path = stage
+
+        with self.assertRaises(ReferencePackageInstallError):
+            self.installer().install()
+
+        self.assertIn("mutate:restore-apk-downgrade", self.events)
+        self.assertIn("mutate:restore-preferences", self.events)
+        self.assertIn("mutate:restore-listener", self.events)
+        self.assertIn("mutate:restore-process", self.events)
+        self.assertEqual(self.lease.acquire_count, self.lease.release_count)
+        self.assertTrue((self.evidence / "transaction-journal.json").exists())
+
+    def test_first_run_without_preferences_is_preserved(self) -> None:
+        self.device.preferences_present = False
+        self.device.preferences = b""
+
+        self.installer().install()
+
+        self.assertFalse(self.device.preferences_present)
+        self.assertEqual(b"", self.device.preferences)
+
+    def test_upgrade_then_failure_uses_downgrade_capable_apk_rollback(self) -> None:
+        self.device.seed_package(self.final)
+        self.device.fail_operation = "install-apk-after-effect"
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "upgrade"):
+            self.installer().install()
+
+        self.assertTrue(self.device.restore_apk_used_downgrade)
+        self.assertEqual(b"old-apk", self.device.installed_apk)
+
+    def test_finalize_removes_only_bound_residue_and_publishes_actual_footprint(self) -> None:
+        self.device.seed_package(self.final)
+        source = f"{ReferencePackageInstaller.REFERENCE_ROOT}/planet-latest.osm.pbf"
+        self.device.add_entry(source, kind="regular", classification="source-pbf")
+        self.device.footprints[self.final] = (100, 120)
+        self.device.footprints["installed-apk"] = (20, 16)
+        self.device.footprints["cache"] = (2, 4)
+        self.device.footprints["code_cache"] = (3, 1)
+        self.installer().install()
+
+        finalize = getattr(self.installer(), "finalize_acceptance", None)
+        self.assertIsNotNone(finalize, "finalize_acceptance is missing")
+        finalize()
+
+        receipt = json.loads((self.evidence / "final-success.json").read_text("utf-8"))
+        self.assertEqual("accepted", receipt["state"])
+        self.assertEqual(147, receipt["footprint"]["countedBytes"])
+        self.assertTrue(receipt["footprint"]["preferredStrictlyBelow"])
+        names = [entry.name for entry in self.device.immediate_inventory(ReferencePackageInstaller.REFERENCE_ROOT)]
+        self.assertEqual([PACKAGE_ID], names)
+        self.assertEqual([PACKAGE_ID], [item["name"] for item in receipt["referenceRootInventoryFinal"]])
+
+    def test_finalize_hard_ceiling_is_strict_and_keeps_rollback_backup(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        journal = json.loads((self.evidence / "transaction-journal.json").read_text("utf-8"))
+        backup = journal["paths"]["backup"]
+        self.device.footprints[self.final] = (40_000_000_000, 1)
+
+        finalize = getattr(self.installer(), "finalize_acceptance", None)
+        self.assertIsNotNone(finalize, "finalize_acceptance is missing")
+        with self.assertRaisesRegex(ReferencePackageInstallError, "40,000,000,000"):
+            finalize()
+
+        self.assertIsNotNone(self.device.entry_identity(backup))
+        self.assertFalse((self.evidence / "final-success.json").exists())
+
+    def test_finalize_receipt_failure_is_retryable_after_committed_cleanup(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        original = installer_module._atomic_write_json
+        failed = False
+
+        def fail_once(path: Path, document: object) -> None:
+            nonlocal failed
+            if path.name == "final-success.json" and not failed:
+                failed = True
+                raise ReferencePackageInstallError("injected final receipt failure")
+            original(path, document)
+
+        with mock.patch.object(installer_module, "_atomic_write_json", side_effect=fail_once):
+            with self.assertRaisesRegex(ReferencePackageInstallError, "receipt failure"):
+                self.installer().finalize_acceptance()
+
+        self.installer().finalize_acceptance()
+
+        self.assertEqual(
+            "accepted",
+            json.loads((self.evidence / "final-success.json").read_text("utf-8"))["state"],
+        )
+
+    def test_finalize_refuses_unidentified_residue_without_deleting_it(self) -> None:
+        self.device.seed_package(self.final)
+        unknown = f"{ReferencePackageInstaller.REFERENCE_ROOT}/do-not-touch"
+        self.device.add_entry(unknown, classification="unknown")
+        self.installer().install()
+
+        finalize = getattr(self.installer(), "finalize_acceptance", None)
+        self.assertIsNotNone(finalize, "finalize_acceptance is missing")
+        with self.assertRaisesRegex(ReferencePackageInstallError, "unidentified"):
+            finalize()
+
+        self.assertIsNotNone(self.device.entry_identity(unknown))
+
+    def test_rollback_restores_package_apk_preferences_listener_focus_and_process(self) -> None:
+        self.device.seed_package(self.final)
+        old_entry = self.device.entry_identity(self.final)
+        old_state = (
+            self.device.installed_apk,
+            self.device.preferences_present,
+            self.device.preferences,
+            self.device.listener_state(),
+            self.device.app_process_state(),
+        )
+        self.installer().install()
+
+        rollback = getattr(self.installer(), "rollback", None)
+        self.assertIsNotNone(rollback, "rollback is missing")
+        rollback()
+
+        self.assertEqual(old_entry.inode, self.device.entry_identity(self.final).inode)
+        self.assertEqual(old_state[0], self.device.installed_apk)
+        self.assertEqual(old_state[1], self.device.preferences_present)
+        self.assertEqual(old_state[2], self.device.preferences)
+        self.assertEqual(old_state[3], self.device.listener_state())
+        self.assertEqual(old_state[4], self.device.app_process_state())
+        receipt = json.loads((self.evidence / "rollback-receipt.json").read_text("utf-8"))
+        self.assertEqual("rolled-back", receipt["state"])
+
+    def test_rollback_receipt_failure_is_retryable_after_verified_restore(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        original = installer_module._atomic_write_json
+        failed = False
+
+        def fail_once(path: Path, document: object) -> None:
+            nonlocal failed
+            if path.name == "rollback-receipt.json" and not failed:
+                failed = True
+                raise ReferencePackageInstallError("injected rollback receipt failure")
+            original(path, document)
+
+        with mock.patch.object(installer_module, "_atomic_write_json", side_effect=fail_once):
+            with self.assertRaisesRegex(ReferencePackageInstallError, "receipt failure"):
+                self.installer().rollback()
+
+        self.installer().rollback()
+
+        self.assertEqual(
+            "rolled-back",
+            json.loads((self.evidence / "rollback-receipt.json").read_text("utf-8"))["state"],
+        )
+
+    def test_restart_reconciles_each_irreversible_phase_before_reinstall(self) -> None:
+        phases = (
+            "after-listener-disallow",
+            "after-force-stop",
+            "stage-created",
+            "pushed-records.fadictpack",
+            "pushed-manifest.json",
+            "before-old-move",
+            "after-old-move",
+            "before-new-publish",
+            "after-new-publish",
+            "before-apk-install",
+            "after-apk-install",
+            "after-prestate-restored",
+        )
+        for phase in phases:
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture = _ValidInstallFixture(root)
+                plan = HostInstallPlan.validate(
+                    package_directory=fixture.package,
+                    apk_path=fixture.apk,
+                    final_result_path=fixture.result,
+                )
+                evidence = root / "evidence"
+                events: list[str] = []
+                lease = _StatefulLease(events)
+                device = _StatefulDevice(root, events)
+                device.seed_package(self.final)
+                killed = False
+
+                def hook(actual: str) -> None:
+                    nonlocal killed
+                    if actual == phase and not killed:
+                        killed = True
+                        raise _ProcessKilled(phase)
+
+                first = ReferencePackageInstaller(
+                    plan=plan,
+                    device=device,
+                    lease=lease,
+                    evidence_directory=evidence,
+                    phase_hook=hook,
+                )
+                with self.assertRaises(_ProcessKilled):
+                    first.install()
+                ReferencePackageInstaller(
+                    plan=plan,
+                    device=device,
+                    lease=lease,
+                    evidence_directory=evidence,
+                ).install()
+                pending = json.loads((evidence / "pending-acceptance.json").read_text("utf-8"))
+                self.assertEqual("pending-acceptance", pending["state"])
+
+    def test_restart_reconciles_journal_bound_stale_lease_before_fresh_acquire(self) -> None:
+        self.device.seed_package(self.final)
+
+        def kill_after_move(phase: str) -> None:
+            if phase == "after-old-move":
+                raise _ProcessKilled(phase)
+
+        with self.assertRaises(_ProcessKilled):
+            self.installer(phase_hook=kill_after_move).install()
+        journal_path = self.evidence / "transaction-journal.json"
+        journal = json.loads(journal_path.read_text("utf-8"))
+        stale_token = "f" * 32
+        journal["activeLeaseToken"] = stale_token
+        journal["leaseReleased"] = False
+        journal_path.write_bytes(_canonical(journal))
+        self.lease.active_token = stale_token
+
+        self.installer().install()
+
+        reconcile = self.events.index(f"lease-reconcile:{stale_token}")
+        acquire = self.events.index("lease-acquire:2")
+        self.assertLess(reconcile, acquire)
+
+    def test_lease_loss_stops_mutation_until_new_recovery_lease(self) -> None:
+        self.device.seed_package(self.final)
+        self.lease.fail_heartbeat_at = 19
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "lease loss"):
+            self.installer().install()
+
+        second_acquire = self.events.index("lease-acquire:2")
+        first_release = self.events.index("lease-release:1")
+        self.assertLess(first_release, second_acquire)
+        between = self.events[first_release + 1 : second_acquire]
+        self.assertFalse(any(event.startswith("mutate:") for event in between))
+
+    def test_stale_tokenized_path_is_not_silently_ignored(self) -> None:
+        stale = (
+            f"{ReferencePackageInstaller.REFERENCE_ROOT}/.{PACKAGE_ID}.exp8-install-"
+            f"{'f' * 32}.stage"
+        )
+        self.device.add_entry(stale)
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "stale"):
+            self.installer().install()
+
+        self.assertIsNotNone(self.device.entry_identity(stale))
 
 
 class _ScriptedRunner:
@@ -561,6 +1297,11 @@ class ProductionBoundaryTest(unittest.TestCase):
             stdout=_canonical({"held": False, "lease": None, "token": ""}),
             stderr=b"",
         )
+        status = CommandResult(
+            return_code=0,
+            stdout=_canonical({"held": False, "lease": None, "token": ""}),
+            stderr=b"",
+        )
         runner = _ScriptedRunner(
             [
                 (
@@ -612,6 +1353,17 @@ class ProductionBoundaryTest(unittest.TestCase):
                     ),
                     release,
                 ),
+                (
+                    (
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-File",
+                        str(helper),
+                        "status",
+                    ),
+                    status,
+                ),
             ]
         )
         lease = AtomicDeviceLeaseClient(
@@ -634,6 +1386,213 @@ class ProductionBoundaryTest(unittest.TestCase):
 
         self.assertEqual(token, actual)
         self.assertEqual([], runner.steps)
+
+    def test_atomic_lease_release_keeps_token_when_status_is_inconsistent(self) -> None:
+        helper = Path("C:/coordination/device-lease.ps1")
+        token = "b" * 32
+        runner = _ScriptedRunner(
+            [
+                (
+                    (
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-File",
+                        str(helper),
+                        "acquire",
+                        "-Owner",
+                        "owner",
+                        "-ThreadId",
+                        "thread",
+                        "-Purpose",
+                        "purpose",
+                        "-Scenario",
+                        "scenario",
+                        "-StatefulEffects",
+                        "effects",
+                        "-ExpectedMinutes",
+                        "1",
+                    ),
+                    CommandResult(0, _canonical({"held": True, "token": token}), b""),
+                ),
+                (
+                    (
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-File",
+                        str(helper),
+                        "release",
+                        "-Token",
+                        token,
+                    ),
+                    CommandResult(0, _canonical({"held": False, "token": ""}), b""),
+                ),
+                (
+                    (
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-File",
+                        str(helper),
+                        "status",
+                    ),
+                    CommandResult(0, _canonical({"held": True, "token": token}), b""),
+                ),
+            ]
+        )
+        lease = AtomicDeviceLeaseClient(
+            helper_path=helper,
+            thread_id="thread",
+            runner=runner,
+            heartbeat_interval_seconds=3600.0,
+        )
+        acquired = lease.acquire(
+            owner="owner",
+            purpose="purpose",
+            scenario="scenario",
+            stateful_effects="effects",
+            expected_minutes=1,
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "status"):
+            lease.release(acquired)
+
+        self.assertEqual(token, lease._token)
+
+    def test_atomic_lease_reconciles_only_the_exact_unfinished_token(self) -> None:
+        helper = Path("C:/coordination/device-lease.ps1")
+        token = "c" * 32
+        command_prefix = (
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(helper),
+        )
+        runner = _ScriptedRunner(
+            [
+                (
+                    (*command_prefix, "status"),
+                    CommandResult(0, _canonical({"held": True, "token": token}), b""),
+                ),
+                (
+                    (*command_prefix, "release", "-Token", token),
+                    CommandResult(0, _canonical({"held": False, "token": ""}), b""),
+                ),
+                (
+                    (*command_prefix, "status"),
+                    CommandResult(0, _canonical({"held": False, "token": ""}), b""),
+                ),
+            ]
+        )
+        lease = AtomicDeviceLeaseClient(
+            helper_path=helper,
+            thread_id="thread",
+            runner=runner,
+            heartbeat_interval_seconds=3600.0,
+        )
+        reconcile = getattr(lease, "reconcile_unfinished", None)
+        self.assertIsNotNone(reconcile, "reconcile_unfinished is missing")
+
+        reconcile(token)
+
+        self.assertEqual([], runner.steps)
+
+    def test_restore_apk_uses_same_signature_downgrade_capable_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            apk = Path(temporary) / "old.apk"
+            apk.write_bytes(b"old-apk")
+            runner = _ScriptedRunner(
+                [
+                    (
+                        ("adb.exe", "-s", "SERIAL", "install", "-r", "-d", str(apk)),
+                        CommandResult(0, b"Success\n", b""),
+                    )
+                ]
+            )
+            device = AdbInstallDevice(adb="adb.exe", runner=runner)
+            device.serial = "SERIAL"
+            with mock.patch.object(
+                device,
+                "verify_installed_apk",
+                return_value=RemoteFileIdentity(len(b"old-apk"), _sha256(b"old-apk")),
+            ):
+                device.restore_apk(apk)
+
+        self.assertEqual([], runner.steps)
+
+    def test_first_run_preference_probe_returns_absent_without_fabricating_bytes(self) -> None:
+        runner = _ScriptedRunner(
+            [
+                (
+                    (
+                        "adb.exe",
+                        "-s",
+                        "SERIAL",
+                        "shell",
+                        "run-as",
+                        "com.flightalert",
+                        "test",
+                        "-e",
+                        "shared_prefs/flight_alert.xml",
+                    ),
+                    CommandResult(1, b"", b""),
+                )
+            ]
+        )
+        device = AdbInstallDevice(adb="adb.exe", runner=runner)
+        device.serial = "SERIAL"
+        probe = getattr(device, "preference_state", None)
+        self.assertIsNotNone(probe, "preference_state is missing")
+
+        self.assertEqual((False, b""), probe())
+
+    def test_remote_inventory_parser_rejects_symlinks_and_preserves_inode_identity(self) -> None:
+        parser = getattr(installer_module, "parse_remote_inventory", None)
+        self.assertIsNotNone(parser, "parse_remote_inventory is missing")
+        root = ReferencePackageInstaller.REFERENCE_ROOT
+        entries = parser(
+            (
+                f"directory\t1\t101\t{root}/legacy-package\n"
+                f"regular file\t1\t102\t{root}/planet.osm.pbf\n"
+            ).encode("ascii"),
+            root,
+        )
+        self.assertEqual((101, 102), tuple(entry.inode for entry in entries))
+        with self.assertRaisesRegex(ReferencePackageInstallError, "unsupported"):
+            parser(
+                f"symbolic link\t1\t103\t{root}/link\n".encode("ascii"),
+                root,
+            )
+
+    def test_listener_binding_parser_requires_an_actual_bound_service_record(self) -> None:
+        parser = getattr(installer_module, "parse_listener_binding", None)
+        self.assertIsNotNone(parser, "parse_listener_binding is missing")
+        component = (
+            "com.flightalert/com.flightalert.alerts.MonitoringNotificationHiderService"
+        )
+        self.assertTrue(
+            parser(
+                (
+                    f"unrelatedTitle=航班\n"
+                    f"    Live notification listeners (1):\n"
+                    f"      {component} (user 0): binder\n"
+                    f"    Snoozed notification listeners (0):\n"
+                ).encode("utf-8"),
+                component,
+            )
+        )
+        self.assertFalse(
+            parser(
+                (
+                    f"    Allowed notification listeners:\n      {component}\n"
+                    f"    Live notification listeners (0):\n"
+                    f"    Snoozed notification listeners (0):\n"
+                ).encode(),
+                component,
+            )
+        )
 
     def test_adb_identity_parser_uses_argument_arrays_and_exact_sha(self) -> None:
         runner = _ScriptedRunner(
@@ -732,6 +1691,69 @@ class ProductionBoundaryTest(unittest.TestCase):
         document = json.loads(completed.stdout.decode("utf-8", "strict"))
         self.assertEqual(PACKAGE_ID, document["packageId"])
 
+    def test_cli_dispatches_finalize_and_rollback_modes(self) -> None:
+        class FakeTransaction:
+            def __init__(self, **arguments: object) -> None:
+                self.evidence = arguments["evidence_directory"]
+
+            def finalize_acceptance(self) -> None:
+                (self.evidence / "final-success.json").write_bytes(
+                    _canonical({"state": "accepted"})
+                )
+
+            def rollback(self) -> None:
+                (self.evidence / "rollback-receipt.json").write_bytes(
+                    _canonical({"state": "rolled-back"})
+                )
+
+        for flag, expected in (
+            ("--finalize-acceptance", "accepted"),
+            ("--rollback", "rolled-back"),
+        ):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture_root = root / "fixture"
+                fixture_root.mkdir()
+                fixture = _ValidInstallFixture(fixture_root)
+                evidence = root / "evidence"
+                evidence.mkdir()
+                output = io.StringIO()
+                with (
+                    mock.patch.object(installer_module, "ReferencePackageInstaller", FakeTransaction),
+                    mock.patch.object(installer_module, "AtomicDeviceLeaseClient"),
+                    mock.patch.object(installer_module, "AdbInstallDevice"),
+                    redirect_stdout(output),
+                ):
+                    code = _main(
+                        [
+                            "--package",
+                            str(fixture.package),
+                            "--apk",
+                            str(fixture.apk),
+                            "--final-result",
+                            str(fixture.result),
+                            flag,
+                            "--lease-helper",
+                            str(root / "lease.ps1"),
+                            "--thread-id",
+                            "thread",
+                            "--evidence-directory",
+                            str(evidence),
+                        ]
+                    )
+
+            self.assertEqual(0, code)
+            self.assertEqual(expected, json.loads(output.getvalue())["state"])
+
+    def test_wrapper_exposes_explicit_finalize_and_rollback_switches(self) -> None:
+        wrapper = Path(__file__).parents[2] / "install-reference-dictionary-experiment8.ps1"
+        text = wrapper.read_text("utf-8")
+
+        self.assertIn("[switch]$FinalizeAcceptance", text)
+        self.assertIn("[switch]$Rollback", text)
+        self.assertIn("--finalize-acceptance", text)
+        self.assertIn("--rollback", text)
+
 
 class HostInstallPlanEdgeCaseTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -813,6 +1835,169 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ReferencePackageInstallError, "footprint total"):
             self.validate()
+
+    def _rewrite_package_json(self, name: str, mutate: object) -> None:
+        path = self.fixture.package / name
+        document = json.loads(path.read_text("utf-8"))
+        mutate(document)  # type: ignore[operator]
+        path.write_bytes(_canonical(document))
+
+    def _refresh_manifest_and_result_bindings(self) -> None:
+        manifest_path = self.fixture.package / "manifest.json"
+        manifest_raw = manifest_path.read_bytes()
+        finalization_path = (
+            self.fixture.package / "class-catalog-finalization-receipt.json"
+        )
+        finalization = json.loads(finalization_path.read_text("utf-8"))
+        manifest_binding = next(
+            item for item in finalization["outputFiles"] if item["name"] == "manifest.json"
+        )
+        manifest_binding["bytes"] = len(manifest_raw)
+        manifest_binding["sha256"] = _sha256(manifest_raw)
+        finalization_path.write_bytes(_canonical(finalization))
+        package_bytes = sum(
+            path.stat().st_size for path in self.fixture.package.iterdir()
+        )
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["package"]["bytes"] = package_bytes
+        result["footprint"]["totalBytes"] = (
+            package_bytes + self.fixture.apk.stat().st_size + MANDATORY_RESERVE_BYTES
+        )
+        self.fixture.result.write_bytes(_canonical(result))
+
+    def test_receipt_schemas_reject_unknown_fields(self) -> None:
+        self._rewrite_package_json(
+            "merge-receipt.json", lambda document: document.__setitem__("extra", True)
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "schema fields"):
+            self.validate()
+
+    def test_merge_input_chain_must_match_manifest(self) -> None:
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document["inputs"][0].__setitem__("recordsBytes", 999),
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "merge inputs"):
+            self.validate()
+
+    def test_merge_chain_allows_multiple_explicit_supplement_inputs(self) -> None:
+        manifest_path = self.fixture.package / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        first = dict(manifest["merge"]["inputs"][0])
+        first["role"] = "supplement"
+        first["packageId"] = "world-supplement-one-v3"
+        second = dict(first)
+        second["packageId"] = "world-supplement-two-v3"
+        manifest["merge"]["inputs"].extend((first, second))
+        manifest_path.write_bytes(_canonical(manifest))
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document["inputs"].extend((first, second)),
+        )
+        self._refresh_manifest_and_result_bindings()
+
+        self.assertEqual(PACKAGE_ID, self.validate().package_id)
+
+    def test_merge_coverage_must_prove_every_declared_tile_present(self) -> None:
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document["coverage"].__setitem__("presentTileCount", 0),
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "merge coverage"):
+            self.validate()
+
+    def test_finalizer_input_manifest_must_be_merge_output_manifest(self) -> None:
+        self._rewrite_package_json(
+            "class-catalog-finalization-receipt.json",
+            lambda document: document["inputFiles"][0].__setitem__("sha256", "9" * 64),
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "manifest transition"):
+            self.validate()
+
+    def test_finalizer_renderer_contract_and_counts_are_bound(self) -> None:
+        self._rewrite_package_json(
+            "class-catalog-finalization-receipt.json",
+            lambda document: document.__setitem__("rendererContractSha256", "8" * 64),
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "renderer contract"):
+            self.validate()
+
+    def test_merge_and_finalizer_subtype_counts_must_match(self) -> None:
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document.__setitem__("subtypeCounts", {"city": 1}),
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "subtype counts"):
+            self.validate()
+
+    def test_lf_and_crlf_tool_checkouts_have_one_accepted_source_identity(self) -> None:
+        merger = Path(installer_module.__file__).parent / "v3_package_merger.py"
+        finalizer = Path(installer_module.__file__).parent / "v3_class_catalog_finalizer.py"
+        merger_lf = merger.read_bytes().replace(b"\r\n", b"\n")
+        finalizer_lf = finalizer.read_bytes().replace(b"\r\n", b"\n")
+        crlf_merger = _sha256(merger_lf.replace(b"\n", b"\r\n"))
+        crlf_finalizer = _sha256(finalizer_lf.replace(b"\n", b"\r\n"))
+        self._rewrite_package_json(
+            "manifest.json",
+            lambda document: document["merge"].__setitem__("mergerSha256", crlf_merger),
+        )
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document.__setitem__("mergerSha256", crlf_merger),
+        )
+        self._rewrite_package_json(
+            "class-catalog-finalization-receipt.json",
+            lambda document: document.__setitem__("finalizerSha256", crlf_finalizer),
+        )
+
+        plan = self.validate()
+
+        self.assertEqual(PACKAGE_ID, plan.package_id)
+
+    def test_non_line_ending_tool_source_change_is_rejected(self) -> None:
+        self._rewrite_package_json(
+            "manifest.json",
+            lambda document: document["merge"].__setitem__("mergerSha256", "a" * 64),
+        )
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document.__setitem__("mergerSha256", "a" * 64),
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "merger source"):
+            self.validate()
+
+    def test_package_inventory_is_rechecked_before_device_or_lease_use(self) -> None:
+        plan = self.validate()
+        (self.fixture.package / "late-extra.bin").write_bytes(b"raced")
+        lease = _FakeLease()
+        device = _FakeDevice(Path(self.temporary.name))
+        evidence = Path(self.temporary.name) / "evidence"
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "inventory changed"):
+            ReferencePackageInstaller(
+                plan=plan,
+                device=device,
+                lease=lease,
+                evidence_directory=evidence,
+            ).install()
+
+        self.assertFalse(lease.acquired)
+        self.assertEqual([], device.calls)
+
+    def test_tool_sources_are_pinned_to_lf_in_gitattributes(self) -> None:
+        attributes = (Path(__file__).parents[3] / ".gitattributes").read_text("utf-8")
+
+        self.assertIn("/tools/experiment8/v3_package_merger.py text eol=lf", attributes)
+        self.assertIn(
+            "/tools/experiment8/v3_class_catalog_finalizer.py text eol=lf", attributes
+        )
 
 
 if __name__ == "__main__":
