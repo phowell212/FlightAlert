@@ -248,6 +248,100 @@ style.
 - coastline, international, state/province, county/local, protected-area,
   water-boundary, and other outlines have distinct color/pattern/width tokens.
 
+### Local-script and English presentation
+
+This is one app-wide sourced-map-text contract, not an Experiment 8-only
+renderer trick. Reference, aviation, imagery/provider, traffic-detail map
+annotations, and later source-backed map layers consume the same typed text
+record, Unicode-script policy digest, shaping interface, fallback-font policy,
+atomic layout rules, and cross-language conformance vectors. A feature family
+may select prominence and visual style tokens; it may not invent its own script
+test, source-English rule, translation fallback, or bilingual collision model.
+Static UI localization remains a separate content domain, but it uses the same
+Unicode-capable shaping/font foundation rather than a competing script
+heuristic.
+
+The Android boundary is one package-neutral `com.flightalert.text` engine.
+It accepts either plain interface text or a canonical sourced-name record and
+returns one cached shaped group. Point and path placers consume that same
+group; they do not reshape or reinterpret the strings. Offline normalization
+emits the canonical sourced-name decision. A live source that cannot use a bake
+runs the identical versioned policy once at source ingestion and caches the
+result. Python and Kotlin implementations read the same table identity and
+must pass the same canonical JSON conformance vectors byte-for-byte. A policy
+digest mismatch makes sourced bilingual presentation unavailable rather than
+falling back to a layer-local heuristic.
+
+Language is not the trigger for a second line. The bake classifies the exact
+primary source text with Unicode 17.0.0 `Scripts.txt`, downloaded only through
+the pinned source-acquisition lane from
+`https://www.unicode.org/Public/17.0.0/ucd/Scripts.txt`: `192,460` bytes,
+SHA-256 `9f5e50d3abaee7d6ce09480f325c706f485ae3240912527e651954d2d6b035bf`.
+Its interpretation follows Unicode Standard Annex #24 revision 39; Python's
+runtime `unicodedata` and Android's platform `Character.UnicodeScript` are not
+authoritative because their Unicode versions differ.
+`Common` and
+`Inherited` characters such as spaces, punctuation, digits, and combining
+marks do not trigger a subtitle by themselves. A primary containing only
+Latin-script letters remains one line, including Spanish, French, Portuguese,
+Vietnamese, and other accented Latin text. A primary containing any strong
+non-Latin script is eligible for the two-line form.
+
+The primary field is the exact text field selected by the owning source's
+verified schema/style policy. An adapter may select a documented provider-local
+field, but it may not infer a local language from coordinates or pick an
+arbitrary translation column. If the verified primary is already English or
+Latin transliteration, it remains the honest one-line primary even when the
+source happens to carry unrelated language translations. This keeps the common
+text engine separate from source-specific field semantics without allowing
+each feature renderer to invent presentation behavior.
+
+For the locked Esri World Basemap v2 adapter, the exact rule is narrower. First
+resolve the pinned style's owning text field. When and only when that field is
+`_name_global` and the same source occurrence contains nonblank `_name_local`,
+the hash-pinned Esri adapter selects `_name_local` as primary. Otherwise the
+resolved `_name` or `_name_global` remains primary. The separately authorized
+named-geometry fallback may use `_name_en` as its primary and then cannot have a
+subtitle. This preserves road/shield and ordinary `_name` semantics while
+allowing provider-declared local names in the provider-global role. It never
+uses coordinates or another translation column to infer local language.
+
+The optional second line is permitted only when the same source occurrence
+contains exact `_name_en`, the Esri adapter's independently identified English
+field. `_name_global` is not reliably English and can never serve as the
+subtitle. The English role and primary-substitution rule are part of the
+hash-pinned Esri adapter policy. Text is
+never synthesized, transliterated, machine-translated, or borrowed from a
+nearby/equal-text feature. A missing, empty, identical, or source-invalid
+English value produces a source-honest local-only record and an explicit
+English-gap reason. A provider field whose value cannot satisfy the frozen
+English-subtitle text contract is also a gap rather than permission to guess.
+An accepted English value contains at least one strong Latin scalar and no
+strong non-Latin or `Unknown` scalar. `Common`/`Inherited` punctuation, digits,
+and marks are neutral. Comparison to the primary occurs after the shared NFC
+and trailing-whitespace canonicalization and never case-folds. Raw source bytes
+and their digest remain detached audit evidence.
+
+When present, the local primary and smaller italic English subtitle are one
+atomic label candidate. They share prominence, visibility, fade, collision,
+selection, filtering, and handoff state. Collision uses the union of both
+shaped runs; neither line may appear or disappear alone. A path label shapes
+two complete coherent runs against the same eligible source-owned path and
+must fit the complete two-line block without per-character placement. The
+English line uses a presentation token rather than baked glyphs so physical
+phone QA can tune the exact smaller size without changing text truth.
+
+Script classification and subtitle eligibility occur once during
+normalization. The phone record stores the resulting typed layout mode and
+exact source-field identities. Runtime never scans the world, detects scripts
+per frame, or searches translation fields: it shapes only accepted candidates
+from the active viewport/zoom blocks and caches the atomic shaped result.
+
+For the OSM supplemental lane, the corresponding source policy is `name` as
+primary and exact same-object `name:en` as the only English candidate. Neither
+`int_name`, `official_name`, another `name:*`, nor a nearby relation is a
+fallback unless a later independently reviewed policy explicitly admits it.
+
 The current heavy white coastline treatment is not an accepted target. Exact
 theme colors/alpha remain subject to physical-device visual QA, but a style may
 not dominate the satellite imagery or obscure aircraft.
@@ -479,6 +573,31 @@ follow the river shape as that shape changes, remain whole, move smoothly or use
 one accepted whole-run handoff, and disappear atomically when no valid span
 exists. A single screenshot cannot pass this temporal gate.
 
+### Worldwide label matrix
+
+U.S. success is not evidence of worldwide success. Freeze a source-verified,
+non-cherry-picked matrix containing at least one dense and one sparse viewport
+on every inhabited continent, plus explicit antimeridian and high-latitude
+cells. Across the matrix, include applicable cities, rivers, islands,
+coastlines, international/first-order/local borders, protected lands, and
+water boundaries at wide, entry, normal, and close fractional zooms.
+
+The matrix must exercise exact provider text in multiple writing systems,
+including CJK, Arabic or another RTL script, Devanagari, accented Latin, and at
+least one additional complex-script/fallback-font case present in the locked
+source. Shape and collide whole grapheme-aware runs; never split a combining
+sequence, reorder source text, synthesize a translation, replace missing glyphs
+silently, or use per-character path placement. For each viewport, evidence must
+distinguish sourced/applicable, sourced-but-suppressed-by-prominence/collision,
+source-proven absent, and unavailable. Honest gaps remain gaps and cannot be
+filled by borrowing a nearby or similarly named feature.
+
+Data-level normalization/package checks and physical-phone temporal capture
+must both pass this matrix. The selected cells, source occurrences, languages,
+scripts, feature classes, zoom bands, and expected honest gaps are hash-pinned
+before candidate comparison. A package or renderer cannot claim whole-world
+acceptance from U.S. samples, aggregate counts, or one successful script.
+
 ### UI and accessibility
 
 Unit tests cover catalog availability, stable persistence, master-gate
@@ -522,6 +641,8 @@ runs so capture overhead cannot improve or poison frame evidence.
 - sparse ocean/coastline, ordinary regional, dense metropolitan, and dense
   mixed water/place/border/transport viewports;
 - the Chester River corridor at wide, entry, normal, and close zooms;
+- every frozen worldwide-label matrix cell across inhabited continents,
+  writing systems, density bands, feature classes, and honest-gap states;
 - antimeridian wrap, high-latitude Web Mercator limits, and a legitimately
   empty/offline viewport;
 - cold process/package-cache, warm process/cold decoded-path cache, and fully

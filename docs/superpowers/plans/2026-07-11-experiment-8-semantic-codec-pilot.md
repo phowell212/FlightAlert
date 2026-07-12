@@ -20,12 +20,13 @@
 - Consume only acquisition rows whose source generation, wire/PBF hashes, and sidecars pass the Plan 1 contract.
 - A source-population-present tile is `Ready(empty)` only after a valid PBF was fully normalized and a distinct hashed semantic-empty proof was emitted. Presence in source coverage plus absence from a block index is not enough.
 - A coordinate absent from the pinned population is `KnownEmpty`. A malformed, missing, or mismatched present tile remains `Unavailable`/failed.
-- Do not bake the full world. Plan 2 may use the 154-row smoke input, a bounded source-verified Chester River/current-phone visual-QA fixture, and, only after Plan 1 completes, the bounded Stage A input.
+- Do not bake the full world. Plan 2 may use the 154-row smoke input, bounded source-verified Chester River/current-phone and worldwide-label visual-QA fixtures, and, only after Plan 1 completes, the bounded Stage A input. The worldwide fixture is fixed before candidate comparison and covers every inhabited continent, multiple writing systems, density bands, dateline/high-latitude behavior, and honest gaps without claiming world completeness.
 - Do not fetch Stage B or authorize a world bake from this plan.
 - Never silently ignore an unsupported relevant style expression, ambiguous semantic classification, ID collision, oversized block, malformed geometry, or missing string/style reference.
 - Determinism is required across input order, worker counts, serial/parallel normalization, and repeated cooks.
 - GPU utilization is not a goal. CPU/I/O implementations win unless a bounded real normalization or compression stage is demonstrably faster end-to-end on the GPU.
 - Degenerate label/reference visuals are a fail-fast Experiment 8 rejection, not deferred polish. Structural validity, speed, or size can never compensate for an applicable prominent sourced name being lost; oversized text; crushed glyph spacing; fragmented/overlapping words; unstable path rotation; or unreadable collision placement. A line name is applicable only when one source occurrence supplies both exact text and exact placement path (or a documented nonzero provider-stable ID joins them), its style/policy display interval contains the zoom, its unmodified rational path intersects the viewport safety region with a continuous segment long enough for the whole shaped run, and deterministic whole-label collision accepts it. The screenshot alone is not evidence that a particular segment owns a name. Equal text, proximity, ancestor tiles, apparent water continuity, similar geometry, or approximate endpoint matches never transfer a name.
+- Freeze one shared app-wide sourced-map-text contract and conformance-vector set; reference, aviation, provider imagery, and later map-label families may supply prominence/style tokens but may not define competing script, English-evidence, fallback-font, shaping, or bilingual-collision methods. Classify script and bilingual eligibility during normalization with Unicode 17.0.0 `Scripts.txt`, exact length `192,460` and SHA-256 `9f5e50d3abaee7d6ce09480f325c706f485ae3240912527e651954d2d6b035bf`. Latin-script primary names, including accented Spanish/French/Portuguese/Vietnamese text, remain one line. Only a primary containing a strong non-Latin script may carry an exact source-provided English subtitle; missing or invalid English remains an explicit honest gap. The primary and smaller italic English line are one atomic visibility/fade/collision/filter/path-placement unit. Never transliterate, translate, borrow text, scan scripts per frame, or query translation fields outside active viewport/zoom blocks.
 - Keep every memory-mapped index segment below `268,435,456` bytes, every positional-read pack shard at or below `1,610,612,736` bytes (1.5 GiB), and every independently inflated feature/posting/tile block at or below `4,194,304` bytes.
 - Package design target is `22,000,000,000` bytes and the preferred package gate is `23,500,000,000` bytes. Per the user's 2026-07-11 update, `38,500,000,000` bytes is the hard fallback package ceiling, not the target; entering that lane requires an evidence-backed coverage/fidelity benefit and a complete-phone projection below `40,000,000,000` bytes. Plan 2 records measurements but does not make the statistical world-size decision.
 
@@ -246,7 +247,7 @@ Tests must cover:
 - scalar and stop-based numeric/color/dash/text style properties;
 - feature-property functions and categorical/interval/exponential stops;
 - filters `==`, `in`, `!in`, and nested `all` used by the pinned style;
-- exact matched `text-field` extraction (`_name` or `_name_global` in required rules), UTF-8 NFC, end trimming only, and no retention of the 41 unused translation fields;
+- exact matched primary `text-field` extraction (`_name` or `_name_global` in required rules); the hash-pinned Esri adapter substitutes same-occurrence nonblank `_name_local` only when the owning style resolved `_name_global`; only same-occurrence `_name_en` is declared secondary evidence; UTF-8 NFC and end trimming only; and no blanket retention or search of the other translation fields;
 - line casing plus inner stroke ordering;
 - label min/max zoom, opacity/fade, font, halo, placement, priority, repeat distance, and collision group;
 - the locked `Water line/label/Default` rule compiling as one whole-text line label with source values `text-size=10`, `text-letter-spacing=0.07`, `text-max-angle=30`, `symbol-spacing=1000`, `text-max-width=8`, `symbol-avoid-edges=true`, and no per-glyph text records;
@@ -324,6 +325,98 @@ git commit -m "Compile Experiment 8 semantic styles"
 ```
 
 Do not begin Task 3 until an independent specification reviewer approves the compiled policy/style semantics and an independent code-quality reviewer approves implementation/tests.
+
+---
+
+### Task 2B: Freeze the one shared sourced-text contract
+
+**Files:**
+- Create: `tools/experiment8/sourced_text.py`
+- Create: `tools/experiment8/tests/test_sourced_text.py`
+- Create: `tools/experiment8/data/unicode-script-profile-17.0.0.json`
+- Create: `tools/experiment8/data/sourced-text-conformance-v1.json`
+- Create: `docs/flightalert-sourced-text-contract.md`
+- Modify: `tools/experiment8/semantic_model.py`
+- Modify: `tools/experiment8/style_contract.py`
+- Modify: their focused tests and `docs/experiment8-renderer-contract.md`
+
+**Interfaces:**
+- Produces: one language-neutral canonical sourced-name record, Unicode-script policy identity, canonical cross-language conformance vectors, atomic single/two-line layout decision, exact primary/English source-field evidence, and an explicit English-gap reason.
+- Consumes: exact owning-source primary field, optional owning-source declared English field, and Unicode 17.0.0 `Scripts.txt` at the pinned length/hash. It does not choose a locale, translate, transliterate, or inspect undeclared translation columns.
+
+- [ ] **Step 1: Write failing shared-policy and semantic-record tests**
+
+Prove at minimum:
+
+- exact acceptance of Unicode 17.0.0 `Scripts.txt` only at 192,460 bytes and SHA-256 `9f5e50d3abaee7d6ce09480f325c706f485ae3240912527e651954d2d6b035bf`;
+- one deterministic classification for every Unicode scalar value, with `Common` and `Inherited` neutral, `Latin` strong Latin, every other assigned script strong non-Latin, and `Unknown` separately audited rather than treated as evidence of non-Latin; a known non-Latin scalar still triggers when Unknown is also present, while font/glyph acceptance remains an independent fail-closed visual gate;
+- Spanish, French, Portuguese, Vietnamese, decomposed combining-mark fixtures after the canonical NFC boundary, digits, and punctuation remain single-line when their only strong script is Latin;
+- Japanese/CJK, Arabic/RTL, Cyrillic, Devanagari, and mixed Latin/non-Latin primary fixtures become subtitle-eligible;
+- only the exact declared provider-English field on the same occurrence can satisfy the subtitle; absent, empty, identical, wrong-typed, or strong-non-Latin English values produce an explicit local-only gap and never a translation search;
+- exact primary text, optional English text, both nonzero source-field IDs, script policy digest, layout mode, and gap reason all change the canonical sourced-name identity;
+- a valid subtitle is smaller and italic through one versioned presentation token, but text records contain no baked glyphs or per-character placement;
+- primary and subtitle share one candidate ID, visibility/fade/filter/selection/collision identity, path/anchor, and whole-block fit decision; no API exposes an independently renderable subtitle;
+- style extraction keeps resolved `_name` as primary; substitutes `_name_local` only for a resolved `_name_global` under the exact Esri adapter policy; and uses only `_name_en` as secondary evidence, with no geographic locale inference, `_name_global`-as-English fallback, or other translation-column retention;
+- `CanonicalVariant`, point dedupe, line-candidate identity, heap accounting, encode/decode, renderer ordering, and independent round-trip include the complete sourced-name record;
+- the incompatible renderer encoding is explicitly versioned rather than allowing an old reader to interpret the new bytes;
+- canonical JSON conformance vectors cover every boundary and are consumed by both the Python reference tests and the later Kotlin implementation without copied decision tables.
+
+Use the already acquired, ledger-verified fixtures rather than synthetic locale
+claims: São Paulo `13/3034/4647` SHA-256
+`84408cfcd8b14ef0f200504d5c30a6ebc34317b8019593e220eaa9e219d789ba`;
+Cairo `13/4806/3378`
+`1df23c34f4bc7977efe4e0d4ed30fc1a2b3191a3a62e510c4fe661ac5e26016a`;
+Tokyo `13/7273/3225`
+`04c77aee6e01aaca46743e0ae98190b52a85fbd91c2a139bb80e5ca38824fa8b`;
+Hanoi `8/203/112`
+`bc17e63bb9024cbfec865f3e54a8a509d26948b9b1e8b57d7012bbc788e1a870`;
+Paris `8/129/88`
+`91032c5b48e1521eb4240d03555b105eaeb4ddddd60dafdb0e5bb12ac5cd9d03`;
+and Mexico `8/57/113`
+`03b5d08f3a28fdbc16fa2507e90a0f60612e63ed6636c20b297b1c97f9cc2be3`.
+The Cairo and Tokyo city fixtures must form local+English atomic records;
+their local roads lacking `_name_en` remain local-only even when
+`_name_global` looks English. São Paulo, Hải Phòng, Île-de-France, and México
+remain single-line Latin-script records.
+
+Run and verify RED before production edits:
+
+```powershell
+& 'C:\FlightAlert-exp8-work\.venv\Scripts\python.exe' -m unittest tools.experiment8.tests.test_sourced_text tools.experiment8.tests.test_semantic_model tools.experiment8.tests.test_style_contract -v
+```
+
+- [ ] **Step 2: Implement the package-neutral shared contract**
+
+Implement one immutable sourced-name value used by every map/source family. The
+owning source adapter supplies exact field semantics; the common policy alone
+classifies script, validates the optional English value, assigns layout/gap,
+and forms canonical bytes. The offline normalizer performs this once. Live
+sources later call the same Kotlin port once at ingestion and cache the result.
+Static interface text uses the same `com.flightalert.text` shaping/font engine
+through a plain-text value but never invokes source-English behavior.
+
+The phone-facing record contains exact primary text, optional exact English,
+both source-field IDs, layout/gap enums, and the shared policy ID. It contains
+no world lookup, translation map, language guess, glyph array, or per-character
+record. Runtime shapes only accepted active-viewport candidates and caches one
+atomic shaped group. Point and path placers consume that group without
+reinterpreting script or source fields. A policy/table mismatch is
+`Unavailable`, never a layer-specific fallback.
+
+- [ ] **Step 3: Rebuild and independently publish the style generation**
+
+Regenerate the Task 2 evidence because retained label properties, candidate
+identities, semantic bytes, and the language-neutral contract change. Publish
+one new content-addressed generation byte-identically to C and D. The prior
+`05fd76eb...` generation remains documentary history but is not a Task 3 input.
+
+- [ ] **Step 4: Verify and commit Task 2B**
+
+Run the focused suites on the pinned Python 3.10 runtime, the complete
+Experiment 8 Python suite, `py_compile`, canonical-vector readback, and an
+independent specification plus code-quality review. Commit only the shared
+contract/code/tests/docs and record the newly trusted generation. Task 3 may
+start only after both reviews are clean.
 
 ---
 
@@ -406,6 +499,15 @@ normalization command.
 Expected: 154 input states reconcile to 127 acquired present tiles plus 27 known-empty; zero source/style/geometry failures; nonzero applicable records in every required group; serial and parallel normalized hashes/bytes match; known-empty coordinates have no source file or normalized feature block.
 
 Also acquire and hash-pin a minimal current-phone visual-QA source fixture through the hardened Plan 1 cache after the Stage A writer releases its lock. Strictly reverify the complete relevant LOD chain and viewport halo. Normalization must retain every verified occurrence's exact name, full geometry/path, source-tile edge domain, zoom interval, and whole-label style/placement fields; omission is a hard failure where that exact path is applicable. Require `Chester River` in an eastern viewport intersecting its verified sourced path, and require honest absence in the western Radcliffe/Island/Dam viewport unless another verified occurrence supplies a western named path. Never borrow the eastern name through visual continuity. If the user requires the western corridor labeled and Esri supplies no named path at any relevant LOD, add and independently lock a real hydrography source with exact named geometry before claiming success. The fixture also asserts that normalization never emits per-character fragments or oversized presentation tokens inconsistent with locked style evidence.
+
+Also freeze a bounded, source-verified worldwide-label fixture before comparing candidates. It contains at least one dense and one sparse viewport per inhabited continent, explicit dateline and high-latitude cells, and applicable examples across places, rivers, islands, coastlines, administrative borders, protected lands, and water boundaries. It must include locked source text in CJK, Arabic or another RTL script, Devanagari, accented Latin, and at least one additional complex-script/fallback-font case present in the source. Preserve exact UTF-8 source text and grapheme sequences with no translation or per-character normalization. Record sourced/applicable, prominence/collision-suppressed, source-proven absent, and unavailable expectations separately. No U.S. sample, aggregate count, or one successful script may stand in for worldwide semantic coverage.
+
+The worldwide fixture also proves the script boundary directly: accented
+Latin/Spanish examples remain single-line, while qualifying non-Latin primary
+examples retain their exact primary and exact provider-English field IDs as one
+atomic bilingual candidate. Include non-Latin examples with and without a
+valid English field so the latter remain honest local-only records rather than
+receiving synthesized text.
 
 - [ ] **Step 4: Verify and commit Task 3**
 
@@ -722,6 +824,7 @@ Expected:
 - compression codec does not change decoded semantics;
 - every applicable required group has real nonzero records;
 - the source-verified Chester River/current-phone fixture retains every applicable prominent source name as one intact label record with its complete path/style/collision inputs;
+- the frozen worldwide-label fixture retains every applicable source name, script/grapheme sequence, prominence decision, path/anchor, and boundary class, while preserving every declared honest gap;
 - all 27 known-empty fixtures remain explicit with no feature/posting/block;
 - every present semantic-empty tile, if any, returns `Ready(empty)`;
 - every block and mapped file stays within its bound;
@@ -747,7 +850,7 @@ Expected: all tests pass; generated data stays external; only intentional Experi
 ### Task 9: Authorize Plan 3 only on documentary smoke success
 
 - [ ] Write Plan 3 with exact Stage A/Stage B projection, paired A/B comparison, Student-t 99% UCB, deterministic bootstrap p99, fixed/table/index/filesystem overhead, phone micro-package measurements, and winner gates.
-- [ ] After Plan 3 selects a provisional package winner from independently equal semantics, require the immediately following Android integration plan to apply the current-phone screenshot class as a non-waivable Experiment 8 phone-render gate. Any missing applicable sourced name, oversized label, crushed spacing, fragmented/overlapping word, unstable path baseline, or unreadable collision blocks Experiment 8 success regardless of size/performance and returns work to the shared semantic/renderer contract. Reject the package format itself only when evidence traces the defect to that format's reader. Preserve the source-verified Chester River corridor micro-package, before/after screenshots, and physical-device video/frame evidence.
+- [ ] After Plan 3 selects a provisional package winner from independently equal semantics, require the immediately following Android integration plan to apply both the current-phone screenshot class and the frozen worldwide-label matrix as non-waivable Experiment 8 phone-render gates. Any missing applicable sourced name, oversized label, crushed spacing, fragmented/overlapping word or grapheme sequence, unstable path baseline, unreadable collision, wrong-script shaping, or U.S.-only success blocks Experiment 8 regardless of size/performance and returns work to the shared semantic/renderer contract. Reject the package format itself only when evidence traces the defect to that format's reader. Preserve the source-verified Chester River corridor and worldwide matrix micro-packages, before/after screenshots, and physical-device video/frame evidence.
 - [ ] Bind Plan 3 to the verified normalized schema/style/policy/package/verifier hashes from this plan.
 - [ ] Do not mark Plan 2 complete or start Stage A package projection until Task 8 has zero unresolved failures.
 
@@ -763,6 +866,7 @@ Plan 2 is complete only when:
 - serial/parallel and repeated cook outputs are deterministic;
 - block/mapping/memory ceilings pass;
 - the current-phone source/name fixture passes data-level whole-label/path/style gates and its degenerate visual class is carried forward as a non-waivable phone acceptance gate;
+- the worldwide-label fixture passes per-continent, multi-script, multizoom, collision, hierarchy, and honest-gap gates and is carried forward as a non-waivable phone acceptance matrix;
 - all artifacts and reports are hash-pinned externally;
 - specification and code-quality reviews approve the result.
 
