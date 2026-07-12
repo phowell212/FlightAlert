@@ -17,6 +17,26 @@ if (externalFlightAlertTestsEnabled && repositoryFlightAlertTestsEnabled) {
     )
 }
 
+val externalFlightAlertTestRoot = providers
+    .gradleProperty("flightAlertExternalTestRoot")
+    .map { file(it) }
+    .getOrElse(rootProject.layout.projectDirectory.dir("../FlightAlert-test-artifacts").asFile)
+
+val externalFlightAlertTestApplicationId = providers
+    .gradleProperty("flightAlertExternalTestApplicationId")
+    .orNull
+    ?.also { applicationId ->
+        require(externalFlightAlertTestsEnabled) {
+            "flightAlertExternalTestApplicationId requires flightAlertExternalTests=true"
+        }
+        require(Regex("[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+").matches(applicationId)) {
+            "flightAlertExternalTestApplicationId must be a lowercase Android application ID"
+        }
+        require(applicationId != "com.flightalert") {
+            "flightAlertExternalTestApplicationId must differ from the production application ID"
+        }
+    }
+
 android {
     namespace = "com.flightalert"
     compileSdk {
@@ -30,6 +50,8 @@ android {
         targetSdk = 37
         versionCode = 11
         versionName = "1.10"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        externalFlightAlertTestApplicationId?.let { testApplicationId = it }
     }
 
     sourceSets {
@@ -38,10 +60,10 @@ android {
         }
         if (externalFlightAlertTestsEnabled) {
             getByName("test") {
-                setRoot("../FlightAlert-test-artifacts/test")
+                setRoot(File(externalFlightAlertTestRoot, "test").path)
             }
             getByName("androidTest") {
-                setRoot("../FlightAlert-test-artifacts/androidTest")
+                setRoot(File(externalFlightAlertTestRoot, "androidTest").path)
             }
         } else if (repositoryFlightAlertTestsEnabled) {
             getByName("test") {
@@ -79,5 +101,11 @@ dependencies {
     implementation("com.github.luben:zstd-jni:1.5.7-11@aar")
     if (externalFlightAlertTestsEnabled || repositoryFlightAlertTestsEnabled) {
         testImplementation("junit:junit:4.13.2")
+    }
+    if (externalFlightAlertTestsEnabled) {
+        testImplementation("org.json:json:20260522")
+        androidTestImplementation("androidx.test:runner:1.7.0")
+        androidTestImplementation("androidx.test.ext:junit:1.3.0")
+        androidTestImplementation("androidx.test.uiautomator:uiautomator:2.4.0")
     }
 }

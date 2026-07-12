@@ -101,13 +101,22 @@ import com.flightalert.flight.MilitaryOriginResolver
 import com.flightalert.flight.SelectedFlightPathController
 import com.flightalert.flight.SelectedFlightPathViewportController
 import com.flightalert.flight.TraceOriginAirportResolver
-import com.flightalert.map.AviationAirspaceFeature
 import com.flightalert.map.AviationGeoBounds
+import com.flightalert.map.AviationInspectorInteractionPolicy
+import com.flightalert.map.AviationInspectorScrollPolicy
+import com.flightalert.map.AviationInspectorTapAction
 import com.flightalert.map.AviationLayerClient
 import com.flightalert.map.AviationLayerController
+import com.flightalert.map.AviationLayerInspector
+import com.flightalert.map.AviationLayerInspectorStyle
+import com.flightalert.map.AviationLayerKind
 import com.flightalert.map.AviationLayerRenderer
+import com.flightalert.map.AviationLayerSnapshot
 import com.flightalert.map.AviationLayerStyle
 import com.flightalert.map.AviationLayerVisibility
+import com.flightalert.map.AviationSelectionKey
+import com.flightalert.map.AviationSelectionPolicy
+import com.flightalert.map.AviationSelection
 import com.flightalert.map.Bounds
 import com.flightalert.map.DeviceHeadingProvider
 import com.flightalert.map.GeoPoint
@@ -116,8 +125,6 @@ import com.flightalert.map.MapProjection
 import com.flightalert.map.MapTileRenderState
 import com.flightalert.map.MapTileRenderStyle
 import com.flightalert.map.MapTileRenderer
-import com.flightalert.map.RestrictedAirspaceInspector
-import com.flightalert.map.RestrictedAirspaceStyle
 import com.flightalert.map.ScaleLabel
 import com.flightalert.map.ScreenPoint
 import com.flightalert.map.TileSource
@@ -264,7 +271,7 @@ class FlightMapView(
         sp = { value -> sp(value) },
         ellipsize = { value, max_width -> ellipsize(value, max_width) }
     )
-    private val restricted_airspace_inspector = RestrictedAirspaceInspector(
+    private val aviation_layer_inspector = AviationLayerInspector(
         text_paint = text_paint,
         dp = { value -> dp(value) },
         sp = { value -> sp(value) },
@@ -287,9 +294,7 @@ class FlightMapView(
         },
         draw_wrapped_text = { canvas, value, x, y, width, max_lines ->
             draw_wrapped_text(canvas, value, x, y, width, max_lines)
-        },
-        lat_lon_to_world = MapProjection::lat_lon_to_world,
-        world_to_lat_lon = MapProjection::world_to_lat_lon
+        }
     )
     private val panel_renderer = FlightMapPanelRenderer(
         paint = paint,
@@ -608,7 +613,7 @@ class FlightMapView(
         FlightAlertSettings.KEY_LAYER_AIRPORT_LABELS_ENABLED,
         FlightAlertSettings.DEFAULT_LAYER_AIRPORT_LABELS_ENABLED
     )
-    private var selected_restricted_airspace: AviationAirspaceFeature? = null
+    private var selected_aviation_key: AviationSelectionKey? = null
     private var alerts_enabled = prefs.getBoolean(FlightAlertSettings.KEY_ALERTS_ENABLED, true)
     private var alert_distance_feet = prefs.getFloat(
         FlightAlertSettings.KEY_ALERT_DISTANCE_FEET,
@@ -711,6 +716,8 @@ class FlightMapView(
     private var down_y = 0f
     private var details_scroll_y = 0f
     private var details_max_scroll_y = 0f
+    private var aviation_details_scroll_y = 0f
+    private var aviation_details_max_scroll_y = 0f
     private var details_scroll_start_y = 0f
     private var details_scroll_start_offset = 0f
     private var drag_started = false
@@ -856,6 +863,11 @@ class FlightMapView(
 
     // Close the top-most map overlay first. If nothing is open, let Android handle Back normally.
     fun handle_back_press(): Boolean {
+        if (selected_aviation_key != null) {
+            clear_aviation_selection()
+            invalidate()
+            return true
+        }
         if (details_session.photo_evidence_open) {
             details_session.close_photo_evidence()
             invalidate()
@@ -953,8 +965,10 @@ class FlightMapView(
         val w = content_width()
         val h = content_height()
         val location = latest_location
+        val aviation_snapshot = aviation_layer_controller.snapshot
+        val selected_aviation = resolve_selected_aviation_for_draw(aviation_snapshot)
         val modal_open =
-            details_session.details_open || settings_open || priority_tracker_open || filters_open || selected_restricted_airspace != null
+            details_session.details_open || settings_open || priority_tracker_open || filters_open || selected_aviation != null
         canvas.withTranslation(safe_inset_left, safe_inset_top) {
             clipRect(0f, 0f, w, h)
             paint.color = map_empty_color
@@ -966,7 +980,7 @@ class FlightMapView(
                 val viewport = viewport_for(location, w, h)
                 draw_map_tiles(this, viewport)
                 request_aviation_layers_if_needed(viewport)
-                draw_aviation_layers(this, viewport)
+                draw_aviation_layers(this, viewport, aviation_snapshot, selected_aviation)
                 draw_priority_range_circle(this, viewport, location)
                 draw_selected_flight_path(this, viewport)
                 draw_traffic_overlay(this, viewport)
@@ -983,8 +997,10 @@ class FlightMapView(
             } else {
                 draw_modal_backdrop(this, w, h)
             }
-            selected_restricted_airspace?.let {
-                draw_restricted_airspace_details_panel(this, w, h, it)
+            selected_aviation?.let { selection ->
+                aviation_snapshot?.let { snapshot ->
+                    draw_aviation_details_panel(this, w, h, selection, snapshot)
+                }
             }
             if (details_session.details_open) {
                 // Draw only the open overlay branch so the visible panel matches the current state object.
@@ -1052,7 +1068,11 @@ class FlightMapView(
                 down_x = x
                 down_y = y
                 details_scroll_start_y = y
-                details_scroll_start_offset = details_scroll_y
+                details_scroll_start_offset = if (selected_aviation_key != null) {
+                    aviation_details_scroll_y
+                } else {
+                    details_scroll_y
+                }
                 drag_started = false
                 drag_blocked = !map_touch_active
                 drag_start_center = if (map_touch_active) current_interaction_viewport()?.let {
@@ -1066,6 +1086,20 @@ class FlightMapView(
             MotionEvent.ACTION_MOVE -> {
                 if (update_map_label_text_slider_drag(x)) return true
                 if (update_priority_adjust_hold(x, y)) return true
+                if (selected_aviation_key != null && aviation_details_max_scroll_y > 0f) {
+                    val dy = y - details_scroll_start_y
+                    if (!drag_started && abs(dy) > dp(6)) drag_started = true
+                    if (drag_started) {
+                        aviation_details_scroll_y =
+                            AviationInspectorScrollPolicy.scroll_from_drag(
+                                start_scroll_y = details_scroll_start_offset,
+                                drag_delta_y = dy,
+                                max_scroll_y = aviation_details_max_scroll_y
+                            )
+                        postInvalidateOnAnimation()
+                    }
+                    return true
+                }
                 if (details_session.details_open && !settings_open && !priority_tracker_open && !filters_open && details_max_scroll_y > 0f) {
                     val dy = y - details_scroll_start_y
                     if (!drag_started && abs(dy) > dp(6)) drag_started = true
@@ -1138,7 +1172,8 @@ class FlightMapView(
     }
 
     private fun map_gesture_blocked_by_overlay(): Boolean {
-        return settings_open || details_block_map_interaction() || priority_tracker_open || filters_open
+        return settings_open || details_block_map_interaction() || priority_tracker_open ||
+                filters_open || selected_aviation_key != null
     }
 
     private fun details_block_map_interaction(): Boolean {
@@ -1189,7 +1224,27 @@ class FlightMapView(
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         val is_pointer_scroll = event.action == MotionEvent.ACTION_SCROLL &&
                 (event.source and InputDevice.SOURCE_CLASS_POINTER) != 0
-        if (!settings_open && !details_session.details_open && !priority_tracker_open && !filters_open && is_pointer_scroll && latest_location != null) {
+        selected_aviation_key?.let { key ->
+            if (!is_pointer_scroll) return@let
+            val scroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            val x = content_x(event.x)
+            val y = content_y(event.y)
+            if (scroll != 0f && aviation_details_body_bounds(
+                    content_width(),
+                    content_height(),
+                    key.kind
+                ).contains(x, y)
+            ) {
+                aviation_details_scroll_y = AviationInspectorScrollPolicy.scroll_from_drag(
+                    start_scroll_y = aviation_details_scroll_y,
+                    drag_delta_y = scroll * dp(48f),
+                    max_scroll_y = aviation_details_max_scroll_y
+                )
+                invalidate()
+            }
+            return true
+        }
+        if (!map_gesture_blocked_by_overlay() && is_pointer_scroll && latest_location != null) {
             val scroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
             if (scroll != 0f) {
                 // Hardware wheels/trackpads zoom around the cursor, matching mouse use in the emulator.
@@ -1209,26 +1264,25 @@ class FlightMapView(
         if (filters_open && filter_search_focused && handle_filter_search_key(keyCode, event)) {
             return true
         }
-        if (!settings_open && !details_session.details_open && !priority_tracker_open && !filters_open && latest_location != null) {
-            val zoom_step = when (keyCode) {
-                KeyEvent.KEYCODE_EQUALS,
-                KeyEvent.KEYCODE_PLUS,
-                KeyEvent.KEYCODE_NUMPAD_ADD -> 0.5
+        val zoom_step = when (keyCode) {
+            KeyEvent.KEYCODE_EQUALS,
+            KeyEvent.KEYCODE_PLUS,
+            KeyEvent.KEYCODE_NUMPAD_ADD -> 0.5
 
-                KeyEvent.KEYCODE_MINUS,
-                KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> -0.5
+            KeyEvent.KEYCODE_MINUS,
+            KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> -0.5
 
-                else -> null
-            }
-            if (zoom_step != null) {
-                // Keyboard zoom is centered in the open map area so panels do not steal the focal point.
-                mark_map_interaction()
-                val focus = layout.default_map_focus(content_width(), content_height(), layout_state())
-                val scale_factor = 2.0.pow(zoom_step)
-                zoom_and_pan_during_pinch(scale_factor, focus.x, focus.y, focus.x, focus.y)
-                request_visible_aircraft_after_map_interaction()
-                return true
-            }
+            else -> null
+        }
+        if (selected_aviation_key != null && zoom_step != null) return true
+        if (!map_gesture_blocked_by_overlay() && latest_location != null && zoom_step != null) {
+            // Keyboard zoom is centered in the open map area so panels do not steal the focal point.
+            mark_map_interaction()
+            val focus = layout.default_map_focus(content_width(), content_height(), layout_state())
+            val scale_factor = 2.0.pow(zoom_step)
+            zoom_and_pan_during_pinch(scale_factor, focus.x, focus.y, focus.x, focus.y)
+            request_visible_aircraft_after_map_interaction()
+            return true
         }
         return super.onKeyDown(keyCode, event)
     }
@@ -1619,10 +1673,15 @@ class FlightMapView(
     }
 
     // Draw cached real aviation layers only after the viewport request has produced source data.
-    private fun draw_aviation_layers(canvas: Canvas, viewport: Viewport) {
+    private fun draw_aviation_layers(
+        canvas: Canvas,
+        viewport: Viewport,
+        snapshot: AviationLayerSnapshot?,
+        selection: AviationSelection?
+    ) {
         val visibility = aviation_layer_visibility()
-        if (!aviation_layer_controller.has_enabled_layers(visibility) && selected_restricted_airspace == null) return
-        val snapshot = aviation_layer_controller.snapshot ?: return
+        if (!aviation_layer_controller.has_enabled_layers(visibility) && selection == null) return
+        snapshot ?: return
         val visible_bounds = aviation_bounds_for_viewport(viewport).to_aviation_geo_bounds()
         aviation_layer_renderer.draw_layers(
             canvas = canvas,
@@ -1631,9 +1690,24 @@ class FlightMapView(
             visible_bounds = visible_bounds,
             visibility = visibility,
             style = aviation_layer_style(),
-            selected_restricted_airspace = selected_restricted_airspace,
+            selection = selection,
             interaction_active = aviation_layer_interacting(SystemClock.elapsedRealtime())
         )
+    }
+
+    private fun resolve_selected_aviation_for_draw(
+        snapshot: AviationLayerSnapshot?
+    ): AviationSelection? {
+        val key = selected_aviation_key ?: return null
+        val selection = snapshot?.let { AviationSelectionPolicy.resolve(key, it) }
+        if (selection == null) clear_aviation_selection()
+        return selection
+    }
+
+    private fun clear_aviation_selection() {
+        selected_aviation_key = null
+        aviation_details_scroll_y = 0f
+        aviation_details_max_scroll_y = 0f
     }
 
     private fun aviation_layer_interacting(now: Long): Boolean {
@@ -2540,13 +2614,23 @@ class FlightMapView(
         return details_panel_renderer.panel_bounds(w, h, layout.is_wide_layout(w, h))
     }
 
-    private fun restricted_airspace_details_panel_bounds(w: Float, h: Float): RectF {
-        return restricted_airspace_inspector.panel_bounds(w, h)
+    private fun aviation_details_panel_bounds(
+        w: Float,
+        h: Float,
+        kind: AviationLayerKind
+    ): RectF {
+        return aviation_layer_inspector.panel_bounds(w, h, kind)
     }
 
-    private fun restricted_airspace_close_button_bounds(panel: RectF): RectF {
-        return restricted_airspace_inspector.close_button_bounds(panel)
+    private fun aviation_details_close_button_bounds(panel: RectF): RectF {
+        return aviation_layer_inspector.close_button_bounds(panel)
     }
+
+    private fun aviation_details_body_bounds(
+        w: Float,
+        h: Float,
+        kind: AviationLayerKind
+    ): RectF = aviation_layer_inspector.body_bounds(aviation_details_panel_bounds(w, h, kind))
 
     private fun details_close_button_bounds(panel: RectF): RectF =
         details_panel_renderer.close_button_bounds(panel)
@@ -2829,43 +2913,56 @@ class FlightMapView(
         chrome_renderer.draw_choice_button(canvas, rect, label, selected, chrome_style())
     }
 
-    private fun draw_restricted_airspace_details_panel(
+    private fun draw_aviation_details_panel(
         canvas: Canvas,
         w: Float,
         h: Float,
-        feature: AviationAirspaceFeature
+        selection: AviationSelection,
+        snapshot: AviationLayerSnapshot
     ) {
-        restricted_airspace_inspector.draw_details_panel(
+        val requested_scroll_y = aviation_details_scroll_y
+        val result = aviation_layer_inspector.draw_details_panel(
             canvas = canvas,
             w = w,
             h = h,
-            feature = feature,
-            style = restricted_airspace_style()
+            selection = selection,
+            snapshot = snapshot,
+            now_epoch_ms = System.currentTimeMillis(),
+            scroll_y = requested_scroll_y,
+            style = aviation_layer_inspector_style()
         )
+        aviation_details_scroll_y = result.scroll_y
+        aviation_details_max_scroll_y = result.max_scroll_y
+        if (result.scroll_y != requested_scroll_y) postInvalidateOnAnimation()
     }
 
-    private fun restricted_airspace_style(): RestrictedAirspaceStyle {
-        return RestrictedAirspaceStyle(
+    private fun aviation_layer_inspector_style(): AviationLayerInspectorStyle {
+        return AviationLayerInspectorStyle(
             panel_color = panel_color,
             modal_panel_alpha = theme_style.modal_panel_alpha,
             text_color = text_color,
             muted_color = muted_color,
-            accent_orange_color = accent_orange_color
+            accent_orange_color = accent_orange_color,
+            accent_blue_color = accent_blue_color,
+            accent_pink_color = accent_pink_color,
+            accent_yellow_color = accent_yellow_color,
+            military_gray_color = military_gray_color
         )
     }
 
-    private fun restricted_airspace_at(x: Float, y: Float): AviationAirspaceFeature? {
-        if (!restricted_airspaces_layer_enabled) return null
+    private fun aviation_selection_key_at(x: Float, y: Float): AviationSelectionKey? {
         val snapshot = aviation_layer_controller.snapshot ?: return null
         val location = latest_location ?: return null
         val viewport = viewport_for(location, content_width(), content_height())
         val visible_bounds = aviation_bounds_for_viewport(viewport).to_aviation_geo_bounds()
-        return restricted_airspace_inspector.airspace_at(
+        return aviation_layer_renderer.selection_key_at(
             x = x,
             y = y,
+            density = resources.displayMetrics.density,
             snapshot = snapshot,
             viewport = viewport,
-            visible_bounds = visible_bounds
+            visible_bounds = visible_bounds,
+            visibility = aviation_layer_visibility()
         )
     }
 
@@ -2894,16 +2991,19 @@ class FlightMapView(
             return if (!panel.contains(x, y)) deselect_aircraft_for_nearest_traffic() else false
         }
         if (handle_selected_aircraft_map_long_press(x, y)) return true
-        if (settings_open || priority_tracker_open || filters_open || selected_restricted_airspace != null) return false
-        val feature = restricted_airspace_at(x, y) ?: return false
-        selected_restricted_airspace = feature
+        if (settings_open || priority_tracker_open || filters_open || selected_aviation_key != null) return false
+        if (is_overlay_or_control_hit(x, y) || aircraft_selection_hit_at(x, y) != null) return false
+        val key = aviation_selection_key_at(x, y) ?: return false
+        selected_aviation_key = key
+        aviation_details_scroll_y = 0f
+        aviation_details_max_scroll_y = 0f
         invalidate()
         return true
     }
 
     private fun handle_selected_aircraft_map_long_press(x: Float, y: Float): Boolean {
         if (selected_path_controller.selected_aircraft_id == null) return false
-        if (settings_open || priority_tracker_open || filters_open || selected_restricted_airspace != null) return false
+        if (settings_open || priority_tracker_open || filters_open || selected_aviation_key != null) return false
         if (is_overlay_or_control_hit(x, y)) return false
         return deselect_aircraft_for_nearest_traffic()
     }
@@ -2922,7 +3022,7 @@ class FlightMapView(
 
     // Route taps from open overlays down to the map so visible controls always win over aircraft hits.
     private fun handle_tap(x: Float, y: Float) {
-        if (handle_restricted_airspace_tap(x, y)) return
+        if (handle_aviation_details_tap(x, y)) return
         if (handle_filters_panel_tap(x, y)) return
         if (handle_priority_tracker_tap(x, y)) return
         if (handle_details_panel_tap(x, y)) return
@@ -2930,15 +3030,19 @@ class FlightMapView(
         handle_map_surface_tap(x, y)
     }
 
-    private fun handle_restricted_airspace_tap(x: Float, y: Float): Boolean {
-        selected_restricted_airspace?.let {
-            val panel = restricted_airspace_details_panel_bounds(content_width(), content_height())
-            if (restricted_airspace_close_button_bounds(panel).contains(x, y) || !panel.contains(
-                    x,
-                    y
-                )
-            ) {
-                selected_restricted_airspace = null
+    private fun handle_aviation_details_tap(x: Float, y: Float): Boolean {
+        selected_aviation_key?.let { key ->
+            val panel = aviation_details_panel_bounds(
+                content_width(),
+                content_height(),
+                key.kind
+            )
+            val action = AviationInspectorInteractionPolicy.action_for(
+                inside_panel = panel.contains(x, y),
+                inside_close_button = aviation_details_close_button_bounds(panel).contains(x, y)
+            )
+            if (action == AviationInspectorTapAction.CLOSE) {
+                clear_aviation_selection()
             }
             invalidate()
             return true
@@ -3368,7 +3472,11 @@ class FlightMapView(
     }
 
     private fun select_aircraft_at(x: Float, y: Float) {
-        val location = latest_location ?: return
+        aircraft_selection_hit_at(x, y)?.let(::select_aircraft)
+    }
+
+    private fun aircraft_selection_hit_at(x: Float, y: Float): Aircraft? {
+        val location = latest_location ?: return null
         val viewport = viewport_for(location, content_width(), content_height())
         val cache = cached_traffic()
         val selected_key = selected_path_controller.selected_aircraft_key
@@ -3376,7 +3484,7 @@ class FlightMapView(
         val now_epoch_sec = aircraft_projection_epoch_seconds()
         val scale = 2.0.pow(viewport.zoom)
         val radius = dp(AIRCRAFT_TAP_RADIUS_DP)
-        val hit = traffic_selection_hit_tester.hit_at(
+        return traffic_selection_hit_tester.hit_at(
             cache = cache,
             viewport = viewport,
             tap_x = x,
@@ -3389,8 +3497,7 @@ class FlightMapView(
             selected_aircraft = selected_path_controller.selected_aircraft_snapshot,
             path_focus = path_focus,
             filters_restrict_aircraft = filters_restrict_aircraft()
-        ) ?: return
-        select_aircraft(hit)
+        )
     }
 
     private fun handle_photo_gallery_tap(panel: RectF, x: Float, y: Float) {
@@ -3554,7 +3661,9 @@ class FlightMapView(
     }
 
     private fun is_overlay_or_control_hit(x: Float, y: Float): Boolean {
-        if (settings_open || details_block_map_interaction() || priority_tracker_open || filters_open) return true
+        if (settings_open || details_block_map_interaction() || priority_tracker_open ||
+            filters_open || selected_aviation_key != null
+        ) return true
         val w = content_width()
         val h = content_height()
         if (latest_location == null) return true
@@ -3717,6 +3826,7 @@ class FlightMapView(
     private fun set_atc_boundaries_layer_enabled(enabled: Boolean) {
         if (atc_boundaries_layer_enabled == enabled) return
         atc_boundaries_layer_enabled = enabled
+        update_aviation_selection_after_toggle(AviationLayerKind.ATC_BOUNDARIES, enabled)
         prefs.edit { putBoolean(FlightAlertSettings.KEY_LAYER_ATC_BOUNDARIES_ENABLED, enabled) }
         on_aviation_layers_changed()
     }
@@ -3724,7 +3834,7 @@ class FlightMapView(
     private fun set_restricted_airspaces_layer_enabled(enabled: Boolean) {
         if (restricted_airspaces_layer_enabled == enabled) return
         restricted_airspaces_layer_enabled = enabled
-        if (!enabled) selected_restricted_airspace = null
+        update_aviation_selection_after_toggle(AviationLayerKind.RESTRICTED_AIRSPACES, enabled)
         prefs.edit {
             putBoolean(
                 FlightAlertSettings.KEY_LAYER_RESTRICTED_AIRSPACES_ENABLED,
@@ -3737,6 +3847,7 @@ class FlightMapView(
     private fun set_oceanic_tracks_layer_enabled(enabled: Boolean) {
         if (oceanic_tracks_layer_enabled == enabled) return
         oceanic_tracks_layer_enabled = enabled
+        update_aviation_selection_after_toggle(AviationLayerKind.OCEANIC_TRACKS, enabled)
         prefs.edit { putBoolean(FlightAlertSettings.KEY_LAYER_OCEANIC_TRACKS_ENABLED, enabled) }
         on_aviation_layers_changed()
     }
@@ -3744,8 +3855,17 @@ class FlightMapView(
     private fun set_airport_labels_layer_enabled(enabled: Boolean) {
         if (airport_labels_layer_enabled == enabled) return
         airport_labels_layer_enabled = enabled
+        update_aviation_selection_after_toggle(AviationLayerKind.AIRPORTS, enabled)
         prefs.edit { putBoolean(FlightAlertSettings.KEY_LAYER_AIRPORT_LABELS_ENABLED, enabled) }
         on_aviation_layers_changed()
+    }
+
+    private fun update_aviation_selection_after_toggle(
+        kind: AviationLayerKind,
+        enabled: Boolean
+    ) {
+        val next = AviationSelectionPolicy.after_toggle(selected_aviation_key, kind, enabled)
+        if (next != selected_aviation_key) clear_aviation_selection()
     }
 
     private fun on_aviation_layers_changed() {

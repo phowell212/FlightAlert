@@ -731,7 +731,7 @@ class FlightMapPanelRenderer(
         draw_layer_toggle_button(
             canvas,
             chrome.layout.layer_restricted_button_bounds(rect),
-            "Restricted airspace",
+            "Special-use",
             state.restricted_airspaces_enabled,
             AviationLayerKind.RESTRICTED_AIRSPACES,
             state
@@ -1139,7 +1139,10 @@ class FlightMapPanelRenderer(
         val suffix = when {
             !enabled -> "off"
             status?.state == AviationLayerState.LOADED -> "on"
+            status?.state == AviationLayerState.PARTIAL ->
+                if (status.showing_last_good) "stale" else "partial"
             status?.state == AviationLayerState.EMPTY -> "empty"
+            status?.state == AviationLayerState.UNAVAILABLE && status.showing_last_good -> "stale"
             status?.state == AviationLayerState.UNAVAILABLE -> "retry"
             state.fetch_in_flight -> "loading"
             else -> "on"
