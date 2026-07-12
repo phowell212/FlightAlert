@@ -1391,14 +1391,28 @@ object AviationGeoJsonParser {
     }
 
     private fun altitude_label(properties: JSONObject, prefix: String): String? {
-        val value = properties.number_or_null("${prefix}_VAL") ?: return null
-        if (value <= MISSING_ALTITUDE_SENTINEL) return null
-        val unit = properties.clean_string("${prefix}_UOM") ?: return null
-        return "${value.toInt()} $unit"
+        val code = properties.clean_string("${prefix}_CODE")
+        val value = properties.number_or_null("${prefix}_VAL")
+            ?.takeIf { it > MISSING_ALTITUDE_SENTINEL }
+        val unit = properties.clean_string("${prefix}_UOM")
+
+        if (code.equals(UNLIMITED_ALTITUDE_CODE, ignoreCase = true)) return code
+        if (code.equals(SURFACE_ALTITUDE_CODE, ignoreCase = true) && value == 0.0) return code
+        if (value == null) return code?.let { "$it (value unavailable)" }
+
+        val value_label = BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
+        return when {
+            unit == null && code == null -> "$value_label (unit/reference unavailable)"
+            unit == null -> "$value_label $code (unit unavailable)"
+            code == null -> "$value_label $unit (reference unavailable)"
+            else -> "$value_label $unit $code"
+        }
     }
 
     private const val MIN_RING_POINTS = 4
     private const val MISSING_ALTITUDE_SENTINEL = -9000.0
+    private const val SURFACE_ALTITUDE_CODE = "SFC"
+    private const val UNLIMITED_ALTITUDE_CODE = "UNLTD"
 }
 
 internal fun Any?.exact_aviation_object_id_or_null(): Long? = when (this) {

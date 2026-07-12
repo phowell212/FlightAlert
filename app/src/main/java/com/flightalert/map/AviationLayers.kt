@@ -288,7 +288,7 @@ class AviationLayerClient(
             where_clause = "TYPE_CODE IN ('ARTCC','FIR','OCA')",
             out_fields =
                 "OBJECTID,NAME,IDENT,TYPE_CODE,LOCAL_TYPE,UPPER_VAL,UPPER_UOM," +
-                    "LOWER_VAL,LOWER_UOM,CITY,STATE",
+                    "UPPER_CODE,LOWER_VAL,LOWER_UOM,LOWER_CODE,CITY,STATE",
             record_id = AviationAirspaceFeature::object_id,
             parser = AviationGeoJsonParser::parse_airspaces
         )
@@ -303,7 +303,7 @@ class AviationLayerClient(
             where_clause = "1=1",
             out_fields =
                 "OBJECTID,NAME,TYPE_CODE,UPPER_VAL,LOWER_VAL,UPPER_UOM,LOWER_UOM," +
-                    "TIMESOFUSE,CITY,STATE",
+                    "UPPER_CODE,LOWER_CODE,TIMESOFUSE,CITY,STATE",
             record_id = AviationAirspaceFeature::object_id,
             parser = AviationGeoJsonParser::parse_airspaces
         )
