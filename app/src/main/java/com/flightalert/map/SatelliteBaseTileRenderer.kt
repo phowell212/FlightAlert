@@ -1340,7 +1340,7 @@ internal class SatelliteBaseTileRenderer(
         const val SATELLITE_CHILD_FALLBACK_MAX_DELTA = 1
         const val SATELLITE_TILE_FADE_MS = 360f
         const val MAP_PAN_CACHE_PADDING_PX = 512f
-        const val MAP_PAN_CACHE_MAX_AGE_MS = 750L
+        const val MAP_PAN_CACHE_MAX_AGE_MS = Long.MAX_VALUE
         const val MAP_PAN_CACHE_RECORD_RETRY_MS = 250L
         const val MAP_PAN_CACHE_ZOOM_EPSILON = 0.000_001
         const val LOD_PREFETCH_START_FRACTION = 0.08f
