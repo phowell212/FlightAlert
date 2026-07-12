@@ -622,18 +622,6 @@ internal class SatelliteMapTileRenderer(
             floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
 
-        request_satellite_buffer_tiles(
-            tile_zoom = tile_zoom,
-            first_tile_x = first_tile_x,
-            last_tile_x = last_tile_x,
-            first_tile_y = first_tile_y,
-            last_tile_y = last_tile_y,
-            max_tile = max_tile,
-            state = state,
-            now_ms = now_ms,
-            request_generation = request_generation
-        )
-
         var visible = 0
         var loaded = 0
         var requested = 0
@@ -697,7 +685,14 @@ internal class SatelliteMapTileRenderer(
                     }
                 } else {
                     requested++
-                    request_satellite_parent_tiles(tile_zoom, tx, ty, state, request_generation)
+                    request_satellite_parent_tiles(
+                        tile_zoom,
+                        tx,
+                        ty,
+                        state,
+                        request_generation,
+                        SatelliteBaseRequestKind.VISIBLE_PARENT
+                    )
                     request_tile(
                         z = tile_zoom,
                         x = tx,
@@ -705,7 +700,7 @@ internal class SatelliteMapTileRenderer(
                         key = key,
                         state = state,
                         request_generation = request_generation,
-                        request_priority = SATELLITE_TILE_REQUEST_PRIORITY_EXACT
+                        request_kind = SatelliteBaseRequestKind.VISIBLE_EXACT
                     )
 
                     if (layer_visible) {
@@ -741,6 +736,18 @@ internal class SatelliteMapTileRenderer(
                 }
             }
         }
+
+        request_satellite_buffer_tiles(
+            tile_zoom = tile_zoom,
+            first_tile_x = first_tile_x,
+            last_tile_x = last_tile_x,
+            first_tile_y = first_tile_y,
+            last_tile_y = last_tile_y,
+            max_tile = max_tile,
+            state = state,
+            now_ms = now_ms,
+            request_generation = request_generation
+        )
 
         return TileLayerDrawStats(
             visible = visible,
@@ -3248,7 +3255,14 @@ internal class SatelliteMapTileRenderer(
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
                 mark_current_tile_request(key, request_generation)
-                request_satellite_parent_tiles(tile_zoom, tx, ty, state, request_generation)
+                request_satellite_parent_tiles(
+                    tile_zoom,
+                    tx,
+                    ty,
+                    state,
+                    request_generation,
+                    SatelliteBaseRequestKind.BUFFER_PARENT
+                )
                 request_tile(
                     z = tile_zoom,
                     x = tx,
@@ -3256,7 +3270,7 @@ internal class SatelliteMapTileRenderer(
                     key = key,
                     state = state,
                     request_generation = request_generation,
-                    request_priority = SATELLITE_TILE_REQUEST_PRIORITY_BUFFER
+                    request_kind = SatelliteBaseRequestKind.BUFFER_EXACT
                 )
             }
         }
@@ -3303,7 +3317,7 @@ internal class SatelliteMapTileRenderer(
                     key = key,
                     state = state,
                     request_generation = request_generation,
-                    request_priority = SATELLITE_TILE_REQUEST_PRIORITY_PREFETCH
+                    request_kind = SatelliteBaseRequestKind.UPPER_PREFETCH
                 )
             }
         }
@@ -3314,7 +3328,8 @@ internal class SatelliteMapTileRenderer(
         x: Int,
         y: Int,
         state: MapTileRenderState,
-        request_generation: Long
+        request_generation: Long,
+        request_kind: SatelliteBaseRequestKind
     ) {
         if (z <= MIN_ZOOM) return
         val max_depth = (z - MIN_ZOOM).coerceAtMost(SATELLITE_PARENT_REQUEST_DEPTH)
@@ -3333,7 +3348,8 @@ internal class SatelliteMapTileRenderer(
                     key = parent_key,
                     state = state,
                     request_generation = request_generation,
-                    request_priority = SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE - depth
+                    request_kind = request_kind,
+                    parent_depth = depth
                 )
             }
         }
@@ -3347,7 +3363,8 @@ internal class SatelliteMapTileRenderer(
         key: String,
         state: MapTileRenderState,
         request_generation: Long,
-        request_priority: Int
+        request_kind: SatelliteBaseRequestKind,
+        parent_depth: Int = 0
     ) {
         if (tile_bitmap(z, x, y, key, state) != null) {
             return
@@ -3360,9 +3377,12 @@ internal class SatelliteMapTileRenderer(
         }
         satellite_tile_executor.execute(
             SatelliteTileRequestTask(
-                generation = request_generation,
-                priority = request_priority,
-                sequence = satellite_tile_task_sequence.incrementAndGet(),
+                order = SatelliteBaseTileRequestOrder(
+                    generation = request_generation,
+                    kind = request_kind,
+                    parentDepth = parent_depth,
+                    sequence = satellite_tile_task_sequence.incrementAndGet()
+                ),
                 action = tileTask@{
                     var connection: HttpURLConnection? = null
                     var redrew_when_loaded = false
@@ -3559,18 +3579,14 @@ internal class SatelliteMapTileRenderer(
     )
 
     private class SatelliteTileRequestTask(
-        private val generation: Long,
-        private val priority: Int,
-        private val sequence: Long,
+        private val order: SatelliteBaseTileRequestOrder,
         private val action: () -> Unit
     ) : Runnable, Comparable<Runnable> {
         override fun run() = action()
 
         override fun compareTo(other: Runnable): Int {
             val task = other as? SatelliteTileRequestTask ?: return -1
-            if (generation != task.generation) return task.generation.compareTo(generation)
-            if (priority != task.priority) return priority.compareTo(task.priority)
-            return sequence.compareTo(task.sequence)
+            return SatelliteBaseTileScheduler.compare(order, task.order)
         }
     }
 
@@ -3727,10 +3743,6 @@ internal class SatelliteMapTileRenderer(
         const val MIN_LAYER_ALPHA = 0.01f
         const val SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS = 15_000L
         const val SATELLITE_TILE_NETWORK_THREADS = 4
-        const val SATELLITE_TILE_REQUEST_PRIORITY_PARENT_BASE = 2
-        const val SATELLITE_TILE_REQUEST_PRIORITY_EXACT = 6
-        const val SATELLITE_TILE_REQUEST_PRIORITY_PREFETCH = 5
-        const val SATELLITE_TILE_REQUEST_PRIORITY_BUFFER = 10
         const val CURRENT_TILE_REQUEST_HISTORY_MAX = 900
         const val CURRENT_TILE_REQUEST_HISTORY_AGE = 6L
         const val CURRENT_TILE_REQUEST_STALE_GENERATIONS = 2L
