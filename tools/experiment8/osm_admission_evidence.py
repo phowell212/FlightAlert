@@ -36,9 +36,9 @@ _CHECK_COUNTS = re.compile(
     r"and (0|[1-9][0-9]*) relations in this file\.\Z"
 )
 _MISSING_COUNT_LINES = (
-    ("Nodes in ways missing: ", "nodes_in_ways"),
-    ("Nodes in relations missing: ", "nodes_in_relations"),
-    ("Ways in relations missing: ", "ways_in_relations"),
+    ("Nodes     in ways      missing: ", "nodes_in_ways"),
+    ("Nodes     in relations missing: ", "nodes_in_relations"),
+    ("Ways      in relations missing: ", "ways_in_relations"),
     ("Relations in relations missing: ", "relations_in_relations"),
 )
 _RESULT_SEAL = object()

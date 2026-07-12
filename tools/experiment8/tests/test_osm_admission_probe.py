@@ -150,9 +150,9 @@ def _check_refs_stderr(
         _timed("Reading ways..."),
         _timed("Reading relations..."),
         f"There are {nodes} nodes, {ways} ways, and {relations} relations in this file.",
-        f"Nodes in ways missing: {missing_nodes_in_ways}",
-        f"Nodes in relations missing: {missing_nodes_in_relations}",
-        f"Ways in relations missing: {missing_ways_in_relations}",
+        f"Nodes     in ways      missing: {missing_nodes_in_ways}",
+        f"Nodes     in relations missing: {missing_nodes_in_relations}",
+        f"Ways      in relations missing: {missing_ways_in_relations}",
         f"Relations in relations missing: {missing_relations_in_relations}",
         _timed("Memory used for indexes: 1 MBytes"),
         _timed("Peak memory used: 18 MBytes"),
@@ -352,7 +352,13 @@ class CheckRefsTranscriptTests(unittest.TestCase):
         cases = (
             (0, b"", valid + b"extra\n"),
             (0, b"", valid.replace(self.INPUT.encode(), b"/mnt/e/wrong.pbf")),
-            (0, b"", valid.replace(b"Nodes in ways missing: 0", b"Nodes missing: 0")),
+            (
+                0,
+                b"",
+                valid.replace(
+                    b"Nodes     in ways      missing: 0", b"Nodes missing: 0"
+                ),
+            ),
             (1, b"", valid),
             (0, b"unexpected\n", valid),
             (0, b"", valid[:-1]),
