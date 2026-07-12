@@ -1,2 +1,4 @@
 /tools/experiment8/data/sourced-text-conformance-v1.json text eol=lf
 /tools/experiment8/data/unicode-script-profile-17.0.0.json text eol=lf
+/tools/experiment8/tests/fixtures/*.opl text eol=lf
+/tools/experiment8/tests/fixtures/global-waterway-root-ids.txt text eol=lf
