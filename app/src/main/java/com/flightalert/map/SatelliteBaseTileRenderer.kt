@@ -76,6 +76,7 @@ internal class SatelliteBaseTileRenderer(
     private val tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
     private val interim_tiles = linkedMapOf<String, InterimRasterTile>()
     private val loaded_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
+    private val changed_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
     private val visible_interim_tile_buffer = ArrayList<InterimRasterTile>(MAX_INTERIM_TILES)
     private val requested_tiles = mutableSetOf<String>()
     private val current_tile_request_generations = mutableMapOf<String, Long>()
@@ -267,6 +268,7 @@ internal class SatelliteBaseTileRenderer(
             )
         }
         loaded_interim_tile_buffer.clear()
+        changed_interim_tile_buffer.clear()
 
         val lower_stats = draw_tile_grid_layer(
             canvas = canvas,
@@ -324,7 +326,7 @@ internal class SatelliteBaseTileRenderer(
 
         if (loaded_interim_tile_buffer.isNotEmpty()) {
             if (lod.blend_active || !required_tiles_ready) {
-                merge_interim_tiles(loaded_interim_tile_buffer)
+                merge_interim_tiles(changed_interim_tile_buffer)
             } else {
                 replace_interim_tiles(loaded_interim_tile_buffer)
             }
@@ -868,12 +870,27 @@ internal class SatelliteBaseTileRenderer(
     }
 
     private fun replace_interim_tiles(tiles: List<InterimRasterTile>) {
-        interim_tiles.clear()
         val start_index = (tiles.size - MAX_INTERIM_TILES).coerceAtLeast(0)
+        if (interim_tiles_match_replacement(tiles, start_index)) return
+        interim_tiles.clear()
         for (index in start_index until tiles.size) {
             val tile = tiles[index]
             interim_tiles[tile.key] = tile
         }
+    }
+
+    private fun interim_tiles_match_replacement(
+        tiles: List<InterimRasterTile>,
+        start_index: Int
+    ): Boolean {
+        if (interim_tiles.size != tiles.size - start_index) return false
+        val current_tiles = interim_tiles.entries.iterator()
+        for (index in start_index until tiles.size) {
+            val current = current_tiles.next()
+            val replacement = tiles[index]
+            if (current.key != replacement.key || current.value !== replacement) return false
+        }
+        return true
     }
 
     private fun merge_interim_tiles(tiles: List<InterimRasterTile>) {
@@ -909,7 +926,7 @@ internal class SatelliteBaseTileRenderer(
             loaded_interim_tiles += existing
             return
         }
-        loaded_interim_tiles += InterimRasterTile(
+        val tile = InterimRasterTile(
             key = key,
             cache_key = cache_key,
             z = z,
@@ -918,6 +935,8 @@ internal class SatelliteBaseTileRenderer(
             bitmap = bitmap,
             last_used_ms = now_ms
         )
+        loaded_interim_tiles += tile
+        changed_interim_tile_buffer += tile
     }
 
     private fun prune_interim_tiles(now_ms: Long) {
