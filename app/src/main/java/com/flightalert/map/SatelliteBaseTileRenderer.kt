@@ -751,7 +751,6 @@ internal class SatelliteBaseTileRenderer(
     ) {
         bitmap_paint.alpha = (255f * alpha.coerceIn(0f, 1f)).roundToInt().coerceIn(0, 255)
         canvas.drawBitmap(bitmap, source, destination, bitmap_paint)
-        bitmap_paint.alpha = 255
     }
 
     private fun draw_interim_tiles(
