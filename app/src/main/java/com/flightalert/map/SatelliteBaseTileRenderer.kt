@@ -80,6 +80,7 @@ internal class SatelliteBaseTileRenderer(
     private val requested_tiles = mutableSetOf<String>()
     private val current_tile_request_generations = mutableMapOf<String, Long>()
     private var current_tile_request_generation = 0L
+    private val tile_request_frame = TileRequestFrame()
     private val satellite_tile_worker_id = AtomicInteger()
     private val satellite_tile_task_sequence = AtomicLong()
     private val satellite_tile_executor = ThreadPoolExecutor(
@@ -245,7 +246,10 @@ internal class SatelliteBaseTileRenderer(
 
         val lod = satellite_lod_state(viewport)
 
-        val request_generation = begin_tile_request_generation()
+        val request_frame = begin_tile_request_generation()
+        val request_generation = request_frame.generation
+        val refresh_loaded_tile_request_generations =
+            !request_frame.requests_were_idle
 
         val interim_draw_needed = include_retained_interim &&
                 (lod.blend_active ||
@@ -276,6 +280,7 @@ internal class SatelliteBaseTileRenderer(
             allow_parent_fallback = true,
             loaded_interim_tiles = loaded_interim_tile_buffer,
             request_generation = request_generation,
+            refresh_loaded_tile_request_generations = refresh_loaded_tile_request_generations,
             allow_speculative_requests = allow_speculative_requests
         )
 
@@ -292,6 +297,7 @@ internal class SatelliteBaseTileRenderer(
                 allow_parent_fallback = false,
                 loaded_interim_tiles = loaded_interim_tile_buffer,
                 request_generation = request_generation,
+                refresh_loaded_tile_request_generations = refresh_loaded_tile_request_generations,
                 allow_speculative_requests = allow_speculative_requests
             )
         } else {
@@ -530,6 +536,7 @@ internal class SatelliteBaseTileRenderer(
         allow_parent_fallback: Boolean,
         loaded_interim_tiles: MutableList<InterimRasterTile>,
         request_generation: Long,
+        refresh_loaded_tile_request_generations: Boolean,
         allow_speculative_requests: Boolean
     ): TileLayerDrawStats {
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
@@ -556,7 +563,6 @@ internal class SatelliteBaseTileRenderer(
             for (tx_raw in first_tile_x..last_tile_x) {
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
-                mark_current_tile_request(key, request_generation)
                 val screen_x = (tx_raw * TILE_SIZE * tile_to_viewport_scale - left_world).toFloat()
                 val screen_y = (ty * TILE_SIZE * tile_to_viewport_scale - top_world).toFloat()
                 val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
@@ -570,6 +576,9 @@ internal class SatelliteBaseTileRenderer(
 
                 val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state)
                 if (bitmap != null) {
+                    if (refresh_loaded_tile_request_generations) {
+                        mark_current_tile_request(key, request_generation)
+                    }
                     record_loaded_interim_tile(
                         key = key,
                         cache_key = state.cache_key,
@@ -606,6 +615,7 @@ internal class SatelliteBaseTileRenderer(
                         if (fallback_underlay_drawn && load_alpha < 0.999f) fading = true
                     }
                 } else {
+                    mark_current_tile_request(key, request_generation)
                     requested++
                     request_satellite_parent_tiles(
                         tile_zoom,
@@ -1268,7 +1278,7 @@ internal class SatelliteBaseTileRenderer(
         )
     }
 
-    private fun begin_tile_request_generation(): Long {
+    private fun begin_tile_request_generation(): TileRequestFrame {
         synchronized(requested_tiles) {
             current_tile_request_generation++
             if (current_tile_request_generations.size > CURRENT_TILE_REQUEST_HISTORY_MAX) {
@@ -1284,7 +1294,9 @@ internal class SatelliteBaseTileRenderer(
                     current_tile_request_generations.remove(oldest_key)
                 }
             }
-            return current_tile_request_generation
+            tile_request_frame.generation = current_tile_request_generation
+            tile_request_frame.requests_were_idle = requested_tiles.isEmpty()
+            return tile_request_frame
         }
     }
 
@@ -1386,6 +1398,11 @@ internal class SatelliteBaseTileRenderer(
     private data class SatelliteTileDrawResult(
         val status: String,
         val reusable_for_pan_cache: Boolean
+    )
+
+    private class TileRequestFrame(
+        var generation: Long = 0L,
+        var requests_were_idle: Boolean = true
     )
 
     private data class SatellitePanCacheKey(
