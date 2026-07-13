@@ -218,9 +218,17 @@ class ReferencePresentationPolicyTest {
     }
 
     @Test
-    fun unpromotedLocalPlacesAndMinorWaterwaysStartInChildLods() {
+    fun localPlacePromotionAndMinorWaterwayBandsAreExact() {
         val localPlace = ReferencePresentationPolicy.visibility_rule_for_label(
             LabelFacts(SemanticSubtype.LOCAL_PLACE),
+        )
+        val promotedLocalPlaceFacts = LabelFacts(
+            subtype = SemanticSubtype.LOCAL_PLACE,
+            population = 10_000,
+            population_verified = true,
+        )
+        val promotedLocalPlace = ReferencePresentationPolicy.visibility_rule_for_label(
+            promotedLocalPlaceFacts,
         )
         val lowPopulationTown = ReferencePresentationPolicy.visibility_rule_for_label(
             LabelFacts(
@@ -239,8 +247,21 @@ class ReferencePresentationPolicyTest {
             WaterwayFacts(SemanticSubtype.UNSPECIFIED_WATERCOURSE),
         )
 
-        assertEquals(825 to 865, localPlace.min_zoom_centi to localPlace.full_alpha_zoom_centi)
+        val island = ReferencePresentationPolicy.visibility_rule_for_label(
+            LabelFacts(SemanticSubtype.ISLAND_ISLET),
+        )
+
+        assertEquals(900 to 940, localPlace.min_zoom_centi to localPlace.full_alpha_zoom_centi)
+        assertEquals(
+            ProminenceTier.LOCAL,
+            ReferencePresentationPolicy.prominence_for_label(promotedLocalPlaceFacts),
+        )
+        assertEquals(
+            650 to 690,
+            promotedLocalPlace.min_zoom_centi to promotedLocalPlace.full_alpha_zoom_centi,
+        )
         assertEquals(775 to 815, lowPopulationTown.min_zoom_centi to lowPopulationTown.full_alpha_zoom_centi)
+        assertEquals(825 to 865, island.min_zoom_centi to island.full_alpha_zoom_centi)
         assertEquals(800 to 835, minorRiver.min_zoom_centi to minorRiver.full_alpha_zoom_centi)
         assertEquals(850 to 885, creek.min_zoom_centi to creek.full_alpha_zoom_centi)
         assertEquals(850 to 885, unspecified.min_zoom_centi to unspecified.full_alpha_zoom_centi)
@@ -305,7 +326,7 @@ class ReferencePresentationPolicyTest {
         assertTrue(bytes.copyOfRange(0, 10).contentEquals("FAE8PDEC1\u0000".toByteArray()))
         assertEquals(143, bytes.size)
         assertEquals(
-            "6fe913ae8f42bf1c68971b9d94565196cd1a495a63f70b8918cd98c1d68e9fb9",
+            "ffc7e03807dc5bfb9f58dd53afb75aedb055e45877c585b2445a9696ce61aa67",
             sha256_hex(bytes),
         )
         assertEquals(sha256_hex(bytes), ReferencePresentationPolicy.prominence_decision_sha256(decision))
@@ -390,7 +411,7 @@ class ReferencePresentationPolicyTest {
         assertEquals(754, bytes.size)
         assertTrue(bytes.copyOfRange(0, 9).contentEquals("FAE8CAT1\u0000".toByteArray()))
         assertEquals(
-            "71164d7270709c9f9e88f178bab44953ddbce1d203f3f9eddca8f1b1ca32067a",
+            "8ae370b736a6322e056cc28952abe6ca0bd91816c5bc846d0c70ffcac9a3edb8",
             sha256_hex(bytes),
         )
         val catalog = ReferenceClassCatalog.from_installed_bytes(
@@ -403,7 +424,7 @@ class ReferencePresentationPolicyTest {
         bytes.fill(0)
         assertEquals(CatalogControlStatus.AVAILABLE, catalog.status)
         assertEquals(
-            "71164d7270709c9f9e88f178bab44953ddbce1d203f3f9eddca8f1b1ca32067a",
+            "8ae370b736a6322e056cc28952abe6ca0bd91816c5bc846d0c70ffcac9a3edb8",
             catalog.catalog_sha256,
         )
         assertEquals(
@@ -551,7 +572,7 @@ class ReferencePresentationPolicyTest {
 
     @Test
     fun canonicalPolicyHashIsTheReviewedPythonV4Digest() {
-        val expected = "0e79551e8a7dab8fe6a300f30f2768a0dc3a013fdd3ce182bb7a6f08e42399b6"
+        val expected = "dce9bd4b789c0528318dbb184e17efe7465f444550ba0180efd82e1cb7219154"
         val canonicalBytes = ReferencePresentationPolicy.canonical_presentation_policy_bytes()
         assertEquals(42_279, canonicalBytes.size)
         assertEquals(

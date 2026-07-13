@@ -32,7 +32,7 @@ _EXACT_SOURCE_PATH = Path(
     r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v2"
 )
 _EXACT_OUTPUT_PATH = Path(
-    r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v3"
+    r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v4"
 )
 _HISTORICAL_FINALIZER_CODE = MappingProxyType(
     {

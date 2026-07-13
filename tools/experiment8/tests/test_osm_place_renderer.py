@@ -163,7 +163,7 @@ class OsmPlaceRendererTest(unittest.TestCase):
         )
 
     def test_numeric_capital_levels_only_promote_clearly_regional_admin_tiers(self) -> None:
-        municipal = self._build(9, zooms=(7, 8))
+        municipal = self._build(9, zooms=(7, 8, 9))
         regional = self._build(10, zooms=(5, 6))
         numeric_national = self._build(11, zooms=(6, 7))
 
@@ -190,7 +190,7 @@ class OsmPlaceRendererTest(unittest.TestCase):
     def test_country_region_and_locality_are_typed_from_exact_place_tags(self) -> None:
         region = self._build(4, zooms=(5,))
         country = self._build(5, zooms=(4,))
-        locality = self._build(7, zooms=(8,))
+        locality = self._build(7, zooms=(9,))
 
         self.assertEqual(SemanticSubtype.FIRST_ORDER_REGION, region.semantic_subtype)
         self.assertEqual(LayerGroup.REGIONS, next(iter(region.tiles.values()))[0].renderer_record.variant.layer_group)
@@ -200,11 +200,13 @@ class OsmPlaceRendererTest(unittest.TestCase):
         self.assertEqual(ProminenceTier.FINE, locality.prominence_tier)
 
     def test_package_omits_integer_lods_that_cannot_reach_the_visibility_band(self) -> None:
-        local_city = self._build(3, zooms=(4, 5, 6, 7, 8))
-        fine_locality = self._build(7, zooms=(4, 5, 6, 7, 8))
+        local_city = self._build(3, zooms=(4, 5, 6, 7, 8, 9))
+        fine_locality = self._build(7, zooms=(8, 9))
 
-        self.assertEqual((6, 7, 8), tuple(tile.z for tile in local_city.tiles))
-        self.assertEqual((8,), tuple(tile.z for tile in fine_locality.tiles))
+        self.assertEqual((6, 7, 8, 9), tuple(tile.z for tile in local_city.tiles))
+        self.assertEqual((9,), tuple(tile.z for tile in fine_locality.tiles))
+        self.assertEqual(1, len(fine_locality.tiles))
+        self.assertEqual(1, len(next(iter(fine_locality.tiles.values()))))
 
     def test_relations_unknown_place_types_and_missing_names_cannot_supply_points(self) -> None:
         dataset = parse_osm_xml_bytes(_OSM)

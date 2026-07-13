@@ -3007,7 +3007,7 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
             installer_module.RUNTIME_PAYLOAD_SCHEMA,
         )
         self.assertEqual(
-            "0e79551e8a7dab8fe6a300f30f2768a0dc3a013fdd3ce182bb7a6f08e42399b6",
+            "dce9bd4b789c0528318dbb184e17efe7465f444550ba0180efd82e1cb7219154",
             installer_module.RUNTIME_PRESENTATION_POLICY_SHA256,
         )
         self.assertEqual(

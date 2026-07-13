@@ -237,8 +237,8 @@ internal object ReferencePresentationTables {
         if (subtype == SemanticSubtype.LOCAL_PLACE && tier == ProminenceTier.FINE) {
             return LabelVisibilityRule(
                 "local_place.fine",
-                825,
-                865,
+                900,
+                940,
                 9_000,
                 letter_spacing_milli_em = style_spec(subtype).letter_spacing_milli_em,
             )

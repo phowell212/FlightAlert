@@ -1215,7 +1215,7 @@ class ReclassificationBoundaryTests(unittest.TestCase):
             (),
             {
                 "output_directory": Path(
-                    r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v3"
+                    r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v4"
                 ),
                 "receipt": {"schema": "fixture-reclassification"},
                 "state": "complete",
@@ -1236,6 +1236,18 @@ class ReclassificationBoundaryTests(unittest.TestCase):
             pipeline._argument_parser().parse_args(
                 ["reclassify-retained", "--output", "elsewhere"]
             )
+
+    def test_production_reclassification_keeps_pinned_v2_source_and_publishes_v4(self) -> None:
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        self.assertEqual(
+            Path(r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v2"),
+            reclassification._EXACT_SOURCE_PATH,
+        )
+        self.assertEqual(
+            Path(r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v4"),
+            reclassification._EXACT_OUTPUT_PATH,
+        )
 
     def test_exact_reclassification_loader_uses_immutable_historical_finalizer_pins(
         self,
@@ -2391,7 +2403,7 @@ class GlobalPlaceRendererTests(unittest.TestCase):
             madrid = by_name["Madrid"][0][1]
             self.assertEqual(LayoutMode.SINGLE, madrid.layout_mode)
             self.assertIsNone(madrid.english_text)
-            self.assertEqual(set(range(8, 12)), {tile.z for tile, _ in by_name["Χωριό"]})
+            self.assertEqual(set(range(9, 12)), {tile.z for tile, _ in by_name["Χωριό"]})
             self.assertEqual(set(range(4, 12)), {tile.z for tile, _ in by_name["Αθήνα"]})
             self.assertEqual(
                 renderer_contract_hash(all_renderer_records),

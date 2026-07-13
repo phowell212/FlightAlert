@@ -236,7 +236,7 @@ class PackageCatalogAndPersistenceTests(unittest.TestCase):
         self.assertEqual(len(catalog_bytes), 754)
         self.assertEqual(
             hashlib.sha256(catalog_bytes).hexdigest(),
-            "71164d7270709c9f9e88f178bab44953ddbce1d203f3f9eddca8f1b1ca32067a",
+            "8ae370b736a6322e056cc28952abe6ca0bd91816c5bc846d0c70ffcac9a3edb8",
         )
         catalog = ReferenceClassCatalog.from_verified_bytes(
             catalog_bytes,
@@ -433,10 +433,16 @@ class WaterwayProminenceTests(unittest.TestCase):
                     self.assertGreater(rule.min_zoom_centi, 628)
                     self.assertEqual(label_alpha_milli(rule, 628), 0)
 
-    def test_unpromoted_local_places_and_minor_waterways_start_in_child_lods(self) -> None:
+    def test_local_place_promotion_and_minor_waterway_bands_are_exact(self) -> None:
         local_place = visibility_rule_for_label(
             LabelFacts(subtype=SemanticSubtype.LOCAL_PLACE)
         )
+        promoted_local_place_facts = LabelFacts(
+            subtype=SemanticSubtype.LOCAL_PLACE,
+            population=10_000,
+            population_verified=True,
+        )
+        promoted_local_place = visibility_rule_for_label(promoted_local_place_facts)
         low_population_town = visibility_rule_for_label(
             LabelFacts(
                 subtype=SemanticSubtype.CITY_TOWN,
@@ -454,8 +460,21 @@ class WaterwayProminenceTests(unittest.TestCase):
             WaterwayFacts(subtype=SemanticSubtype.UNSPECIFIED_WATERCOURSE)
         )
 
-        self.assertEqual((825, 865), (local_place.min_zoom_centi, local_place.full_alpha_zoom_centi))
+        island = visibility_rule_for_label(
+            LabelFacts(subtype=SemanticSubtype.ISLAND_ISLET)
+        )
+
+        self.assertEqual((900, 940), (local_place.min_zoom_centi, local_place.full_alpha_zoom_centi))
+        self.assertIs(ProminenceTier.LOCAL, prominence_for_label(promoted_local_place_facts))
+        self.assertEqual(
+            (650, 690),
+            (
+                promoted_local_place.min_zoom_centi,
+                promoted_local_place.full_alpha_zoom_centi,
+            ),
+        )
         self.assertEqual((775, 815), (low_population_town.min_zoom_centi, low_population_town.full_alpha_zoom_centi))
+        self.assertEqual((825, 865), (island.min_zoom_centi, island.full_alpha_zoom_centi))
         self.assertEqual((800, 835), (minor_river.min_zoom_centi, minor_river.full_alpha_zoom_centi))
         self.assertEqual((850, 885), (creek.min_zoom_centi, creek.full_alpha_zoom_centi))
         self.assertEqual((850, 885), (unspecified.min_zoom_centi, unspecified.full_alpha_zoom_centi))
@@ -689,11 +708,11 @@ class UniversalLabelProminenceTests(unittest.TestCase):
         self.assertEqual(len(encoded), 143)
         self.assertEqual(
             hashlib.sha256(encoded).hexdigest(),
-            "6fe913ae8f42bf1c68971b9d94565196cd1a495a63f70b8918cd98c1d68e9fb9",
+            "ffc7e03807dc5bfb9f58dd53afb75aedb055e45877c585b2445a9696ce61aa67",
         )
         self.assertEqual(
             prominence_decision_sha256(decision),
-            "6fe913ae8f42bf1c68971b9d94565196cd1a495a63f70b8918cd98c1d68e9fb9",
+            "ffc7e03807dc5bfb9f58dd53afb75aedb055e45877c585b2445a9696ce61aa67",
         )
 
     def test_provider_prominence_requires_generation_classifier_field_and_rank(self) -> None:
@@ -888,6 +907,10 @@ class CurrentViewportPlacementTests(unittest.TestCase):
     def test_policy_has_one_canonical_hash(self) -> None:
         value = presentation_policy_sha256()
         self.assertRegex(value, r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            "dce9bd4b789c0528318dbb184e17efe7465f444550ba0180efd82e1cb7219154",
+            value,
+        )
         self.assertEqual(value, PRESENTATION_POLICY_SHA256)
         self.assertEqual(value, presentation_policy_sha256())
         self.assertEqual(

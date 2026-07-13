@@ -39,7 +39,7 @@ LABEL_EDGE_CLEARANCE_MILLI_EM = 250
 LABEL_MAX_PRESENTATIONS_PER_CANDIDATE_WRAP = 1
 LABEL_HANDOFF_MAX_MS = 220
 PRESENTATION_POLICY_SHA256 = (
-    "0e79551e8a7dab8fe6a300f30f2768a0dc3a013fdd3ce182bb7a6f08e42399b6"
+    "dce9bd4b789c0528318dbb184e17efe7465f444550ba0180efd82e1cb7219154"
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -2054,8 +2054,8 @@ def _visibility_rule_for_subtype_tier(
     if subtype is SemanticSubtype.LOCAL_PLACE and tier is ProminenceTier.FINE:
         return LabelVisibilityRule(
             rule_id="local_place.fine",
-            min_zoom_centi=825,
-            full_alpha_zoom_centi=865,
+            min_zoom_centi=900,
+            full_alpha_zoom_centi=940,
             text_size_milli_sp=9_000,
             letter_spacing_milli_em=style_spec_for_subtype(
                 subtype
