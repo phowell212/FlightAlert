@@ -1553,6 +1553,13 @@ def source_binding_from_extraction_receipt(
 ) -> "PlaceSourceBinding":
     if not isinstance(extraction_directory, Path) or not extraction_directory.is_dir():
         raise GlobalPlacePackageError("extraction directory is not readable")
+    reclassification_receipt = extraction_directory / "reclassification-receipt.json"
+    if os.path.lexists(reclassification_receipt):
+        from .osm_global_place_reclassification import (
+            source_binding_from_reclassified_extraction,
+        )
+
+        return source_binding_from_reclassified_extraction(extraction_directory)
     receipt_path = extraction_directory / "extraction-receipt.json"
     receipt_identity = _stream_file_identity(receipt_path)
     if not 0 < receipt_identity.bytes <= 16 * 1024 * 1024:
@@ -1824,6 +1831,10 @@ def _argument_parser() -> argparse.ArgumentParser:
         "recover-retained",
         help="finalize only the exact pinned retained 260629 extraction stage",
     )
+    commands.add_parser(
+        "reclassify-retained",
+        help="reclassify only the exact pinned recovered 260629 place extraction",
+    )
     render = commands.add_parser("render", help="render an exact completed extraction")
     render.add_argument("--extraction", type=Path, required=True)
     render.add_argument("--output", type=Path, required=True)
@@ -1864,6 +1875,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             result = recover_completed_extraction_stage()
+        elif arguments.command == "reclassify-retained":
+            from .osm_global_place_reclassification import (
+                reclassify_retained_extraction,
+            )
+
+            result = reclassify_retained_extraction()
         else:
             binding = source_binding_from_extraction_receipt(arguments.extraction)
             if (

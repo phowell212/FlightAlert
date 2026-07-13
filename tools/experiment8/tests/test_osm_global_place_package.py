@@ -10,9 +10,9 @@ import sys
 import tempfile
 import unittest
 import zlib
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tools.experiment8.model import TileKey
 from tools.experiment8.reference_presentation_policy import SemanticSubtype
@@ -1103,6 +1103,701 @@ class RecoveryBoundaryTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         exact_recovery.assert_called_once_with()
         self.assertEqual("complete", json.loads(stdout.getvalue())["state"])
+
+
+class ReclassificationBoundaryTests(unittest.TestCase):
+    def _fixture(self, root: Path):
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_recovery as recovery
+        from tools.experiment8 import osm_place_renderer
+
+        old_policy = "0" * 64
+        with patch.object(
+            osm_place_renderer, "PRESENTATION_POLICY_SHA256", old_policy
+        ):
+            stage, source, contract, _, _, _ = _make_recovery_stage(
+                root, recovery, pipeline
+            )
+            recovery._recover_completed_extraction_stage(
+                stage_directory=stage,
+                output_directory=source,
+                contract=contract,
+            )
+        output = root / "fixture-reclassified-extraction"
+
+        def load_source(path: Path):
+            return recovery._source_binding_from_recovered_extraction(path, contract)
+
+        return pipeline, recovery, source, output, load_source
+
+    def test_cli_exposes_only_argument_free_exact_reclassification(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        fake_result = type(
+            "FakeReclassificationResult",
+            (),
+            {
+                "output_directory": Path(
+                    r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v3"
+                ),
+                "receipt": {"schema": "fixture-reclassification"},
+                "state": "complete",
+            },
+        )()
+        stdout = io.StringIO()
+        with patch.object(
+            reclassification,
+            "reclassify_retained_extraction",
+            return_value=fake_result,
+        ) as exact_reclassification, redirect_stdout(stdout):
+            exit_code = pipeline.main(["reclassify-retained"])
+
+        self.assertEqual(0, exit_code)
+        exact_reclassification.assert_called_once_with()
+        self.assertEqual("complete", json.loads(stdout.getvalue())["state"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pipeline._argument_parser().parse_args(
+                ["reclassify-retained", "--output", "elsewhere"]
+            )
+
+    def test_public_reclassification_and_binding_refuse_non_pinned_paths(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                pipeline.GlobalPlacePackageError, "exact pinned"
+            ):
+                reclassification.source_binding_from_reclassified_extraction(root)
+
+    def test_reclassification_preserves_source_and_recomputes_current_policy_outcomes(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+        from tools.experiment8 import osm_global_place_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            source_snapshot = {
+                path.name: path.read_bytes() for path in source.iterdir()
+            }
+            authenticated_loader = Mock(wraps=load_source)
+            old_receipt = json.loads(
+                (source / "extraction-receipt.json").read_text("utf-8")
+            )
+            with patch.object(
+                pipeline,
+                "_run_osmium_command",
+                side_effect=AssertionError("reclassification must not run osmium"),
+            ), patch.object(
+                store,
+                "_semantic_outcome_audits_stream",
+                wraps=store._semantic_outcome_audits_stream,
+            ) as semantic_pass:
+                result = reclassification._reclassify_recovered_extraction(
+                    source_directory=source,
+                    output_directory=output,
+                    source_binding_loader=authenticated_loader,
+                )
+
+            self.assertEqual("complete", result.state)
+            self.assertEqual(1, semantic_pass.call_count)
+            self.assertEqual(2, authenticated_loader.call_count)
+            self.assertEqual(
+                source_snapshot,
+                {path.name: path.read_bytes() for path in source.iterdir()},
+            )
+            self.assertEqual(
+                (source / "place-nodes.pbf").read_bytes(),
+                (output / "place-nodes.pbf").read_bytes(),
+            )
+            self.assertEqual(
+                (source / "place-nodes.opl").read_bytes(),
+                (output / "place-nodes.opl").read_bytes(),
+            )
+            receipt = json.loads(
+                (output / "reclassification-receipt.json").read_text("utf-8")
+            )
+            self.assertNotEqual(
+                old_receipt["rendererSemanticOutcome"]["sha256"],
+                receipt["rendererSemanticOutcome"]["sha256"],
+            )
+            with (output / "place-nodes.opl").open("rb") as handle:
+                strict, semantic, outcome = store._semantic_outcome_audits_stream(
+                    handle,
+                    source_generation_sha256=load_source(source).planet_sha256,
+                )
+            self.assertEqual(strict, receipt["strictOplAudit"])
+            self.assertEqual(semantic, receipt["semanticAdmissionAudit"])
+            self.assertEqual(outcome, receipt["rendererSemanticOutcome"])
+            self.assertEqual(
+                reclassification.PRESENTATION_POLICY_SHA256,
+                receipt["presentationPolicySha256"],
+            )
+            self.assertEqual(os.path.abspath(source), receipt["source"]["directory"])
+            self.assertEqual(os.path.abspath(output), receipt["output"]["path"])
+            self.assertEqual(
+                sorted(
+                    (
+                        "place-nodes.opl",
+                        "place-nodes.pbf",
+                        "place-semantic-outcomes.bin",
+                        "reclassification-receipt.json",
+                    )
+                ),
+                receipt["output"]["inventory"],
+            )
+            for field, filename in (
+                ("extractionReceipt", "extraction-receipt.json"),
+                ("recoveryReceipt", "extraction-recovery-receipt.json"),
+            ):
+                raw = (source / filename).read_bytes()
+                self.assertEqual(len(raw), receipt["source"][field]["bytes"])
+                self.assertEqual(
+                    hashlib.sha256(raw).hexdigest(),
+                    receipt["source"][field]["sha256"],
+                )
+            self.assertNotIn("commands", receipt)
+            self.assertNotIn("extractor", receipt["code"])
+            self.assertFalse(receipt["provenance"]["osmiumCommandsExecuted"])
+            self.assertEqual(
+                "none; authenticated source was opened read-only",
+                receipt["provenance"]["sourceMutation"],
+            )
+
+    def test_same_length_source_mutation_is_rejected_before_copy(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            pbf = source / "place-nodes.pbf"
+            with pbf.open("r+b") as handle:
+                first = handle.read(1)
+                handle.seek(0)
+                handle.write(bytes((first[0] ^ 0xFF,)))
+
+            with self.assertRaisesRegex(
+                pipeline.GlobalPlacePackageError, "SHA-256 differs"
+            ):
+                reclassification._reclassify_recovered_extraction(
+                    source_directory=source,
+                    output_directory=output,
+                    source_binding_loader=load_source,
+                )
+            self.assertFalse(output.exists())
+            self.assertEqual([], list(root.glob(output.name + ".reclassification-partial-*")))
+
+    def test_completed_partial_is_validated_and_published_on_atomic_retry(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+        from tools.experiment8 import osm_global_place_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            real_rename = reclassification._durable_rename
+
+            def fail_publication(source_path, destination_path):
+                if Path(destination_path) == output:
+                    raise OSError("simulated final rename failure")
+                return real_rename(source_path, destination_path)
+
+            with patch.object(
+                reclassification, "_durable_rename", side_effect=fail_publication
+            ):
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError,
+                    "atomic reclassification publication",
+                ):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+            partials = list(root.glob(output.name + ".reclassification-partial-*"))
+            self.assertEqual(1, len(partials))
+
+            with patch.object(
+                store,
+                "_semantic_outcome_audits_stream",
+                wraps=store._semantic_outcome_audits_stream,
+            ) as semantic_pass:
+                result = reclassification._reclassify_recovered_extraction(
+                    source_directory=source,
+                    output_directory=output,
+                    source_binding_loader=load_source,
+                )
+            self.assertEqual("complete", result.state)
+            self.assertEqual(1, semantic_pass.call_count)
+            self.assertTrue(output.is_dir())
+            self.assertFalse(partials[0].exists())
+
+    def test_publication_never_replaces_destination_created_after_precheck(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            with patch.object(
+                reclassification,
+                "_durable_rename",
+                side_effect=OSError("leave completed partial"),
+            ):
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError,
+                    "atomic reclassification publication",
+                ):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+            partial = next(
+                root.glob(output.name + ".reclassification-partial-*")
+            )
+            real_rename = reclassification._durable_rename
+
+            def create_destination_then_rename(source_path: Path, output_path: Path):
+                output_path.mkdir()
+                return real_rename(source_path, output_path)
+
+            with patch.object(
+                reclassification,
+                "_durable_rename",
+                side_effect=create_destination_then_rename,
+            ):
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError,
+                    "atomic reclassification publication",
+                ):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+            self.assertTrue(partial.is_dir())
+            self.assertTrue(output.is_dir())
+            self.assertEqual([], list(output.iterdir()))
+
+    def test_partial_receipt_or_inventory_tamper_is_rejected_without_overwrite(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        for tamper in ("artifact", "receipt", "inventory"):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _, _, source, output, load_source = self._fixture(root)
+                with patch.object(
+                    reclassification,
+                    "_durable_rename",
+                    side_effect=OSError("leave completed partial"),
+                ):
+                    with self.assertRaisesRegex(
+                        pipeline.GlobalPlacePackageError,
+                        "atomic reclassification publication",
+                    ):
+                        reclassification._reclassify_recovered_extraction(
+                            source_directory=source,
+                            output_directory=output,
+                            source_binding_loader=load_source,
+                        )
+                partial = next(
+                    root.glob(output.name + ".reclassification-partial-*")
+                )
+                if tamper == "artifact":
+                    artifact = partial / "place-nodes.pbf"
+                    with artifact.open("r+b") as handle:
+                        first = handle.read(1)
+                        handle.seek(0)
+                        handle.write(bytes((first[0] ^ 0xFF,)))
+                elif tamper == "receipt":
+                    receipt_path = partial / "reclassification-receipt.json"
+                    receipt = json.loads(receipt_path.read_text("utf-8"))
+                    receipt["runtime"]["pythonVersion"] = [9, 9, 9]
+                    receipt_path.write_bytes(pipeline._canonical_json_bytes(receipt))
+                else:
+                    (partial / "unexpected.bin").write_bytes(b"foreign")
+
+                with self.assertRaises(pipeline.GlobalPlacePackageError):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+                self.assertFalse(output.exists())
+                self.assertTrue(partial.exists())
+
+    def test_existing_output_and_unowned_partial_are_rejected_without_changes(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        for state in ("output", "foreign-partial"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _, _, source, output, load_source = self._fixture(root)
+                if state == "output":
+                    obstacle = output
+                else:
+                    obstacle = root / (
+                        output.name + ".reclassification-partial-foreign"
+                    )
+                obstacle.mkdir()
+                marker = obstacle / "foreign.bin"
+                marker.write_bytes(b"do-not-touch")
+
+                with self.assertRaises(pipeline.GlobalPlacePackageError):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+                self.assertEqual(b"do-not-touch", marker.read_bytes())
+
+    def test_semantic_contract_attests_dependencies_classifier_and_canonical_policy(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+        from tools.experiment8 import osm_global_place_store as store
+        from tools.experiment8 import osm_place_renderer
+        from tools.experiment8 import reference_presentation_policy as presentation_policy
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            result = reclassification._reclassify_recovered_extraction(
+                source_directory=source,
+                output_directory=output,
+                source_binding_loader=load_source,
+            )
+            self.assertTrue(set(store._code_identities()).issubset(result.receipt["code"]))
+            self.assertEqual(
+                osm_place_renderer.classifier_identity_sha256(),
+                result.receipt["semanticContract"]["classifierSha256"],
+            )
+            self.assertEqual(
+                presentation_policy.PRESENTATION_POLICY_SHA256,
+                result.receipt["semanticContract"]["presentationPolicySha256"],
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            with patch.object(
+                presentation_policy,
+                "presentation_policy_sha256",
+                return_value="f" * 64,
+            ):
+                with self.assertRaisesRegex(
+                    reclassification.GlobalPlacePackageError,
+                    "canonical presentation policy",
+                ):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+            self.assertFalse(output.exists())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            original_code = reclassification._code_identities()
+            drifted_code = dict(original_code)
+            drifted_code["reclassifier"] = {
+                "bytes": 1,
+                "name": "osm_global_place_reclassification.py",
+                "sha256": "0" * 64,
+            }
+            with patch.object(
+                reclassification,
+                "_code_identities",
+                side_effect=(original_code, drifted_code),
+            ):
+                with self.assertRaisesRegex(
+                    reclassification.GlobalPlacePackageError,
+                    "semantic contract drifted",
+                ):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+            self.assertFalse(output.exists())
+
+    def test_reclassification_receipt_read_detects_open_handle_drift(self) -> None:
+        from types import SimpleNamespace
+
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt = Path(temporary) / "reclassification-receipt.json"
+            receipt.write_bytes(
+                pipeline._canonical_json_bytes(
+                    {"schema": reclassification._RECLASSIFICATION_SCHEMA}
+                )
+            )
+            real_fstat = reclassification.os.fstat
+            calls = 0
+
+            def drifting_fstat(descriptor: int):
+                nonlocal calls
+                calls += 1
+                status = real_fstat(descriptor)
+                if calls == 2:
+                    return SimpleNamespace(
+                        st_mode=status.st_mode,
+                        st_dev=status.st_dev,
+                        st_ino=status.st_ino,
+                        st_size=status.st_size,
+                        st_mtime_ns=status.st_mtime_ns + 1,
+                        st_ctime_ns=status.st_ctime_ns,
+                    )
+                return status
+
+            with patch.object(
+                reclassification.os, "fstat", side_effect=drifting_fstat
+            ):
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError, "drifted while reading"
+                ):
+                    reclassification._read_canonical_reclassification_receipt(
+                        receipt
+                    )
+
+    def test_v3_binding_reauthenticates_v2_after_semantic_validation(self) -> None:
+        from dataclasses import replace
+
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            reclassification._reclassify_recovered_extraction(
+                source_directory=source,
+                output_directory=output,
+                source_binding_loader=load_source,
+            )
+            original = load_source(source)
+            drifting_loader = Mock(
+                side_effect=(
+                    original,
+                    replace(original, planet_path="changed-after-first-authentication.pbf"),
+                )
+            )
+            with self.assertRaisesRegex(
+                pipeline.GlobalPlacePackageError, "source changed"
+            ):
+                reclassification._source_binding_from_reclassified_extraction(
+                    output,
+                    source_directory=source,
+                    output_directory=output,
+                    source_binding_loader=drifting_loader,
+                )
+            self.assertEqual(2, drifting_loader.call_count)
+
+    def test_v3_binding_hashes_and_audits_opl_through_one_stable_open(self) -> None:
+        from types import SimpleNamespace
+
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            reclassification._reclassify_recovered_extraction(
+                source_directory=source,
+                output_directory=output,
+                source_binding_loader=load_source,
+            )
+            target = output / "place-nodes.opl"
+            real_open = Path.open
+            target_opens = 0
+
+            def tracking_open(path: Path, *args, **kwargs):
+                nonlocal target_opens
+                if path == target:
+                    target_opens += 1
+                return real_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", new=tracking_open):
+                reclassification._source_binding_from_reclassified_extraction(
+                    output,
+                    source_directory=source,
+                    output_directory=output,
+                    source_binding_loader=load_source,
+                )
+            self.assertEqual(1, target_opens)
+
+            real_fstat = reclassification.os.fstat
+            calls = 0
+
+            def drifting_fstat(descriptor: int):
+                nonlocal calls
+                calls += 1
+                status = real_fstat(descriptor)
+                if calls == 2:
+                    return SimpleNamespace(
+                        st_mode=status.st_mode,
+                        st_dev=status.st_dev,
+                        st_ino=status.st_ino,
+                        st_size=status.st_size,
+                        st_mtime_ns=status.st_mtime_ns + 1,
+                        st_ctime_ns=status.st_ctime_ns,
+                    )
+                return status
+
+            with patch.object(
+                reclassification.os, "fstat", side_effect=drifting_fstat
+            ):
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError,
+                    "OPL drifted during semantic validation",
+                ):
+                    reclassification._verified_opl_semantics(
+                        target,
+                        load_source(source),
+                    )
+
+    def test_concurrent_partial_creator_collision_is_structured_and_non_destructive(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            real_mkdir = Path.mkdir
+            collision = None
+
+            def collide(path: Path, *args, **kwargs):
+                nonlocal collision
+                if path.name.startswith(output.name + ".reclassification-partial-"):
+                    real_mkdir(path, *args, **kwargs)
+                    collision = path
+                    (path / "foreign.bin").write_bytes(b"other creator")
+                    raise FileExistsError("simulated creator race")
+                return real_mkdir(path, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", new=collide):
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError, "appeared concurrently"
+                ):
+                    reclassification._reclassify_recovered_extraction(
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+            assert collision is not None
+            self.assertEqual(b"other creator", (collision / "foreign.bin").read_bytes())
+            self.assertFalse(output.exists())
+
+    def test_symlink_partial_and_source_receipt_tamper_fail_closed(self) -> None:
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlinks are unavailable")
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            foreign = root / "foreign"
+            foreign.mkdir()
+            link = root / (output.name + ".reclassification-partial-foreign")
+            try:
+                link.symlink_to(foreign, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks are unavailable: {error}")
+            with self.assertRaisesRegex(
+                pipeline.GlobalPlacePackageError, "ambiguous or unowned"
+            ):
+                reclassification._reclassify_recovered_extraction(
+                    source_directory=source,
+                    output_directory=output,
+                    source_binding_loader=load_source,
+                )
+            self.assertTrue(link.is_symlink())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            receipt = source / "extraction-recovery-receipt.json"
+            raw = bytearray(receipt.read_bytes())
+            raw[-2] ^= 1
+            receipt.write_bytes(bytes(raw))
+            with self.assertRaises(pipeline.GlobalPlacePackageError):
+                reclassification._reclassify_recovered_extraction(
+                    source_directory=source,
+                    output_directory=output,
+                    source_binding_loader=load_source,
+                )
+            self.assertFalse(output.exists())
+
+    def test_reclassified_output_supplies_usable_source_binding_and_dispatch(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            result = reclassification._reclassify_recovered_extraction(
+                source_directory=source,
+                output_directory=output,
+                source_binding_loader=load_source,
+            )
+            receipt_raw = (output / "reclassification-receipt.json").read_bytes()
+            expected = reclassification._source_binding_from_reclassified_extraction(
+                output,
+                source_directory=source,
+                output_directory=output,
+                source_binding_loader=load_source,
+            )
+            with patch.object(
+                reclassification,
+                "source_binding_from_reclassified_extraction",
+                return_value=expected,
+            ) as exact_loader:
+                actual = pipeline.source_binding_from_extraction_receipt(output)
+
+            exact_loader.assert_called_once_with(output)
+            self.assertEqual(expected, actual)
+            self.assertEqual(
+                hashlib.sha256(receipt_raw).hexdigest(),
+                actual.recovery_receipt_sha256,
+            )
+            self.assertEqual(
+                result.receipt["rendererSemanticOutcome"]["sha256"],
+                actual.renderer_semantic_outcome.stream_sha256,
+            )
+            self.assertEqual(
+                str(output / "place-semantic-outcomes.bin"),
+                actual.renderer_semantic_outcome_path,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            malformed = Path(temporary)
+            (malformed / "reclassification-receipt.json").mkdir()
+            with patch.object(
+                reclassification,
+                "source_binding_from_reclassified_extraction",
+                side_effect=pipeline.GlobalPlacePackageError(
+                    "reclassified extraction inventory differs"
+                ),
+            ) as exact_loader:
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError, "inventory differs"
+                ):
+                    pipeline.source_binding_from_extraction_receipt(malformed)
+            exact_loader.assert_called_once_with(malformed)
 
 
 class GlobalPlaceRendererTests(unittest.TestCase):
