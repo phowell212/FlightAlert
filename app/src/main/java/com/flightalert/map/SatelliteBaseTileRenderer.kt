@@ -190,6 +190,12 @@ internal class SatelliteBaseTileRenderer(
                 content_revision = record_revision,
                 padding = MAP_PAN_CACHE_PADDING_PX
             ) { recording_canvas, cache_viewport ->
+                if (!satellite_pan_cache_recording_ready(cache_viewport, state)) {
+                    return@record_for_future MapLayerPanCacheRecordResult(
+                        status = result.status,
+                        reusable = false
+                    )
+                }
                 val visual_state = snapshot_visual_state()
                 try {
                     val recorded_result = draw_tiles_direct(
@@ -395,6 +401,28 @@ internal class SatelliteBaseTileRenderer(
         last_pan_cache_record_attempt_revision = content_revision
         last_pan_cache_record_attempt_ms = now_ms
         return true
+    }
+
+    private fun satellite_pan_cache_recording_ready(
+        viewport: Viewport,
+        state: MapTileRenderState
+    ): Boolean {
+        val lod = satellite_lod_state(viewport)
+        if (!satellite_tile_grid_fully_available(
+                viewport = viewport,
+                state = state,
+                tile_zoom = lod.lower_tile_zoom
+            )
+        ) {
+            return false
+        }
+        return !lod.has_upper_lod ||
+                lod.upper_lod_alpha <= MIN_LAYER_ALPHA ||
+                satellite_tile_grid_fully_available(
+                    viewport = viewport,
+                    state = state,
+                    tile_zoom = lod.upper_tile_zoom
+                )
     }
 
     private fun satellite_pan_cache_key(
