@@ -172,7 +172,8 @@ internal class SatelliteBaseTileRenderer(
             state = state,
             style = style,
             allow_speculative_requests = true,
-            include_retained_interim = true
+            include_retained_interim = true,
+            draw_lower_lod_pixels = true
         )
         if (result.reusable_for_pan_cache &&
             should_record_pan_cache(
@@ -198,6 +199,7 @@ internal class SatelliteBaseTileRenderer(
                 }
                 val visual_state = snapshot_visual_state()
                 try {
+                    val recording_now_ms = SystemClock.elapsedRealtime()
                     val recorded_result = draw_tiles_direct(
                         canvas = recording_canvas,
                         viewport = cache_viewport,
@@ -205,7 +207,13 @@ internal class SatelliteBaseTileRenderer(
                         style = style,
                         allow_speculative_requests = false,
                         draw_reference_layers = false,
-                        include_retained_interim = false
+                        include_retained_interim = false,
+                        draw_lower_lod_pixels = satellite_pan_cache_lower_lod_pixels_needed(
+                            cache_viewport,
+                            state,
+                            recording_now_ms
+                        ),
+                        now_ms = recording_now_ms
                     )
                     MapLayerPanCacheRecordResult(
                         status = recorded_result.status,
@@ -228,9 +236,10 @@ internal class SatelliteBaseTileRenderer(
         style: MapTileRenderStyle,
         allow_speculative_requests: Boolean,
         draw_reference_layers: Boolean = true,
-        include_retained_interim: Boolean = true
+        include_retained_interim: Boolean = true,
+        draw_lower_lod_pixels: Boolean = true,
+        now_ms: Long = SystemClock.elapsedRealtime()
     ): SatelliteTileDrawResult {
-        val now_ms = SystemClock.elapsedRealtime()
         paint.style = Paint.Style.FILL
         paint.color = style.map_empty
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
@@ -263,7 +272,7 @@ internal class SatelliteBaseTileRenderer(
             style = style,
             tile_zoom = lod.lower_tile_zoom,
             now_ms = now_ms,
-            layer_alpha = 1f,
+            layer_alpha = if (draw_lower_lod_pixels) 1f else 0f,
             draw_unavailable_if_missing = true,
             allow_parent_fallback = true,
             loaded_interim_tiles = loaded_interim_tile_buffer,
@@ -423,6 +432,28 @@ internal class SatelliteBaseTileRenderer(
                     state = state,
                     tile_zoom = lod.upper_tile_zoom
                 )
+    }
+
+    private fun satellite_pan_cache_lower_lod_pixels_needed(
+        viewport: Viewport,
+        state: MapTileRenderState,
+        now_ms: Long
+    ): Boolean {
+        val lod = satellite_lod_state(viewport)
+        if (!lod.has_upper_lod || lod.upper_lod_alpha != 1f) return true
+        if (!satellite_tile_grid_fully_available(
+                viewport = viewport,
+                state = state,
+                tile_zoom = lod.lower_tile_zoom,
+                require_settled_at_ms = now_ms
+            )
+        ) return true
+        return !satellite_tile_grid_fully_available(
+            viewport = viewport,
+            state = state,
+            tile_zoom = lod.upper_tile_zoom,
+            require_opaque = true
+        )
     }
 
     private fun satellite_pan_cache_key(
@@ -649,7 +680,9 @@ internal class SatelliteBaseTileRenderer(
     private fun satellite_tile_grid_fully_available(
         viewport: Viewport,
         state: MapTileRenderState,
-        tile_zoom: Int
+        tile_zoom: Int,
+        require_opaque: Boolean = false,
+        require_settled_at_ms: Long? = null
     ): Boolean {
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
@@ -667,7 +700,11 @@ internal class SatelliteBaseTileRenderer(
             for (tx_raw in first_tile_x..last_tile_x) {
                 val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                 val key = "${state.cache_key}/$tile_zoom/$tx/$ty"
-                if (tile_bitmap(tile_zoom, tx, ty, key, state) == null) return false
+                val bitmap = tile_bitmap(tile_zoom, tx, ty, key, state) ?: return false
+                if (require_opaque && bitmap.hasAlpha()) return false
+                if (require_settled_at_ms != null &&
+                    satellite_tile_load_alpha(key, require_settled_at_ms) < 0.999f
+                ) return false
             }
         }
         return true
