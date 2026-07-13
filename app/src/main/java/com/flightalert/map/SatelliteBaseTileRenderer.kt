@@ -118,6 +118,7 @@ internal class SatelliteBaseTileRenderer(
         allowCoreThreadTimeOut(true)
     }
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+    private var bitmap_paint_alpha = 255
     private val tile_destination = RectF()
     private val interim_tile_destination = RectF()
     private val interim_tile_test_rect = RectF()
@@ -751,7 +752,11 @@ internal class SatelliteBaseTileRenderer(
         destination: RectF,
         alpha: Float
     ) {
-        bitmap_paint.alpha = (255f * alpha.coerceIn(0f, 1f)).roundToInt().coerceIn(0, 255)
+        val draw_alpha = (255f * alpha.coerceIn(0f, 1f)).roundToInt().coerceIn(0, 255)
+        if (bitmap_paint_alpha != draw_alpha) {
+            bitmap_paint.alpha = draw_alpha
+            bitmap_paint_alpha = draw_alpha
+        }
         canvas.drawBitmap(bitmap, source, destination, bitmap_paint)
     }
 
