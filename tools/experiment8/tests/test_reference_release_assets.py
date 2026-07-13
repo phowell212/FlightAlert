@@ -540,7 +540,9 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
             [], list(self.root.glob(f".{output.name}.exp8-prepare-*.stage"))
         )
 
-    def test_prepare_cleans_stage_if_initial_identity_probe_fails(self) -> None:
+    def test_prepare_leaves_safe_orphan_if_initial_identity_probe_fails(
+        self,
+    ) -> None:
         output = self.root / "identity-probe-release-assets"
         real_stat = Path.stat
         failed = False
@@ -576,9 +578,53 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
 
         self.assertTrue(failed)
         self.assertFalse(output.exists())
-        self.assertEqual(
-            [], list(self.root.glob(f".{output.name}.exp8-prepare-*.stage"))
+        orphans = list(
+            self.root.glob(f".{output.name}.exp8-prepare-*.stage")
         )
+        self.assertEqual(1, len(orphans))
+        self.assertEqual([], list(orphans[0].iterdir()))
+
+    def test_prepare_preserves_empty_replacement_after_initial_probe_failure(
+        self,
+    ) -> None:
+        output = self.root / "empty-replacement-probe-assets"
+        real_stat = Path.stat
+        original_stage: Path | None = None
+        replacement_stage: Path | None = None
+
+        def replace_with_empty_stage_then_fail_stat(
+            path: Path, *, follow_symlinks: bool = True
+        ) -> object:
+            nonlocal original_stage, replacement_stage
+            if (
+                replacement_stage is None
+                and path.name.startswith(f".{output.name}.exp8-prepare-")
+                and path.name.endswith(".stage")
+                and not follow_symlinks
+            ):
+                original_stage = path.with_name(path.name + ".original")
+                path.rename(original_stage)
+                path.mkdir()
+                replacement_stage = path
+                raise OSError("injected empty replacement identity ambiguity")
+            return real_stat(path, follow_symlinks=follow_symlinks)
+
+        with mock.patch.object(
+            Path,
+            "stat",
+            autospec=True,
+            side_effect=replace_with_empty_stage_then_fail_stat,
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                self._prepare_from_result("empty-replacement-probe-assets")
+
+        self.assertIsNotNone(original_stage)
+        self.assertIsNotNone(replacement_stage)
+        assert original_stage is not None
+        assert replacement_stage is not None
+        self.assertTrue(original_stage.is_dir())
+        self.assertTrue(replacement_stage.is_dir())
+        self.assertEqual([], list(replacement_stage.iterdir()))
 
     def test_prepare_never_adopts_replacement_after_initial_probe_failure(
         self,

@@ -127,10 +127,6 @@ def _create_stage(target: Path, operation: str) -> tuple[Path, tuple[int, int]]:
     try:
         information = stage.stat(follow_symlinks=False)
     except OSError as error:
-        try:
-            stage.rmdir()
-        except OSError:
-            pass
         raise ReferencePackageInstallError(
             f"{operation} stage identity cannot be inspected"
         ) from error
