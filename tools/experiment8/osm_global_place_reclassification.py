@@ -34,6 +34,43 @@ _EXACT_SOURCE_PATH = Path(
 _EXACT_OUTPUT_PATH = Path(
     r"E:\FlightAlert-exp8-work\osm-global-place-260629-extraction-outcome-v3"
 )
+_HISTORICAL_FINALIZER_CODE = MappingProxyType(
+    {
+        "auditParser": MappingProxyType(
+            {
+                "bytes": 73_351,
+                "name": "osm_global_place_package.py",
+                "sha256": (
+                    "7f7c18ff7d44d9ecfeb1d447a29bb65a104ca9bf93d8959f33a9d53cd8da1d8e"
+                ),
+            }
+        ),
+        "semanticOutcome": MappingProxyType(
+            {
+                "bytes": 83_314,
+                "name": "osm_global_place_store.py",
+                "sha256": (
+                    "a3bfd11e8dcc46e93d8c523fbd209909f31cc34cb7ea6f3a7df792b493ac37a9"
+                ),
+            }
+        ),
+        "stageFinalizer": MappingProxyType(
+            {
+                "bytes": 39_967,
+                "name": "osm_global_place_recovery.py",
+                "sha256": (
+                    "ae58c8e03c8a83617b9d7c8ad61e1367e43e87a1a3c87b64979d55211c1a15ba"
+                ),
+            }
+        ),
+    }
+)
+_HISTORICAL_FINALIZER_RUNTIME = MappingProxyType(
+    {
+        "pythonImplementation": "cpython",
+        "pythonVersion": (3, 11, 1),
+    }
+)
 _INVENTORY = tuple(
     sorted(
         (
@@ -71,6 +108,22 @@ class _HashingReader:
 
     def tell(self) -> int:
         return self.source.tell()
+
+
+def _source_binding_from_historical_recovery(
+    extraction_directory: Path,
+) -> PlaceSourceBinding:
+    recovery._require_exact_path(
+        extraction_directory,
+        _EXACT_SOURCE_PATH,
+        "historical reclassification source",
+    )
+    return recovery._source_binding_from_recovered_extraction(
+        _EXACT_SOURCE_PATH,
+        recovery._EXACT_RETAINED_RECOVERY_CONTRACT,
+        expected_finalizer_code=_HISTORICAL_FINALIZER_CODE,
+        expected_finalizer_runtime=_HISTORICAL_FINALIZER_RUNTIME,
+    )
 
 
 def _code_identities() -> dict[str, object]:
@@ -728,7 +781,7 @@ def reclassify_retained_extraction() -> GlobalPlaceExtractionResult:
     return _reclassify_recovered_extraction(
         source_directory=_EXACT_SOURCE_PATH,
         output_directory=_EXACT_OUTPUT_PATH,
-        source_binding_loader=recovery.source_binding_from_recovered_extraction,
+        source_binding_loader=_source_binding_from_historical_recovery,
     )
 
 
@@ -792,7 +845,7 @@ def source_binding_from_reclassified_extraction(
         _EXACT_OUTPUT_PATH,
         source_directory=_EXACT_SOURCE_PATH,
         output_directory=_EXACT_OUTPUT_PATH,
-        source_binding_loader=recovery.source_binding_from_recovered_extraction,
+        source_binding_loader=_source_binding_from_historical_recovery,
     )
 
 

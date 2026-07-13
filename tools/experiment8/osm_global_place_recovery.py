@@ -542,6 +542,70 @@ def _finalizer_runtime() -> dict[str, object]:
     }
 
 
+def _expected_finalizer_code(
+    expected: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if expected is None:
+        return _finalizer_code()
+    expected_names = {
+        "auditParser": "osm_global_place_package.py",
+        "semanticOutcome": "osm_global_place_store.py",
+        "stageFinalizer": "osm_global_place_recovery.py",
+    }
+    if not isinstance(expected, Mapping) or set(expected) != set(expected_names):
+        raise GlobalPlacePackageError(
+            "expected historical finalizer code fields differ"
+        )
+    validated: dict[str, object] = {}
+    for role, expected_name in expected_names.items():
+        identity = expected.get(role)
+        if (
+            not isinstance(identity, Mapping)
+            or set(identity) != {"bytes", "name", "sha256"}
+            or type(identity.get("bytes")) is not int
+            or identity["bytes"] < 0
+            or identity.get("name") != expected_name
+        ):
+            raise GlobalPlacePackageError(
+                "expected historical finalizer code identity is malformed"
+            )
+        validated[role] = {
+            "bytes": identity["bytes"],
+            "name": expected_name,
+            "sha256": pipeline._require_sha256(
+                identity.get("sha256"),
+                "expected historical finalizer code",
+            ),
+        }
+    return validated
+
+
+def _expected_finalizer_runtime(
+    expected: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if expected is None:
+        return _finalizer_runtime()
+    if (
+        not isinstance(expected, Mapping)
+        or set(expected) != {"pythonImplementation", "pythonVersion"}
+        or type(expected.get("pythonImplementation")) is not str
+        or not expected["pythonImplementation"]
+        or type(expected.get("pythonVersion")) not in {list, tuple}
+        or len(expected["pythonVersion"]) != 3
+        or any(
+            type(value) is not int or value < 0
+            for value in expected["pythonVersion"]
+        )
+    ):
+        raise GlobalPlacePackageError(
+            "expected historical finalizer runtime is malformed"
+        )
+    return {
+        "pythonImplementation": expected["pythonImplementation"],
+        "pythonVersion": list(expected["pythonVersion"]),
+    }
+
+
 def _recovery_partial_path(
     output_directory: Path,
     contract: _RecoveryContract,
@@ -652,7 +716,11 @@ def _validate_recovery_output(
     directory: Path,
     *,
     contract: _RecoveryContract,
+    expected_finalizer_code: Mapping[str, object] | None = None,
+    expected_finalizer_runtime: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object], pipeline.FileIdentity]:
+    finalizer_code = _expected_finalizer_code(expected_finalizer_code)
+    finalizer_runtime = _expected_finalizer_runtime(expected_finalizer_runtime)
     _require_real_directory(directory, "recovered extraction")
     if _directory_names(directory) != _expected_recovered_names():
         raise GlobalPlacePackageError("recovered extraction inventory differs")
@@ -748,7 +816,7 @@ def _validate_recovery_output(
     actual_bound.sort(key=lambda document: str(document["name"]))
     expected_recovery = {
         "boundFiles": actual_bound,
-        "finalizer": {"code": _finalizer_code(), "runtime": _finalizer_runtime()},
+        "finalizer": {"code": finalizer_code, "runtime": finalizer_runtime},
         "freshExtractionReceipt": fresh_receipt_identity,
         "producer": {
             "checkpoint": checkpoint_identity,
@@ -980,9 +1048,15 @@ def recover_completed_extraction_stage(
 def _source_binding_from_recovered_extraction(
     extraction_directory: Path,
     contract: _RecoveryContract,
+    *,
+    expected_finalizer_code: Mapping[str, object] | None = None,
+    expected_finalizer_runtime: Mapping[str, object] | None = None,
 ) -> PlaceSourceBinding:
     receipt, receipt_identity = _validate_recovery_output(
-        extraction_directory, contract=contract
+        extraction_directory,
+        contract=contract,
+        expected_finalizer_code=expected_finalizer_code,
+        expected_finalizer_runtime=expected_finalizer_runtime,
     )
     recovery_identity = pipeline._stream_file_identity(
         extraction_directory / "extraction-recovery-receipt.json"

@@ -1104,6 +1104,82 @@ class RecoveryBoundaryTests(unittest.TestCase):
         exact_recovery.assert_called_once_with()
         self.assertEqual("complete", json.loads(stdout.getvalue())["state"])
 
+    def test_historical_finalizer_pins_are_explicit_and_default_validation_stays_current(
+        self,
+    ) -> None:
+        pipeline, recovery = self._modules()
+        historical_code = {
+            "auditParser": {
+                "bytes": 73_351,
+                "name": "osm_global_place_package.py",
+                "sha256": (
+                    "7f7c18ff7d44d9ecfeb1d447a29bb65a104ca9bf93d8959f33a9d53cd8da1d8e"
+                ),
+            },
+            "semanticOutcome": {
+                "bytes": 83_314,
+                "name": "osm_global_place_store.py",
+                "sha256": (
+                    "a3bfd11e8dcc46e93d8c523fbd209909f31cc34cb7ea6f3a7df792b493ac37a9"
+                ),
+            },
+            "stageFinalizer": {
+                "bytes": 39_967,
+                "name": "osm_global_place_recovery.py",
+                "sha256": (
+                    "ae58c8e03c8a83617b9d7c8ad61e1367e43e87a1a3c87b64979d55211c1a15ba"
+                ),
+            },
+        }
+        historical_runtime = {
+            "pythonImplementation": "cpython",
+            "pythonVersion": [3, 11, 1],
+        }
+        self.assertNotEqual(
+            historical_code["auditParser"],
+            recovery._finalizer_code()["auditParser"],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage, output, contract, _, opl_raw, _ = _make_recovery_stage(
+                root, recovery, pipeline
+            )
+            recovery._recover_completed_extraction_stage(
+                stage_directory=stage,
+                output_directory=output,
+                contract=contract,
+            )
+            receipt_path = output / "extraction-recovery-receipt.json"
+            receipt = json.loads(receipt_path.read_text("utf-8"))
+            receipt["finalizer"] = {
+                "code": historical_code,
+                "runtime": historical_runtime,
+            }
+            receipt_path.write_bytes(pipeline._canonical_json_bytes(receipt))
+
+            with patch.object(
+                recovery, "_EXACT_OUTPUT_PATH", output
+            ), patch.object(
+                recovery, "_EXACT_RETAINED_RECOVERY_CONTRACT", contract
+            ):
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError,
+                    "exact recovery contract",
+                ):
+                    recovery.source_binding_from_recovered_extraction(output)
+
+            binding = recovery._source_binding_from_recovered_extraction(
+                output,
+                contract,
+                expected_finalizer_code=historical_code,
+                expected_finalizer_runtime=historical_runtime,
+            )
+            self.assertEqual(hashlib.sha256(opl_raw).hexdigest(), binding.opl_sha256)
+            self.assertEqual(
+                hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+                binding.recovery_receipt_sha256,
+            )
+
 
 class ReclassificationBoundaryTests(unittest.TestCase):
     def _fixture(self, root: Path):
@@ -1160,6 +1236,87 @@ class ReclassificationBoundaryTests(unittest.TestCase):
             pipeline._argument_parser().parse_args(
                 ["reclassify-retained", "--output", "elsewhere"]
             )
+
+    def test_exact_reclassification_loader_uses_immutable_historical_finalizer_pins(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+        from tools.experiment8 import osm_global_place_recovery as recovery
+
+        self.assertEqual(
+            {
+                "auditParser": (
+                    73_351,
+                    "7f7c18ff7d44d9ecfeb1d447a29bb65a104ca9bf93d8959f33a9d53cd8da1d8e",
+                ),
+                "semanticOutcome": (
+                    83_314,
+                    "a3bfd11e8dcc46e93d8c523fbd209909f31cc34cb7ea6f3a7df792b493ac37a9",
+                ),
+                "stageFinalizer": (
+                    39_967,
+                    "ae58c8e03c8a83617b9d7c8ad61e1367e43e87a1a3c87b64979d55211c1a15ba",
+                ),
+            },
+            {
+                role: (identity["bytes"], identity["sha256"])
+                for role, identity in reclassification._HISTORICAL_FINALIZER_CODE.items()
+            },
+        )
+        self.assertEqual(
+            ("cpython", (3, 11, 1)),
+            (
+                reclassification._HISTORICAL_FINALIZER_RUNTIME[
+                    "pythonImplementation"
+                ],
+                tuple(
+                    reclassification._HISTORICAL_FINALIZER_RUNTIME[
+                        "pythonVersion"
+                    ]
+                ),
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage, source, contract, _, opl_raw, _ = _make_recovery_stage(
+                root, recovery, pipeline
+            )
+            recovery._recover_completed_extraction_stage(
+                stage_directory=stage,
+                output_directory=source,
+                contract=contract,
+            )
+            receipt_path = source / "extraction-recovery-receipt.json"
+            receipt = json.loads(receipt_path.read_text("utf-8"))
+            receipt["finalizer"] = {
+                "code": {
+                    role: dict(identity)
+                    for role, identity in reclassification._HISTORICAL_FINALIZER_CODE.items()
+                },
+                "runtime": {
+                    "pythonImplementation": reclassification._HISTORICAL_FINALIZER_RUNTIME[
+                        "pythonImplementation"
+                    ],
+                    "pythonVersion": list(
+                        reclassification._HISTORICAL_FINALIZER_RUNTIME[
+                            "pythonVersion"
+                        ]
+                    ),
+                },
+            }
+            receipt_path.write_bytes(pipeline._canonical_json_bytes(receipt))
+
+            with patch.object(
+                reclassification, "_EXACT_SOURCE_PATH", source
+            ), patch.object(
+                recovery, "_EXACT_RETAINED_RECOVERY_CONTRACT", contract
+            ):
+                binding = reclassification._source_binding_from_historical_recovery(
+                    source
+                )
+            self.assertEqual(hashlib.sha256(opl_raw).hexdigest(), binding.opl_sha256)
 
     def test_public_reclassification_and_binding_refuse_non_pinned_paths(self) -> None:
         from tools.experiment8 import osm_global_place_package as pipeline
