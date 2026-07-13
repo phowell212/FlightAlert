@@ -224,19 +224,21 @@ internal class TrafficCacheController(
     private val now_elapsed_ms: () -> Long = { SystemClock.elapsedRealtime() }
 ) {
     private var traffic_cache_dirty = true
-    private var cached_filtered_aircraft: List<Aircraft> = emptyList()
-    private var cached_nearest_aircraft: Aircraft? = null
-    private var cached_filtered_entries: List<TrafficSpatialEntry> = emptyList()
-    private var cached_traffic_spatial_index = TrafficSpatialIndex(emptyList())
-    private var cached_world_dot_batch = TrafficWorldDotBatch.empty()
-    private var cached_aircraft_total = 0
-    private var cached_hazard_present = false
-    private var cached_extreme_priority_aircraft: List<Aircraft> = emptyList()
-    private var cached_extreme_priority_keys: Set<String> = emptySet()
-    private var cached_max_projected_speed_zoom_zero = 0.0
+    private var published_traffic = CachedTraffic(
+        aircraft = emptyList(),
+        nearest_aircraft = null,
+        entries = emptyList(),
+        spatial_index = TrafficSpatialIndex(emptyList()),
+        world_dot_batch = TrafficWorldDotBatch.empty(),
+        total = 0,
+        hazard_present = false,
+        extreme_priority_aircraft = emptyList(),
+        extreme_priority_keys = emptySet(),
+        max_projected_speed_zoom_zero = 0.0
+    )
 
     val total: Int
-        get() = cached_aircraft_total
+        get() = published_traffic.total
 
     fun mark_dirty() {
         traffic_cache_dirty = true
@@ -292,32 +294,12 @@ internal class TrafficCacheController(
     }
 
     fun publish_cached_traffic(cache: CachedTraffic) {
-        cached_filtered_aircraft = cache.aircraft
-        cached_nearest_aircraft = cache.nearest_aircraft
-        cached_filtered_entries = cache.entries
-        cached_traffic_spatial_index = cache.spatial_index
-        cached_world_dot_batch = cache.world_dot_batch
-        cached_aircraft_total = cache.total
-        cached_hazard_present = cache.hazard_present
-        cached_extreme_priority_aircraft = cache.extreme_priority_aircraft
-        cached_extreme_priority_keys = cache.extreme_priority_keys
-        cached_max_projected_speed_zoom_zero = cache.max_projected_speed_zoom_zero
+        published_traffic = cache
         traffic_cache_dirty = false
     }
 
     private fun current_cached_traffic(): CachedTraffic {
-        return CachedTraffic(
-            aircraft = cached_filtered_aircraft,
-            nearest_aircraft = cached_nearest_aircraft,
-            entries = cached_filtered_entries,
-            spatial_index = cached_traffic_spatial_index,
-            world_dot_batch = cached_world_dot_batch,
-            total = cached_aircraft_total,
-            hazard_present = cached_hazard_present,
-            extreme_priority_aircraft = cached_extreme_priority_aircraft,
-            extreme_priority_keys = cached_extreme_priority_keys,
-            max_projected_speed_zoom_zero = cached_max_projected_speed_zoom_zero
-        )
+        return published_traffic
     }
 
     private fun max_projected_speed_zoom_zero(entries: List<TrafficSpatialEntry>): Double {
