@@ -7,9 +7,11 @@ import ctypes
 import errno
 import hashlib
 import http.client
+import ipaddress
 import os
 import re
 import shutil
+import socket
 import stat
 import sys
 import uuid
@@ -17,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from tools.experiment8 import reference_package_install as installer
 from tools.experiment8.reference_package_install import (
@@ -33,10 +35,21 @@ RELEASE_MANIFEST_SCHEMA = (
     "flightalert.experiment8.reference-release-manifest.v1"
 )
 MAX_RELEASE_ASSET_BYTES = 2_000_000_000
+MAX_RELEASE_CHUNKS = 999
 DEFAULT_CHUNK_BYTES = 1_900_000_000
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _DOWNLOAD_BUFFER_BYTES = 4 * 1024 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 60
+_GITHUB_RELEASE_HOST = "github.com"
+_GITHUB_RELEASE_PATH_PREFIX = (
+    "/phowell212/FlightAlert/releases/download/"
+)
+_GITHUB_RELEASE_CDN_HOSTS = frozenset(
+    {
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+)
 
 
 def _same_install_file(
@@ -48,6 +61,40 @@ def _same_install_file(
         and left.sha256 == right.sha256
         and left.stat_identity == right.stat_identity
     )
+
+
+def _source_commit_from_final_result(final_result_path: Path) -> str:
+    result = installer._read_strict_json(
+        final_result_path,
+        "final result",
+        canonical=False,
+    )
+    apk = installer._exact_mapping(result.get("apk"), "final result APK")
+    source_commit = installer._exact_string(
+        apk.get("sourceCommit"),
+        "final result APK source commit",
+    )
+    if _FULL_COMMIT.fullmatch(source_commit) is None:
+        raise ReferencePackageInstallError(
+            "final result APK source commit is malformed"
+        )
+    rebind = installer._exact_mapping(
+        result.get("rebind"),
+        "final result rebind",
+    )
+    rebound_commit = installer._exact_string(
+        rebind.get("sourceCommit"),
+        "final result rebind source commit",
+    )
+    if _FULL_COMMIT.fullmatch(rebound_commit) is None:
+        raise ReferencePackageInstallError(
+            "final result rebind source commit is malformed"
+        )
+    if rebound_commit != source_commit:
+        raise ReferencePackageInstallError(
+            "final result source commit bindings differ"
+        )
+    return source_commit
 
 
 def _fresh_directory_target(path: Path, label: str) -> Path:
@@ -81,12 +128,7 @@ def _create_stage(target: Path, operation: str) -> tuple[Path, tuple[int, int]]:
         information = stage.stat(follow_symlinks=False)
     except OSError as error:
         try:
-            recovery_information = stage.stat(follow_symlinks=False)
-            recovery_identity = (
-                recovery_information.st_dev,
-                recovery_information.st_ino,
-            )
-            _cleanup_owned_stage(stage, recovery_identity)
+            stage.rmdir()
         except OSError:
             pass
         raise ReferencePackageInstallError(
@@ -120,7 +162,10 @@ def _cleanup_owned_stage(
 
 
 def _publish_stage(
-    stage: Path, target: Path, identity: tuple[int, int]
+    stage: Path,
+    target: Path,
+    identity: tuple[int, int],
+    validate_published: Callable[[Path], None],
 ) -> None:
     if stage.parent != target.parent or os.path.lexists(target):
         raise ReferencePackageInstallError(
@@ -138,6 +183,16 @@ def _publish_stage(
         ):
             raise ReferencePackageInstallError(
                 "published release output identity differs from its stage"
+            )
+        validate_published(target)
+        final_information = target.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(final_information.st_mode)
+            or installer._is_reparse(final_information)
+            or (final_information.st_dev, final_information.st_ino) != identity
+        ):
+            raise ReferencePackageInstallError(
+                "published release output changed during final validation"
             )
     except ReferencePackageInstallError:
         if published:
@@ -219,7 +274,33 @@ def _exact_list(value: object, label: str) -> list[object]:
     return value
 
 
-def _validate_url(url: str, *, allow_loopback_http: bool) -> str:
+def _validate_release_asset_plan(
+    file_sizes: Sequence[int],
+    chunk_bytes: int,
+) -> int:
+    if (
+        type(chunk_bytes) is not int
+        or chunk_bytes <= 0
+        or chunk_bytes >= MAX_RELEASE_ASSET_BYTES
+    ):
+        raise ReferencePackageInstallError(
+            "release asset chunk size must be positive and below 2 GB"
+        )
+    total_chunks = 0
+    for size in file_sizes:
+        if type(size) is not int or size <= 0:
+            raise ReferencePackageInstallError(
+                "release asset plan contains an invalid file size"
+            )
+        total_chunks += (size + chunk_bytes - 1) // chunk_bytes
+        if total_chunks > MAX_RELEASE_CHUNKS:
+            raise ReferencePackageInstallError(
+                "release asset plan exceeds 999 package shards"
+            )
+    return total_chunks
+
+
+def _split_download_url(url: str) -> urllib.parse.SplitResult:
     if (
         type(url) is not str
         or not url
@@ -239,26 +320,214 @@ def _validate_url(url: str, *, allow_loopback_http: bool) -> str:
         or parsed.password is not None
         or parsed.fragment
         or not parsed.path
+        or not parsed.path.startswith("/")
+        or port == 0
     ):
         raise ReferencePackageInstallError("release asset URL is malformed")
-    del port
-    if parsed.scheme == "https":
-        return url
+    return parsed
+
+
+def _resolve_host_addresses(hostname: str, port: int) -> tuple[str, ...]:
+    try:
+        answers = socket.getaddrinfo(
+            hostname,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+    except (OSError, socket.gaierror) as error:
+        raise ReferencePackageInstallError(
+            "release asset host cannot be resolved"
+        ) from error
+    addresses = tuple(sorted({answer[4][0] for answer in answers}))
+    if not addresses:
+        raise ReferencePackageInstallError(
+            "release asset host has no resolved addresses"
+        )
+    return addresses
+
+
+def _assert_resolved_address_scope(
+    hostname: str,
+    port: int,
+    *,
+    loopback_only: bool,
+) -> None:
+    addresses = _resolve_host_addresses(hostname, port)
+    for text in addresses:
+        try:
+            address = ipaddress.ip_address(text.split("%", 1)[0])
+        except ValueError as error:
+            raise ReferencePackageInstallError(
+                "release asset host resolved to a malformed address"
+            ) from error
+        if loopback_only:
+            allowed = address.is_loopback
+        else:
+            allowed = address.is_global and not (
+                address.is_loopback
+                or address.is_private
+                or address.is_link_local
+                or address.is_reserved
+                or address.is_unspecified
+                or address.is_multicast
+            )
+        if not allowed:
+            raise ReferencePackageInstallError(
+                "release asset host resolved to a nonpublic address"
+            )
+
+
+def _plain_release_path(path: str) -> str:
+    decoded = urllib.parse.unquote(path)
     if (
-        allow_loopback_http
-        and parsed.scheme == "http"
-        and parsed.hostname in {"127.0.0.1", "::1"}
+        decoded != path
+        or "\\" in decoded
+        or "\0" in decoded
+        or "//" in decoded
     ):
+        raise ReferencePackageInstallError(
+            "release asset URL path is malformed"
+        )
+    return decoded
+
+
+def _github_release_directory(path: str) -> str:
+    plain = _plain_release_path(path)
+    if not plain.startswith(_GITHUB_RELEASE_PATH_PREFIX):
+        raise ReferencePackageInstallError(
+            "release asset URL is outside the FlightAlert releases"
+        )
+    remainder = plain[len(_GITHUB_RELEASE_PATH_PREFIX) :]
+    parts = remainder.split("/")
+    if (
+        len(parts) != 2
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ReferencePackageInstallError(
+            "release asset URL is not one exact GitHub release asset"
+        )
+    return _GITHUB_RELEASE_PATH_PREFIX + parts[0] + "/"
+
+
+class _DownloadUrlPolicy:
+    def __init__(
+        self,
+        *,
+        initial_url: str,
+        release_directory: str,
+        loopback_origin: tuple[str, str, int] | None,
+    ) -> None:
+        self.initial_url = initial_url
+        self.release_directory = release_directory
+        self._loopback_origin = loopback_origin
+
+    @classmethod
+    def for_initial(
+        cls,
+        url: str,
+        *,
+        allow_loopback_http: bool,
+    ) -> "_DownloadUrlPolicy":
+        parsed = _split_download_url(url)
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ReferencePackageInstallError("release asset URL is malformed")
+        port = parsed.port
+        if (
+            allow_loopback_http
+            and parsed.scheme == "http"
+            and hostname in {"127.0.0.1", "::1"}
+        ):
+            effective_port = port if port is not None else 80
+            _assert_resolved_address_scope(
+                hostname,
+                effective_port,
+                loopback_only=True,
+            )
+            plain_path = _plain_release_path(parsed.path)
+            if PurePosixPath(plain_path).name in {"", ".", ".."}:
+                raise ReferencePackageInstallError(
+                    "loopback release asset URL has no file name"
+                )
+            directory = plain_path.rsplit("/", 1)[0] + "/"
+            return cls(
+                initial_url=url,
+                release_directory=directory,
+                loopback_origin=("http", hostname, effective_port),
+            )
+        if (
+            parsed.scheme != "https"
+            or hostname != _GITHUB_RELEASE_HOST
+            or port not in (None, 443)
+            or parsed.query
+        ):
+            raise ReferencePackageInstallError(
+                "release asset URL must be one FlightAlert GitHub release asset"
+            )
+        directory = _github_release_directory(parsed.path)
+        _assert_resolved_address_scope(
+            hostname,
+            443,
+            loopback_only=False,
+        )
+        return cls(
+            initial_url=url,
+            release_directory=directory,
+            loopback_origin=None,
+        )
+
+    def validate_redirect(self, url: str) -> str:
+        parsed = _split_download_url(url)
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ReferencePackageInstallError("release asset URL is malformed")
+        port = parsed.port
+        if self._loopback_origin is not None:
+            effective_port = port if port is not None else 80
+            origin = (parsed.scheme, hostname, effective_port)
+            plain_path = _plain_release_path(parsed.path)
+            directory = plain_path.rsplit("/", 1)[0] + "/"
+            if origin != self._loopback_origin or directory != self.release_directory:
+                raise ReferencePackageInstallError(
+                    "loopback release redirect escaped its exact origin or directory"
+                )
+            _assert_resolved_address_scope(
+                hostname,
+                effective_port,
+                loopback_only=True,
+            )
+            return url
+        if parsed.scheme != "https" or port not in (None, 443):
+            raise ReferencePackageInstallError(
+                "release asset redirect must use default-port HTTPS"
+            )
+        if hostname == _GITHUB_RELEASE_HOST:
+            if _github_release_directory(parsed.path) != self.release_directory:
+                raise ReferencePackageInstallError(
+                    "release asset redirect escaped its exact release directory"
+                )
+        elif hostname in _GITHUB_RELEASE_CDN_HOSTS:
+            decoded = urllib.parse.unquote(parsed.path)
+            if "\\" in decoded or "\0" in decoded:
+                raise ReferencePackageInstallError(
+                    "release asset CDN URL path is malformed"
+                )
+        else:
+            raise ReferencePackageInstallError(
+                "release asset redirect uses an untrusted origin"
+            )
+        _assert_resolved_address_scope(
+            hostname,
+            443,
+            loopback_only=False,
+        )
         return url
-    raise ReferencePackageInstallError(
-        "release asset URL must use HTTPS outside the loopback test seam"
-    )
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def __init__(self, *, allow_loopback_http: bool) -> None:
+    def __init__(self, *, policy: _DownloadUrlPolicy) -> None:
         super().__init__()
-        self._allow_loopback_http = allow_loopback_http
+        self._policy = policy
 
     def redirect_request(
         self,
@@ -269,27 +538,28 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Mapping[str, str],
         new_url: str,
     ) -> urllib.request.Request | None:
-        _validate_url(
-            new_url,
-            allow_loopback_http=self._allow_loopback_http,
-        )
+        absolute_url = urllib.parse.urljoin(request.full_url, new_url)
+        validated_url = self._policy.validate_redirect(absolute_url)
         return super().redirect_request(
             request,
             file_pointer,
             code,
             message,
             headers,
-            new_url,
+            validated_url,
         )
 
 
 def _open_download(url: str, *, allow_loopback_http: bool) -> object:
-    validated = _validate_url(url, allow_loopback_http=allow_loopback_http)
+    policy = _DownloadUrlPolicy.for_initial(
+        url,
+        allow_loopback_http=allow_loopback_http,
+    )
     opener = urllib.request.build_opener(
-        _SafeRedirectHandler(allow_loopback_http=allow_loopback_http)
+        _SafeRedirectHandler(policy=policy)
     )
     request = urllib.request.Request(
-        validated,
+        policy.initial_url,
         headers={
             "Accept-Encoding": "identity",
             "User-Agent": "FlightAlert-Experiment8-Reference/1",
@@ -306,7 +576,7 @@ def _open_download(url: str, *, allow_loopback_http: bool) -> object:
         ) from error
     try:
         final_url = response.geturl()
-        _validate_url(final_url, allow_loopback_http=allow_loopback_http)
+        policy.validate_redirect(final_url)
         encoding = response.headers.get("Content-Encoding")
         if encoding not in (None, "", "identity"):
             raise ReferencePackageInstallError(
@@ -330,10 +600,8 @@ def _declared_content_length(response: object, label: str) -> int | None:
 def _download_manifest(
     manifest_url: str, *, allow_loopback_http: bool
 ) -> tuple[dict[str, object], str]:
-    validated_url = _validate_url(
-        manifest_url,
-        allow_loopback_http=allow_loopback_http,
-    )
+    _split_download_url(manifest_url)
+    validated_url = manifest_url
     parsed = urllib.parse.urlsplit(validated_url)
     decoded_path = urllib.parse.unquote(parsed.path)
     if (
@@ -512,6 +780,10 @@ def _validated_manifest_files(
                     "release manifest asset name collides or is unsafe"
                 )
             asset_names.add(asset)
+            if len(asset_names) > MAX_RELEASE_CHUNKS:
+                raise ReferencePackageInstallError(
+                    "release manifest exceeds 999 package shards"
+                )
             size = _exact_positive_integer(
                 chunk.get("bytes"),
                 f"release manifest file {name} chunk {chunk_index} bytes",
@@ -723,16 +995,11 @@ def prepare_release_assets(
     package_directory: Path,
     apk_path: Path,
     final_result_path: Path,
-    source_commit: str,
     output_directory: Path,
     chunk_bytes: int = DEFAULT_CHUNK_BYTES,
 ) -> Path:
     """Validate and deterministically shard an exact Experiment 8 package."""
 
-    if type(source_commit) is not str or _FULL_COMMIT.fullmatch(source_commit) is None:
-        raise ReferencePackageInstallError(
-            "source commit is not one full lowercase Git commit"
-        )
     if (
         type(chunk_bytes) is not int
         or chunk_bytes <= 0
@@ -748,6 +1015,7 @@ def prepare_release_assets(
         Path(final_result_path), "final result"
     )
     result_file = installer._hash_regular_file(final_result_path, "final result")
+    source_commit = _source_commit_from_final_result(final_result_path)
     plan = HostInstallPlan.validate(
         package_directory=Path(package_directory),
         apk_path=Path(apk_path),
@@ -760,6 +1028,10 @@ def prepare_release_assets(
         raise ReferencePackageInstallError(
             "final result changed during host-plan validation"
         )
+    _validate_release_asset_plan(
+        tuple(item.byte_length for item in plan.package_files),
+        chunk_bytes,
+    )
 
     stage: Path | None = None
     stage_identity: tuple[int, int] | None = None
@@ -809,7 +1081,16 @@ def prepare_release_assets(
             )
         _assert_prepared_stage(stage, file_documents, manifest_raw)
         _assert_validated_input_identities(plan, result_file)
-        _publish_stage(stage, output, stage_identity)
+        _publish_stage(
+            stage,
+            output,
+            stage_identity,
+            lambda published: _assert_prepared_stage(
+                published,
+                file_documents,
+                manifest_raw,
+            ),
+        )
         stage = None
         stage_identity = None
         return output / RELEASE_MANIFEST_NAME
@@ -998,7 +1279,15 @@ def fetch_release_assets(
                     f"reconstructed package file {name} differs"
                 )
         _assert_reconstructed_stage(stage, files)
-        _publish_stage(stage, output, stage_identity)
+        _publish_stage(
+            stage,
+            output,
+            stage_identity,
+            lambda published: _assert_reconstructed_stage(
+                published,
+                files,
+            ),
+        )
         stage = None
         stage_identity = None
         return output
@@ -1017,7 +1306,6 @@ def _main(arguments: Sequence[str] | None = None) -> int:
     prepare.add_argument("--package", required=True, type=Path)
     prepare.add_argument("--apk", required=True, type=Path)
     prepare.add_argument("--final-result", required=True, type=Path)
-    prepare.add_argument("--source-commit", required=True)
     prepare.add_argument("--output", required=True, type=Path)
     prepare.add_argument(
         "--chunk-bytes",
@@ -1034,7 +1322,6 @@ def _main(arguments: Sequence[str] | None = None) -> int:
                 package_directory=parsed.package,
                 apk_path=parsed.apk,
                 final_result_path=parsed.final_result,
-                source_commit=parsed.source_commit,
                 output_directory=parsed.output,
                 chunk_bytes=parsed.chunk_bytes,
             )

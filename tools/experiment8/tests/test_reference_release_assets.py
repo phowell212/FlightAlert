@@ -7,7 +7,7 @@ import json
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from functools import partial
 from pathlib import Path
 from unittest import mock
@@ -28,6 +28,11 @@ SOURCE_COMMIT = "b" * 40
 MANDATORY_RESERVE_BYTES = 1_500_000_000
 TEST_CHUNK_BYTES = 512
 OVERSIZED_MANIFEST_MARKER = ".oversized-manifest-test"
+GITHUB_RELEASE_DIRECTORY_URL = (
+    "https://github.com/phowell212/FlightAlert/releases/download/v8/"
+)
+GITHUB_MANIFEST_URL = GITHUB_RELEASE_DIRECTORY_URL + RELEASE_MANIFEST_NAME
+PUBLIC_TEST_ADDRESS = "93.184.216.34"
 
 
 def _sha256(raw: bytes) -> str:
@@ -194,6 +199,7 @@ class _ValidReleaseFixture:
                 "bytes": apk_bytes,
                 "path": str(self.apk.resolve()),
                 "sha256": _sha256(self.apk.read_bytes()),
+                "sourceCommit": SOURCE_COMMIT,
             },
             "footprint": {
                 "hardCeilingBytes": 40_000_000_000,
@@ -210,6 +216,7 @@ class _ValidReleaseFixture:
             },
             "schema": "flightalert.experiment8.final-package-monitor-result.v1",
             "state": "complete",
+            "rebind": {"sourceCommit": SOURCE_COMMIT},
         }
         self.result.write_bytes(_canonical(final_result))
 
@@ -229,6 +236,95 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.fixture = _ValidReleaseFixture(self.root)
 
+    def _prepare_from_result(self, output_name: str) -> Path:
+        return prepare_release_assets(
+            package_directory=self.fixture.package,
+            apk_path=self.fixture.apk,
+            final_result_path=self.fixture.result,
+            output_directory=self.root / output_name,
+            chunk_bytes=TEST_CHUNK_BYTES,
+        )
+
+    def test_prepare_derives_source_commit_from_rebound_final_result(self) -> None:
+        manifest_path = self._prepare_from_result("derived-commit-assets")
+
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        self.assertEqual(SOURCE_COMMIT, manifest["sourceCommit"])
+
+    def test_prepare_requires_final_rebind_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        del result["rebind"]
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaises(installer_module.ReferencePackageInstallError):
+            self._prepare_from_result("missing-rebind-assets")
+
+    def test_prepare_requires_apk_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        del result["apk"]["sourceCommit"]
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaises(installer_module.ReferencePackageInstallError):
+            self._prepare_from_result("missing-apk-commit-assets")
+
+    def test_prepare_rejects_malformed_apk_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["apk"]["sourceCommit"] = SOURCE_COMMIT.upper()
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaises(installer_module.ReferencePackageInstallError):
+            self._prepare_from_result("malformed-commit-assets")
+
+    def test_prepare_rejects_malformed_rebind_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"]["sourceCommit"] = SOURCE_COMMIT[:-1]
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaises(installer_module.ReferencePackageInstallError):
+            self._prepare_from_result("malformed-rebind-commit-assets")
+
+    def test_prepare_rejects_mismatched_rebind_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"]["sourceCommit"] = "c" * 40
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaises(installer_module.ReferencePackageInstallError):
+            self._prepare_from_result("mismatched-commit-assets")
+
+    def test_release_asset_plan_accepts_exactly_999_chunks(self) -> None:
+        sizes = (994, 1, 1, 1, 1, 1)
+
+        self.assertEqual(
+            999,
+            release_module._validate_release_asset_plan(sizes, 1),
+        )
+
+    def test_release_asset_plan_rejects_1000_chunks(self) -> None:
+        sizes = (995, 1, 1, 1, 1, 1)
+
+        with self.assertRaises(installer_module.ReferencePackageInstallError):
+            release_module._validate_release_asset_plan(sizes, 1)
+
+    def test_prepare_rejects_excess_chunks_before_stage_creation(self) -> None:
+        output = self.root / "too-many-release-assets"
+
+        with mock.patch.object(
+            release_module,
+            "_create_stage",
+            side_effect=AssertionError("stage must not be created"),
+        ) as create_stage:
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                prepare_release_assets(
+                    package_directory=self.fixture.package,
+                    apk_path=self.fixture.apk,
+                    final_result_path=self.fixture.result,
+                    output_directory=output,
+                    chunk_bytes=1,
+                )
+
+        create_stage.assert_not_called()
+        self.assertFalse(output.exists())
+
     def test_prepare_is_deterministic_and_preserves_multichunk_binary_crlf(
         self,
     ) -> None:
@@ -240,7 +336,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                 package_directory=self.fixture.package,
                 apk_path=self.fixture.apk,
                 final_result_path=self.fixture.result,
-                source_commit=SOURCE_COMMIT,
                 output_directory=output,
                 chunk_bytes=TEST_CHUNK_BYTES,
             )
@@ -324,7 +419,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                 package_directory=self.fixture.package,
                 apk_path=self.fixture.apk,
                 final_result_path=self.fixture.result,
-                source_commit=SOURCE_COMMIT,
                 output_directory=output,
                 chunk_bytes=TEST_CHUNK_BYTES,
             )
@@ -344,29 +438,11 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                 package_directory=self.fixture.package,
                 apk_path=self.fixture.apk,
                 final_result_path=self.fixture.result,
-                source_commit=SOURCE_COMMIT,
                 output_directory=output,
                 chunk_bytes=MAX_RELEASE_ASSET_BYTES,
             )
 
         self.assertFalse(output.exists())
-
-    def test_prepare_requires_one_full_lowercase_source_commit(self) -> None:
-        for index, source_commit in enumerate(("b" * 39, "B" * 40)):
-            output = self.root / f"bad-commit-assets-{index}"
-            with self.subTest(source_commit=source_commit):
-                with self.assertRaises(
-                    installer_module.ReferencePackageInstallError
-                ):
-                    prepare_release_assets(
-                        package_directory=self.fixture.package,
-                        apk_path=self.fixture.apk,
-                        final_result_path=self.fixture.result,
-                        source_commit=source_commit,
-                        output_directory=output,
-                        chunk_bytes=TEST_CHUNK_BYTES,
-                    )
-                self.assertFalse(output.exists())
 
     def test_prepare_failure_cleans_tokenized_stage(self) -> None:
         output = self.root / "failed-release-assets"
@@ -381,7 +457,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                     package_directory=self.fixture.package,
                     apk_path=self.fixture.apk,
                     final_result_path=self.fixture.result,
-                    source_commit=SOURCE_COMMIT,
                     output_directory=output,
                     chunk_bytes=TEST_CHUNK_BYTES,
                 )
@@ -402,7 +477,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                 package_directory=self.fixture.package,
                 apk_path=self.fixture.apk,
                 final_result_path=self.fixture.result,
-                source_commit=SOURCE_COMMIT,
                 output_directory=output,
                 chunk_bytes=TEST_CHUNK_BYTES,
             )
@@ -428,7 +502,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                     package_directory=self.fixture.package,
                     apk_path=self.fixture.apk,
                     final_result_path=self.fixture.result,
-                    source_commit=SOURCE_COMMIT,
                     output_directory=output,
                     chunk_bytes=TEST_CHUNK_BYTES,
                 )
@@ -458,7 +531,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                     package_directory=self.fixture.package,
                     apk_path=self.fixture.apk,
                     final_result_path=self.fixture.result,
-                    source_commit=SOURCE_COMMIT,
                     output_directory=output,
                     chunk_bytes=TEST_CHUNK_BYTES,
                 )
@@ -498,7 +570,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                     package_directory=self.fixture.package,
                     apk_path=self.fixture.apk,
                     final_result_path=self.fixture.result,
-                    source_commit=SOURCE_COMMIT,
                     output_directory=output,
                     chunk_bytes=TEST_CHUNK_BYTES,
                 )
@@ -508,6 +579,70 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
         self.assertEqual(
             [], list(self.root.glob(f".{output.name}.exp8-prepare-*.stage"))
         )
+
+    def test_prepare_never_adopts_replacement_after_initial_probe_failure(
+        self,
+    ) -> None:
+        output = self.root / "ambiguous-probe-release-assets"
+        real_stat = Path.stat
+        replacement_stage: Path | None = None
+
+        def replace_stage_then_fail_stat(
+            path: Path, *, follow_symlinks: bool = True
+        ) -> object:
+            nonlocal replacement_stage
+            if (
+                replacement_stage is None
+                and path.name.startswith(f".{output.name}.exp8-prepare-")
+                and path.name.endswith(".stage")
+                and not follow_symlinks
+            ):
+                path.rmdir()
+                path.mkdir()
+                (path / "competitor.txt").write_bytes(b"competitor\n")
+                replacement_stage = path
+                raise OSError("injected ambiguous stage identity")
+            return real_stat(path, follow_symlinks=follow_symlinks)
+
+        with mock.patch.object(
+            Path,
+            "stat",
+            autospec=True,
+            side_effect=replace_stage_then_fail_stat,
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                self._prepare_from_result("ambiguous-probe-release-assets")
+
+        self.assertIsNotNone(replacement_stage)
+        assert replacement_stage is not None
+        self.assertEqual(
+            b"competitor\n",
+            (replacement_stage / "competitor.txt").read_bytes(),
+        )
+
+    def test_prepare_revalidates_all_published_bytes_after_rename(self) -> None:
+        output = self.root / "post-rename-mutated-release-assets"
+        real_rename = release_module._rename_directory_no_replace
+        mutated = False
+
+        def rename_then_mutate(source: Path, target: Path) -> None:
+            nonlocal mutated
+            real_rename(source, target)
+            shard = next(target.glob("*.part"))
+            raw = shard.read_bytes()
+            shard.write_bytes(bytes((raw[0] ^ 0xFF,)) + raw[1:])
+            mutated = True
+
+        with mock.patch.object(
+            release_module,
+            "_rename_directory_no_replace",
+            side_effect=rename_then_mutate,
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                self._prepare_from_result("post-rename-mutated-release-assets")
+
+        self.assertTrue(mutated)
+        self.assertFalse(output.exists())
 
     def test_prepare_rejects_source_changed_after_final_shard_hash(self) -> None:
         output = self.root / "late-source-change-assets"
@@ -536,7 +671,6 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                     package_directory=self.fixture.package,
                     apk_path=self.fixture.apk,
                     final_result_path=self.fixture.result,
-                    source_commit=SOURCE_COMMIT,
                     output_directory=output,
                     chunk_bytes=TEST_CHUNK_BYTES,
                 )
@@ -546,6 +680,160 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
         self.assertEqual(
             [], list(self.root.glob(f".{output.name}.exp8-prepare-*.stage"))
         )
+
+
+class DownloadUrlPolicyTest(unittest.TestCase):
+    def _policy(self) -> object:
+        with mock.patch.object(
+            release_module,
+            "_resolve_host_addresses",
+            return_value=(PUBLIC_TEST_ADDRESS,),
+        ):
+            return release_module._DownloadUrlPolicy.for_initial(
+                GITHUB_MANIFEST_URL,
+                allow_loopback_http=False,
+            )
+
+    def test_production_initial_url_is_exact_repository_github_release(self) -> None:
+        malformed = (
+            "https://example.invalid/phowell212/FlightAlert/releases/download/v8/"
+            + RELEASE_MANIFEST_NAME,
+            "https://github.com/phowell212/Other/releases/download/v8/"
+            + RELEASE_MANIFEST_NAME,
+            "https://github.com/phowell212/FlightAlert/releases/latest/"
+            + RELEASE_MANIFEST_NAME,
+            "https://user@github.com/phowell212/FlightAlert/releases/download/v8/"
+            + RELEASE_MANIFEST_NAME,
+            "https://github.com:444/phowell212/FlightAlert/releases/download/v8/"
+            + RELEASE_MANIFEST_NAME,
+            GITHUB_MANIFEST_URL + "#fragment",
+        )
+
+        for url in malformed:
+            with self.subTest(url=url), mock.patch.object(
+                release_module,
+                "_resolve_host_addresses",
+                return_value=(PUBLIC_TEST_ADDRESS,),
+            ):
+                with self.assertRaises(
+                    installer_module.ReferencePackageInstallError
+                ):
+                    release_module._DownloadUrlPolicy.for_initial(
+                        url,
+                        allow_loopback_http=False,
+                    )
+
+    def test_redirect_rejects_cross_origin_attacker(self) -> None:
+        policy = self._policy()
+        attacker = "https://attacker.invalid/release/asset.part"
+
+        with mock.patch.object(
+            release_module,
+            "_resolve_host_addresses",
+            return_value=(PUBLIC_TEST_ADDRESS,),
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                policy.validate_redirect(attacker)
+
+    def test_redirect_rejects_https_to_http_downgrade(self) -> None:
+        policy = self._policy()
+        downgraded = GITHUB_RELEASE_DIRECTORY_URL.replace("https://", "http://")
+        downgraded += "asset.part"
+
+        with mock.patch.object(
+            release_module,
+            "_resolve_host_addresses",
+            return_value=(PUBLIC_TEST_ADDRESS,),
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                policy.validate_redirect(downgraded)
+
+    def test_same_origin_redirect_cannot_escape_exact_release_directory(self) -> None:
+        policy = self._policy()
+        escaped = (
+            "https://github.com/phowell212/FlightAlert/releases/download/other/"
+            "asset.part"
+        )
+
+        with mock.patch.object(
+            release_module,
+            "_resolve_host_addresses",
+            return_value=(PUBLIC_TEST_ADDRESS,),
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                policy.validate_redirect(escaped)
+
+    def test_same_origin_redirect_can_stay_in_exact_release_directory(self) -> None:
+        policy = self._policy()
+        target = GITHUB_RELEASE_DIRECTORY_URL + "asset.part"
+
+        with mock.patch.object(
+            release_module,
+            "_resolve_host_addresses",
+            return_value=(PUBLIC_TEST_ADDRESS,),
+        ):
+            self.assertEqual(target, policy.validate_redirect(target))
+
+    def test_resolution_rejects_any_nonpublic_target_address(self) -> None:
+        for address in (
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.1.1",
+            "192.0.2.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "::1",
+        ):
+            with self.subTest(address=address), mock.patch.object(
+                release_module,
+                "_resolve_host_addresses",
+                return_value=(PUBLIC_TEST_ADDRESS, address),
+            ):
+                with self.assertRaises(
+                    installer_module.ReferencePackageInstallError
+                ):
+                    release_module._DownloadUrlPolicy.for_initial(
+                        GITHUB_MANIFEST_URL,
+                        allow_loopback_http=False,
+                    )
+
+    def test_redirect_allows_exact_github_release_cdn_hosts(self) -> None:
+        policy = self._policy()
+        allowed = (
+            "https://release-assets.githubusercontent.com/github-production-"
+            "release-asset/123/asset?sp=signed",
+            "https://objects.githubusercontent.com/github-production-release-"
+            "asset/123/asset?sp=signed",
+        )
+
+        with mock.patch.object(
+            release_module,
+            "_resolve_host_addresses",
+            return_value=(PUBLIC_TEST_ADDRESS,),
+        ):
+            for target in allowed:
+                with self.subTest(target=target):
+                    self.assertEqual(target, policy.validate_redirect(target))
+
+    def test_redirect_rejects_unsafe_cdn_authority_or_fragment(self) -> None:
+        policy = self._policy()
+        unsafe = (
+            "https://user@release-assets.githubusercontent.com/asset",
+            "https://release-assets.githubusercontent.com:444/asset",
+            "https://objects.githubusercontent.com/asset#fragment",
+        )
+
+        with mock.patch.object(
+            release_module,
+            "_resolve_host_addresses",
+            return_value=(PUBLIC_TEST_ADDRESS,),
+        ):
+            for target in unsafe:
+                with self.subTest(target=target):
+                    with self.assertRaises(
+                        installer_module.ReferencePackageInstallError
+                    ):
+                        policy.validate_redirect(target)
 
 
 class _SilentFileHandler(http.server.SimpleHTTPRequestHandler):
@@ -590,7 +878,6 @@ class FetchReleaseAssetsTest(unittest.TestCase):
             package_directory=self.fixture.package,
             apk_path=self.fixture.apk,
             final_result_path=self.fixture.result,
-            source_commit=SOURCE_COMMIT,
             output_directory=self.assets,
             chunk_bytes=TEST_CHUNK_BYTES,
         )
@@ -740,6 +1027,38 @@ class FetchReleaseAssetsTest(unittest.TestCase):
 
         self._assert_fetch_rejected_without_residue()
 
+    def test_fetch_rejects_more_than_999_shards_before_stage_creation(self) -> None:
+        manifest = self._manifest()
+        first = manifest["package"]["files"][0]
+        old_bytes = first["bytes"]
+        first["bytes"] = 1000
+        first["chunks"] = [
+            {
+                "asset": f"{PACKAGE_ID}.00.{index:05d}.part",
+                "bytes": 1,
+                "offset": index,
+                "sha256": "0" * 64,
+            }
+            for index in range(1000)
+        ]
+        manifest["package"]["bytes"] += 1000 - old_bytes
+        self._write_manifest(manifest)
+
+        with mock.patch.object(
+            release_module,
+            "_create_stage",
+            side_effect=AssertionError("stage must not be created"),
+        ) as create_stage:
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                fetch_release_assets(
+                    manifest_url=self.manifest_url,
+                    output_directory=self.output,
+                    allow_loopback_http=True,
+                )
+
+        create_stage.assert_not_called()
+        self.assertFalse(self.output.exists())
+
     def test_fetch_rejects_chunk_offset_gap(self) -> None:
         manifest = self._manifest()
         records = next(
@@ -820,6 +1139,60 @@ class FetchReleaseAssetsTest(unittest.TestCase):
 
         publish.assert_called_once()
 
+    def test_fetch_revalidates_all_published_bytes_after_rename(self) -> None:
+        real_rename = release_module._rename_directory_no_replace
+        mutated = False
+
+        def rename_then_mutate(source: Path, target: Path) -> None:
+            nonlocal mutated
+            real_rename(source, target)
+            manifest = target / "manifest.json"
+            raw = manifest.read_bytes()
+            manifest.write_bytes(bytes((raw[0] ^ 0xFF,)) + raw[1:])
+            mutated = True
+
+        with mock.patch.object(
+            release_module,
+            "_rename_directory_no_replace",
+            side_effect=rename_then_mutate,
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                fetch_release_assets(
+                    manifest_url=self.manifest_url,
+                    output_directory=self.output,
+                    allow_loopback_http=True,
+                )
+
+        self.assertTrue(mutated)
+        self.assertFalse(self.output.exists())
+
+    def test_fetch_never_removes_replacement_after_rename(self) -> None:
+        real_rename = release_module._rename_directory_no_replace
+        sentinel = self.output / "competitor.txt"
+
+        def rename_then_replace(source: Path, target: Path) -> None:
+            real_rename(source, target)
+            for item in target.iterdir():
+                item.unlink()
+            target.rmdir()
+            target.mkdir()
+            sentinel.write_bytes(b"competitor\n")
+
+        with mock.patch.object(
+            release_module,
+            "_rename_directory_no_replace",
+            side_effect=rename_then_replace,
+        ):
+            with self.assertRaises(installer_module.ReferencePackageInstallError):
+                fetch_release_assets(
+                    manifest_url=self.manifest_url,
+                    output_directory=self.output,
+                    allow_loopback_http=True,
+                )
+
+        self.assertEqual([sentinel], list(self.output.iterdir()))
+        self.assertEqual(b"competitor\n", sentinel.read_bytes())
+
     def test_fetch_publication_race_preserves_competing_output(self) -> None:
         sentinel = self.output / "competitor.txt"
 
@@ -873,8 +1246,6 @@ class ReleaseAssetsCliTest(unittest.TestCase):
                     str(self.fixture.apk),
                     "--final-result",
                     str(self.fixture.result),
-                    "--source-commit",
-                    SOURCE_COMMIT,
                     "--output",
                     str(output),
                     "--chunk-bytes",
@@ -886,12 +1257,40 @@ class ReleaseAssetsCliTest(unittest.TestCase):
         self.assertEqual(str(output / RELEASE_MANIFEST_NAME), stdout.getvalue().strip())
         self.assertTrue((output / RELEASE_MANIFEST_NAME).is_file())
 
+    def test_prepare_cli_has_no_unrelated_source_commit_argument(self) -> None:
+        output = self.root / "old-cli-release-assets"
+        stderr = io.StringIO()
+
+        with (
+            self.assertRaises(SystemExit),
+            mock.patch.object(
+                release_module,
+                "prepare_release_assets",
+                side_effect=AssertionError("parser must reject old argument"),
+            ),
+            redirect_stderr(stderr),
+        ):
+            _main(
+                [
+                    "prepare",
+                    "--package",
+                    str(self.fixture.package),
+                    "--apk",
+                    str(self.fixture.apk),
+                    "--final-result",
+                    str(self.fixture.result),
+                    "--source-commit",
+                    SOURCE_COMMIT,
+                    "--output",
+                    str(output),
+                ]
+            )
+
+        self.assertIn("unrecognized arguments: --source-commit", stderr.getvalue())
+
     def test_fetch_cli_forwards_https_manifest_and_exact_output(self) -> None:
         output = self.root / PACKAGE_ID
-        manifest_url = (
-            "https://example.invalid/releases/download/v1/"
-            + RELEASE_MANIFEST_NAME
-        )
+        manifest_url = GITHUB_MANIFEST_URL
         stdout = io.StringIO()
 
         with (
