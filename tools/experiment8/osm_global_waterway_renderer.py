@@ -53,7 +53,7 @@ from .sourced_text import create_sourced_map_text
 
 _WORLD_DENOMINATOR = 1_000_000_000
 _MAX_WEB_MERCATOR_LATITUDE = 85.05112878
-_FEATURE_DOMAIN = b"FAE8OSMGLOBALWATERWAYFEATURE1\0"
+_FEATURE_DOMAIN = b"FAE8OSMGLOBALWATERWAYFEATURE3\0"
 _ALLOWED_WATERWAYS = frozenset(
     ("river", "stream", "canal", "tidal_channel", "wadi")
 )
@@ -120,8 +120,8 @@ class ExactWaterwayFeature:
             raise GlobalWaterwayPackageError("waterway source primary name is empty")
         if self.english_name is not None and type(self.english_name) is not str:
             raise GlobalWaterwayPackageError("waterway English source name is malformed")
-        if type(self.complete_named_relation) is not bool or self.complete_named_relation != (
-            self.source_kind == "relation"
+        if type(self.complete_named_relation) is not bool or (
+            self.source_kind == "way" and self.complete_named_relation
         ):
             raise GlobalWaterwayPackageError("complete relation evidence contradicts source kind")
         if not self.parts or any(len(part) < 2 for part in self.parts):

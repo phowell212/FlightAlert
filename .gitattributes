@@ -4,3 +4,4 @@
 /tools/experiment8/tests/fixtures/global-waterway-root-ids.txt text eol=lf
 /tools/experiment8/v3_package_merger.py text eol=lf
 /tools/experiment8/v3_class_catalog_finalizer.py text eol=lf
+/tools/experiment8/osm_global_waterway_package.py text eol=lf

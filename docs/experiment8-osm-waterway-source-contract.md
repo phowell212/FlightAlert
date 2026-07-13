@@ -2,15 +2,40 @@
 
 ## Status and scope
 
-This is the language-neutral source contract for the bounded Experiment 8
-OpenStreetMap named-waterway pilot. It permits the exact Chester fixture and one
-immutable Maryland PBF. It does not permit another region, a planet download, a
-world bake, Android integration, phone changes, or a release/redistribution
-claim.
+This is the language-neutral source contract for Experiment 8 OpenStreetMap
+named waterways. The original bounded pilot permits the exact Chester fixture
+and one immutable Maryland PBF. The separately authenticated global extension
+permits only the exact 2026-06-29 whole-world selection and recursive extraction
+identified below, under line-candidate policy v2. Neither profile authorizes
+Android changes, phone changes, or a release/redistribution claim.
 
 The OSM lane exists to supply names on exact OSM waterway geometry when the
 locked Esri source does not own a named path. It never transfers a name to Esri
 geometry and never changes Esri coverage, empty-state, provenance, or IDs.
+
+### Authenticated 260629 whole-world extension
+
+The global extension reuses the immutable extraction at
+`E:\FlightAlert-exp8-work\osm-global-waterway-260629-extraction`; it does not
+repeat planet selection or recursive extraction. Its canonical root IDs are
+60,323,109 bytes at SHA-256
+`e2024e9ef743d1ae76ad3b91f117d2af7797cb2fd1307b65bcbdbb34d740e2a4`.
+Its closure OPL is 31,201,581,334 bytes at SHA-256
+`6d9b1c25352b008180181f90d5343534dba9d3a3757ef27b5b30fe56549b1461`.
+The extraction receipt, selection manifest, and selection policy SHA-256 values
+are respectively
+`7677d49d854e18bf1ed4604a61c1213a3ad0b684533c0162fa7d5e16d0acc0f7`,
+`405e356bd2b7638c347e3e884d6702b44d60ea8acea61e163bef1c47d24fb46c`,
+and `7ddea49ea1501790519b6b47c2cd8170ce3043218551f1b978c98ffb35e7b50c`.
+
+The canonical line-candidate policy document has schema
+`flightalert.experiment8.osm-waterway-line-candidate-policy.v2`, is 3,935
+sorted-key compact UTF-8/LF bytes, and has SHA-256
+`d6fe6d0e1e4400736abbbfd3f379a502ee6b36d0d3900b65cff2a9169a1c99f6`.
+The extension remains bound to presentation policy SHA-256
+`dce9bd4b789c0528318dbb184e17efe7465f444550ba0180efd82e1cb7219154`.
+These global rules do not change the Maryland or Chester pilot rules outside
+this exact extension.
 
 ## Frozen source identities
 
@@ -257,7 +282,8 @@ emission, world coverage, or phone rendering; those remain separate gates.
 
 ## Selection, closure audit, and admission profiles
 
-Selection, closure, and admission are three separately hashed facts:
+Selection, referential/structural closure, candidate admission, and rendering
+are separately hashed facts. For the pilot profiles:
 
 1. The source-bound selection manifest binds the verified generic selection
    material and contains every root that passes the tag policy.
@@ -294,6 +320,53 @@ planet profile has no quarantine path: `selected == complete == admitted`, and
 one missing object aborts the entire build before an admitted manifest or
 package can be written.
 
+For the authenticated global extension, referential closure means every object
+reachable from every selected root exists and every way-node reference resolves.
+Structural closure is a separate fact: member and node ordinals are contiguous,
+member kinds are known, every reachable way has at least two nodes, selected
+roots retain their exact name/predicate contract, and traversal stays within its
+frozen ceilings. The structural traversal is cycle-safe: it records an
+active-stack cycle edge and does not recurse through that occurrence, while
+continuing all other branches. It traverses below unsupported `waterway` values
+because unsupported values are candidate-policy evidence, not unknown object
+kinds. Missing objects, noncontiguous ordinals, fewer-than-two-node ways, unknown
+member object kinds, selected-root/name/predicate contradictions, and any
+structural or resource ceiling remain fatal globally.
+
+Candidate traversal is a separate ordered DFS. An exact supported relation
+`waterway` overrides the nearest inherited supported type; an untagged nested
+relation inherits; and an unsupported declared relation value records
+`unsupported_relation_waterway` and forms a candidate/join barrier. For a way
+occurrence, the nearest effective relation type wins, otherwise the exact way
+value supplies the type. A missing or unsupported effective way value records
+`unsupported_member_way_waterway` and forms a barrier. Active-stack cycles
+record `relation_cycle` before candidate depth/visit charging. Excluded branches
+consume no candidate part/point budget and do not materialize coordinates.
+
+Admission covers every selected way and relation root exactly once in
+`(rootKindCode, rootId)` keyset order in a work-only SQLite v2 store. Each root
+entry binds its source payload/name fields, ordered reason occurrences and paths,
+declared/effective values, node evidence, structural and geometry usage,
+dependency digest, candidate feature hashes, and candidate-stream digest. The
+aggregate uses domain `FAE8WATERADMISSION2\0` and uint64-be length framing of
+canonical no-terminal-LF entry JSON. A resumable checkpoint authenticates the
+entire persisted prefix and all dependent candidate rows before continuing. A
+complete admission receipt with `fatalCount=0` is required before any renderer
+feature or record row exists.
+
+The reason histogram unit is occurrences, in order `relation_cycle`,
+`unsupported_relation_waterway`, `unsupported_member_way_waterway`. Root status
+precedence is `fatal`, `line_candidates_with_noncandidate_members`,
+`line_candidates`, `no_line_geometry`, then
+`no_supported_line_candidate`. Selected zero-candidate roots remain exact source
+occurrences; they are never `KnownEmpty` or semantic-empty proof. The receipt
+also retains the independent legacy first-terminal projection: 9,304 unsupported
+relation roots, 1,357 unsupported member-way roots, 12 no-usable-way roots, and
+one cycle root. Its 10,674-ID canonical ledger is 94,632 bytes at SHA-256
+`e63bb8e77f0fa8c432492028ba5a00b6da43a10cbd7cabdf10ad4435b0c422f2`.
+The cycle-safe structural projection must separately contain exactly 19
+relation roots with no reachable way member.
+
 ## Root/reference separation
 
 Selected roots and reference-only objects are different sets in every manifest
@@ -307,6 +380,9 @@ also be an independently selected root; in that case it remains a root and is
 not counted as reference-only. The Maryland profile retains every incomplete
 selected relation in the closure audit while excluding that occurrence from the
 admitted manifest; independently selected complete member ways remain roots.
+In the authenticated global extension, independently selected member ways also
+remain their own roots and candidates even when a containing relation retains an
+incomplete candidate subset.
 
 ## Relation geometry
 
@@ -318,8 +394,27 @@ Disconnected members remain separate parts. Exact node members such as `source`
 and `mouth` must exist in the verified closure and remain in source/audit
 identity, but they contribute no coordinates to line assembly and cannot receive
 line text. A relation with no assembled way parts emits no line candidate and is
-not reclassified semantic empty. Missing objects, fewer-than-two-node member
-ways, unsupported member types, or recursive relation cycles fail closed.
+not reclassified semantic empty. In the pilot, missing objects,
+fewer-than-two-node member ways, unsupported member types, or recursive relation
+cycles retain the existing fail-closed behavior.
+
+For the authenticated global extension, node members increment exact
+occurrence-based evidence, contribute no coordinates, and do not break joining.
+Unsupported line occurrences and cycle edges break joining but do not discard
+valid supported branches. Joining otherwise remains ordered, same-type, and
+endpoint-node-ID exact. Raw supported way parts/points are recorded before
+joining; feature parts/points are recorded after joining. Resource-limit failure
+is fatal rather than an audited exclusion.
+
+A relation candidate is `complete_named_relation=true` only when its root has
+exactly one supported candidate type and no unsupported or cycle line
+occurrence. Multiple supported types or any excluded/cycle line occurrence make
+every retained exact subset incomplete. Node-only audit members do not make an
+otherwise complete line relation incomplete. Completeness is bound into the
+source-feature identity. An incomplete relation subset uses direct-source-path
+placement and cannot claim complete relation length, complete-geometry
+prominence, or `EXACT_PARENT_PATH`; this does not alter styling, zoom rules, or
+tile format.
 
 Direct named ways and their containing named relation remain separate source
 occurrences. A later presentation policy may give the relation deterministic
@@ -333,6 +428,8 @@ The OSM lane has its own generation, coverage, semantic-empty proof, and state:
 - a verified selected record produces `Ready(nonempty)`;
 - a source-present unit with an independently proven empty selection produces
   `Ready(empty)` for the OSM lane;
+- a selected global root with no line candidate remains an audited exact source
+  occurrence and supplies no semantic-empty proof;
 - a missing/corrupt source, closure, policy, or package is `Unavailable`;
 - a selected regional relation with proven clipped closure is
   `Unavailable(source_incomplete)` and cannot be represented as semantic empty;

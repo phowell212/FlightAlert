@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO, Mapping, Sequence
+from typing import BinaryIO, Iterator, Mapping, Sequence
 
 from . import osm_global_waterway_package as source_module
 from .osm_global_waterway_package import (
@@ -50,8 +50,8 @@ from .renderer_tile_package import (
 from .semantic_model import renderer_record_bytes, variant_fingerprint
 
 
-_RUN_SCHEMA = "flightalert.experiment8.osm-global-waterway-ingest-run.v1"
-_INGEST_SCHEMA = "flightalert.experiment8.osm-global-waterway-ingest.v1"
+_RUN_SCHEMA = "flightalert.experiment8.osm-global-waterway-ingest-run.v2"
+_INGEST_SCHEMA = "flightalert.experiment8.osm-global-waterway-ingest.v2"
 _SEMANTIC_DOMAIN = b"FAE8OSMWATERWAYCLOSURE1\0"
 _SOURCE_PREFIX_DOMAIN = b"FAE8OSMWATERWAYSQLITEPREFIX1\0"
 _ROOT_KIND = {"w": 1, "r": 2}
@@ -65,7 +65,10 @@ _NON_LANGUAGE_SUFFIXES = frozenset(
 _ALLOWED_WATERWAYS = frozenset(
     ("river", "stream", "canal", "tidal_channel", "wadi")
 )
-_SOURCE_FEATURE_DOMAIN = b"FAE8OSMGLOBALWATERWAYFEATURE2\0"
+_SOURCE_FEATURE_DOMAIN = b"FAE8OSMGLOBALWATERWAYFEATURE3\0"
+_CANDIDATE_FEATURE_DOMAIN = b"FAE8WATERCANDIDATEFEATURE2\0"
+_CANDIDATE_STREAM_DOMAIN = b"FAE8WATERCANDIDATESTREAM2\0"
+_ADMISSION_STREAM_DOMAIN = b"FAE8WATERADMISSION2\0"
 _DEPENDENCY_EVIDENCE_DOMAIN = b"FAE8OSMWATERWAYDEPENDENCIES1\0"
 _MAX_DEPENDENCY_RECORD_BYTES = 128 * 1024 * 1024
 _MAX_DEPENDENCY_RECORDS = (1 << 64) - 1
@@ -74,8 +77,8 @@ _MAX_RELATION_DEPTH = source_module._MAX_LINE_BYTES // (1024 * 1024)
 _MAX_RELATION_VISITS = source_module._MAX_LINE_BYTES // 1024
 _MAX_RELATION_PARTS = MAX_RECORDS_PER_TILE
 _MAX_RELATION_POINTS = MAX_RENDERER_RECORD_BYTES // _RELATION_POINT_ACCOUNTING_BYTES
-_BUILD_SCHEMA = "flightalert.experiment8.osm-global-waterway-build.v1"
-_RENDER_RUN_SCHEMA = "flightalert.experiment8.osm-global-waterway-render-run.v1"
+_BUILD_SCHEMA = "flightalert.experiment8.osm-global-waterway-build.v2"
+_RENDER_RUN_SCHEMA = "flightalert.experiment8.osm-global-waterway-render-run.v2"
 _SEMANTIC_STREAM_DOMAIN = b"flight-alert-exp8-semantic-v1\0"
 _DEFAULT_ZOOMS = tuple(range(4, 12))
 _ZERO_INDEX_ENTRY = b"\0" * INDEX_ENTRY_BYTES
@@ -97,23 +100,215 @@ _MAX_COMPRESSED_TILE_BYTES = (
 )
 _PARTIAL_OWNER_SCHEMA = "flightalert.experiment8.osm-global-waterway-partial-owner.v1"
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_ROOT_STATUS_ORDER = (
+    "fatal",
+    "line_candidates_with_noncandidate_members",
+    "line_candidates",
+    "no_line_geometry",
+    "no_supported_line_candidate",
+)
+_REASON_CODE_ORDER = (
+    "relation_cycle",
+    "unsupported_relation_waterway",
+    "unsupported_member_way_waterway",
+)
+_LEGACY_REASON_ORDER = (
+    "unsupported_relation_waterway",
+    "unsupported_member_way_waterway",
+    "no_usable_way_geometry",
+    "relation_cycle",
+)
+_SUPPORTED_WATERWAY_ORDER = ("river", "stream", "canal", "tidal_channel", "wadi")
+_ADMISSION_CHECKPOINT_ROOTS = 100
+_MAX_ADMISSION_ENTRY_BYTES = 128 * 1024 * 1024
+_MAX_STRUCTURAL_MEMBER_OCCURRENCES = 524_288
+_MAX_STRUCTURAL_WAY_NODE_OCCURRENCES = 8_388_608
+_LEGACY_PRODUCTION_COUNTS = {
+    "unsupported_relation_waterway": 9_304,
+    "unsupported_member_way_waterway": 1_357,
+    "no_usable_way_geometry": 12,
+    "relation_cycle": 1,
+}
+_LEGACY_PRODUCTION_LEDGER_BYTES = 94_632
+_LEGACY_PRODUCTION_LEDGER_SHA256 = (
+    "e63bb8e77f0fa8c432492028ba5a00b6da43a10cbd7cabdf10ad4435b0c422f2"
+)
+_PRODUCTION_STRUCTURAL_NO_WAY_COUNT = 19
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionLimits:
+    max_structural_depth: int
+    max_structural_relation_visits: int
+    max_structural_member_occurrences: int
+    max_structural_way_node_occurrences: int
+    max_candidate_depth: int
+    max_candidate_relation_visits: int
+    max_candidate_raw_parts: int
+    max_candidate_points: int
+    max_dependency_record_bytes: int
+    max_dependency_records: int
+    max_admission_entry_bytes: int
+
+    @classmethod
+    def production(cls) -> "_AdmissionLimits":
+        return cls(
+            max_structural_depth=_MAX_RELATION_DEPTH,
+            max_structural_relation_visits=_MAX_RELATION_VISITS,
+            max_structural_member_occurrences=_MAX_STRUCTURAL_MEMBER_OCCURRENCES,
+            max_structural_way_node_occurrences=_MAX_STRUCTURAL_WAY_NODE_OCCURRENCES,
+            max_candidate_depth=_MAX_RELATION_DEPTH,
+            max_candidate_relation_visits=_MAX_RELATION_VISITS,
+            max_candidate_raw_parts=_MAX_RELATION_PARTS,
+            max_candidate_points=_MAX_RELATION_POINTS,
+            max_dependency_record_bytes=_MAX_DEPENDENCY_RECORD_BYTES,
+            max_dependency_records=_MAX_DEPENDENCY_RECORDS,
+            max_admission_entry_bytes=_MAX_ADMISSION_ENTRY_BYTES,
+        )
+
+
+def _line_candidate_policy_document() -> dict[str, object]:
+    limits = _AdmissionLimits.production()
+    return {
+        "candidateTraversal": {
+            "cycleCheckBeforeBudget": True,
+            "cycleOccurrence": "reason-and-join-barrier-without-recursion",
+            "excludedBranchesConsumeGeometryBudget": False,
+            "joinRule": "ordered-dfs-adjacent-same-effective-type-shared-endpoint-node-id",
+            "nodeMembers": "audit-evidence-without-line-or-join-barrier",
+            "reasonOccurrenceOrder": "ordered-depth-first-source-path",
+            "relationTypePrecedence": [
+                "exact-supported-declaration",
+                "nearest-inherited-supported-type",
+            ],
+            "wayTypePrecedence": [
+                "nearest-effective-relation-type",
+                "exact-way-waterway",
+            ],
+            "supportedWayAccounting": (
+                "charge raw part and all raw points before joining"
+            ),
+            "unsupportedRelationDeclaration": (
+                "reason-and-join-barrier-without-candidate-descent"
+            ),
+            "unsupportedWayWithoutEffectiveRelationType": (
+                "reason-and-join-barrier-without-coordinate-materialization"
+            ),
+        },
+        "canonicalEvidence": {
+            "admissionStreamDomain": "FAE8WATERADMISSION2\0",
+            "candidateFeatureDomain": "FAE8WATERCANDIDATEFEATURE2\0",
+            "candidateStreamDomain": "FAE8WATERCANDIDATESTREAM2\0",
+            "candidateStreamEncoding": (
+                "uint64-be length plus 32-byte candidate feature SHA-256"
+            ),
+            "dependencyEvidenceDomain": "FAE8OSMWATERWAYDEPENDENCIES1\0",
+            "dependencyRecordEncoding": (
+                "sorted-key compact UTF-8 with exactly one terminal LF"
+            ),
+            "dependencyStreamEncoding": (
+                "domain then repeated uint64-be record byte length plus record bytes"
+            ),
+            "entryEncoding": "sorted-key compact UTF-8 without BOM or terminal LF",
+            "featureMetadataEncoding": (
+                "domain then uint64-be metadata byte length plus sorted-key compact UTF-8 "
+                "without BOM or terminal LF"
+            ),
+            "framing": "uint64-be byte length followed by bytes",
+            "geometryEncoding": (
+                "uint64-be part count; per part P plus uint64-be point count; repeated "
+                "uint64-be node ID plus int32-be longitude E7 plus int32-be latitude E7"
+            ),
+            "histogramUnits": {
+                "reasonHistogram": "occurrences",
+                "rootStatusHistogram": "roots",
+            },
+            "sourcePathEncoding": (
+                "root [kindCode,id,-1], then source occurrences "
+                "[kindCode,id,memberOrdinal]"
+            ),
+            "sourceFeatureDomain": "FAE8OSMGLOBALWATERWAYFEATURE3\0",
+        },
+        "completeness": {
+            "incompletePlacementSource": "DIRECT_SOURCE_PATH",
+            "relationCompleteWhen": (
+                "exactly one supported candidate type and no excluded or cycle line occurrence"
+            ),
+            "relationIncompleteOmits": [
+                "COMPLETE_RELATION_LENGTH",
+                "complete-geometry prominence",
+                "EXACT_PARENT_PATH",
+            ],
+            "selectedZeroCandidateMeaning": "exact-source-occurrence-not-semantic-empty",
+        },
+        "geometry": {
+            "accounting": {
+                "candidateFeatures": "post-join parts and points",
+                "relationDepthAndVisits": "maximum-depth and occurrence visits",
+                "supportedWays": "raw pre-join parts and points",
+            },
+            "limits": {
+                "maxAdmissionEntryBytes": limits.max_admission_entry_bytes,
+                "maxCandidateDepth": limits.max_candidate_depth,
+                "maxCandidatePoints": limits.max_candidate_points,
+                "maxCandidateRawParts": limits.max_candidate_raw_parts,
+                "maxCandidateRelationVisits": limits.max_candidate_relation_visits,
+                "maxDependencyRecordBytes": limits.max_dependency_record_bytes,
+                "maxDependencyRecords": limits.max_dependency_records,
+                "maxStructuralDepth": limits.max_structural_depth,
+                "maxStructuralMemberOccurrences": limits.max_structural_member_occurrences,
+                "maxStructuralRelationVisits": limits.max_structural_relation_visits,
+                "maxStructuralWayNodeOccurrences": limits.max_structural_way_node_occurrences,
+            },
+            "resourceFailure": "fatal",
+        },
+        "legacyFirstTerminalReasonOrder": list(_LEGACY_REASON_ORDER),
+        "reasonCodes": list(_REASON_CODE_ORDER),
+        "rootKindOrder": [
+            {"code": 1, "kind": "way"},
+            {"code": 2, "kind": "relation"},
+        ],
+        "rootStatuses": list(_ROOT_STATUS_ORDER),
+        "schema": "flightalert.experiment8.osm-waterway-line-candidate-policy.v2",
+        "structuralTraversal": {
+            "cycleEdge": "record-and-do-not-recurse",
+            "fatalContradictions": [
+                "missing-object",
+                "malformed-or-noncontiguous-ordinal",
+                "member-way-fewer-than-two-nodes",
+                "unknown-member-object-kind",
+                "selected-root-name-or-predicate-contradiction",
+                "resource-ceiling",
+            ],
+            "scope": "complete reachable closure including candidate-pruned branches",
+            "unsupportedWaterwayValue": (
+                "audited-candidate-noncandidate-not-structural-fatal"
+            ),
+        },
+        "supportedWaterways": list(_SUPPORTED_WATERWAY_ORDER),
+    }
 
 
 class _DependencyEvidence:
-    __slots__ = ("_digest", "_records")
+    __slots__ = ("_digest", "_limits", "_records")
 
-    def __init__(self) -> None:
+    def __init__(self, limits: _AdmissionLimits | None = None) -> None:
+        self._limits = limits or _AdmissionLimits.production()
+        if not isinstance(self._limits, _AdmissionLimits):
+            raise GlobalWaterwayPackageError(
+                "waterway dependency evidence limits are invalid"
+            )
         self._digest = hashlib.sha256()
         self._digest.update(_DEPENDENCY_EVIDENCE_DOMAIN)
         self._records = 0
 
     def add(self, record: Sequence[object]) -> None:
-        if self._records >= _MAX_DEPENDENCY_RECORDS:
+        if self._records >= self._limits.max_dependency_records:
             raise GlobalWaterwayPackageError(
                 "waterway dependency record count exceeds its exact ceiling"
             )
         encoded = _canonical_json_bytes(list(record))
-        if len(encoded) > _MAX_DEPENDENCY_RECORD_BYTES:
+        if len(encoded) > self._limits.max_dependency_record_bytes:
             raise GlobalWaterwayPackageError(
                 "one waterway dependency record exceeds its exact byte ceiling"
             )
@@ -123,65 +318,6 @@ class _DependencyEvidence:
 
     def document(self) -> dict[str, object]:
         return {"records": self._records, "sha256": self._digest.hexdigest()}
-
-
-@dataclass(slots=True)
-class _RelationGeometryBudget:
-    max_depth: int
-    max_relation_visits: int
-    max_parts: int
-    max_points: int
-    relation_visits: int = 0
-    parts: int = 0
-    points: int = 0
-
-    def enter_relation(self, depth: int) -> None:
-        if depth > self.max_depth:
-            raise GlobalWaterwayPackageError(
-                "nested waterway relation depth ceiling exceeded"
-            )
-        if self.relation_visits >= self.max_relation_visits:
-            raise GlobalWaterwayPackageError(
-                "nested waterway relation-visit ceiling exceeded"
-            )
-        self.relation_visits += 1
-
-    def reserve_way(self, point_count: int) -> None:
-        if self.parts >= self.max_parts:
-            raise GlobalWaterwayPackageError(
-                "nested waterway relation part ceiling exceeded"
-            )
-        if point_count > self.max_points - self.points:
-            raise GlobalWaterwayPackageError(
-                "nested waterway relation point ceiling exceeded"
-            )
-        self.parts += 1
-        self.points += point_count
-
-    def usage(self) -> dict[str, int]:
-        return {
-            "parts": self.parts,
-            "points": self.points,
-            "relationVisits": self.relation_visits,
-        }
-
-
-def _relation_geometry_policy_document() -> dict[str, object]:
-    return {
-        "maxDepth": _MAX_RELATION_DEPTH,
-        "maxParts": _MAX_RELATION_PARTS,
-        "maxPoints": _MAX_RELATION_POINTS,
-        "maxRelationVisits": _MAX_RELATION_VISITS,
-        "schema": "flightalert.experiment8.osm-waterway-relation-geometry-policy.v1",
-        "sourceLimits": {
-            "depthUnitBytes": 1024 * 1024,
-            "oplLineBytes": source_module._MAX_LINE_BYTES,
-            "partCeilingRecordsPerTile": MAX_RECORDS_PER_TILE,
-            "pointAccountingBytes": _RELATION_POINT_ACCOUNTING_BYTES,
-            "rendererRecordBytes": MAX_RENDERER_RECORD_BYTES,
-            "relationVisitUnitBytes": 1024,
-        },
-    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +357,18 @@ def _canonical_json_bytes(value: object) -> bytes:
         ).encode("utf-8", "strict")
     except (TypeError, ValueError, UnicodeError) as error:
         raise GlobalWaterwayPackageError("waterway store JSON is not canonical") from error
+
+
+def _canonical_json_no_lf_bytes(value: object) -> bytes:
+    raw = _canonical_json_bytes(value)
+    if not raw.endswith(b"\n") or raw.endswith(b"\r\n"):
+        raise GlobalWaterwayPackageError("waterway store JSON LF contract differs")
+    return raw[:-1]
+
+
+LINE_CANDIDATE_POLICY_SHA256 = hashlib.sha256(
+    _canonical_json_bytes(_line_candidate_policy_document())
+).hexdigest()
 
 
 def _tags_bytes(tags: Sequence[tuple[str, str]]) -> bytes:
@@ -317,15 +465,29 @@ def _meta_set(connection: sqlite3.Connection, key: str, value: object) -> None:
     )
 
 
+def _sqlite_blob(value: object, label: str) -> bytes:
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise GlobalWaterwayPackageError(
+            f"waterway {label} is not canonical SQLite BLOB evidence"
+        )
+    return bytes(value)
+
+
 def _run_identity(
     source_binding: WaterwaySourceBinding,
     checkpoint_objects: int,
+    checkpoint_admission_roots: int,
 ) -> dict[str, object]:
     code = {
         "source": _stream_identity(Path(source_module.__file__).resolve(), "waterway source code"),
         "store": _stream_identity(Path(__file__).resolve(), "waterway store code"),
     }
     return {
+        "admissionCheckpointRoots": checkpoint_admission_roots,
+        "admissionPolicy": {
+            "document": _line_candidate_policy_document(),
+            "sha256": LINE_CANDIDATE_POLICY_SHA256,
+        },
         "checkpointObjects": checkpoint_objects,
         "code": code,
         "schema": _RUN_SCHEMA,
@@ -365,6 +527,16 @@ def _open_database(
             "kind INTEGER NOT NULL,ref INTEGER NOT NULL,role TEXT NOT NULL,"
             "PRIMARY KEY(relation_id,ordinal)) WITHOUT ROWID;"
             "CREATE INDEX relation_members_ref ON relation_members(kind,ref);"
+            "CREATE TABLE admission_roots(root_kind INTEGER NOT NULL,root_id INTEGER NOT NULL,"
+            "entry_json BLOB NOT NULL,entry_sha BLOB NOT NULL,framed_bytes INTEGER NOT NULL,"
+            "status TEXT NOT NULL,candidate_stream_sha BLOB NOT NULL,"
+            "PRIMARY KEY(root_kind,root_id)) WITHOUT ROWID;"
+            "CREATE TABLE admission_candidates(root_kind INTEGER NOT NULL,root_id INTEGER NOT NULL,"
+            "feature_ordinal INTEGER NOT NULL,waterway_type TEXT NOT NULL,"
+            "complete_named_relation INTEGER NOT NULL,candidate_feature_sha BLOB NOT NULL,"
+            "source_feature_sha BLOB NOT NULL,part_count INTEGER NOT NULL,point_count INTEGER NOT NULL,"
+            "PRIMARY KEY(root_kind,root_id,feature_ordinal),"
+            "UNIQUE(root_kind,root_id,waterway_type)) WITHOUT ROWID;"
             "CREATE TABLE rendered_features(ordinal INTEGER PRIMARY KEY,source_kind TEXT NOT NULL,"
             "source_id INTEGER NOT NULL,source_type TEXT NOT NULL,feature_sha BLOB NOT NULL,"
             "UNIQUE(source_kind,source_id,source_type));"
@@ -793,38 +965,6 @@ def _missing_reference(connection: sqlite3.Connection) -> tuple[str, int] | None
     return None
 
 
-def _relation_has_geometry(
-    connection: sqlite3.Connection,
-    relation_id: int,
-    stack: tuple[int, ...] = (),
-) -> bool:
-    if relation_id in stack:
-        raise GlobalWaterwayPackageError("relation membership cycle is forbidden")
-    found = False
-    for ordinal, kind, ref in connection.execute(
-        "SELECT ordinal,kind,ref FROM relation_members WHERE relation_id=? ORDER BY ordinal",
-        (relation_id,),
-    ):
-        if int(ordinal) < 0:
-            raise GlobalWaterwayPackageError("relation member ordinal is negative")
-        kind = int(kind)
-        ref = int(ref)
-        if kind == 1:
-            count = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM way_nodes WHERE way_id=?", (ref,)
-                ).fetchone()[0]
-            )
-            if count < 2:
-                raise GlobalWaterwayPackageError(
-                    f"relation member way {ref} has fewer than two nodes"
-                )
-            found = True
-        elif kind == 2:
-            found = _relation_has_geometry(connection, ref, stack + (relation_id,)) or found
-    return found
-
-
 def _validate_closure(connection: sqlite3.Connection) -> dict[str, int]:
     missing = _missing_reference(connection)
     if missing is not None:
@@ -842,10 +982,6 @@ def _validate_closure(connection: sqlite3.Connection) -> dict[str, int]:
         if connection.execute(f"SELECT 1 FROM {table} WHERE id=?", (object_id,)).fetchone() is None:
             raise GlobalWaterwayPackageError(
                 f"selected root {table[:-1]} {int(object_id)} is absent from closure"
-            )
-        if int(kind) == 2 and not _relation_has_geometry(connection, int(object_id)):
-            raise GlobalWaterwayPackageError(
-                f"selected relation {int(object_id)} contains no usable exact way geometry"
             )
     nodes = int(connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0])
     ways = int(connection.execute("SELECT COUNT(*) FROM ways").fetchone()[0])
@@ -1237,93 +1373,303 @@ def _point_rows(
     return tuple(points)
 
 
-def _way_source(
-    connection: sqlite3.Connection,
-    way_id: int,
-    evidence: _DependencyEvidence,
-    geometry_budget: _RelationGeometryBudget | None = None,
-) -> tuple[int, str, tuple[tuple[str, str], ...], bytes, object]:
-    row = connection.execute(
-        "SELECT version,timestamp,tags,payload_sha FROM ways WHERE id=?", (way_id,)
-    ).fetchone()
-    if row is None:
-        raise GlobalWaterwayPackageError(f"waterway source references missing way {way_id}")
-    version, timestamp, raw_tags, payload_sha = row
-    tags = _decode_tags(bytes(raw_tags), f"way {way_id}")
-    digest = bytes(payload_sha)
-    evidence.add(["way", way_id, digest.hex()])
-    if geometry_budget is not None:
-        point_count = connection.execute(
-            "SELECT COUNT(*) FROM way_nodes WHERE way_id=?", (way_id,)
-        ).fetchone()
-        geometry_budget.reserve_way(int(point_count[0]))
-    points = _point_rows(connection, way_id, evidence)
-    return int(version), str(timestamp), tags, digest, points
 
 
-def _feature_identity(
+@dataclass(slots=True)
+class _StructuralUsage:
+    limits: _AdmissionLimits
+    max_depth: int = 0
+    relation_visits: int = 0
+    member_occurrences: int = 0
+    way_node_occurrences: int = 0
+    cycle_edges: int = 0
+    has_reachable_way: bool = False
+
+    def enter_relation(self, depth: int) -> None:
+        if depth > self.limits.max_structural_depth:
+            raise GlobalWaterwayPackageError(
+                "waterway structural depth ceiling exceeded"
+            )
+        if self.relation_visits >= self.limits.max_structural_relation_visits:
+            raise GlobalWaterwayPackageError(
+                "waterway structural relation-visit ceiling exceeded"
+            )
+        self.relation_visits += 1
+        self.max_depth = max(self.max_depth, depth)
+
+    def member(self) -> None:
+        if self.member_occurrences >= self.limits.max_structural_member_occurrences:
+            raise GlobalWaterwayPackageError(
+                "waterway structural member-occurrence ceiling exceeded"
+            )
+        self.member_occurrences += 1
+
+    def way_node(self) -> None:
+        if self.way_node_occurrences >= self.limits.max_structural_way_node_occurrences:
+            raise GlobalWaterwayPackageError(
+                "waterway structural way-node-occurrence ceiling exceeded"
+            )
+        self.way_node_occurrences += 1
+
+    def document(self) -> dict[str, int | bool]:
+        return {
+            "cycleEdges": self.cycle_edges,
+            "hasReachableWay": self.has_reachable_way,
+            "maxDepth": self.max_depth,
+            "memberOccurrences": self.member_occurrences,
+            "relationVisits": self.relation_visits,
+            "wayNodeOccurrences": self.way_node_occurrences,
+        }
+
+
+@dataclass(slots=True)
+class _CandidateUsage:
+    limits: _AdmissionLimits
+    max_depth: int = 0
+    relation_visits: int = 0
+    raw_parts: int = 0
+    raw_points: int = 0
+
+    def enter_relation(self, depth: int) -> None:
+        if depth > self.limits.max_candidate_depth:
+            raise GlobalWaterwayPackageError(
+                "waterway candidate depth ceiling exceeded"
+            )
+        if self.relation_visits >= self.limits.max_candidate_relation_visits:
+            raise GlobalWaterwayPackageError(
+                "waterway candidate relation-visit ceiling exceeded"
+            )
+        self.relation_visits += 1
+        self.max_depth = max(self.max_depth, depth)
+
+    def reserve_way(self, point_count: int) -> None:
+        if self.raw_parts >= self.limits.max_candidate_raw_parts:
+            raise GlobalWaterwayPackageError(
+                "waterway candidate raw-part ceiling exceeded"
+            )
+        if point_count > self.limits.max_candidate_points - self.raw_points:
+            raise GlobalWaterwayPackageError(
+                "waterway candidate raw-point ceiling exceeded"
+            )
+        self.raw_parts += 1
+        self.raw_points += point_count
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateEvidence:
+    waterway_type: str
+    complete_named_relation: bool
+    parts: tuple[tuple[object, ...], ...]
+    required_node_ids: frozenset[int]
+    source_occurrence_paths: tuple[tuple[tuple[int, int, int], ...], ...]
+    candidate_feature_sha256: bytes
+    source_feature_sha256: bytes
+    part_count: int
+    point_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionRootAnalysis:
+    entry: Mapping[str, object]
+    entry_bytes: bytes
+    candidates: tuple[_CandidateEvidence, ...]
+    legacy_first_terminal_reason: str | None
+
+
+def _source_document_from_database(connection: sqlite3.Connection) -> dict[str, object]:
+    run_identity = _meta_get(connection, "runIdentity")
+    if not isinstance(run_identity, dict) or not isinstance(
+        run_identity.get("source"), dict
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway admission source identity is absent"
+        )
+    return dict(run_identity["source"])
+
+
+def _frame_digest_value(digest: object, value: object) -> None:
+    raw = _canonical_json_no_lf_bytes(value)
+    digest.update(struct.pack(">Q", len(raw)))
+    digest.update(raw)
+
+
+def _start_geometry_digest(domain: bytes, metadata: Mapping[str, object]) -> object:
+    digest = hashlib.sha256()
+    digest.update(domain)
+    _frame_digest_value(digest, dict(metadata))
+    return digest
+
+
+def _update_geometry_part_start(digest: object, point_count: int) -> None:
+    digest.update(b"P")
+    digest.update(struct.pack(">Q", point_count))
+
+
+def _update_geometry_point(digest: object, point: object) -> None:
+    digest.update(
+        struct.pack(
+            ">Qii", point.node_id, point.longitude_e7, point.latitude_e7
+        )
+    )
+
+
+def _feature_metadata(
     *,
-    source_binding: WaterwaySourceBinding,
-    source_kind: str,
-    source_id: int,
-    source_version: int,
-    source_timestamp: str,
-    waterway_type: str,
+    root: Mapping[str, object],
+    source_document: Mapping[str, object],
     name_source_key: str,
     primary_name: str,
     english_name: str | None,
-    parts: Sequence[Sequence[object]],
+    waterway_type: str,
+    complete_named_relation: bool,
     required_node_ids: frozenset[int],
+    source_occurrence_paths: Sequence[Sequence[Sequence[int]]],
     dependency_evidence: Mapping[str, object],
-) -> bytes:
-    document = {
+) -> tuple[dict[str, object], dict[str, object]]:
+    candidate = {
+        "completeNamedRelation": complete_named_relation,
+        "requiredJoinNodeIds": sorted(required_node_ids),
+        "sourceOccurrencePaths": [
+            [list(component) for component in path]
+            for path in source_occurrence_paths
+        ],
+        "waterwayType": waterway_type,
+    }
+    source = {
+        **candidate,
         "dependencyEvidence": dict(dependency_evidence),
         "englishName": english_name,
         "nameSourceKey": name_source_key,
-        "parts": [
-            [
-                [point.node_id, point.longitude_e7, point.latitude_e7]
-                for point in part
-            ]
-            for part in parts
-        ],
-        "planetSha256": source_binding.planet_sha256,
         "primaryName": primary_name,
-        "requiredJoinNodeIds": sorted(required_node_ids),
-        "sourceId": source_id,
-        "sourceKind": source_kind,
-        "sourceTimestamp": source_timestamp,
-        "sourceVersion": source_version,
-        "waterwayType": waterway_type,
+        "root": dict(root),
+        "source": dict(source_document),
     }
-    return hashlib.sha256(_SOURCE_FEATURE_DOMAIN + _canonical_json_bytes(document)).digest()
+    return candidate, source
 
 
-def _relation_occurrences(
+def _hash_materialized_candidate(
+    *,
+    candidate_metadata: Mapping[str, object],
+    source_metadata: Mapping[str, object],
+    parts: Sequence[Sequence[object]],
+) -> tuple[bytes, bytes]:
+    candidate_digest = _start_geometry_digest(
+        _CANDIDATE_FEATURE_DOMAIN, candidate_metadata
+    )
+    source_digest = _start_geometry_digest(_SOURCE_FEATURE_DOMAIN, source_metadata)
+    candidate_digest.update(struct.pack(">Q", len(parts)))
+    source_digest.update(struct.pack(">Q", len(parts)))
+    for part in parts:
+        _update_geometry_part_start(candidate_digest, len(part))
+        _update_geometry_part_start(source_digest, len(part))
+        for point in part:
+            _update_geometry_point(candidate_digest, point)
+            _update_geometry_point(source_digest, point)
+    return candidate_digest.digest(), source_digest.digest()
+
+
+def _iter_exact_way_points(
+    connection: sqlite3.Connection,
+    way_id: int,
+) -> Iterator[object]:
+    from .osm_global_waterway_renderer import ExactWaterwayPoint
+
+    rows = connection.execute(
+        "SELECT wn.ordinal,n.id,n.longitude_e7,n.latitude_e7 "
+        "FROM way_nodes wn JOIN nodes n ON n.id=wn.node_id "
+        "WHERE wn.way_id=? ORDER BY wn.ordinal",
+        (way_id,),
+    )
+    seen = 0
+    try:
+        for expected, row in enumerate(rows):
+            ordinal, node_id, longitude_e7, latitude_e7 = row
+            if int(ordinal) != expected:
+                raise GlobalWaterwayPackageError(
+                    f"waterway way {way_id} node order is malformed"
+                )
+            seen += 1
+            yield ExactWaterwayPoint(
+                int(node_id), int(longitude_e7), int(latitude_e7)
+            )
+    finally:
+        rows.close()
+    if seen < 2:
+        raise GlobalWaterwayPackageError(
+            f"waterway way {way_id} has incomplete geometry"
+        )
+
+
+def _structural_way(
+    connection: sqlite3.Connection,
+    way_id: int,
+    evidence: _DependencyEvidence,
+    usage: _StructuralUsage,
+    path: Sequence[Sequence[int]],
+) -> None:
+    row = connection.execute(
+        "SELECT payload_sha FROM ways WHERE id=?", (way_id,)
+    ).fetchone()
+    if row is None:
+        raise GlobalWaterwayPackageError(
+            f"waterway structural closure references missing way {way_id}"
+        )
+    usage.has_reachable_way = True
+    evidence.add(["way", way_id, bytes(row[0]).hex(), [list(item) for item in path]])
+    rows = connection.execute(
+        "SELECT wn.ordinal,wn.node_id,n.payload_sha "
+        "FROM way_nodes wn LEFT JOIN nodes n ON n.id=wn.node_id "
+        "WHERE wn.way_id=? ORDER BY wn.ordinal",
+        (way_id,),
+    )
+    seen = 0
+    try:
+        for expected, (ordinal, node_id, payload_sha) in enumerate(rows):
+            if int(ordinal) != expected:
+                raise GlobalWaterwayPackageError(
+                    f"waterway way {way_id} node ordinal is malformed or noncontiguous"
+                )
+            usage.way_node()
+            if payload_sha is None:
+                raise GlobalWaterwayPackageError(
+                    f"waterway structural closure references missing node {int(node_id)}"
+                )
+            evidence.add(
+                ["way-node", way_id, expected, int(node_id), bytes(payload_sha).hex()]
+            )
+            seen += 1
+    finally:
+        rows.close()
+    if seen < 2:
+        raise GlobalWaterwayPackageError(
+            f"waterway structural member way {way_id} has fewer than two nodes"
+        )
+
+
+def _structural_relation(
     connection: sqlite3.Connection,
     relation_id: int,
     evidence: _DependencyEvidence,
+    usage: _StructuralUsage,
     *,
-    geometry_budget: _RelationGeometryBudget,
-    inherited_type: str | None = None,
-    stack: tuple[int, ...] = (),
-):
+    stack: tuple[int, ...],
+    path: tuple[tuple[int, int, int], ...],
+) -> None:
     if relation_id in stack:
-        raise GlobalWaterwayPackageError("relation membership cycle is forbidden")
-    geometry_budget.enter_relation(len(stack) + 1)
+        usage.cycle_edges += 1
+        evidence.add(["cycle-edge", [list(item) for item in path]])
+        return
+    usage.enter_relation(len(stack) + 1)
     row = connection.execute(
-        "SELECT tags,payload_sha FROM relations WHERE id=?", (relation_id,)
+        "SELECT payload_sha FROM relations WHERE id=?", (relation_id,)
     ).fetchone()
     if row is None:
-        raise GlobalWaterwayPackageError(f"waterway source references missing relation {relation_id}")
-    tags = _decode_tags(bytes(row[0]), f"relation {relation_id}")
-    evidence.add(["relation", relation_id, bytes(row[1]).hex()])
-    declared_type = dict(tags).get("waterway")
-    if declared_type is not None and declared_type not in _ALLOWED_WATERWAYS:
         raise GlobalWaterwayPackageError(
-            f"relation {relation_id} has unsupported exact waterway type {declared_type!r}"
+            f"waterway structural closure references missing relation {relation_id}"
         )
-    effective_type = declared_type or inherited_type
+    evidence.add(
+        ["relation", relation_id, bytes(row[0]).hex(), [list(item) for item in path]]
+    )
     next_stack = stack + (relation_id,)
     rows = connection.execute(
         "SELECT ordinal,kind,ref,role FROM relation_members "
@@ -1331,16 +1677,21 @@ def _relation_occurrences(
         (relation_id,),
     )
     try:
-        for expected_ordinal, row in enumerate(rows):
-            ordinal, kind, ref, role = row
-            if int(ordinal) != expected_ordinal:
+        for expected, (ordinal, kind, ref, role) in enumerate(rows):
+            if int(ordinal) != expected:
                 raise GlobalWaterwayPackageError(
-                    f"relation {relation_id} member order is malformed"
+                    f"relation {relation_id} member ordinal is malformed or noncontiguous"
                 )
+            usage.member()
             kind = int(kind)
             ref = int(ref)
+            if kind not in (0, 1, 2):
+                raise GlobalWaterwayPackageError(
+                    f"relation {relation_id} has unknown member object kind {kind}"
+                )
+            member_path = path + ((kind, ref, expected),)
             evidence.add(
-                ["member", relation_id, expected_ordinal, kind, ref, str(role)]
+                ["member", relation_id, expected, kind, ref, str(role)]
             )
             if kind == 0:
                 node = connection.execute(
@@ -1348,36 +1699,615 @@ def _relation_occurrences(
                 ).fetchone()
                 if node is None:
                     raise GlobalWaterwayPackageError(
-                        f"relation {relation_id} references missing node {ref}"
+                        f"waterway structural closure references missing node {ref}"
                     )
                 evidence.add(["relation-node", ref, bytes(node[0]).hex()])
-                continue
-            if kind == 1:
-                _, _, way_tags, _, points = _way_source(
-                    connection, ref, evidence, geometry_budget
-                )
-                waterway_type = effective_type or dict(way_tags).get("waterway")
-                if waterway_type not in _ALLOWED_WATERWAYS:
-                    raise GlobalWaterwayPackageError(
-                        f"relation member way {ref} lacks one exact supported waterway type"
-                    )
-                yield waterway_type, points
-                continue
-            if kind == 2:
-                yield from _relation_occurrences(
+            elif kind == 1:
+                _structural_way(connection, ref, evidence, usage, member_path)
+            else:
+                _structural_relation(
                     connection,
                     ref,
                     evidence,
-                    geometry_budget=geometry_budget,
-                    inherited_type=effective_type,
+                    usage,
                     stack=next_stack,
+                    path=member_path,
+                )
+    finally:
+        rows.close()
+
+
+def _candidate_reason(
+    reason_code: str,
+    path: Sequence[Sequence[int]],
+    *,
+    declared: str | None,
+    effective: str | None,
+    way_declared: str | None = None,
+) -> dict[str, object]:
+    return {
+        "declaredWaterway": declared,
+        "effectiveWaterway": effective,
+        "memberWayDeclaredWaterway": way_declared,
+        "reasonCode": reason_code,
+        "sourcePath": [list(item) for item in path],
+    }
+
+
+def _candidate_relation_events(
+    connection: sqlite3.Connection,
+    relation_id: int,
+    *,
+    inherited_type: str | None,
+    stack: tuple[int, ...],
+    path: tuple[tuple[int, int, int], ...],
+    usage: _CandidateUsage,
+    waterway_evidence: list[dict[str, object]],
+):
+    if relation_id in stack:
+        row = connection.execute(
+            "SELECT tags FROM relations WHERE id=?", (relation_id,)
+        ).fetchone()
+        if row is None:
+            raise GlobalWaterwayPackageError(
+                f"waterway candidate cycle references missing relation {relation_id}"
+            )
+        tags = _decode_tags(bytes(row[0]), f"relation {relation_id}")
+        declared = dict(tags).get("waterway")
+        effective = declared if declared in _ALLOWED_WATERWAYS else inherited_type
+        waterway_evidence.append(
+            {
+                "declaredWaterway": declared,
+                "effectiveWaterway": effective,
+                "objectId": relation_id,
+                "objectKind": "relation",
+                "sourcePath": [list(item) for item in path],
+            }
+        )
+        yield (
+            "reason",
+            _candidate_reason(
+                "relation_cycle",
+                path,
+                declared=declared,
+                effective=effective,
+            ),
+        )
+        return
+    usage.enter_relation(len(stack) + 1)
+    row = connection.execute(
+        "SELECT tags FROM relations WHERE id=?", (relation_id,)
+    ).fetchone()
+    if row is None:
+        raise GlobalWaterwayPackageError(
+            f"waterway candidate references missing relation {relation_id}"
+        )
+    tags = _decode_tags(bytes(row[0]), f"relation {relation_id}")
+    declared = dict(tags).get("waterway")
+    effective = declared if declared in _ALLOWED_WATERWAYS else inherited_type
+    waterway_evidence.append(
+        {
+            "declaredWaterway": declared,
+            "effectiveWaterway": effective,
+            "objectId": relation_id,
+            "objectKind": "relation",
+            "sourcePath": [list(item) for item in path],
+        }
+    )
+    if declared is not None and declared not in _ALLOWED_WATERWAYS:
+        yield (
+            "reason",
+            _candidate_reason(
+                "unsupported_relation_waterway",
+                path,
+                declared=declared,
+                effective=inherited_type,
+            ),
+        )
+        return
+    next_stack = stack + (relation_id,)
+    rows = connection.execute(
+        "SELECT ordinal,kind,ref FROM relation_members "
+        "WHERE relation_id=? ORDER BY ordinal",
+        (relation_id,),
+    )
+    try:
+        for expected, (ordinal, kind, ref) in enumerate(rows):
+            if int(ordinal) != expected:
+                raise GlobalWaterwayPackageError(
+                    f"relation {relation_id} member ordinal is malformed or noncontiguous"
+                )
+            kind = int(kind)
+            ref = int(ref)
+            member_path = path + ((kind, ref, expected),)
+            if kind == 0:
+                yield ("node", member_path)
+                continue
+            if kind == 1:
+                row = connection.execute(
+                    "SELECT tags FROM ways WHERE id=?", (ref,)
+                ).fetchone()
+                if row is None:
+                    raise GlobalWaterwayPackageError(
+                        f"waterway candidate references missing way {ref}"
+                    )
+                way_tags = _decode_tags(bytes(row[0]), f"way {ref}")
+                way_declared = dict(way_tags).get("waterway")
+                way_effective = effective or way_declared
+                waterway_evidence.append(
+                    {
+                        "declaredWaterway": way_declared,
+                        "effectiveWaterway": way_effective,
+                        "objectId": ref,
+                        "objectKind": "way",
+                        "sourcePath": [list(item) for item in member_path],
+                    }
+                )
+                if way_effective not in _ALLOWED_WATERWAYS:
+                    yield (
+                        "reason",
+                        _candidate_reason(
+                            "unsupported_member_way_waterway",
+                            member_path,
+                            declared=declared,
+                            effective=effective,
+                            way_declared=way_declared,
+                        ),
+                    )
+                    continue
+                point_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM way_nodes WHERE way_id=?", (ref,)
+                    ).fetchone()[0]
+                )
+                usage.reserve_way(point_count)
+                points = _point_rows(connection, ref, _DependencyEvidence(usage.limits))
+                yield (
+                    "candidate",
+                    {
+                        "path": member_path,
+                        "points": points,
+                        "waterwayType": way_effective,
+                    },
+                )
+                continue
+            if kind == 2:
+                yield from _candidate_relation_events(
+                    connection,
+                    ref,
+                    inherited_type=effective,
+                    stack=next_stack,
+                    path=member_path,
+                    usage=usage,
+                    waterway_evidence=waterway_evidence,
                 )
                 continue
             raise GlobalWaterwayPackageError(
-                f"relation {relation_id} member type {kind} is unsupported"
+                f"relation {relation_id} has unknown member object kind {kind}"
             )
     finally:
         rows.close()
+
+
+def _legacy_first_terminal(
+    connection: sqlite3.Connection,
+    relation_id: int,
+    *,
+    inherited_type: str | None = None,
+    stack: tuple[int, ...] = (),
+) -> tuple[str | None, bool]:
+    if relation_id in stack:
+        return "relation_cycle", False
+    row = connection.execute(
+        "SELECT tags FROM relations WHERE id=?", (relation_id,)
+    ).fetchone()
+    if row is None:
+        raise GlobalWaterwayPackageError(
+            f"legacy projection references missing relation {relation_id}"
+        )
+    tags = _decode_tags(bytes(row[0]), f"relation {relation_id}")
+    declared = dict(tags).get("waterway")
+    if declared is not None and declared not in _ALLOWED_WATERWAYS:
+        return "unsupported_relation_waterway", False
+    effective = declared or inherited_type
+    found = False
+    rows = connection.execute(
+        "SELECT ordinal,kind,ref FROM relation_members "
+        "WHERE relation_id=? ORDER BY ordinal",
+        (relation_id,),
+    )
+    try:
+        for expected, (ordinal, kind, ref) in enumerate(rows):
+            if int(ordinal) != expected:
+                raise GlobalWaterwayPackageError(
+                    f"legacy relation {relation_id} member ordinal is malformed"
+                )
+            kind = int(kind)
+            ref = int(ref)
+            if kind == 0:
+                continue
+            if kind == 1:
+                way = connection.execute(
+                    "SELECT tags FROM ways WHERE id=?", (ref,)
+                ).fetchone()
+                if way is None:
+                    raise GlobalWaterwayPackageError(
+                        f"legacy projection references missing way {ref}"
+                    )
+                exact_way_type = dict(
+                    _decode_tags(bytes(way[0]), f"way {ref}")
+                ).get("waterway")
+                if (effective or exact_way_type) not in _ALLOWED_WATERWAYS:
+                    return "unsupported_member_way_waterway", found
+                found = True
+                continue
+            if kind == 2:
+                reason, child_found = _legacy_first_terminal(
+                    connection,
+                    ref,
+                    inherited_type=effective,
+                    stack=stack + (relation_id,),
+                )
+                if reason is not None:
+                    return reason, found or child_found
+                found = found or child_found
+                continue
+            raise GlobalWaterwayPackageError(
+                f"legacy relation {relation_id} member kind is unsupported"
+            )
+    finally:
+        rows.close()
+    return None, found
+
+
+def _root_row(
+    connection: sqlite3.Connection,
+    root_kind: int,
+    root_id: int,
+) -> tuple[dict[str, object], tuple[tuple[str, str], ...], str, str, str | None]:
+    table = "ways" if root_kind == 1 else "relations"
+    row = connection.execute(
+        f"SELECT version,timestamp,tags,payload_sha FROM {table} WHERE id=?",
+        (root_id,),
+    ).fetchone()
+    if row is None:
+        raise GlobalWaterwayPackageError(
+            f"selected root {table[:-1]} {root_id} is absent from closure"
+        )
+    version, timestamp, raw_tags, payload_sha = row
+    tags = _decode_tags(bytes(raw_tags), f"selected {table[:-1]} {root_id}")
+    name_key, primary, english = _source_names(tags)
+    by_key = dict(tags)
+    if root_kind == 1:
+        if by_key.get("waterway") not in _ALLOWED_WATERWAYS:
+            raise GlobalWaterwayPackageError(
+                f"selected way {root_id} predicate contradicts supported waterway selection"
+            )
+    elif by_key.get("type") != "waterway":
+        raise GlobalWaterwayPackageError(
+            f"selected relation {root_id} predicate contradicts type=waterway selection"
+        )
+    root = {
+        "id": root_id,
+        "kind": "way" if root_kind == 1 else "relation",
+        "kindCode": root_kind,
+        "payloadSha256": bytes(payload_sha).hex(),
+        "timestamp": str(timestamp),
+        "version": int(version),
+    }
+    return root, tags, name_key, primary, english
+
+
+def _direct_candidate(
+    connection: sqlite3.Connection,
+    *,
+    root: Mapping[str, object],
+    tags: Sequence[tuple[str, str]],
+    name_key: str,
+    primary: str,
+    english: str | None,
+    source_document: Mapping[str, object],
+    dependency_evidence: Mapping[str, object],
+    usage: _CandidateUsage,
+    materialize: bool,
+) -> _CandidateEvidence:
+    root_id = int(root["id"])
+    waterway_type = str(dict(tags)["waterway"])
+    point_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM way_nodes WHERE way_id=?", (root_id,)
+        ).fetchone()[0]
+    )
+    usage.reserve_way(point_count)
+    source_path = (((1, root_id, -1),),)
+    candidate_meta, source_meta = _feature_metadata(
+        root=root,
+        source_document=source_document,
+        name_source_key=name_key,
+        primary_name=primary,
+        english_name=english,
+        waterway_type=waterway_type,
+        complete_named_relation=False,
+        required_node_ids=frozenset(),
+        source_occurrence_paths=source_path,
+        dependency_evidence=dependency_evidence,
+    )
+    candidate_digest = _start_geometry_digest(_CANDIDATE_FEATURE_DOMAIN, candidate_meta)
+    source_digest = _start_geometry_digest(_SOURCE_FEATURE_DOMAIN, source_meta)
+    candidate_digest.update(struct.pack(">Q", 1))
+    source_digest.update(struct.pack(">Q", 1))
+    _update_geometry_part_start(candidate_digest, point_count)
+    _update_geometry_part_start(source_digest, point_count)
+    points: list[object] | None = [] if materialize else None
+    seen = 0
+    for point in _iter_exact_way_points(connection, root_id):
+        _update_geometry_point(candidate_digest, point)
+        _update_geometry_point(source_digest, point)
+        if points is not None:
+            points.append(point)
+        seen += 1
+    if seen != point_count:
+        raise GlobalWaterwayPackageError(
+            f"direct way {root_id} point count drifted during admission"
+        )
+    parts = (tuple(points),) if points is not None else ()
+    return _CandidateEvidence(
+        waterway_type,
+        False,
+        parts,
+        frozenset(),
+        source_path,
+        candidate_digest.digest(),
+        source_digest.digest(),
+        1,
+        point_count,
+    )
+
+
+def _analyze_admission_root(
+    connection: sqlite3.Connection,
+    root_kind: int,
+    root_id: int,
+    *,
+    limits: _AdmissionLimits | None = None,
+    materialize: bool = False,
+) -> _AdmissionRootAnalysis:
+    if root_kind not in (1, 2):
+        raise GlobalWaterwayPackageError("waterway admission root kind is unsupported")
+    checked_limits = limits or _AdmissionLimits.production()
+    if not isinstance(checked_limits, _AdmissionLimits):
+        raise GlobalWaterwayPackageError("waterway admission limits are invalid")
+    source_document = _source_document_from_database(connection)
+    root, tags, name_key, primary, english = _root_row(
+        connection, root_kind, root_id
+    )
+    dependency = _DependencyEvidence(checked_limits)
+    structural = _StructuralUsage(checked_limits)
+    root_path = ((root_kind, root_id, -1),)
+    if root_kind == 1:
+        _structural_way(connection, root_id, dependency, structural, root_path)
+    else:
+        _structural_relation(
+            connection,
+            root_id,
+            dependency,
+            structural,
+            stack=(),
+            path=root_path,
+        )
+    dependency_document = dependency.document()
+    candidate_usage = _CandidateUsage(checked_limits)
+    reasons: list[dict[str, object]] = []
+    waterway_evidence: list[dict[str, object]] = []
+    node_evidence_count = 0
+    candidates: list[_CandidateEvidence] = []
+    if root_kind == 1:
+        waterway_type = str(dict(tags).get("waterway"))
+        waterway_evidence.append(
+            {
+                "declaredWaterway": waterway_type,
+                "effectiveWaterway": waterway_type,
+                "objectId": root_id,
+                "objectKind": "way",
+                "sourcePath": [list(item) for item in root_path],
+            }
+        )
+        candidates.append(
+            _direct_candidate(
+                connection,
+                root=root,
+                tags=tags,
+                name_key=name_key,
+                primary=primary,
+                english=english,
+                source_document=source_document,
+                dependency_evidence=dependency_document,
+                usage=candidate_usage,
+                materialize=materialize,
+            )
+        )
+        legacy_reason = None
+    else:
+        parts_by_type: dict[str, list[list[object]]] = {}
+        required_by_type: dict[str, set[int]] = {}
+        paths_by_type: dict[str, list[tuple[tuple[int, int, int], ...]]] = {}
+        type_order: list[str] = []
+        previous_type: str | None = None
+        join_allowed = False
+        for event_kind, value in _candidate_relation_events(
+            connection,
+            root_id,
+            inherited_type=None,
+            stack=(),
+            path=root_path,
+            usage=candidate_usage,
+            waterway_evidence=waterway_evidence,
+        ):
+            if event_kind == "node":
+                node_evidence_count += 1
+                continue
+            if event_kind == "reason":
+                reasons.append(value)
+                join_allowed = False
+                previous_type = None
+                continue
+            waterway_type = str(value["waterwayType"])
+            points = value["points"]
+            path = tuple(tuple(int(component) for component in item) for item in value["path"])
+            if waterway_type not in parts_by_type:
+                parts_by_type[waterway_type] = []
+                required_by_type[waterway_type] = set()
+                paths_by_type[waterway_type] = []
+                type_order.append(waterway_type)
+            typed_parts = parts_by_type[waterway_type]
+            if (
+                join_allowed
+                and previous_type == waterway_type
+                and typed_parts
+                and typed_parts[-1][-1].node_id == points[0].node_id
+            ):
+                required_by_type[waterway_type].add(points[0].node_id)
+                typed_parts[-1].extend(points[1:])
+            else:
+                typed_parts.append(list(points))
+            paths_by_type[waterway_type].append(path)
+            previous_type = waterway_type
+            join_allowed = True
+        complete = len(type_order) == 1 and not reasons
+        for waterway_type in type_order:
+            parts = tuple(tuple(part) for part in parts_by_type[waterway_type])
+            required = frozenset(required_by_type[waterway_type])
+            occurrence_paths = tuple(paths_by_type[waterway_type])
+            candidate_meta, source_meta = _feature_metadata(
+                root=root,
+                source_document=source_document,
+                name_source_key=name_key,
+                primary_name=primary,
+                english_name=english,
+                waterway_type=waterway_type,
+                complete_named_relation=complete,
+                required_node_ids=required,
+                source_occurrence_paths=occurrence_paths,
+                dependency_evidence=dependency_document,
+            )
+            candidate_sha, source_sha = _hash_materialized_candidate(
+                candidate_metadata=candidate_meta,
+                source_metadata=source_meta,
+                parts=parts,
+            )
+            candidates.append(
+                _CandidateEvidence(
+                    waterway_type,
+                    complete,
+                    parts if materialize else (),
+                    required,
+                    occurrence_paths,
+                    candidate_sha,
+                    source_sha,
+                    len(parts),
+                    sum(len(part) for part in parts),
+                )
+            )
+        legacy_reason, legacy_found = _legacy_first_terminal(connection, root_id)
+        if legacy_reason is None and not legacy_found:
+            legacy_reason = "no_usable_way_geometry"
+    if candidates:
+        status = (
+            "line_candidates_with_noncandidate_members"
+            if reasons
+            else "line_candidates"
+        )
+    elif not structural.has_reachable_way:
+        status = "no_line_geometry"
+    else:
+        status = "no_supported_line_candidate"
+    candidate_stream = hashlib.sha256()
+    candidate_stream.update(_CANDIDATE_STREAM_DOMAIN)
+    for candidate in candidates:
+        candidate_stream.update(struct.pack(">Q", 32))
+        candidate_stream.update(candidate.candidate_feature_sha256)
+    feature_parts = sum(candidate.part_count for candidate in candidates)
+    feature_points = sum(candidate.point_count for candidate in candidates)
+    entry: dict[str, object] = {
+        "candidateFeatureCount": len(candidates),
+        "candidateFeatureSha256": [
+            candidate.candidate_feature_sha256.hex() for candidate in candidates
+        ],
+        "candidateStreamSha256": candidate_stream.hexdigest(),
+        "dependencyEvidence": dependency_document,
+        "englishName": english,
+        "geometryUsage": {
+            "candidateFeatureParts": feature_parts,
+            "candidateFeaturePoints": feature_points,
+            "maxDepth": candidate_usage.max_depth,
+            "rawSupportedWayParts": candidate_usage.raw_parts,
+            "rawSupportedWayPoints": candidate_usage.raw_points,
+            "relationVisits": candidate_usage.relation_visits,
+        },
+        "legacyFirstTerminalReason": legacy_reason,
+        "nameSourceKey": name_key,
+        "nodeEvidenceCount": node_evidence_count,
+        "ownedNameField": {"key": name_key, "value": primary},
+        "primaryName": primary,
+        "reasonOccurrences": reasons,
+        "root": root,
+        "status": status,
+        "structural": structural.document(),
+        "structuralStatus": "valid",
+        "waterwayEvidence": waterway_evidence,
+    }
+    entry_bytes = _canonical_json_no_lf_bytes(entry)
+    if len(entry_bytes) > checked_limits.max_admission_entry_bytes:
+        raise GlobalWaterwayPackageError(
+            "waterway admission entry byte ceiling exceeded"
+        )
+    return _AdmissionRootAnalysis(
+        MappingProxyType(entry), entry_bytes, tuple(candidates), legacy_reason
+    )
+
+
+def _candidate_rows(analysis: _AdmissionRootAnalysis) -> tuple[tuple[object, ...], ...]:
+    root = analysis.entry["root"]
+    return tuple(
+        (
+            int(root["kindCode"]),
+            int(root["id"]),
+            ordinal,
+            candidate.waterway_type,
+            int(candidate.complete_named_relation),
+            candidate.candidate_feature_sha256,
+            candidate.source_feature_sha256,
+            candidate.part_count,
+            candidate.point_count,
+        )
+        for ordinal, candidate in enumerate(analysis.candidates)
+    )
+
+
+def _analysis_features(analysis: _AdmissionRootAnalysis):
+    from .osm_global_waterway_renderer import ExactWaterwayFeature
+
+    entry = analysis.entry
+    root = entry["root"]
+    for candidate in analysis.candidates:
+        if not candidate.parts:
+            raise GlobalWaterwayPackageError(
+                "waterway renderer candidate geometry was not materialized"
+            )
+        yield ExactWaterwayFeature(
+            str(root["kind"]),
+            int(root["id"]),
+            int(root["version"]),
+            str(root["timestamp"]),
+            candidate.waterway_type,
+            str(entry["nameSourceKey"]),
+            str(entry["primaryName"]),
+            entry["englishName"],
+            candidate.complete_named_relation,
+            candidate.parts,
+            candidate.required_node_ids,
+            candidate.source_feature_sha256,
+        )
 
 
 def iter_exact_waterway_features(
@@ -1385,165 +2315,607 @@ def iter_exact_waterway_features(
     *,
     source_binding: WaterwaySourceBinding,
 ):
-    """Yield selected roots only, with exact recursive source geometry and text."""
+    """Recompute and authenticate every admitted root before yielding candidates."""
 
-    from .osm_global_waterway_renderer import ExactWaterwayFeature
-
-    if not isinstance(database_path, Path) or not database_path.is_file() or database_path.is_symlink():
-        raise GlobalWaterwayPackageError("waterway database is not one regular non-link file")
+    if (
+        not isinstance(database_path, Path)
+        or not database_path.is_file()
+        or database_path.is_symlink()
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway database is not one regular non-link file"
+        )
     if not isinstance(source_binding, WaterwaySourceBinding):
         raise GlobalWaterwayPackageError("waterway feature source binding is invalid")
     connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
     try:
+        connection.execute("PRAGMA query_only=ON")
         run_identity = _meta_get(connection, "runIdentity")
-        checkpoint = _meta_get(connection, "checkpoint")
-        if not isinstance(run_identity, dict) or run_identity.get("source") != source_binding.document():
+        admission_receipt = _meta_get(connection, "admissionReceipt")
+        if (
+            not isinstance(run_identity, dict)
+            or run_identity.get("source") != source_binding.document()
+        ):
             raise GlobalWaterwayPackageError("waterway database source binding differs")
-        if not isinstance(checkpoint, dict) or checkpoint.get("ingestComplete") is not True:
-            raise GlobalWaterwayPackageError("waterway database ingest is incomplete")
-        def root_rows():
-            previous_kind = -1
-            previous_id = 0
-            while True:
-                cursor = connection.execute(
-                    "SELECT kind,id FROM roots "
-                    "WHERE kind>? OR (kind=? AND id>?) ORDER BY kind,id LIMIT 1",
-                    (previous_kind, previous_kind, previous_id),
-                )
-                row = cursor.fetchone()
-                cursor.close()
-                if row is None:
-                    return
-                previous_kind = int(row[0])
-                previous_id = int(row[1])
-                yield previous_kind, previous_id
-
-        for kind, source_id in root_rows():
-            kind = int(kind)
-            source_id = int(source_id)
-            if kind == 1:
-                evidence = _DependencyEvidence()
-                version, timestamp, tags, _, points = _way_source(
-                    connection, source_id, evidence
-                )
-                waterway_type = dict(tags).get("waterway")
-                if waterway_type not in _ALLOWED_WATERWAYS:
-                    raise GlobalWaterwayPackageError(
-                        f"selected way {source_id} lacks one exact supported waterway type"
-                    )
-                name_key, primary, english = _source_names(tags)
-                parts = (points,)
-                identity = _feature_identity(
-                    source_binding=source_binding,
-                    source_kind="way",
-                    source_id=source_id,
-                    source_version=version,
-                    source_timestamp=timestamp,
-                    waterway_type=waterway_type,
-                    name_source_key=name_key,
-                    primary_name=primary,
-                    english_name=english,
-                    parts=parts,
-                    required_node_ids=frozenset(),
-                    dependency_evidence=evidence.document(),
-                )
-                yield ExactWaterwayFeature(
-                    "way",
-                    source_id,
-                    version,
-                    timestamp,
-                    waterway_type,
-                    name_key,
-                    primary,
-                    english,
-                    False,
-                    parts,
-                    frozenset(),
-                    identity,
-                )
-                continue
-            row = connection.execute(
-                "SELECT version,timestamp,tags FROM relations WHERE id=?", (source_id,)
-            ).fetchone()
-            if row is None:
-                raise GlobalWaterwayPackageError(
-                    f"selected relation {source_id} is absent from closure"
-                )
-            version, timestamp, raw_tags = row
-            tags = _decode_tags(bytes(raw_tags), f"relation {source_id}")
-            name_key, primary, english = _source_names(tags)
-            evidence = _DependencyEvidence()
-            policy = _relation_geometry_policy_document()
-            geometry_budget = _RelationGeometryBudget(
-                int(policy["maxDepth"]),
-                int(policy["maxRelationVisits"]),
-                int(policy["maxParts"]),
-                int(policy["maxPoints"]),
+        if (
+            not isinstance(admission_receipt, dict)
+            or admission_receipt.get("fatalCount") != 0
+            or admission_receipt.get("policy", {}).get("sha256")
+            != LINE_CANDIDATE_POLICY_SHA256
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway database lacks complete v2 admission evidence"
             )
-            parts_by_type: dict[str, list[list[object]]] = {}
-            required_by_type: dict[str, set[int]] = {}
-            type_order: list[str] = []
-            previous_type: str | None = None
-            has_occurrences = False
-            for waterway_type, points in _relation_occurrences(
+        previous_kind = 0
+        previous_id = 0
+        while True:
+            root_cursor = connection.execute(
+                "SELECT kind,id FROM roots "
+                "WHERE kind>? OR (kind=? AND id>?) ORDER BY kind,id LIMIT 1",
+                (previous_kind, previous_kind, previous_id),
+            )
+            root_row = root_cursor.fetchone()
+            root_cursor.close()
+            if root_row is None:
+                break
+            root_kind, root_id = int(root_row[0]), int(root_row[1])
+            previous_kind, previous_id = root_kind, root_id
+            analysis = _analyze_admission_root(
                 connection,
-                source_id,
-                evidence,
-                geometry_budget=geometry_budget,
-            ):
-                has_occurrences = True
-                if waterway_type not in parts_by_type:
-                    parts_by_type[waterway_type] = []
-                    required_by_type[waterway_type] = set()
-                    type_order.append(waterway_type)
-                typed_parts = parts_by_type[waterway_type]
-                if (
-                    previous_type == waterway_type
-                    and typed_parts
-                    and typed_parts[-1][-1].node_id == points[0].node_id
-                ):
-                    required_by_type[waterway_type].add(points[0].node_id)
-                    typed_parts[-1].extend(points[1:])
-                else:
-                    typed_parts.append(list(points))
-                previous_type = waterway_type
-            if not has_occurrences:
+                root_kind,
+                root_id,
+                materialize=True,
+            )
+            stored = connection.execute(
+                "SELECT entry_json,entry_sha,candidate_stream_sha "
+                "FROM admission_roots WHERE root_kind=? AND root_id=?",
+                (root_kind, root_id),
+            ).fetchone()
+            if stored is None:
                 raise GlobalWaterwayPackageError(
-                    f"selected relation {source_id} contains no exact path geometry"
+                    "waterway admitted root evidence is absent"
                 )
-            dependency_evidence = evidence.document()
-            for waterway_type in type_order:
-                parts = tuple(tuple(part) for part in parts_by_type[waterway_type])
-                identity = _feature_identity(
-                    source_binding=source_binding,
-                    source_kind="relation",
-                    source_id=source_id,
-                    source_version=int(version),
-                    source_timestamp=str(timestamp),
-                    waterway_type=waterway_type,
-                    name_source_key=name_key,
-                    primary_name=primary,
-                    english_name=english,
-                    parts=parts,
-                    required_node_ids=frozenset(required_by_type[waterway_type]),
-                    dependency_evidence=dependency_evidence,
+            expected_entry_sha = hashlib.sha256(analysis.entry_bytes).digest()
+            if (
+                _sqlite_blob(stored[0], "admitted root entry") != analysis.entry_bytes
+                or _sqlite_blob(stored[1], "admitted root entry SHA-256") != expected_entry_sha
+                or _sqlite_blob(stored[2], "admitted candidate stream SHA-256").hex()
+                != analysis.entry["candidateStreamSha256"]
+            ):
+                raise GlobalWaterwayPackageError(
+                    "waterway admitted root candidate stream differs from exact source"
                 )
-                yield ExactWaterwayFeature(
-                    "relation",
-                    source_id,
-                    int(version),
-                    str(timestamp),
-                    waterway_type,
-                    name_key,
-                    primary,
-                    english,
-                    True,
-                    parts,
-                    frozenset(required_by_type[waterway_type]),
-                    identity,
+            actual_candidates = tuple(
+                connection.execute(
+                    "SELECT root_kind,root_id,feature_ordinal,waterway_type,"
+                    "complete_named_relation,candidate_feature_sha,source_feature_sha,"
+                    "part_count,point_count FROM admission_candidates "
+                    "WHERE root_kind=? AND root_id=? ORDER BY feature_ordinal",
+                    (root_kind, root_id),
                 )
+            )
+            if actual_candidates != _candidate_rows(analysis):
+                raise GlobalWaterwayPackageError(
+                    "waterway admitted candidate feature evidence differs"
+                )
+            yield from _analysis_features(analysis)
     finally:
         connection.close()
+
+
+def _root_status_histogram(counts: Mapping[str, int]) -> dict[str, object]:
+    return {
+        "unit": "roots",
+        "values": [
+            {"roots": int(counts.get(status, 0)), "status": status}
+            for status in _ROOT_STATUS_ORDER
+        ],
+    }
+
+
+def _reason_occurrence_histogram(counts: Mapping[str, int]) -> dict[str, object]:
+    return {
+        "unit": "occurrences",
+        "values": [
+            {
+                "occurrences": int(counts.get(reason, 0)),
+                "reasonCode": reason,
+            }
+            for reason in _REASON_CODE_ORDER
+        ],
+    }
+
+
+def _legacy_histogram(counts: Mapping[str, int]) -> dict[str, object]:
+    return {
+        "unit": "roots",
+        "values": [
+            {"reasonCode": reason, "roots": int(counts.get(reason, 0))}
+            for reason in _LEGACY_REASON_ORDER
+        ],
+    }
+
+
+def _numeric_ledger(root_ids: Sequence[int]) -> tuple[bytes, dict[str, object]]:
+    raw = (
+        json.dumps(sorted(root_ids), ensure_ascii=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    return raw, {
+        "bytes": len(raw),
+        "count": len(root_ids),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _next_root(
+    connection: sqlite3.Connection,
+    after_kind: int,
+    after_id: int,
+) -> tuple[int, int] | None:
+    row = connection.execute(
+        "SELECT kind,id FROM roots WHERE kind>? OR (kind=? AND id>?) "
+        "ORDER BY kind,id LIMIT 1",
+        (after_kind, after_kind, after_id),
+    ).fetchone()
+    return None if row is None else (int(row[0]), int(row[1]))
+
+
+def _checkpoint_next_document(value: tuple[int, int] | None) -> object:
+    if value is None:
+        return None
+    return {"rootId": value[1], "rootKindCode": value[0]}
+
+
+def _admission_checkpoint_document(
+    *,
+    processed_count: int,
+    next_root: tuple[int, int] | None,
+    framed_bytes: int,
+    aggregate_digest: object,
+    status_counts: Mapping[str, int],
+    reason_counts: Mapping[str, int],
+    fatal_count: int,
+) -> dict[str, object]:
+    return {
+        "admissionComplete": next_root is None,
+        "fatalCount": fatal_count,
+        "nextRoot": _checkpoint_next_document(next_root),
+        "prefixFramedBytes": framed_bytes,
+        "prefixSha256": aggregate_digest.hexdigest(),
+        "processedCount": processed_count,
+        "reasonOccurrenceHistogram": _reason_occurrence_histogram(reason_counts),
+        "rootStatusHistogram": _root_status_histogram(status_counts),
+        "schema": "flightalert.experiment8.osm-waterway-admission-checkpoint.v2",
+    }
+
+
+def _stored_candidate_rows(
+    connection: sqlite3.Connection,
+    root_kind: int,
+    root_id: int,
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        connection.execute(
+            "SELECT root_kind,root_id,feature_ordinal,waterway_type,"
+            "complete_named_relation,candidate_feature_sha,source_feature_sha,"
+            "part_count,point_count FROM admission_candidates "
+            "WHERE root_kind=? AND root_id=? ORDER BY feature_ordinal",
+            (root_kind, root_id),
+        )
+    )
+
+
+def _authenticate_admission_prefix(
+    connection: sqlite3.Connection,
+    checkpoint: Mapping[str, object],
+) -> tuple[
+    object,
+    int,
+    int,
+    tuple[int, int] | None,
+    dict[str, int],
+    dict[str, int],
+    dict[str, int],
+    list[int],
+    list[int],
+    int,
+    int,
+]:
+    try:
+        processed = int(checkpoint["processedCount"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise GlobalWaterwayPackageError(
+            "waterway admission checkpoint prefix is malformed"
+        ) from error
+    if processed < 0:
+        raise GlobalWaterwayPackageError(
+            "waterway admission checkpoint prefix is malformed"
+        )
+    if int(
+        connection.execute("SELECT COUNT(*) FROM admission_roots").fetchone()[0]
+    ) != processed:
+        raise GlobalWaterwayPackageError(
+            "waterway admission prefix root inventory differs"
+        )
+    orphan = connection.execute(
+        "SELECT 1 FROM admission_candidates c LEFT JOIN admission_roots r "
+        "ON r.root_kind=c.root_kind AND r.root_id=c.root_id "
+        "WHERE r.root_id IS NULL LIMIT 1"
+    ).fetchone()
+    if orphan is not None:
+        raise GlobalWaterwayPackageError(
+            "waterway admission candidate evidence is orphaned"
+        )
+    root_rows = connection.execute("SELECT kind,id FROM roots ORDER BY kind,id")
+    stored_rows = connection.execute(
+        "SELECT root_kind,root_id,entry_json,entry_sha,framed_bytes,status,"
+        "candidate_stream_sha FROM admission_roots ORDER BY root_kind,root_id"
+    )
+    aggregate = hashlib.sha256()
+    aggregate.update(_ADMISSION_STREAM_DOMAIN)
+    framed_bytes = len(_ADMISSION_STREAM_DOMAIN)
+    status_counts = {status: 0 for status in _ROOT_STATUS_ORDER}
+    reason_counts = {reason: 0 for reason in _REASON_CODE_ORDER}
+    legacy_counts = {reason: 0 for reason in _LEGACY_REASON_ORDER}
+    legacy_root_ids: list[int] = []
+    no_way_root_ids: list[int] = []
+    candidate_roots = 0
+    zero_candidate_roots = 0
+    last = (0, 0)
+    try:
+        for index in range(processed):
+            root_row = root_rows.fetchone()
+            stored = stored_rows.fetchone()
+            if root_row is None or stored is None:
+                raise GlobalWaterwayPackageError(
+                    "waterway admission prefix order ended early"
+                )
+            root_kind, root_id = int(root_row[0]), int(root_row[1])
+            if (int(stored[0]), int(stored[1])) != (root_kind, root_id):
+                raise GlobalWaterwayPackageError(
+                    "waterway admission prefix order drifted"
+                )
+            analysis = _analyze_admission_root(
+                connection, root_kind, root_id, materialize=False
+            )
+            entry_sha = hashlib.sha256(analysis.entry_bytes).digest()
+            if (
+                _sqlite_blob(stored[2], "admission prefix entry") != analysis.entry_bytes
+                or _sqlite_blob(stored[3], "admission prefix entry SHA-256") != entry_sha
+                or int(stored[4]) != 8 + len(analysis.entry_bytes)
+                or str(stored[5]) != analysis.entry["status"]
+                or _sqlite_blob(stored[6], "admission prefix candidate stream SHA-256").hex()
+                != analysis.entry["candidateStreamSha256"]
+            ):
+                raise GlobalWaterwayPackageError(
+                    "waterway admission prefix evidence differs from exact source"
+                )
+            if _stored_candidate_rows(connection, root_kind, root_id) != _candidate_rows(
+                analysis
+            ):
+                raise GlobalWaterwayPackageError(
+                    "waterway admission prefix candidate evidence differs"
+                )
+            aggregate.update(struct.pack(">Q", len(analysis.entry_bytes)))
+            aggregate.update(analysis.entry_bytes)
+            framed_bytes += 8 + len(analysis.entry_bytes)
+            status = str(analysis.entry["status"])
+            status_counts[status] += 1
+            for reason in analysis.entry["reasonOccurrences"]:
+                reason_counts[str(reason["reasonCode"])] += 1
+            if analysis.legacy_first_terminal_reason is not None:
+                legacy_counts[analysis.legacy_first_terminal_reason] += 1
+                legacy_root_ids.append(root_id)
+            if not bool(analysis.entry["structural"]["hasReachableWay"]):
+                no_way_root_ids.append(root_id)
+            if int(analysis.entry["candidateFeatureCount"]):
+                candidate_roots += 1
+            else:
+                zero_candidate_roots += 1
+            last = (root_kind, root_id)
+        if stored_rows.fetchone() is not None:
+            raise GlobalWaterwayPackageError(
+                "waterway admission prefix has extra root evidence"
+            )
+        next_root_row = root_rows.fetchone()
+    finally:
+        root_rows.close()
+        stored_rows.close()
+    next_root = (
+        None
+        if next_root_row is None
+        else (int(next_root_row[0]), int(next_root_row[1]))
+    )
+    expected_checkpoint = _admission_checkpoint_document(
+        processed_count=processed,
+        next_root=next_root,
+        framed_bytes=framed_bytes,
+        aggregate_digest=aggregate,
+        status_counts=status_counts,
+        reason_counts=reason_counts,
+        fatal_count=0,
+    )
+    if dict(checkpoint) != expected_checkpoint:
+        raise GlobalWaterwayPackageError(
+            "waterway admission checkpoint differs from authenticated prefix"
+        )
+    if processed and next_root is not None and last >= next_root:
+        raise GlobalWaterwayPackageError(
+            "waterway admission checkpoint next-key order differs"
+        )
+    return (
+        aggregate,
+        framed_bytes,
+        processed,
+        next_root,
+        status_counts,
+        reason_counts,
+        legacy_counts,
+        legacy_root_ids,
+        no_way_root_ids,
+        candidate_roots,
+        zero_candidate_roots,
+    )
+
+
+def _commit_admission_checkpoint(
+    connection: sqlite3.Connection,
+    checkpoint: Mapping[str, object],
+) -> None:
+    _meta_set(connection, "admissionCheckpoint", dict(checkpoint))
+    connection.commit()
+
+
+def _admission_receipt_document(
+    connection: sqlite3.Connection,
+    *,
+    aggregate: object,
+    framed_bytes: int,
+    processed: int,
+    status_counts: Mapping[str, int],
+    reason_counts: Mapping[str, int],
+    legacy_counts: Mapping[str, int],
+    legacy_root_ids: Sequence[int],
+    no_way_root_ids: Sequence[int],
+    candidate_roots: int,
+    zero_candidate_roots: int,
+    source_binding: WaterwaySourceBinding,
+    ingest_semantic_sha256: str,
+) -> dict[str, object]:
+    _, legacy_ledger = _numeric_ledger(legacy_root_ids)
+    _, no_way_ledger = _numeric_ledger(no_way_root_ids)
+    if not source_binding.planet_path.startswith("fixture://"):
+        if dict(legacy_counts) != _LEGACY_PRODUCTION_COUNTS:
+            raise GlobalWaterwayPackageError(
+                "production legacy first-terminal histogram differs from pinned evidence"
+            )
+        if (
+            legacy_ledger["bytes"] != _LEGACY_PRODUCTION_LEDGER_BYTES
+            or legacy_ledger["sha256"] != _LEGACY_PRODUCTION_LEDGER_SHA256
+        ):
+            raise GlobalWaterwayPackageError(
+                "production legacy first-terminal ledger differs from pinned evidence"
+            )
+        if no_way_ledger["count"] != _PRODUCTION_STRUCTURAL_NO_WAY_COUNT:
+            raise GlobalWaterwayPackageError(
+                "production structural no-way ledger count differs from pinned evidence"
+            )
+    selected_way_count = int(
+        connection.execute("SELECT COUNT(*) FROM roots WHERE kind=1").fetchone()[0]
+    )
+    selected_relation_count = int(
+        connection.execute("SELECT COUNT(*) FROM roots WHERE kind=2").fetchone()[0]
+    )
+    policy_document = _line_candidate_policy_document()
+    return {
+        "aggregateSha256": aggregate.hexdigest(),
+        "candidateRootCount": candidate_roots,
+        "entryCount": processed,
+        "fatalCount": 0,
+        "framedBytes": framed_bytes,
+        "ingestSemanticSha256": ingest_semantic_sha256,
+        "legacyFirstTerminal": {
+            "histogram": _legacy_histogram(legacy_counts),
+            "ledger": legacy_ledger,
+        },
+        "policy": {
+            "bytes": len(_canonical_json_bytes(policy_document)),
+            "document": policy_document,
+            "sha256": LINE_CANDIDATE_POLICY_SHA256,
+        },
+        "reasonOccurrenceHistogram": _reason_occurrence_histogram(reason_counts),
+        "rootStatusHistogram": _root_status_histogram(status_counts),
+        "schema": "flightalert.experiment8.osm-waterway-admission-receipt.v2",
+        "selectedRelationCount": selected_relation_count,
+        "selectedWayCount": selected_way_count,
+        "source": source_binding.document(),
+        "structuralNoReachableWay": {"ledger": no_way_ledger},
+        "zeroCandidateRootCount": zero_candidate_roots,
+    }
+
+
+def _admit_waterway_candidates(
+    connection: sqlite3.Connection,
+    *,
+    source_binding: WaterwaySourceBinding,
+    ingest_semantic_sha256: str,
+    checkpoint_roots: int,
+    pause_after_roots: int | None,
+) -> tuple[bool, Mapping[str, object]]:
+    preexisting_receipt = _meta_get(connection, "admissionReceipt")
+    if (
+        preexisting_receipt is None
+        and (
+            int(connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+            or int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM rendered_features"
+                ).fetchone()[0]
+            )
+        )
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway admission must complete before renderer rows exist"
+        )
+    admission_identity = {
+        "ingestSemanticSha256": ingest_semantic_sha256,
+        "policySha256": LINE_CANDIDATE_POLICY_SHA256,
+        "schema": "flightalert.experiment8.osm-waterway-admission-run.v2",
+        "source": source_binding.document(),
+    }
+    stored_identity = _meta_get(connection, "admissionRunIdentity")
+    if stored_identity is None:
+        _meta_set(connection, "admissionRunIdentity", admission_identity)
+        digest = hashlib.sha256()
+        digest.update(_ADMISSION_STREAM_DOMAIN)
+        first_root = _next_root(connection, 0, 0)
+        checkpoint = _admission_checkpoint_document(
+            processed_count=0,
+            next_root=first_root,
+            framed_bytes=len(_ADMISSION_STREAM_DOMAIN),
+            aggregate_digest=digest,
+            status_counts={status: 0 for status in _ROOT_STATUS_ORDER},
+            reason_counts={reason: 0 for reason in _REASON_CODE_ORDER},
+            fatal_count=0,
+        )
+        _commit_admission_checkpoint(connection, checkpoint)
+    elif stored_identity != admission_identity:
+        raise GlobalWaterwayPackageError(
+            "waterway admission identity differs from source/run/policy identities"
+        )
+    checkpoint = _meta_get(connection, "admissionCheckpoint")
+    if not isinstance(checkpoint, dict):
+        raise GlobalWaterwayPackageError("waterway admission checkpoint is absent")
+    (
+        aggregate,
+        framed_bytes,
+        processed,
+        next_root,
+        status_counts,
+        reason_counts,
+        legacy_counts,
+        legacy_root_ids,
+        no_way_root_ids,
+        candidate_roots,
+        zero_candidate_roots,
+    ) = _authenticate_admission_prefix(connection, checkpoint)
+    existing_receipt = preexisting_receipt
+    if existing_receipt is not None:
+        if next_root is not None or not isinstance(existing_receipt, dict):
+            raise GlobalWaterwayPackageError(
+                "waterway admission receipt contradicts checkpoint completion"
+            )
+        expected_receipt = _admission_receipt_document(
+            connection,
+            aggregate=aggregate,
+            framed_bytes=framed_bytes,
+            processed=processed,
+            status_counts=status_counts,
+            reason_counts=reason_counts,
+            legacy_counts=legacy_counts,
+            legacy_root_ids=legacy_root_ids,
+            no_way_root_ids=no_way_root_ids,
+            candidate_roots=candidate_roots,
+            zero_candidate_roots=zero_candidate_roots,
+            source_binding=source_binding,
+            ingest_semantic_sha256=ingest_semantic_sha256,
+        )
+        if _canonical_json_bytes(existing_receipt) != _canonical_json_bytes(
+            expected_receipt
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway admission receipt differs from authenticated evidence"
+            )
+        return True, MappingProxyType(expected_receipt)
+    since_commit = 0
+    processed_this_call = 0
+    while next_root is not None:
+        root_kind, root_id = next_root
+        analysis = _analyze_admission_root(
+            connection, root_kind, root_id, materialize=False
+        )
+        entry_sha = hashlib.sha256(analysis.entry_bytes).digest()
+        try:
+            connection.execute(
+                "INSERT INTO admission_roots(root_kind,root_id,entry_json,entry_sha,"
+                "framed_bytes,status,candidate_stream_sha) VALUES (?,?,?,?,?,?,?)",
+                (
+                    root_kind,
+                    root_id,
+                    analysis.entry_bytes,
+                    entry_sha,
+                    8 + len(analysis.entry_bytes),
+                    analysis.entry["status"],
+                    bytes.fromhex(str(analysis.entry["candidateStreamSha256"])),
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO admission_candidates(root_kind,root_id,feature_ordinal,"
+                "waterway_type,complete_named_relation,candidate_feature_sha,"
+                "source_feature_sha,part_count,point_count) VALUES (?,?,?,?,?,?,?,?,?)",
+                _candidate_rows(analysis),
+            )
+        except sqlite3.IntegrityError as error:
+            raise GlobalWaterwayPackageError(
+                "waterway admission root or candidate evidence is duplicated"
+            ) from error
+        aggregate.update(struct.pack(">Q", len(analysis.entry_bytes)))
+        aggregate.update(analysis.entry_bytes)
+        framed_bytes += 8 + len(analysis.entry_bytes)
+        processed += 1
+        processed_this_call += 1
+        since_commit += 1
+        status_counts[str(analysis.entry["status"])] += 1
+        for reason in analysis.entry["reasonOccurrences"]:
+            reason_counts[str(reason["reasonCode"])] += 1
+        if analysis.legacy_first_terminal_reason is not None:
+            legacy_counts[analysis.legacy_first_terminal_reason] += 1
+            legacy_root_ids.append(root_id)
+        if not bool(analysis.entry["structural"]["hasReachableWay"]):
+            no_way_root_ids.append(root_id)
+        if int(analysis.entry["candidateFeatureCount"]):
+            candidate_roots += 1
+        else:
+            zero_candidate_roots += 1
+        next_root = _next_root(connection, root_kind, root_id)
+        checkpoint = _admission_checkpoint_document(
+            processed_count=processed,
+            next_root=next_root,
+            framed_bytes=framed_bytes,
+            aggregate_digest=aggregate,
+            status_counts=status_counts,
+            reason_counts=reason_counts,
+            fatal_count=0,
+        )
+        if since_commit >= checkpoint_roots:
+            _commit_admission_checkpoint(connection, checkpoint)
+            since_commit = 0
+        if (
+            pause_after_roots is not None
+            and processed_this_call >= pause_after_roots
+        ):
+            _commit_admission_checkpoint(connection, checkpoint)
+            return False, MappingProxyType(checkpoint)
+    _commit_admission_checkpoint(connection, checkpoint)
+    receipt = _admission_receipt_document(
+        connection,
+        aggregate=aggregate,
+        framed_bytes=framed_bytes,
+        processed=processed,
+        status_counts=status_counts,
+        reason_counts=reason_counts,
+        legacy_counts=legacy_counts,
+        legacy_root_ids=legacy_root_ids,
+        no_way_root_ids=no_way_root_ids,
+        candidate_roots=candidate_roots,
+        zero_candidate_roots=zero_candidate_roots,
+        source_binding=source_binding,
+        ingest_semantic_sha256=ingest_semantic_sha256,
+    )
+    _meta_set(connection, "admissionReceipt", receipt)
+    connection.commit()
+    return True, MappingProxyType(receipt)
 
 
 def ingest_global_waterway_closure(
@@ -1553,7 +2925,9 @@ def ingest_global_waterway_closure(
     work_directory: Path,
     source_binding: WaterwaySourceBinding,
     checkpoint_objects: int = 10_000,
+    checkpoint_admission_roots: int = _ADMISSION_CHECKPOINT_ROOTS,
     pause_after_objects: int | None = None,
+    pause_after_admission_roots: int | None = None,
 ) -> GlobalWaterwayIngestResult:
     """Stream one verified recursive closure into a resumable SQLite source store."""
 
@@ -1565,10 +2939,24 @@ def ingest_global_waterway_closure(
         raise GlobalWaterwayPackageError("selection policy identity differs from global policy")
     if type(checkpoint_objects) is not int or checkpoint_objects <= 0:
         raise GlobalWaterwayPackageError("checkpoint object count must be positive")
+    if (
+        type(checkpoint_admission_roots) is not int
+        or checkpoint_admission_roots <= 0
+    ):
+        raise GlobalWaterwayPackageError(
+            "admission checkpoint root count must be positive"
+        )
     if pause_after_objects is not None and (
         type(pause_after_objects) is not int or pause_after_objects <= 0
     ):
         raise GlobalWaterwayPackageError("pause object count must be positive")
+    if pause_after_admission_roots is not None and (
+        type(pause_after_admission_roots) is not int
+        or pause_after_admission_roots <= 0
+    ):
+        raise GlobalWaterwayPackageError(
+            "pause admission root count must be positive"
+        )
     _require_identity(
         root_ids_path,
         expected_bytes=source_binding.root_ids_bytes,
@@ -1581,7 +2969,9 @@ def ingest_global_waterway_closure(
         expected_sha256=source_binding.closure_opl_sha256,
         label="closure OPL",
     )
-    run_identity = _run_identity(source_binding, checkpoint_objects)
+    run_identity = _run_identity(
+        source_binding, checkpoint_objects, checkpoint_admission_roots
+    )
     database_path = work_directory / "waterway-state.sqlite"
     connection, created = _open_database(database_path, run_identity)
     try:
@@ -1614,8 +3004,29 @@ def ingest_global_waterway_closure(
             )
         audit = _validate_closure(connection)
         semantic_sha256 = _semantic_sha256(connection)
+        admission_complete, admission = _admit_waterway_candidates(
+            connection,
+            source_binding=source_binding,
+            ingest_semantic_sha256=semantic_sha256,
+            checkpoint_roots=checkpoint_admission_roots,
+            pause_after_roots=pause_after_admission_roots,
+        )
+        if not admission_complete:
+            return GlobalWaterwayIngestResult(
+                "paused",
+                database_path,
+                MappingProxyType(
+                    {
+                        "admissionCheckpoint": dict(admission),
+                        "runIdentitySha256": run_sha256,
+                        "schema": _INGEST_SCHEMA,
+                        "state": "paused",
+                    }
+                ),
+            )
         peaks = dict(_meta_get(connection, "peaks") or {})
         receipt = {
+            "admission": dict(admission),
             "checkpoint": _meta_get(connection, "checkpoint"),
             "closureAudit": audit,
             "peakResources": {
@@ -1677,13 +3088,22 @@ def _render_run_identity(
     checkpoint_features: int,
     code_identities: Mapping[str, object],
     classifier_sha256: str,
+    admission_receipt: Mapping[str, object],
+    ingest_semantic_sha256: str,
 ) -> dict[str, object]:
+    policy = admission_receipt.get("policy")
+    if not isinstance(policy, Mapping):
+        raise GlobalWaterwayPackageError(
+            "waterway render identity requires v2 admission policy evidence"
+        )
     return {
+        "admissionAggregateSha256": admission_receipt["aggregateSha256"],
+        "admissionPolicySha256": policy["sha256"],
         "checkpointFeatures": checkpoint_features,
         "classifierSha256": classifier_sha256,
         "code": dict(code_identities),
         "packageId": package_id,
-        "relationGeometryPolicy": _relation_geometry_policy_document(),
+        "ingestSemanticSha256": ingest_semantic_sha256,
         "runtime": _runtime_identity_document(),
         "schema": _RENDER_RUN_SCHEMA,
         "source": source_binding.document(),
@@ -1926,6 +3346,18 @@ def _stage_renderer_records(
     )
     from .semantic_model import HotIdRegistry
 
+    admission = _meta_get(connection, "admissionReceipt")
+    if (
+        not isinstance(admission, dict)
+        or admission.get("fatalCount") != 0
+        or admission.get("aggregateSha256")
+        != run_identity.get("admissionAggregateSha256")
+        or admission.get("policy", {}).get("sha256")
+        != run_identity.get("admissionPolicySha256")
+    ):
+        raise GlobalWaterwayPackageError(
+            "renderer requires complete matching v2 waterway admission"
+        )
     stored_identity = _meta_get(connection, "renderRunIdentity")
     if stored_identity is None:
         _meta_set(connection, "renderRunIdentity", dict(run_identity))
@@ -2492,6 +3924,9 @@ def _manifest_document(
     semantic_sha256: str,
     classifier_sha256: str,
     run_identity_sha256: str,
+    admission_aggregate_sha256: str,
+    admission_policy_sha256: str,
+    ingest_semantic_sha256: str,
     records_identity: Mapping[str, object],
     index_identity: Mapping[str, object],
 ) -> dict[str, object]:
@@ -2505,9 +3940,11 @@ def _manifest_document(
             "zoomRanges": [window.document() for window in windows],
         },
         "globalWaterwaySupplement": {
+            "admissionAggregateSha256": admission_aggregate_sha256,
+            "admissionPolicySha256": admission_policy_sha256,
             "adaptiveGeometry": {
                 "errorBound": "one-half-pixel-at-record-integer-zoom",
-                "pathScope": "complete-source-path",
+                "pathScope": "admitted-exact-path-or-incomplete-relation-subset",
                 "sourceEndpointsPreserved": True,
             },
             "attribution": {
@@ -2530,6 +3967,7 @@ def _manifest_document(
             "buildSchema": _BUILD_SCHEMA,
             "classifierSha256": classifier_sha256,
             "fixtureOnly": source_binding.planet_path.startswith("fixture://"),
+            "ingestSemanticSha256": ingest_semantic_sha256,
             "records": dict(records_identity),
             "requestedZooms": list(_DEFAULT_ZOOMS),
             "rootPolicySha256": source_binding.selection_policy_sha256,
@@ -2591,6 +4029,15 @@ def _publish(
         semantic_sha256=semantic_sha256,
         classifier_sha256=str(render_run_identity["classifierSha256"]),
         run_identity_sha256=render_run_sha256,
+        admission_aggregate_sha256=str(
+            render_run_identity["admissionAggregateSha256"]
+        ),
+        admission_policy_sha256=str(
+            render_run_identity["admissionPolicySha256"]
+        ),
+        ingest_semantic_sha256=str(
+            render_run_identity["ingestSemanticSha256"]
+        ),
         records_identity=records_identity,
         index_identity=index_identity,
     )
@@ -2643,6 +4090,7 @@ def _publish(
         }
     )
     receipt: dict[str, object] = {
+        "admission": ingest_receipt["admission"],
         "attribution": manifest["globalWaterwaySupplement"]["attribution"],
         "build": {
             "classifierSha256": render_run_identity["classifierSha256"],
@@ -2674,11 +4122,25 @@ def _publish(
             "sqliteCacheTargetBytes": 64 * 1024 * 1024,
         },
         "projection": projection,
-        "relationGeometryPolicy": render_run_identity["relationGeometryPolicy"],
         "rendererSemanticStreamSha256": semantic_sha256,
         "schema": _BUILD_SCHEMA,
         "source": source_binding.document(),
     }
+    final_semantic_document = {
+        "admissionAggregateSha256": render_run_identity[
+            "admissionAggregateSha256"
+        ],
+        "admissionPolicySha256": render_run_identity["admissionPolicySha256"],
+        "ingestSemanticSha256": render_run_identity["ingestSemanticSha256"],
+        "manifestSha256": output_files[0]["sha256"],
+        "rendererRunIdentitySha256": render_run_sha256,
+        "rendererSemanticStreamSha256": semantic_sha256,
+        "schema": "flightalert.experiment8.osm-waterway-final-semantic-identity.v2",
+        "source": source_binding.document(),
+    }
+    receipt["finalSemanticIdentitySha256"] = hashlib.sha256(
+        b"FAE8WATERFINAL2\0" + _canonical_json_bytes(final_semantic_document)
+    ).hexdigest()
     projection["publishedDirectoryBytes"] = 0
     for _ in range(8):
         receipt_bytes = _canonical_json_bytes(receipt)
@@ -2879,6 +4341,8 @@ def _render_bound_global_waterway_package(
         checkpoint_features=checkpoint_features,
         code_identities=code_identities,
         classifier_sha256=classifier,
+        admission_receipt=ingest.receipt["admission"],
+        ingest_semantic_sha256=str(ingest.receipt["semanticSha256"]),
     )
     render_sha256 = hashlib.sha256(
         _canonical_json_bytes(render_identity)

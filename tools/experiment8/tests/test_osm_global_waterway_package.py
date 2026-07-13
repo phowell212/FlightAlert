@@ -1071,23 +1071,28 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
             def __getitem__(self, index):
                 return self._points[index]
 
-        def occurrences(connection, relation_id, evidence, **kwargs):
-            del connection, relation_id, evidence, kwargs
-            yield "river", MarkingPoints(
-                (
+        def occurrences(connection, relation_id, **kwargs):
+            del connection, relation_id, kwargs
+            yield "candidate", {
+                "path": ((2, 200, -1), (1, 100, 0)),
+                "points": MarkingPoints((
                     ExactWaterwayPoint(1_000, -760_000_000, 390_000_000),
                     ExactWaterwayPoint(1_001, -759_000_000, 391_000_000),
-                ),
-                "first",
-            )
+                ), "first"),
+                "waterwayType": "river",
+            }
             self.assertTrue(
                 consumed["first"],
                 "the first occurrence was retained instead of consumed incrementally",
             )
-            yield "river", (
-                ExactWaterwayPoint(1_001, -759_000_000, 391_000_000),
-                ExactWaterwayPoint(1_002, -758_000_000, 392_000_000),
-            )
+            yield "candidate", {
+                "path": ((2, 200, -1), (1, 101, 1)),
+                "points": (
+                    ExactWaterwayPoint(1_001, -759_000_000, 391_000_000),
+                    ExactWaterwayPoint(1_002, -758_000_000, 392_000_000),
+                ),
+                "waterwayType": "river",
+            }
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1099,12 +1104,17 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
                 source_binding=binding,
                 checkpoint_objects=3,
             )
-            with patch.object(store, "_relation_occurrences", occurrences):
-                features = tuple(
-                    store.iter_exact_waterway_features(
-                        result.database_path, source_binding=binding
+            import sqlite3
+
+            connection = sqlite3.connect(result.database_path)
+            try:
+                with patch.object(store, "_candidate_relation_events", occurrences):
+                    analysis = store._analyze_admission_root(
+                        connection, 2, 200, materialize=True
                     )
-                )
+                    features = tuple(store._analysis_features(analysis))
+            finally:
+                connection.close()
 
         relation = next(feature for feature in features if feature.source_kind == "relation")
         self.assertEqual(
@@ -1172,14 +1182,19 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
         )
 
     def test_relation_geometry_budget_accepts_exact_limits_and_rejects_overflow(self) -> None:
+        from dataclasses import replace
+
         from tools.experiment8 import osm_global_waterway_store as store
 
         def budget():
-            return store._RelationGeometryBudget(
-                max_depth=2,
-                max_relation_visits=2,
-                max_parts=2,
-                max_points=4,
+            return store._CandidateUsage(
+                replace(
+                    store._AdmissionLimits.production(),
+                    max_candidate_depth=2,
+                    max_candidate_relation_visits=2,
+                    max_candidate_raw_parts=2,
+                    max_candidate_points=4,
+                )
             )
 
         exact = budget()
@@ -1187,9 +1202,7 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
         exact.enter_relation(2)
         exact.reserve_way(2)
         exact.reserve_way(2)
-        self.assertEqual(
-            {"parts": 2, "points": 4, "relationVisits": 2}, exact.usage()
-        )
+        self.assertEqual((2, 4, 2), (exact.raw_parts, exact.raw_points, exact.relation_visits))
 
         with self.assertRaisesRegex(store.GlobalWaterwayPackageError, "depth ceiling"):
             budget().enter_relation(3)
@@ -1238,55 +1251,53 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
                 source_binding=binding,
                 checkpoint_objects=3,
             )
-            base_policy = store._relation_geometry_policy_document()
+            import sqlite3
+            from dataclasses import replace
 
-            def policy(**changes):
-                return {**base_policy, **changes}
-
-            exact_policy = policy(
-                maxDepth=1,
-                maxRelationVisits=1,
-                maxParts=2,
-                maxPoints=4,
-            )
-            with patch.object(
-                store, "_relation_geometry_policy_document", return_value=exact_policy
-            ):
-                features = tuple(
-                    store.iter_exact_waterway_features(
-                        result.database_path, source_binding=binding
-                    )
+            production = store._AdmissionLimits.production()
+            connection = sqlite3.connect(result.database_path)
+            try:
+                exact = replace(
+                    production,
+                    max_candidate_depth=1,
+                    max_candidate_relation_visits=1,
+                    max_candidate_raw_parts=2,
+                    max_candidate_points=4,
                 )
-            self.assertEqual(1, len(features))
+                analysis = store._analyze_admission_root(
+                    connection, 2, 20, limits=exact
+                )
+                self.assertEqual(1, len(analysis.candidates))
 
-            materialize_points = store._point_rows
-            for limit, message in (({"maxParts": 1}, "part ceiling"), ({"maxPoints": 3}, "point ceiling")):
-                with self.subTest(limit=limit):
-                    with patch.object(
-                        store,
-                        "_relation_geometry_policy_document",
-                        return_value=policy(**limit),
-                    ), patch.object(
+                materialize_points = store._point_rows
+                for limit, message in (
+                    ({"max_candidate_raw_parts": 1}, "raw-part ceiling"),
+                    ({"max_candidate_points": 3}, "raw-point ceiling"),
+                ):
+                    with self.subTest(limit=limit), patch.object(
                         store, "_point_rows", wraps=materialize_points
                     ) as point_rows:
                         with self.assertRaisesRegex(
                             store.GlobalWaterwayPackageError, message
                         ):
-                            tuple(
-                                store.iter_exact_waterway_features(
-                                    result.database_path, source_binding=binding
-                                )
+                            store._analyze_admission_root(
+                                connection,
+                                2,
+                                20,
+                                limits=replace(production, **limit),
                             )
-                    self.assertEqual(
-                        1,
-                        point_rows.call_count,
-                        "overflowing second way was materialized before rejection",
-                    )
+                        self.assertEqual(
+                            1,
+                            point_rows.call_count,
+                            "overflowing second way was materialized before rejection",
+                        )
+            finally:
+                connection.close()
 
     def test_relation_geometry_policy_bounds_deep_nesting_at_exact_depth(self) -> None:
         from tools.experiment8 import osm_global_waterway_store as store
 
-        maximum_depth = store._relation_geometry_policy_document()["maxDepth"]
+        maximum_depth = store._AdmissionLimits.production().max_candidate_depth
 
         def closure(depth: int) -> bytes:
             records = [
@@ -1331,15 +1342,10 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
                     )
                 ),
             )
-            overflow, overflow_binding = ingest(root / "overflow", maximum_depth + 1)
             with self.assertRaisesRegex(
                 store.GlobalWaterwayPackageError, "depth ceiling"
             ):
-                tuple(
-                    store.iter_exact_waterway_features(
-                        overflow.database_path, source_binding=overflow_binding
-                    )
-                )
+                ingest(root / "overflow", maximum_depth + 1)
 
     def test_adaptive_complete_path_preserves_parts_endpoints_and_increases_detail(self) -> None:
         from tools.experiment8.osm_global_waterway_renderer import (
@@ -1820,20 +1826,23 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
         self.assertEqual(list(ssl.OPENSSL_VERSION_INFO), semantics["opensslVersionInfo"])
         self.assertNotEqual("unavailable", semantics["opensslVersion"])
 
-    def test_relation_geometry_policy_is_bound_in_run_identity_and_receipt(self) -> None:
+    def test_line_candidate_policy_is_bound_in_run_identity_and_receipt(self) -> None:
         from tools.experiment8 import osm_global_waterway_store as store
 
         with tempfile.TemporaryDirectory() as temporary:
             result = self._build(Path(temporary), "package")
-        policy = store._relation_geometry_policy_document()
-        self.assertEqual(policy, result.receipt["relationGeometryPolicy"])
+        policy = store._line_candidate_policy_document()
+        self.assertEqual(policy, result.receipt["admission"]["policy"]["document"])
         self.assertEqual(
-            policy, result.receipt["build"]["runIdentity"]["relationGeometryPolicy"]
+            store.LINE_CANDIDATE_POLICY_SHA256,
+            result.receipt["build"]["runIdentity"]["admissionPolicySha256"],
         )
-        self.assertEqual(64, policy["maxDepth"])
-        self.assertEqual(65_536, policy["maxRelationVisits"])
-        self.assertEqual(65_536, policy["maxParts"])
-        self.assertEqual(524_288, policy["maxPoints"])
+        self.assertNotIn("relationGeometryPolicy", result.receipt)
+        limits = policy["geometry"]["limits"]
+        self.assertEqual(64, limits["maxCandidateDepth"])
+        self.assertEqual(65_536, limits["maxCandidateRelationVisits"])
+        self.assertEqual(65_536, limits["maxCandidateRawParts"])
+        self.assertEqual(524_288, limits["maxCandidatePoints"])
 
     def test_runtime_resume_authenticates_prefix_and_publication_is_atomic(self) -> None:
         from tools.experiment8 import osm_global_waterway_store as store
