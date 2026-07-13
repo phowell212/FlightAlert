@@ -134,6 +134,7 @@ internal class SatelliteBaseTileRenderer(
         max_age_ms = MAP_PAN_CACHE_MAX_AGE_MS
     )
     private var last_pan_cache_draw_zoom = Double.NaN
+    private var last_pan_cache_zoom_change_ms = 0L
     private var last_pan_cache_record_attempt_ms = 0L
     private var last_pan_cache_record_attempt_key: SatellitePanCacheKey? = null
     private var last_pan_cache_record_attempt_revision = Long.MIN_VALUE
@@ -398,6 +399,10 @@ internal class SatelliteBaseTileRenderer(
         if (!last_pan_cache_draw_zoom.isFinite() ||
             abs(last_pan_cache_draw_zoom - viewport.zoom) > MAP_PAN_CACHE_ZOOM_EPSILON
         ) {
+            last_pan_cache_zoom_change_ms = now_ms
+            return false
+        }
+        if (now_ms - last_pan_cache_zoom_change_ms < MAP_PAN_CACHE_ZOOM_STABILITY_MS) {
             return false
         }
         if (last_pan_cache_record_attempt_key == key &&
@@ -1411,6 +1416,7 @@ internal class SatelliteBaseTileRenderer(
         const val MAP_PAN_CACHE_PADDING_PX = 512f
         const val MAP_PAN_CACHE_MAX_AGE_MS = Long.MAX_VALUE
         const val MAP_PAN_CACHE_RECORD_RETRY_MS = 250L
+        const val MAP_PAN_CACHE_ZOOM_STABILITY_MS = 120L
         const val MAP_PAN_CACHE_ZOOM_EPSILON = 0.000_001
         const val LOD_PREFETCH_START_FRACTION = 0.08f
         const val LOD_BLEND_START_FRACTION = 0.18f
