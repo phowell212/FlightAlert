@@ -171,7 +171,8 @@ internal class SatelliteBaseTileRenderer(
             viewport = viewport,
             state = state,
             style = style,
-            allow_speculative_requests = true
+            allow_speculative_requests = true,
+            include_retained_interim = true
         )
         if (result.reusable_for_pan_cache &&
             should_record_pan_cache(
@@ -197,7 +198,8 @@ internal class SatelliteBaseTileRenderer(
                         state = state,
                         style = style,
                         allow_speculative_requests = false,
-                        draw_reference_layers = false
+                        draw_reference_layers = false,
+                        include_retained_interim = false
                     )
                     MapLayerPanCacheRecordResult(
                         status = recorded_result.status,
@@ -219,7 +221,8 @@ internal class SatelliteBaseTileRenderer(
         state: MapTileRenderState,
         style: MapTileRenderStyle,
         allow_speculative_requests: Boolean,
-        draw_reference_layers: Boolean = true
+        draw_reference_layers: Boolean = true,
+        include_retained_interim: Boolean = true
     ): SatelliteTileDrawResult {
         val now_ms = SystemClock.elapsedRealtime()
         paint.style = Paint.Style.FILL
@@ -230,12 +233,13 @@ internal class SatelliteBaseTileRenderer(
 
         val request_generation = begin_tile_request_generation()
 
-        val interim_draw_needed = lod.blend_active ||
-                !satellite_tile_grid_fully_available(
-                    viewport = viewport,
-                    state = state,
-                    tile_zoom = lod.lower_tile_zoom
-                )
+        val interim_draw_needed = include_retained_interim &&
+                (lod.blend_active ||
+                        !satellite_tile_grid_fully_available(
+                            viewport = viewport,
+                            state = state,
+                            tile_zoom = lod.lower_tile_zoom
+                        ))
         if (interim_draw_needed) {
             draw_interim_tiles(
                 canvas = canvas,
