@@ -28,7 +28,8 @@ from tools.experiment8.reference_package_install import (
 )
 
 
-PACKAGE_ID = "world-experiment8-binary-v3"
+PACKAGE_ID = "world-experiment8-binary-v4"
+LEGACY_PACKAGE_ID = "world-experiment8-binary-v3"
 MANDATORY_RESERVE_BYTES = 1_500_000_000
 
 
@@ -237,6 +238,38 @@ class HostInstallPlanTest(unittest.TestCase):
         self.assertEqual(_sha256(self.fixture.apk.read_bytes()), plan.apk_sha256)
         self.assertTrue(plan.preferred_strictly_below)
         self.assertTrue(plan.hard_strictly_below)
+
+    def test_installer_authority_and_every_derived_target_use_v4(self) -> None:
+        self.assertEqual(PACKAGE_ID, installer_module.PACKAGE_ID)
+        self.assertEqual(
+            f"{ReferencePackageInstaller.REFERENCE_ROOT}/{PACKAGE_ID}",
+            ReferencePackageInstaller.FINAL_PACKAGE_PATH,
+        )
+        token = "0123456789abcdef0123456789abcdef"
+        paths = {
+            state: (
+                f"{ReferencePackageInstaller.REFERENCE_ROOT}/.{PACKAGE_ID}.exp8-install-"
+                f"{token}.{state}"
+            )
+            for state in ("stage", "backup", "failed")
+        }
+        self.assertEqual(
+            paths,
+            installer_module._journal_paths(
+                {"paths": paths, "transactionToken": token}
+            ),
+        )
+
+    def test_non_v4_manifest_is_rejected_by_authoritative_package_id_gate(self) -> None:
+        manifest_path = self.fixture.package / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["packageId"] = LEGACY_PACKAGE_ID
+        manifest_path.write_bytes(_canonical(manifest))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "manifest package ID differs"
+        ):
+            self.validate()
 
     def test_unexpected_package_entry_is_rejected(self) -> None:
         (self.fixture.package / "extra.bin").write_bytes(b"not-runtime")

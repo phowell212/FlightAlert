@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 
 
-PACKAGE_ID = "world-experiment8-binary-v3"
+PACKAGE_ID = "world-experiment8-binary-v4"
 RUNTIME_SCHEMA_VERSION = 3
 RUNTIME_PAYLOAD_SCHEMA = "flightalert.reference.renderer-tile.v1"
 RUNTIME_PRESENTATION_POLICY_SHA256 = (

@@ -353,10 +353,12 @@ internal class ReferenceDictionaryPackage private constructor(
     )
 
     companion object {
-        const val EXPERIMENT8_PACKAGE_ID = "world-experiment8-binary-v3"
+        const val EXPERIMENT8_PACKAGE_ID = "world-experiment8-binary-v4"
+        const val EXPERIMENT8_V3_PACKAGE_ID = "world-experiment8-binary-v3"
         const val DEFAULT_PACKAGE_ID = "world-z5-6-7-8-9-10-11-lossless-deflate-v1"
         val PREFERRED_PACKAGE_IDS = listOf(
             EXPERIMENT8_PACKAGE_ID,
+            EXPERIMENT8_V3_PACKAGE_ID,
             DEFAULT_PACKAGE_ID
         )
 

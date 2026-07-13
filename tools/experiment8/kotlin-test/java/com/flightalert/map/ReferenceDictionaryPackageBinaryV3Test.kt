@@ -1,6 +1,8 @@
 package com.flightalert.map
 
+import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -46,14 +48,73 @@ class ReferenceDictionaryPackageBinaryV3Test {
     }
 
     @Test
-    fun experiment8BinaryPackageIsPreferredBeforeLegacyExperiment7() {
+    fun experiment8BinaryV4IsPreferredBeforeV3AndLegacyExperiment7() {
         assertEquals(
-            ReferenceDictionaryPackage.EXPERIMENT8_PACKAGE_ID,
-            ReferenceDictionaryPackage.PREFERRED_PACKAGE_IDS.first(),
+            listOf(
+                "world-experiment8-binary-v4",
+                "world-experiment8-binary-v3",
+                ReferenceDictionaryPackage.DEFAULT_PACKAGE_ID,
+            ),
+            ReferenceDictionaryPackage.PREFERRED_PACKAGE_IDS,
         )
-        assertEquals(
+    }
+
+    @Test
+    fun validV4WinsWhenValidV3AndDefaultPackagesCoexist() {
+        val root = Files.createTempDirectory("reference-package-v4-preference").toFile()
+        val packageIds = listOf(
+            "world-experiment8-binary-v4",
+            "world-experiment8-binary-v3",
             ReferenceDictionaryPackage.DEFAULT_PACKAGE_ID,
-            ReferenceDictionaryPackage.PREFERRED_PACKAGE_IDS[1],
         )
+        packageIds.forEach { packageId ->
+            writeEmptyBinaryPackage(File(root, packageId))
+        }
+        val openedPackageIds = mutableListOf<String>()
+        val store = ReferenceDictionaryPackageStore(
+            candidate_provider = {
+                ReferenceDictionaryPackage.PREFERRED_PACKAGE_IDS.map { packageId ->
+                    File(root, packageId)
+                }
+            },
+            package_opener = { candidate ->
+                openedPackageIds += candidate.name
+                ReferenceDictionaryPackage.open_if_available(candidate)
+            },
+            elapsed_realtime_ms = { 1_000L },
+        )
+        try {
+            assertEquals(
+                "world-experiment8-binary-v4",
+                store.package_info_if_available()?.package_id,
+            )
+            assertEquals(listOf("world-experiment8-binary-v4"), openedPackageIds)
+        } finally {
+            store.close()
+            root.deleteRecursively()
+        }
+    }
+
+    private fun writeEmptyBinaryPackage(packageDir: File) {
+        packageDir.mkdirs()
+        File(packageDir, "manifest.json").writeText(
+            """
+            {
+              "schemaVersion": 3,
+              "payloadSchema": "flightalert.reference.renderer-tile.v1",
+              "presentationPolicySha256": "${ReferencePresentationPolicy.canonical_policy_sha256}",
+              "sourcedTextPolicySha256": "${SourcedMapTextBinaryCodec.policySha256}",
+              "unicodeScriptProfileSha256": "${SourcedMapTextBinaryCodec.unicodeScriptProfileSha256}",
+              "coverage": {
+                "tileCount": 0,
+                "zoomRanges": [],
+                "completeDeclaredScope": true,
+                "completeWholeEarthDictionary": true
+              }
+            }
+            """.trimIndent(),
+        )
+        File(packageDir, "records.fadictpack").writeBytes(byteArrayOf())
+        File(packageDir, "tile-index.bin").writeBytes(byteArrayOf())
     }
 }
