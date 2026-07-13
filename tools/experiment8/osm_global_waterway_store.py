@@ -2454,9 +2454,9 @@ def _next_root(
     after_id: int,
 ) -> tuple[int, int] | None:
     row = connection.execute(
-        "SELECT kind,id FROM roots WHERE kind>? OR (kind=? AND id>?) "
+        "SELECT kind,id FROM roots WHERE (kind,id)>(?,?) "
         "ORDER BY kind,id LIMIT 1",
-        (after_kind, after_kind, after_id),
+        (after_kind, after_id),
     ).fetchone()
     return None if row is None else (int(row[0]), int(row[1]))
 

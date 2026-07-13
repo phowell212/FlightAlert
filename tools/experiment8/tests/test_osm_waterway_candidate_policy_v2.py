@@ -779,6 +779,67 @@ class CandidateTraversalTests(unittest.TestCase):
 
 
 class AdmissionDurabilityAndFatalTests(unittest.TestCase):
+    def test_next_root_uses_one_ordered_seek_for_lexicographic_successors(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        class RecordingConnection(sqlite3.Connection):
+            successor_queries: list[tuple[str, tuple[object, ...]]]
+
+            def execute(self, sql: str, parameters=(), /):
+                cursor = super().execute(sql, parameters)
+                if sql.startswith("SELECT kind,id FROM roots "):
+                    self.successor_queries.append((sql, tuple(parameters)))
+                return cursor
+
+        connection = sqlite3.connect(":memory:", factory=RecordingConnection)
+        try:
+            connection.successor_queries = []
+            connection.execute(
+                "CREATE TABLE roots(kind INTEGER NOT NULL,id INTEGER NOT NULL,"
+                "PRIMARY KEY(kind,id)) WITHOUT ROWID"
+            )
+            expected = tuple(
+                (kind, object_id)
+                for kind in (1, 2)
+                for object_id in range(1, 1_025, 2)
+            )
+            connection.executemany(
+                "INSERT INTO roots(kind,id) VALUES(?,?)",
+                expected,
+            )
+            actual: list[tuple[int, int] | None] = []
+            after = (0, 0)
+            while True:
+                successor = store._next_root(connection, *after)
+                actual.append(successor)
+                if successor is None:
+                    break
+                after = successor
+
+            self.assertEqual((*expected, None), tuple(actual))
+            self.assertEqual(len(actual), len(connection.successor_queries))
+            query, parameters = connection.successor_queries[
+                len(connection.successor_queries) // 2
+            ]
+            plan = tuple(
+                str(row[3])
+                for row in connection.execute(
+                    "EXPLAIN QUERY PLAN " + query,
+                    parameters,
+                )
+            )
+        finally:
+            connection.close()
+
+        self.assertNotIn("MULTI-INDEX OR", plan)
+        self.assertNotIn("USE TEMP B-TREE FOR ORDER BY", plan)
+        self.assertNotIn(" OR ", query)
+        self.assertEqual(1, len(plan))
+        self.assertRegex(
+            plan[0],
+            r"^SEARCH roots USING PRIMARY KEY \(\(kind,id\)>",
+        )
+
     def _two_root_fixture(
         self,
         directory: Path,
