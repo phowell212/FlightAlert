@@ -3007,7 +3007,7 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
             installer_module.RUNTIME_PAYLOAD_SCHEMA,
         )
         self.assertEqual(
-            "40f4e98394dacfaaad7cdc195858d0b56fc72ba5c83ccfc1e75d71fff6f6395c",
+            "0e79551e8a7dab8fe6a300f30f2768a0dc3a013fdd3ce182bb7a6f08e42399b6",
             installer_module.RUNTIME_PRESENTATION_POLICY_SHA256,
         )
         self.assertEqual(
@@ -3154,6 +3154,7 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
             "class-catalog-finalization-receipt.json",
             lambda document: document.__setitem__("finalizerSha256", crlf_finalizer),
         )
+        self._refresh_manifest_and_result_bindings()
 
         plan = self.validate()
 
