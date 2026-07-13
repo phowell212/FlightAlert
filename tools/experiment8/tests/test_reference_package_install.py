@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 from unittest import mock
@@ -100,12 +101,18 @@ class _ValidInstallFixture:
                 "schema": "flightalert.experiment8.v3-package-merge.v1",
             },
             "packageId": PACKAGE_ID,
-            "payloadSchema": "flightalert.reference.renderer-tile.v1",
-            "presentationPolicySha256": "1" * 64,
+            "payloadSchema": installer_module.RUNTIME_PAYLOAD_SCHEMA,
+            "presentationPolicySha256": (
+                installer_module.RUNTIME_PRESENTATION_POLICY_SHA256
+            ),
             "rendererSemanticStreamSha256": renderer_sha256,
-            "schemaVersion": 3,
-            "sourcedTextPolicySha256": "2" * 64,
-            "unicodeScriptProfileSha256": "3" * 64,
+            "schemaVersion": installer_module.RUNTIME_SCHEMA_VERSION,
+            "sourcedTextPolicySha256": (
+                installer_module.RUNTIME_SOURCED_TEXT_POLICY_SHA256
+            ),
+            "unicodeScriptProfileSha256": (
+                installer_module.RUNTIME_UNICODE_SCRIPT_PROFILE_SHA256
+            ),
         }
         manifest_raw = _canonical(manifest)
         base_manifest_raw = b"pre-finalizer-manifest\n"
@@ -248,11 +255,13 @@ class _FakeLease:
         self.token = "0123456789abcdef0123456789abcdef"
 
     def acquisition_intent(self, **arguments: object) -> dict[str, object]:
+        invocation_id = arguments["invocation_id"]
         return {
             "expectedMinutes": arguments["expected_minutes"],
+            "invocationId": invocation_id,
             "owner": arguments["owner"],
             "purpose": arguments["purpose"],
-            "scenario": arguments["scenario"],
+            "scenario": f"{arguments['scenario']} [invocation:{invocation_id}]",
             "statefulEffects": arguments["stateful_effects"],
             "threadId": "fake-thread",
         }
@@ -559,6 +568,60 @@ class DeviceTransactionTest(unittest.TestCase):
         self.assertNotIn("mutate:restore-preferences", self.events)
         self.assertEqual(self.lease.acquire_count, self.lease.release_count)
 
+    def test_free_space_includes_package_apk_and_mandatory_reserve(self) -> None:
+        required = (
+            self.plan.package_bytes
+            + self.plan.apk_bytes
+            + MANDATORY_RESERVE_BYTES
+        )
+        self.device.available = required - 1
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "free space"):
+            self.install()
+
+        self.assertNotIn("mutate:disallow-listener", self.events)
+
+    def test_exact_required_free_space_boundary_is_accepted(self) -> None:
+        self.device.available = (
+            self.plan.package_bytes
+            + self.plan.apk_bytes
+            + MANDATORY_RESERVE_BYTES
+        )
+
+        self.install()
+
+        self.assertTrue((self.evidence / "pending-acceptance.json").is_file())
+
+    def test_free_space_budget_accepts_exact_signed_64_bit_limit(self) -> None:
+        maximum = installer_module.MAX_SIGNED_64
+        package_bytes = maximum - self.plan.apk_bytes - MANDATORY_RESERVE_BYTES
+        maximum_plan = replace(self.plan, package_bytes=package_bytes)
+        self.device.available = maximum
+        transaction = ReferencePackageInstaller(
+            plan=maximum_plan,
+            device=self.device,
+            lease=self.lease,
+            evidence_directory=self.evidence,
+        )
+
+        transaction.install()
+
+        self.assertTrue((self.evidence / "pending-acceptance.json").is_file())
+
+    def test_free_space_budget_rejects_signed_64_bit_overflow(self) -> None:
+        oversized = replace(self.plan, package_bytes=(1 << 63) - 1)
+        transaction = ReferencePackageInstaller(
+            plan=oversized,
+            device=self.device,
+            lease=self.lease,
+            evidence_directory=self.evidence,
+        )
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "overflow"):
+            transaction.install()
+
+        self.assertNotIn("mutate:disallow-listener", self.events)
+
     def test_held_lease_prevents_every_device_call(self) -> None:
         self.lease = _FakeLease(held=True)
 
@@ -585,11 +648,13 @@ class _StatefulLease:
         self.active_intent: dict[str, object] | None = None
 
     def acquisition_intent(self, **arguments: object) -> dict[str, object]:
+        invocation_id = arguments["invocation_id"]
         return {
             "expectedMinutes": arguments["expected_minutes"],
+            "invocationId": invocation_id,
             "owner": arguments["owner"],
             "purpose": arguments["purpose"],
-            "scenario": arguments["scenario"],
+            "scenario": f"{arguments['scenario']} [invocation:{invocation_id}]",
             "statefulEffects": arguments["stateful_effects"],
             "threadId": "stateful-thread",
         }
@@ -822,6 +887,13 @@ class _StatefulDevice:
         if path not in self.entries:
             self.add_entry(path)
 
+    def make_directory_no_replace(self, path: str) -> object:
+        self.events.append(f"mutate:mkdir-no-replace:{path}")
+        if path in self.entries:
+            raise ReferencePackageInstallError("fake no-replace directory exists")
+        self.add_entry(path)
+        return self._entry(path)
+
     def push_file(self, local: Path, remote: str) -> None:
         self.events.append(f"mutate:push:{Path(remote).name}")
         if self.fail_operation == f"push:{Path(remote).name}":
@@ -994,6 +1066,79 @@ class DurableTransactionTest(unittest.TestCase):
             **arguments,
         )
 
+    def test_each_lease_acquisition_has_a_unique_invocation_identity(self) -> None:
+        first = self.installer()._lease_arguments("install")
+        second = self.installer()._lease_arguments("install")
+
+        self.assertRegex(str(first.get("invocation_id")), r"^[0-9a-f]{32}$")
+        self.assertRegex(str(second.get("invocation_id")), r"^[0-9a-f]{32}$")
+        self.assertNotEqual(first["invocation_id"], second["invocation_id"])
+
+    def test_evidence_invocation_lock_rejects_a_second_live_owner(self) -> None:
+        lock_type = getattr(installer_module, "_EvidenceInvocationLock", None)
+        self.assertIsNotNone(lock_type, "_EvidenceInvocationLock is missing")
+        lock_path = self.root / "evidence.invocation.lock"
+
+        with lock_type(lock_path):
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError, "already active"
+            ):
+                with lock_type(lock_path):
+                    self.fail("second live invocation acquired the same host lock")
+
+    def test_install_holds_the_evidence_invocation_lock_for_the_whole_operation(self) -> None:
+        lock = mock.MagicMock()
+        transaction = self.installer()
+        expected_path = transaction._invocation_lock_path()
+
+        with mock.patch.object(
+            installer_module,
+            "_EvidenceInvocationLock",
+            return_value=lock,
+            create=True,
+        ) as lock_type:
+            transaction.install()
+
+        lock_type.assert_called_once_with(expected_path)
+        lock.__enter__.assert_called_once_with()
+        lock.__exit__.assert_called_once()
+
+    def test_invocation_lock_preserves_nested_evidence_parent_creation(self) -> None:
+        nested_evidence = self.root / "new" / "nested" / "evidence"
+        transaction = ReferencePackageInstaller(
+            plan=self.plan,
+            device=self.device,
+            lease=self.lease,
+            evidence_directory=nested_evidence,
+        )
+
+        transaction.install()
+
+        self.assertTrue((nested_evidence / "pending-acceptance.json").is_file())
+
+    def test_nested_evidence_lock_identity_does_not_change_when_parent_appears(
+        self,
+    ) -> None:
+        nested_evidence = self.root / "new" / "nested" / "evidence"
+        transaction = ReferencePackageInstaller(
+            plan=self.plan,
+            device=self.device,
+            lease=self.lease,
+            evidence_directory=nested_evidence,
+        )
+        first_path = transaction._invocation_lock_path()
+
+        with installer_module._EvidenceInvocationLock(first_path):
+            nested_evidence.parent.mkdir(parents=True)
+            second_path = transaction._invocation_lock_path()
+
+            self.assertEqual(first_path, second_path)
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError, "already active"
+            ):
+                with installer_module._EvidenceInvocationLock(second_path):
+                    self.fail("second live invocation acquired a changed host lock")
+
     def test_install_ends_pending_acceptance_with_exact_backup_and_durable_journal(self) -> None:
         self.device.seed_package(self.final)
         old_entry = self.device.entry_identity(self.final)
@@ -1056,6 +1201,67 @@ class DurableTransactionTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReferencePackageInstallError, "regular files"
+        ):
+            self.installer().finalize_acceptance()
+
+        self.assertFalse((self.evidence / "final-success.json").exists())
+
+    def test_pending_receipt_republication_requires_rollback_backup(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        backup = journal["paths"]["backup"]
+        self.device.remove_tree(backup)
+        (self.evidence / "pending-acceptance.json").unlink()
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rollback backup"
+        ):
+            self.installer().install()
+
+    def test_pending_receipt_republication_rejects_changed_backup_identity(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        backup = journal["paths"]["backup"]
+        self.device.entries.pop(backup)
+        self.device.add_entry(backup, classification="previous-active-package")
+        (self.evidence / "pending-acceptance.json").unlink()
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rollback backup"
+        ):
+            self.installer().install()
+
+    def test_pending_receipt_republication_rejects_changed_backup_inventory(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        backup = journal["paths"]["backup"]
+        self.device.files[f"{backup}/unexpected.bin"] = b"mutated"
+        (self.evidence / "pending-acceptance.json").unlink()
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rollback backup"
+        ):
+            self.installer().install()
+
+    def test_finalize_requires_declared_rollback_backup_before_commit(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        self.device.remove_tree(journal["paths"]["backup"])
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rollback backup"
         ):
             self.installer().finalize_acceptance()
 
@@ -1131,6 +1337,70 @@ class DurableTransactionTest(unittest.TestCase):
 
         self.assertEqual(old_entry.inode, self.device.entry_identity(self.final).inode)
         self.assertEqual(b"old-apk", self.device.installed_apk)
+
+    def test_restart_recovers_crash_after_stage_mkdir_before_identity_journal(self) -> None:
+        original_make_directory = self.device.make_directory_no_replace
+        crashed = False
+
+        def crash_after_stage_effect(path: str) -> None:
+            nonlocal crashed
+            original_make_directory(path)
+            if path.endswith(".stage") and not crashed:
+                crashed = True
+                raise _ProcessKilled("after stage mkdir effect")
+
+        with mock.patch.object(
+            self.device,
+            "make_directory_no_replace",
+            side_effect=crash_after_stage_effect,
+        ):
+            with self.assertRaises(_ProcessKilled):
+                self.installer().install()
+
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        stage = journal["paths"]["stage"]
+        self.assertIsNone(journal.get("newPackageEntry"))
+        self.assertIsNotNone(self.device.entry_identity(stage))
+
+        self.installer().install()
+
+        self.assertTrue((self.evidence / "pending-acceptance.json").is_file())
+        self.assertIsNone(self.device.entry_identity(stage))
+
+    def test_recovery_never_deletes_ambiguous_nonempty_unbound_stage(self) -> None:
+        original_make_directory = self.device.make_directory_no_replace
+        crashed = False
+
+        def crash_after_stage_effect(path: str) -> None:
+            nonlocal crashed
+            original_make_directory(path)
+            if path.endswith(".stage") and not crashed:
+                crashed = True
+                raise _ProcessKilled("after stage mkdir effect")
+
+        with mock.patch.object(
+            self.device,
+            "make_directory_no_replace",
+            side_effect=crash_after_stage_effect,
+        ):
+            with self.assertRaises(_ProcessKilled):
+                self.installer().install()
+
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        stage = journal["paths"]["stage"]
+        self.device.files[f"{stage}/unbound.bin"] = b"ambiguous"
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "not empty"
+        ):
+            self.installer().install()
+
+        self.assertIsNotNone(self.device.entry_identity(stage))
+        self.assertIn(f"{stage}/unbound.bin", self.device.files)
 
     def test_recovery_probe_failure_does_not_skip_app_restore_or_lease_release(self) -> None:
         self.device.seed_package(self.final)
@@ -1290,6 +1560,45 @@ class DurableTransactionTest(unittest.TestCase):
             "rolled-back",
             json.loads((self.evidence / "rollback-receipt.json").read_text("utf-8"))["state"],
         )
+
+    def test_rollback_crash_after_recovery_remains_retryable_as_rollback(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        killed = False
+
+        def crash_after_recovery(phase: str) -> None:
+            nonlocal killed
+            if phase == "recovery-complete" and not killed:
+                killed = True
+                raise _ProcessKilled(phase)
+
+        with self.assertRaises(_ProcessKilled):
+            self.installer(phase_hook=crash_after_recovery).rollback()
+
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        self.assertEqual("rollback-in-progress", journal["state"])
+
+        self.installer().rollback()
+
+        self.assertEqual(
+            "rolled-back",
+            json.loads((self.evidence / "rollback-receipt.json").read_text("utf-8"))["state"],
+        )
+
+    def test_execute_cannot_redirect_a_rollback_in_progress_journal(self) -> None:
+        self.device.seed_package(self.final)
+        self.installer().install()
+        journal_path = self.evidence / "transaction-journal.json"
+        journal = json.loads(journal_path.read_text("utf-8"))
+        journal["state"] = "rollback-in-progress"
+        journal_path.write_bytes(_canonical(journal))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rollback.*in progress"
+        ):
+            self.installer().install()
 
     def test_restart_reconciles_each_irreversible_phase_before_reinstall(self) -> None:
         phases = (
@@ -1472,6 +1781,58 @@ class _ScriptedRunner:
 
 
 class ProductionBoundaryTest(unittest.TestCase):
+    def test_stage_creation_uses_no_replace_mkdir_and_returns_exact_identity(
+        self,
+    ) -> None:
+        path = "/storage/emulated/0/reference/.stage"
+        expected_command = (
+            "adb.exe",
+            "-s",
+            "SERIAL",
+            "shell",
+            "mkdir",
+            "--",
+            path,
+        )
+        runner = _ScriptedRunner(
+            [(expected_command, CommandResult(0, b"", b""))]
+        )
+        device = AdbInstallDevice(adb="adb.exe", runner=runner)
+        device.serial = "SERIAL"
+        device.set_mutation_guard(lambda: None)
+        identity = installer_module.RemoteEntryIdentity(
+            name=".stage", kind="directory", device=1, inode=2
+        )
+
+        with mock.patch.object(device, "path_exists", return_value=False), mock.patch.object(
+            device, "entry_identity", return_value=identity
+        ):
+            actual = device.make_directory_no_replace(path)
+
+        self.assertEqual(identity, actual)
+        self.assertEqual([expected_command], runner.calls)
+
+    def test_atomic_lease_intent_binds_invocation_id_into_helper_identity(self) -> None:
+        lease = AtomicDeviceLeaseClient(
+            helper_path=Path("C:/coordination/device-lease.ps1"),
+            thread_id="thread",
+            runner=_ScriptedRunner([]),
+            heartbeat_interval_seconds=3600.0,
+        )
+        nonce = "1" * 32
+
+        intent = lease.acquisition_intent(
+            owner="owner",
+            purpose="purpose",
+            scenario="scenario",
+            stateful_effects="effects",
+            expected_minutes=1,
+            invocation_id=nonce,
+        )
+
+        self.assertEqual(nonce, intent["invocationId"])
+        self.assertEqual(f"scenario [invocation:{nonce}]", intent["scenario"])
+
     @staticmethod
     def _process_restore_device(
         steps: list[tuple[tuple[str, ...], CommandResult]],
@@ -1627,6 +1988,37 @@ class ProductionBoundaryTest(unittest.TestCase):
 
         self.assertEqual([], runner.calls)
 
+    def test_apk_rechecks_lease_after_hash_before_install_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            apk = Path(temporary) / "app.apk"
+            raw = b"verified-apk-bytes"
+            apk.write_bytes(raw)
+            information = apk.stat(follow_symlinks=False)
+            install = ("adb.exe", "-s", "SERIAL", "install", "-r", str(apk))
+            runner = _ScriptedRunner(
+                [(install, CommandResult(0, b"Success\n", b""))]
+            )
+            device = AdbInstallDevice(adb="adb.exe", runner=runner)
+            device.serial = "SERIAL"
+            guard_calls = 0
+
+            def lose_after_hash() -> None:
+                nonlocal guard_calls
+                guard_calls += 1
+                if guard_calls == 2:
+                    raise ReferencePackageInstallError("injected lease loss")
+
+            device.set_mutation_guard(lose_after_hash)
+            with self.assertRaisesRegex(ReferencePackageInstallError, "lease loss"):
+                device.install_apk(
+                    apk,
+                    expected_bytes=len(raw),
+                    expected_sha256=_sha256(raw),
+                    expected_stat_identity=installer_module._identity(information),
+                )
+
+        self.assertEqual([], runner.calls)
+
     def test_app_process_probe_captures_lock_service_and_other_app_focus(self) -> None:
         other = "com.example.other/.OtherActivity"
         service = "com.flightalert/.alerts.AircraftAlertService"
@@ -1756,6 +2148,8 @@ class ProductionBoundaryTest(unittest.TestCase):
     def test_atomic_lease_client_uses_exact_json_token_and_releases(self) -> None:
         helper = Path("C:/coordination/device-lease.ps1")
         token = "a" * 32
+        invocation_id = "0" * 32
+        scenario = f"scenario [invocation:{invocation_id}]"
         acquire = CommandResult(
             return_code=0,
             stdout=_canonical(
@@ -1797,7 +2191,7 @@ class ProductionBoundaryTest(unittest.TestCase):
                         "-Purpose",
                         "purpose",
                         "-Scenario",
-                        "scenario",
+                        scenario,
                         "-StatefulEffects",
                         "effects",
                         "-ExpectedMinutes",
@@ -1858,6 +2252,7 @@ class ProductionBoundaryTest(unittest.TestCase):
             scenario="scenario",
             stateful_effects="effects",
             expected_minutes=180,
+            invocation_id=invocation_id,
         )
         lease.heartbeat(actual)
         lease.release(actual)
@@ -1869,6 +2264,8 @@ class ProductionBoundaryTest(unittest.TestCase):
         helper = Path("C:/coordination/device-lease.ps1")
         token = "d" * 32
         thread_id = "thread-heartbeat"
+        invocation_id = "1" * 32
+        scenario = f"scenario [invocation:{invocation_id}]"
         command_prefix = (
             "powershell.exe",
             "-NoProfile",
@@ -1879,7 +2276,7 @@ class ProductionBoundaryTest(unittest.TestCase):
         lease_identity = {
             "owner": "owner",
             "purpose": "purpose",
-            "scenario": "scenario",
+            "scenario": scenario,
             "statefulEffects": "effects",
             "threadId": thread_id,
             "token": token,
@@ -1897,7 +2294,7 @@ class ProductionBoundaryTest(unittest.TestCase):
                         "-Purpose",
                         "purpose",
                         "-Scenario",
-                        "scenario",
+                        scenario,
                         "-StatefulEffects",
                         "effects",
                         "-ExpectedMinutes",
@@ -1945,6 +2342,7 @@ class ProductionBoundaryTest(unittest.TestCase):
             "scenario": "scenario",
             "stateful_effects": "effects",
             "expected_minutes": 180,
+            "invocation_id": invocation_id,
         }
         acquired = lease.acquire(**arguments)
 
@@ -1958,6 +2356,8 @@ class ProductionBoundaryTest(unittest.TestCase):
         helper = Path("C:/coordination/device-lease.ps1")
         token = "e" * 32
         thread_id = "thread-acquire"
+        invocation_id = "2" * 32
+        scenario = f"scenario [invocation:{invocation_id}]"
         prefix = (
             "powershell.exe",
             "-NoProfile",
@@ -1968,7 +2368,7 @@ class ProductionBoundaryTest(unittest.TestCase):
         identity = {
             "owner": "owner",
             "purpose": "purpose",
-            "scenario": "scenario",
+            "scenario": scenario,
             "statefulEffects": "effects",
             "threadId": thread_id,
             "token": token,
@@ -1986,7 +2386,7 @@ class ProductionBoundaryTest(unittest.TestCase):
                         "-Purpose",
                         "purpose",
                         "-Scenario",
-                        "scenario",
+                        scenario,
                         "-StatefulEffects",
                         "effects",
                         "-ExpectedMinutes",
@@ -2029,15 +2429,98 @@ class ProductionBoundaryTest(unittest.TestCase):
             scenario="scenario",
             stateful_effects="effects",
             expected_minutes=1,
+            invocation_id=invocation_id,
         )
         lease.release(acquired)
 
         self.assertEqual(token, acquired)
         self.assertEqual([], runner.steps)
 
+    def test_atomic_lease_never_adopts_another_live_invocation(self) -> None:
+        helper = Path("C:/coordination/device-lease.ps1")
+        token = "f" * 32
+        first_id = "4" * 32
+        second_id = "5" * 32
+        first_scenario = f"scenario [invocation:{first_id}]"
+        second_scenario = f"scenario [invocation:{second_id}]"
+        prefix = (
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(helper),
+        )
+        runner = _ScriptedRunner(
+            [
+                (
+                    (
+                        *prefix,
+                        "acquire",
+                        "-Owner",
+                        "owner",
+                        "-ThreadId",
+                        "thread",
+                        "-Purpose",
+                        "purpose",
+                        "-Scenario",
+                        second_scenario,
+                        "-StatefulEffects",
+                        "effects",
+                        "-ExpectedMinutes",
+                        "1",
+                    ),
+                    CommandResult(1, b"", b"already held"),
+                ),
+                (
+                    (*prefix, "status"),
+                    CommandResult(
+                        0,
+                        _canonical(
+                            {
+                                "held": True,
+                                "lease": {
+                                    "owner": "owner",
+                                    "purpose": "purpose",
+                                    "scenario": first_scenario,
+                                    "statefulEffects": "effects",
+                                    "threadId": "thread",
+                                    "token": token,
+                                },
+                                "token": None,
+                            }
+                        ),
+                        b"",
+                    ),
+                ),
+            ]
+        )
+        lease = AtomicDeviceLeaseClient(
+            helper_path=helper,
+            thread_id="thread",
+            runner=runner,
+            heartbeat_interval_seconds=3600.0,
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "scenario.*does not match"
+        ):
+            lease.acquire(
+                owner="owner",
+                purpose="purpose",
+                scenario="scenario",
+                stateful_effects="effects",
+                expected_minutes=1,
+                invocation_id=second_id,
+            )
+
+        self.assertIsNone(lease._token)
+        self.assertEqual([], runner.steps)
+
     def test_atomic_lease_release_keeps_token_when_status_is_inconsistent(self) -> None:
         helper = Path("C:/coordination/device-lease.ps1")
         token = "b" * 32
+        invocation_id = "3" * 32
+        scenario = f"scenario [invocation:{invocation_id}]"
         runner = _ScriptedRunner(
             [
                 (
@@ -2055,7 +2538,7 @@ class ProductionBoundaryTest(unittest.TestCase):
                         "-Purpose",
                         "purpose",
                         "-Scenario",
-                        "scenario",
+                        scenario,
                         "-StatefulEffects",
                         "effects",
                         "-ExpectedMinutes",
@@ -2101,6 +2584,7 @@ class ProductionBoundaryTest(unittest.TestCase):
             scenario="scenario",
             stateful_effects="effects",
             expected_minutes=1,
+            invocation_id=invocation_id,
         )
 
         with self.assertRaisesRegex(ReferencePackageInstallError, "status"):
@@ -2486,6 +2970,70 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ReferencePackageInstallError, "footprint total"):
             self.validate()
+
+    def test_manifest_must_match_every_android_binary_v3_runtime_identity(self) -> None:
+        manifest_path = self.fixture.package / "manifest.json"
+        original = json.loads(manifest_path.read_text("utf-8"))
+        cases = (
+            ("payloadSchema", "wrong.payload", "payload schema"),
+            ("presentationPolicySha256", "0" * 64, "presentation policy"),
+            ("sourcedTextPolicySha256", "0" * 64, "sourced-text policy"),
+            ("unicodeScriptProfileSha256", "0" * 64, "Unicode script profile"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                changed = dict(original)
+                changed[field] = value
+                manifest_path.write_bytes(_canonical(changed))
+                with self.assertRaisesRegex(ReferencePackageInstallError, message):
+                    self.validate()
+        manifest_path.write_bytes(_canonical(original))
+
+    def test_manifest_missing_runtime_identity_fails_closed(self) -> None:
+        manifest_path = self.fixture.package / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        del manifest["payloadSchema"]
+        manifest_path.write_bytes(_canonical(manifest))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "payload schema"
+        ):
+            self.validate()
+
+    def test_installer_runtime_pins_match_authoritative_android_contracts(self) -> None:
+        self.assertEqual(3, installer_module.RUNTIME_SCHEMA_VERSION)
+        self.assertEqual(
+            "flightalert.reference.renderer-tile.v1",
+            installer_module.RUNTIME_PAYLOAD_SCHEMA,
+        )
+        self.assertEqual(
+            "40f4e98394dacfaaad7cdc195858d0b56fc72ba5c83ccfc1e75d71fff6f6395c",
+            installer_module.RUNTIME_PRESENTATION_POLICY_SHA256,
+        )
+        self.assertEqual(
+            "ca7bd559b3d84758d17e11b5e619f04da7e5093d67d0f90506ab509e2ef6543a",
+            installer_module.RUNTIME_SOURCED_TEXT_POLICY_SHA256,
+        )
+        self.assertEqual(
+            "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb",
+            installer_module.RUNTIME_UNICODE_SCRIPT_PROFILE_SHA256,
+        )
+        repository = Path(__file__).parents[3]
+        loader = (
+            repository
+            / "app/src/main/java/com/flightalert/map/ReferenceDictionaryPackage.kt"
+        ).read_text("utf-8")
+        presentation = (
+            repository
+            / "app/src/main/java/com/flightalert/map/ReferencePresentationPolicy.kt"
+        ).read_text("utf-8")
+        sourced = (
+            repository / "app/src/main/java/com/flightalert/map/SourcedMapText.kt"
+        ).read_text("utf-8")
+        self.assertIn(installer_module.RUNTIME_PAYLOAD_SCHEMA, loader)
+        self.assertIn(installer_module.RUNTIME_PRESENTATION_POLICY_SHA256, presentation)
+        self.assertIn(installer_module.RUNTIME_SOURCED_TEXT_POLICY_SHA256, sourced)
+        self.assertIn(installer_module.RUNTIME_UNICODE_SCRIPT_PROFILE_SHA256, sourced)
 
     def _rewrite_package_json(self, name: str, mutate: object) -> None:
         path = self.fixture.package / name

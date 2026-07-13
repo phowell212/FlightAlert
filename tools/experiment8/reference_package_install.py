@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
@@ -18,6 +19,17 @@ from typing import Callable, Mapping, Protocol, Sequence
 
 
 PACKAGE_ID = "world-experiment8-binary-v3"
+RUNTIME_SCHEMA_VERSION = 3
+RUNTIME_PAYLOAD_SCHEMA = "flightalert.reference.renderer-tile.v1"
+RUNTIME_PRESENTATION_POLICY_SHA256 = (
+    "40f4e98394dacfaaad7cdc195858d0b56fc72ba5c83ccfc1e75d71fff6f6395c"
+)
+RUNTIME_SOURCED_TEXT_POLICY_SHA256 = (
+    "ca7bd559b3d84758d17e11b5e619f04da7e5093d67d0f90506ab509e2ef6543a"
+)
+RUNTIME_UNICODE_SCRIPT_PROFILE_SHA256 = (
+    "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb"
+)
 PACKAGE_FILE_NAMES = (
     "class-catalog-finalization-receipt.json",
     "class-catalog.bin",
@@ -45,10 +57,61 @@ MAX_JSON_BYTES = 4 * 1024 * 1024
 HASH_CHUNK_BYTES = 4 * 1024 * 1024
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+MAX_SIGNED_64 = (1 << 63) - 1
 
 
 class ReferencePackageInstallError(RuntimeError):
     """The source package, evidence, or device transaction is not acceptable."""
+
+
+class _EvidenceInvocationLock:
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._file: object | None = None
+
+    def __enter__(self) -> "_EvidenceInvocationLock":
+        if not self.path.parent.is_dir():
+            raise ReferencePackageInstallError(
+                "evidence invocation lock parent is missing"
+            )
+        handle = self.path.open("a+b", buffering=0)
+        try:
+            if self.path.stat().st_size == 0:
+                handle.write(b"\0")
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, ValueError) as error:
+            handle.close()
+            raise ReferencePackageInstallError(
+                "another live installer invocation is already active"
+            ) from error
+        self._file = handle
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        handle = self._file
+        self._file = None
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 @dataclass(frozen=True)
@@ -119,8 +182,46 @@ class HostInstallPlan:
         )
         if _exact_string(manifest.get("packageId"), "manifest package ID") != PACKAGE_ID:
             raise ReferencePackageInstallError("manifest package ID differs")
-        if _exact_integer(manifest.get("schemaVersion"), "manifest schema version") != 3:
+        if (
+            _exact_integer(manifest.get("schemaVersion"), "manifest schema version")
+            != RUNTIME_SCHEMA_VERSION
+        ):
             raise ReferencePackageInstallError("manifest schema version differs")
+        if (
+            _exact_string(manifest.get("payloadSchema"), "manifest payload schema")
+            != RUNTIME_PAYLOAD_SCHEMA
+        ):
+            raise ReferencePackageInstallError("manifest payload schema differs")
+        if (
+            _exact_sha256(
+                manifest.get("presentationPolicySha256"),
+                "manifest presentation policy SHA-256",
+            )
+            != RUNTIME_PRESENTATION_POLICY_SHA256
+        ):
+            raise ReferencePackageInstallError(
+                "manifest presentation policy identity differs"
+            )
+        if (
+            _exact_sha256(
+                manifest.get("sourcedTextPolicySha256"),
+                "manifest sourced-text policy SHA-256",
+            )
+            != RUNTIME_SOURCED_TEXT_POLICY_SHA256
+        ):
+            raise ReferencePackageInstallError(
+                "manifest sourced-text policy identity differs"
+            )
+        if (
+            _exact_sha256(
+                manifest.get("unicodeScriptProfileSha256"),
+                "manifest Unicode script profile SHA-256",
+            )
+            != RUNTIME_UNICODE_SCRIPT_PROFILE_SHA256
+        ):
+            raise ReferencePackageInstallError(
+                "manifest Unicode script profile identity differs"
+            )
         coverage = _exact_mapping(manifest.get("coverage"), "manifest coverage")
         if not _exact_bool(
             coverage.get("completeDeclaredScope"),
@@ -373,6 +474,8 @@ class InstallDevice(Protocol):
 
     def make_directory(self, path: str) -> None: ...
 
+    def make_directory_no_replace(self, path: str) -> RemoteEntryIdentity: ...
+
     def push_file(self, local: Path, remote: str) -> None: ...
 
     def remote_file_identity(self, path: str) -> RemoteFileIdentity: ...
@@ -424,7 +527,6 @@ class ReferencePackageInstaller:
         "/storage/emulated/0/Android/data/com.flightalert/files/reference"
     )
     FINAL_PACKAGE_PATH = f"{REFERENCE_ROOT}/{PACKAGE_ID}"
-    MINIMUM_COPY_MARGIN_BYTES = 64 * 1024 * 1024
 
     def __init__(
         self,
@@ -441,7 +543,20 @@ class ReferencePackageInstaller:
         self.evidence_directory = Path(evidence_directory)
         self.phase_hook = phase_hook
 
+    def _invocation_lock_path(self) -> Path:
+        canonical_evidence = os.path.normcase(
+            str(self.evidence_directory.resolve(strict=False))
+        )
+        identity = hashlib.sha256(
+            canonical_evidence.encode("utf-8", "strict")
+        ).hexdigest()
+        return Path(tempfile.gettempdir()) / f".flightalert-exp8-{identity}.lock"
+
     def install(self) -> None:
+        with _EvidenceInvocationLock(self._invocation_lock_path()):
+            self._install_under_invocation_lock()
+
+    def _install_under_invocation_lock(self) -> None:
         _assert_host_plan_unchanged(self.plan)
         journal = self._load_or_create_install_journal()
         journal = self._reconcile_journal_lease(journal)
@@ -454,6 +569,14 @@ class ReferencePackageInstaller:
             return
         if journal.get("state") in {"accepted", "rolled-back"}:
             raise ReferencePackageInstallError("transaction journal is already terminal")
+        if journal.get("state") == "rollback-in-progress":
+            raise ReferencePackageInstallError(
+                "rollback is already in progress; execute cannot continue"
+            )
+        if journal.get("state") != "active":
+            raise ReferencePackageInstallError(
+                "execute requires one active installation journal"
+            )
 
         token: str | None = None
         released = False
@@ -523,6 +646,10 @@ class ReferencePackageInstaller:
         )
 
     def finalize_acceptance(self) -> None:
+        with _EvidenceInvocationLock(self._invocation_lock_path()):
+            self._finalize_under_invocation_lock()
+
+    def _finalize_under_invocation_lock(self) -> None:
         _assert_host_plan_unchanged(self.plan)
         journal = self._load_journal()
         if journal.get("state") not in {"pending-acceptance", "finalizing-committed"}:
@@ -546,6 +673,8 @@ class ReferencePackageInstaller:
                 raise ReferencePackageInstallError(
                     "pending journal belongs to a different device"
                 )
+            if journal.get("state") == "pending-acceptance":
+                self._verify_declared_rollback_backup(journal, prestate, token)
             self._verify_new_state(journal, prestate, token)
             if journal.get("state") == "pending-acceptance":
                 residue = self._classify_finalize_residue(journal, token)
@@ -623,13 +752,24 @@ class ReferencePackageInstaller:
         self._write_journal(journal, "accepted")
 
     def rollback(self) -> None:
+        with _EvidenceInvocationLock(self._invocation_lock_path()):
+            self._rollback_under_invocation_lock()
+
+    def _rollback_under_invocation_lock(self) -> None:
         journal = self._load_journal()
-        if journal.get("state") not in {"pending-acceptance", "rollback-verified"}:
+        if journal.get("state") not in {
+            "pending-acceptance",
+            "rollback-in-progress",
+            "rollback-verified",
+        }:
             raise ReferencePackageInstallError(
                 "rollback requires one pending-acceptance journal"
             )
         self._assert_journal_plan(journal)
         journal = self._reconcile_journal_lease(journal)
+        if journal.get("state") == "pending-acceptance":
+            journal["state"] = "rollback-in-progress"
+            journal = self._write_journal(journal, "rollback-started")
         token: str | None = None
         released = False
         errors: list[str] = []
@@ -645,7 +785,14 @@ class ReferencePackageInstaller:
                     "pending journal belongs to a different device"
                 )
             if journal.get("state") != "rollback-verified":
-                errors.extend(self._recover_under_lease(journal, prestate, token))
+                errors.extend(
+                    self._recover_under_lease(
+                        journal,
+                        prestate,
+                        token,
+                        completion_state="rollback-in-progress",
+                    )
+                )
             if not errors:
                 self._verify_rolled_back_state(prestate, token)
                 journal["state"] = "rollback-verified"
@@ -694,6 +841,7 @@ class ReferencePackageInstaller:
                 raise ReferencePackageInstallError(
                     "pending journal belongs to a different device"
                 )
+            self._verify_declared_rollback_backup(journal, prestate, token)
             self._verify_new_state(journal, prestate, token)
         finally:
             if token is not None:
@@ -724,10 +872,13 @@ class ReferencePackageInstaller:
         self.evidence_directory.mkdir(parents=True, exist_ok=False)
         journal: dict[str, object] = {
             "activeLeaseToken": None,
+            "backupEntry": None,
+            "backupInventory": None,
             "deviceSerial": None,
             "deviceMutationStarted": False,
             "leaseAcquisitionIntent": None,
             "leaseReleased": False,
+            "newPackageEntry": None,
             "paths": None,
             "phase": "host-plan-bound",
             "phaseSequence": 0,
@@ -735,6 +886,7 @@ class ReferencePackageInstaller:
             "referenceClassifications": None,
             "schema": "flightalert.experiment8.reference-install-journal.v2",
             "sourcePlan": _plan_document(self.plan),
+            "stageCreation": None,
             "state": "active",
             "transactionToken": None,
         }
@@ -828,7 +980,7 @@ class ReferencePackageInstaller:
         self, journal: dict[str, object], prestate: DevicePrestate, token: str
     ) -> None:
         paths = _journal_paths(journal)
-        required_free = self.plan.package_bytes + self.MINIMUM_COPY_MARGIN_BYTES
+        required_free = _required_install_free_bytes(self.plan)
         external_files_root = self.REFERENCE_ROOT.rsplit("/", 1)[0]
         available = self._guarded(
             token,
@@ -881,19 +1033,22 @@ class ReferencePackageInstaller:
             "create reference root",
             lambda: self.device.make_directory(self.REFERENCE_ROOT),
         )
-        self._guarded(
-            token,
-            "create stage",
-            lambda: self.device.make_directory(paths["stage"]),
-        )
+        journal["stageCreation"] = {
+            "path": paths["stage"],
+            "state": "authorized-empty-no-replace",
+        }
+        journal = self._write_journal(journal, "before-stage-create")
         stage_entry = self._guarded(
             token,
-            "capture staged directory identity",
-            lambda: self.device.entry_identity(paths["stage"]),
+            "create stage without replacement",
+            lambda: self.device.make_directory_no_replace(paths["stage"]),
         )
-        if stage_entry is None or stage_entry.kind != "directory":
-            raise ReferencePackageInstallError("staged directory identity is unavailable")
         journal["newPackageEntry"] = _entry_document(stage_entry)
+        journal["stageCreation"] = {
+            "entry": _entry_document(stage_entry),
+            "path": paths["stage"],
+            "state": "identity-bound",
+        }
         journal = self._write_journal(journal, "stage-created")
         order = tuple(
             item for item in self.plan.package_files if item.name != "manifest.json"
@@ -936,6 +1091,14 @@ class ReferencePackageInstaller:
             if backup is None or not prestate.final_package_entry.same_object(backup):
                 raise ReferencePackageInstallError("backup package identity differs")
             journal["backupEntry"] = _entry_document(backup)
+            backup_inventory = self._guarded(
+                token,
+                "capture rollback backup inventory",
+                lambda: self.device.immediate_inventory(paths["backup"]),
+            )
+            journal["backupInventory"] = [
+                _entry_document(item) for item in backup_inventory
+            ]
             journal = self._write_journal(journal, "after-old-move")
 
         journal = self._write_journal(journal, "before-new-publish")
@@ -1062,6 +1225,63 @@ class ReferencePackageInstaller:
         if present is not prestate.preferences_present or raw != prestate.preferences:
             raise ReferencePackageInstallError("preference restoration differs")
 
+    def _verify_declared_rollback_backup(
+        self,
+        journal: Mapping[str, object],
+        prestate: DevicePrestate,
+        token: str,
+    ) -> None:
+        paths = _journal_paths(journal)
+        backup_name = paths["backup"].rsplit("/", 1)[-1]
+        inventory = self._guarded(
+            token,
+            "verify rollback backup inventory",
+            lambda: self.device.immediate_inventory(self.REFERENCE_ROOT),
+        )
+        matches = tuple(item for item in inventory if item.name == backup_name)
+        raw_declared = journal.get("backupEntry")
+        raw_backup_inventory = journal.get("backupInventory")
+        previous = prestate.final_package_entry
+        if previous is None:
+            if (
+                raw_declared is not None
+                or raw_backup_inventory is not None
+                or matches
+            ):
+                raise ReferencePackageInstallError(
+                    "unexpected rollback backup is present"
+                )
+            return
+        if type(raw_declared) is not dict:
+            raise ReferencePackageInstallError(
+                "declared rollback backup identity is missing"
+            )
+        declared = _entry_from_document(raw_declared)
+        if not previous.same_object(declared):
+            raise ReferencePackageInstallError(
+                "declared rollback backup differs from prestate"
+            )
+        if len(matches) != 1 or matches[0] != declared:
+            raise ReferencePackageInstallError(
+                "rollback backup inventory or identity differs"
+            )
+        if type(raw_backup_inventory) is not list:
+            raise ReferencePackageInstallError(
+                "declared rollback backup inventory is missing"
+            )
+        declared_inventory = tuple(
+            _entry_from_document(item) for item in raw_backup_inventory
+        )
+        actual_backup_inventory = self._guarded(
+            token,
+            "verify rollback backup contents",
+            lambda: self.device.immediate_inventory(paths["backup"]),
+        )
+        if actual_backup_inventory != declared_inventory:
+            raise ReferencePackageInstallError(
+                "rollback backup contents inventory differs"
+            )
+
     def _recover_with_fresh_lease(self, journal: dict[str, object]) -> list[str]:
         errors: list[str] = []
         token: str | None = None
@@ -1091,6 +1311,8 @@ class ReferencePackageInstaller:
         journal: dict[str, object],
         prestate: DevicePrestate,
         token: str,
+        *,
+        completion_state: str = "active",
     ) -> list[str]:
         errors: list[str] = []
         paths = _journal_paths(journal)
@@ -1124,6 +1346,44 @@ class ReferencePackageInstaller:
         final = probes.get("final")
         backup = probes.get("backup")
         failed = probes.get("failed")
+
+        if new is None and probes.get("stage") is not None:
+            stage = probes["stage"]
+            raw_creation = journal.get("stageCreation")
+            creation = (
+                _exact_mapping(raw_creation, "stage creation authorization")
+                if raw_creation is not None
+                else {}
+            )
+            if (
+                stage is not None
+                and stage.kind == "directory"
+                and creation.get("path") == paths["stage"]
+                and creation.get("state") == "authorized-empty-no-replace"
+            ):
+                try:
+                    stage_inventory = self._guarded(
+                        token,
+                        "verify authorized empty stage",
+                        lambda: self.device.immediate_inventory(paths["stage"]),
+                    )
+                except Exception as error:
+                    errors.append(f"verify authorized empty stage: {error}")
+                else:
+                    if stage_inventory:
+                        errors.append(
+                            "unbound stage is not empty and cannot be identified"
+                        )
+                    else:
+                        attempt(
+                            "remove authorized empty stage",
+                            lambda stage=stage: self.device.remove_bound_entry(
+                                paths["stage"], stage
+                            ),
+                        )
+                        probes["stage"] = None
+            else:
+                errors.append("unbound stage identity is ambiguous")
 
         attempt("force-stop before recovery", self.device.force_stop)
         old_restored = old is None
@@ -1237,7 +1497,7 @@ class ReferencePackageInstaller:
             lambda: self.device.restore_process_state(prestate.process_state),
         )
         if not errors:
-            journal["state"] = "active"
+            journal["state"] = completion_state
             journal["deviceMutationStarted"] = False
             self._write_journal(journal, "recovery-complete")
         else:
@@ -1485,6 +1745,7 @@ class ReferencePackageInstaller:
 
     def _lease_arguments(self, operation: str) -> dict[str, object]:
         return {
+            "invocation_id": uuid.uuid4().hex,
             "owner": "Zeus/Experiment8",
             "purpose": f"{operation} finalized whole-world Experiment 8 package",
             "scenario": f"transactional reference package {operation}",
@@ -1810,11 +2071,17 @@ class AtomicDeviceLeaseClient:
         minutes = arguments.get("expected_minutes")
         if type(minutes) is not int or minutes <= 0:
             raise ReferencePackageInstallError("device lease minutes are malformed")
+        invocation_id = _required_argument(arguments, "invocation_id")
+        if re.fullmatch(r"[0-9a-f]{32}", invocation_id) is None:
+            raise ReferencePackageInstallError(
+                "device lease invocation ID is malformed"
+            )
         return {
             "expectedMinutes": minutes,
+            "invocationId": invocation_id,
             "owner": owner,
             "purpose": purpose,
-            "scenario": scenario,
+            "scenario": f"{scenario} [invocation:{invocation_id}]",
             "statefulEffects": effects,
             "threadId": self.thread_id,
         }
@@ -2275,6 +2542,19 @@ class AdbInstallDevice:
         if not self.path_exists(path):
             raise ReferencePackageInstallError("device directory creation did not persist")
 
+    def make_directory_no_replace(self, path: str) -> RemoteEntryIdentity:
+        if self.path_exists(path):
+            raise ReferencePackageInstallError(
+                "device no-replace directory already exists"
+            )
+        self._mutating_checked(("shell", "mkdir", "--", path), timeout=30.0)
+        entry = self.entry_identity(path)
+        if entry is None or entry.kind != "directory":
+            raise ReferencePackageInstallError(
+                "device no-replace directory identity is unavailable"
+            )
+        return entry
+
     def push_file(self, local: Path, remote: str) -> None:
         self._mutating_checked(("push", str(local), remote), timeout=None)
 
@@ -2404,7 +2684,9 @@ class AdbInstallDevice:
             or actual.stat_identity != expected_stat_identity
         ):
             raise ReferencePackageInstallError("APK changed after final lease guard")
-        result = self._checked(("install", "-r", str(path)), timeout=300.0)
+        result = self._mutating_checked(
+            ("install", "-r", str(path)), timeout=300.0
+        )
         text = _strict_ascii_text(result.stdout, "adb install output", maximum=128 * 1024)
         if not any(line.strip() == "Success" for line in text.splitlines()):
             raise ReferencePackageInstallError("adb install did not report Success")
@@ -3740,6 +4022,25 @@ def _assert_host_plan_unchanged(plan: HostInstallPlan) -> None:
     _assert_apk_plan_unchanged(plan)
 
 
+def _required_install_free_bytes(plan: HostInstallPlan) -> int:
+    total = 0
+    for label, value in (
+        ("package", plan.package_bytes),
+        ("APK", plan.apk_bytes),
+        ("mandatory reserve", MANDATORY_RESERVE_BYTES),
+    ):
+        if type(value) is not int or value < 0:
+            raise ReferencePackageInstallError(
+                f"{label} install byte budget is malformed"
+            )
+        if value > MAX_SIGNED_64 - total:
+            raise ReferencePackageInstallError(
+                "device install byte budget would overflow signed 64-bit"
+            )
+        total += value
+    return total
+
+
 def _assert_apk_plan_unchanged(plan: HostInstallPlan) -> None:
     apk = _hash_regular_file(plan.apk_path, "APK")
     if (
@@ -3871,6 +4172,7 @@ def _validate_lease_acquisition_intent(
         {
             "deviceOperation",
             "expectedMinutes",
+            "invocationId",
             "owner",
             "purpose",
             "scenario",
@@ -3884,7 +4186,10 @@ def _validate_lease_acquisition_intent(
         "expectedMinutes": arguments["expected_minutes"],
         "owner": arguments["owner"],
         "purpose": arguments["purpose"],
-        "scenario": arguments["scenario"],
+        "invocationId": arguments["invocation_id"],
+        "scenario": (
+            f"{arguments['scenario']} [invocation:{arguments['invocation_id']}]"
+        ),
         "statefulEffects": arguments["stateful_effects"],
     }
     for name, value in expected.items():
