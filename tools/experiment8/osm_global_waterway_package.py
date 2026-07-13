@@ -2528,4 +2528,6 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from tools.experiment8.osm_global_waterway_package import main as canonical_main
+
+    raise SystemExit(canonical_main())

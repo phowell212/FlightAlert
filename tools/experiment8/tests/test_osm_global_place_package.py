@@ -1249,6 +1249,40 @@ class ReclassificationBoundaryTests(unittest.TestCase):
             reclassification._EXACT_OUTPUT_PATH,
         )
 
+    def test_reclassified_receipt_static_drift_fails_before_expensive_opl_scan(self) -> None:
+        from tools.experiment8 import osm_global_place_package as pipeline
+        from tools.experiment8 import osm_global_place_reclassification as reclassification
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, source, output, load_source = self._fixture(root)
+            reclassification._reclassify_recovered_extraction(
+                source_directory=source,
+                output_directory=output,
+                source_binding_loader=load_source,
+            )
+            receipt_path = output / "reclassification-receipt.json"
+            receipt = json.loads(receipt_path.read_text("utf-8"))
+            receipt["code"]["reclassifier"]["sha256"] = "0" * 64
+            receipt_path.write_bytes(pipeline._canonical_json_bytes(receipt))
+
+            with patch.object(
+                reclassification,
+                "_verified_opl_semantics",
+                side_effect=AssertionError("expensive OPL scan must not start"),
+            ) as semantic_scan:
+                with self.assertRaisesRegex(
+                    pipeline.GlobalPlacePackageError,
+                    "static contract differs before semantic validation",
+                ):
+                    reclassification._source_binding_from_reclassified_extraction(
+                        output,
+                        source_directory=source,
+                        output_directory=output,
+                        source_binding_loader=load_source,
+                    )
+            semantic_scan.assert_not_called()
+
     def test_exact_reclassification_loader_uses_immutable_historical_finalizer_pins(
         self,
     ) -> None:

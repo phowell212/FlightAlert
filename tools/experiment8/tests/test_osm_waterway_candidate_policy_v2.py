@@ -4,7 +4,6 @@ import hashlib
 import json
 import sqlite3
 import struct
-import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -304,28 +303,28 @@ class CandidatePolicyIdentityTests(unittest.TestCase):
             hashlib.sha256(_canonical_bytes(_POLICY_DOCUMENT)).hexdigest(),
         )
 
-    def test_authenticated_package_source_has_exact_lf_git_rule_and_blob(self) -> None:
+    def test_authenticated_package_source_has_exact_lf_git_rule_and_identity(self) -> None:
         repository = Path(__file__).parents[3]
         attributes = (repository / ".gitattributes").read_text("utf-8").splitlines()
+        self.assertEqual(
+            1,
+            attributes.count("/tools/experiment8/*.py text eol=lf"),
+        )
+        immediate_sources = sorted((repository / "tools/experiment8").glob("*.py"))
+        self.assertTrue(immediate_sources)
+        self.assertEqual(
+            [],
+            [path.name for path in immediate_sources if b"\r\n" in path.read_bytes()],
+        )
         rule = "/tools/experiment8/osm_global_waterway_package.py text eol=lf"
         self.assertEqual(1, attributes.count(rule))
-        blob = subprocess.run(
-            [
-                "git",
-                "cat-file",
-                "blob",
-                "HEAD:tools/experiment8/osm_global_waterway_package.py",
-            ],
-            cwd=repository,
-            check=True,
-            capture_output=True,
-        ).stdout
-        self.assertEqual(96_322, len(blob))
+        source = (repository / "tools/experiment8/osm_global_waterway_package.py").read_bytes()
+        self.assertEqual(96_418, len(source))
         self.assertEqual(
-            "eb7a5b54d0b9efa7facb67eb13d6420c1c5639613f1a9f7658c4f563bede0d93",
-            hashlib.sha256(blob).hexdigest(),
+            "b0dde525e09ac8748e56355420a3833d6cdc0b56e67432e2148fe1c89d7eae22",
+            hashlib.sha256(source).hexdigest(),
         )
-        self.assertNotIn(b"\r\n", blob)
+        self.assertNotIn(b"\r\n", source)
 
     def test_dependency_and_feature_hash_encodings_are_independently_reconstructed(self) -> None:
         from tools.experiment8 import osm_global_waterway_store as store

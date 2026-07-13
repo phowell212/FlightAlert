@@ -465,6 +465,24 @@ def _validate_reclassification_output(
     receipt, receipt_identity = _read_canonical_reclassification_receipt(
         directory / "reclassification-receipt.json"
     )
+    static_contract = {
+        "code": code,
+        "output": _output_document(output_directory),
+        "presentationPolicySha256": semantic_contract["presentationPolicySha256"],
+        "provenance": _provenance_document(),
+        "runtime": runtime,
+        "schema": _RECLASSIFICATION_SCHEMA,
+        "semanticAdmissionPolicy": {
+            "document": pipeline._SEMANTIC_ADMISSION_POLICY_DOCUMENT,
+            "sha256": pipeline.SEMANTIC_ADMISSION_POLICY_SHA256,
+        },
+        "semanticContract": semantic_contract,
+        "source": source,
+    }
+    if any(receipt.get(name) != value for name, value in static_contract.items()):
+        raise GlobalPlacePackageError(
+            "reclassification receipt static contract differs before semantic validation"
+        )
     pbf = pipeline.verify_file_identity(
         directory / "place-nodes.pbf",
         expected_bytes=binding.candidate_pbf_bytes,

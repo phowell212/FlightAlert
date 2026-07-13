@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import runpy
 import struct
+import sys
 import tempfile
 import unittest
+import warnings
 import zlib
 from pathlib import Path
 from unittest.mock import patch
@@ -818,6 +821,30 @@ class GlobalWaterwayExtractionTests(unittest.TestCase):
 
 
 class GlobalWaterwayCliTests(unittest.TestCase):
+    def test_direct_module_entry_delegates_to_canonical_module(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as canonical
+
+        calls: list[object] = []
+
+        def fake_main(argv=None):
+            calls.append(argv)
+            return 37
+
+        with patch.object(canonical, "main", side_effect=fake_main), patch.object(
+            sys, "argv", [str(Path(canonical.__file__)), "plan"]
+        ), redirect_stdout(io.StringIO()):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                with self.assertRaises(SystemExit) as raised:
+                    runpy.run_module(
+                        "tools.experiment8.osm_global_waterway_package",
+                        run_name="__main__",
+                        alter_sys=True,
+                    )
+
+        self.assertEqual(37, raised.exception.code)
+        self.assertEqual([None], calls)
+
     def test_plan_cli_is_read_only_and_emits_canonical_contract(self) -> None:
         from tools.experiment8 import osm_global_waterway_package as pipeline
 
