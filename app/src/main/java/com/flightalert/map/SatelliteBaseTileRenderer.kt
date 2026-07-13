@@ -146,6 +146,7 @@ internal class SatelliteBaseTileRenderer(
         style: MapTileRenderStyle
     ): String {
         val now_ms = SystemClock.elapsedRealtime()
+        observe_pan_cache_draw_zoom(viewport.zoom, now_ms)
         val pan_cache_key = satellite_pan_cache_key(state, style)
         val content_revision = map_content_revision.get()
         pan_compositor.draw_cached(
@@ -163,7 +164,6 @@ internal class SatelliteBaseTileRenderer(
                 now_ms = now_ms
             )
             if (label_stats.fading) request_redraw()
-            last_pan_cache_draw_zoom = viewport.zoom
             return status
         }
 
@@ -178,7 +178,6 @@ internal class SatelliteBaseTileRenderer(
         )
         if (result.reusable_for_pan_cache &&
             should_record_pan_cache(
-                viewport = viewport,
                 key = pan_cache_key,
                 content_revision = map_content_revision.get(),
                 now_ms = now_ms
@@ -226,7 +225,6 @@ internal class SatelliteBaseTileRenderer(
                 }
             }
         }
-        last_pan_cache_draw_zoom = viewport.zoom
         return result.status
     }
 
@@ -390,18 +388,20 @@ internal class SatelliteBaseTileRenderer(
         )
     }
 
+    private fun observe_pan_cache_draw_zoom(zoom: Double, now_ms: Long) {
+        if (!last_pan_cache_draw_zoom.isFinite() ||
+            abs(last_pan_cache_draw_zoom - zoom) > MAP_PAN_CACHE_ZOOM_EPSILON
+        ) {
+            last_pan_cache_zoom_change_ms = now_ms
+        }
+        last_pan_cache_draw_zoom = zoom
+    }
+
     private fun should_record_pan_cache(
-        viewport: Viewport,
         key: SatellitePanCacheKey,
         content_revision: Long,
         now_ms: Long
     ): Boolean {
-        if (!last_pan_cache_draw_zoom.isFinite() ||
-            abs(last_pan_cache_draw_zoom - viewport.zoom) > MAP_PAN_CACHE_ZOOM_EPSILON
-        ) {
-            last_pan_cache_zoom_change_ms = now_ms
-            return false
-        }
         if (now_ms - last_pan_cache_zoom_change_ms < MAP_PAN_CACHE_ZOOM_STABILITY_MS) {
             return false
         }
