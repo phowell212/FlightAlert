@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from unittest import mock
 import tools.experiment8.final_package_result_rebind as rebind_module
 import tools.experiment8.reference_package_install as installer_module
 from tools.experiment8.final_package_result_rebind import (
+    CANONICAL_APK_RELATIVE_PATH,
     FINAL_APK_SELECTION,
     _main,
     rebind_final_package_result,
@@ -27,6 +29,10 @@ from tools.experiment8.reference_package_install import (
 PACKAGE_ID = "world-experiment8-binary-v4"
 ORIGINAL_SOURCE_COMMIT = "a" * 40
 MANDATORY_RESERVE_BYTES = 1_500_000_000
+STALE_FINAL_APK = b"ignored-stale-foreign-apk-from-an-earlier-build"
+BUILT_FINAL_APK = (
+    b"fresh-gradle-clean-assemble-debug-output-bound-to-current-head"
+)
 
 
 def _sha256(raw: bytes) -> str:
@@ -258,10 +264,58 @@ class FinalPackageResultRebindTest(unittest.TestCase):
             / "Flight Alert-debug.apk"
         )
         self.final_apk.parent.mkdir(parents=True)
-        self.final_apk.write_bytes(
-            b"different-final-release-apk-that-is-larger-than-planning"
-        )
+        self.final_apk.write_bytes(STALE_FINAL_APK)
         (self.repository / "tracked.txt").write_text("clean\n", "utf-8")
+        (self.repository / ".gitignore").write_text("/build/\n", "utf-8")
+        (self.repository / "test-gradle-output.apk").write_bytes(BUILT_FINAL_APK)
+        self.gradle_wrapper = self.repository / "gradlew.bat"
+        if os.name == "nt":
+            self.gradle_wrapper.write_text(
+                "\r\n".join(
+                    (
+                        "@echo off",
+                        'if not "%~1"=="clean" exit /b 41',
+                        'if not "%~2"=="assembleDebug" exit /b 42',
+                        'if not "%~3"=="--no-daemon" exit /b 43',
+                        'if not "%~4"=="" exit /b 44',
+                        'if "%FLIGHT_ALERT_TEST_GRADLE_FAIL%"=="1" exit /b 45',
+                        'if exist "build" rmdir /s /q "build"',
+                        'mkdir "build\\outputs\\apk\\debug" || exit /b 46',
+                        (
+                            'copy /b /y "test-gradle-output.apk" '
+                            '"build\\outputs\\apk\\debug\\Flight Alert-debug.apk" '
+                            '>nul || exit /b 47'
+                        ),
+                        "exit /b 0",
+                        "",
+                    )
+                ),
+                "utf-8",
+                newline="",
+            )
+        else:
+            self.gradle_wrapper.write_text(
+                "\n".join(
+                    (
+                        "#!/bin/sh",
+                        '[ "$#" -eq 3 ] || exit 40',
+                        '[ "$1" = clean ] || exit 41',
+                        '[ "$2" = assembleDebug ] || exit 42',
+                        '[ "$3" = --no-daemon ] || exit 43',
+                        '[ "${FLIGHT_ALERT_TEST_GRADLE_FAIL:-}" != 1 ] || exit 45',
+                        'rm -rf -- "build" || exit 46',
+                        'mkdir -p -- "build/outputs/apk/debug" || exit 47',
+                        (
+                            'cp -- "test-gradle-output.apk" '
+                            '"build/outputs/apk/debug/Flight Alert-debug.apk" '
+                            '|| exit 48'
+                        ),
+                        "",
+                    )
+                ),
+                "utf-8",
+            )
+            self.gradle_wrapper.chmod(0o755)
         self._git("init", "-q")
         self._git("config", "user.email", "flight-alert-test@example.invalid")
         self._git("config", "user.name", "Flight Alert Test")
@@ -385,6 +439,122 @@ class FinalPackageResultRebindTest(unittest.TestCase):
         )
         datetime.fromisoformat(rebound["completedUtc"].removesuffix("Z") + "+00:00")
 
+    def test_clean_gradle_build_replaces_ignored_stale_apk_before_binding(
+        self,
+    ) -> None:
+        self.assertEqual(STALE_FINAL_APK, self.final_apk.read_bytes())
+        self.assertEqual("", self._git("check-ignore", "--quiet", self.final_apk))
+
+        self._rebind()
+
+        self.assertEqual(BUILT_FINAL_APK, self.final_apk.read_bytes())
+        rebound = json.loads(self.output.read_text("utf-8"))
+        self.assertEqual(len(BUILT_FINAL_APK), rebound["apk"]["bytes"])
+        self.assertEqual(_sha256(BUILT_FINAL_APK), rebound["apk"]["sha256"])
+
+    def test_rejects_nonzero_gradle_build_without_publishing(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"FLIGHT_ALERT_TEST_GRADLE_FAIL": "1"}
+        ):
+            self._assert_rejected_without_output()
+
+    def test_rejects_nested_directory_instead_of_exact_git_top_level(self) -> None:
+        nested_repository = self.repository / "nested"
+        nested_repository.mkdir()
+        shutil.copy2(self.gradle_wrapper, nested_repository / "gradlew.bat")
+        shutil.copy2(
+            self.repository / "test-gradle-output.apk",
+            nested_repository / "test-gradle-output.apk",
+        )
+        nested_apk = nested_repository / CANONICAL_APK_RELATIVE_PATH
+        nested_apk.parent.mkdir(parents=True)
+        nested_apk.write_bytes(STALE_FINAL_APK)
+
+        with self.assertRaises(ReferencePackageInstallError):
+            rebind_final_package_result(
+                package_directory=self.fixture.package,
+                apk_path=nested_apk,
+                source_repository=nested_repository,
+                planning_result_path=self.fixture.result,
+                output_path=self.output,
+            )
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_reparse_metadata_on_a_canonical_path_component(self) -> None:
+        build_component = self.repository / "build"
+        real_stat = Path.stat
+
+        def marked_stat(
+            path: Path, *, follow_symlinks: bool = True
+        ) -> os.stat_result:
+            information = real_stat(path, follow_symlinks=follow_symlinks)
+            if Path(path) == build_component and not follow_symlinks:
+                marked = mock.Mock(wraps=information)
+                marked.st_mode = information.st_mode
+                marked.st_file_attributes = (
+                    getattr(information, "st_file_attributes", 0)
+                    | installer_module.FILE_ATTRIBUTE_REPARSE_POINT
+                )
+                return marked
+            return information
+
+        with mock.patch.object(
+            Path, "stat", autospec=True, side_effect=marked_stat
+        ):
+            self._assert_rejected_without_output()
+
+    def test_rejects_directory_link_escape_in_canonical_apk_path(self) -> None:
+        build_link = self.repository / "build"
+        shutil.rmtree(build_link)
+        escaped_build = self.root / "escaped-build"
+        escaped_apk = escaped_build / CANONICAL_APK_RELATIVE_PATH.relative_to(
+            "build"
+        )
+        escaped_apk.parent.mkdir(parents=True)
+        escaped_apk.write_bytes(STALE_FINAL_APK)
+        if os.name == "nt":
+            junction = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(build_link),
+                    str(escaped_build),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if junction.returncode != 0:
+                self.skipTest(
+                    "directory junction creation unavailable: "
+                    f"{junction.stdout}{junction.stderr}"
+                )
+        else:
+            try:
+                build_link.symlink_to(escaped_build, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlink creation unavailable: {error}")
+
+        def remove_directory_link() -> None:
+            try:
+                os.rmdir(build_link)
+            except FileNotFoundError:
+                pass
+
+        self.addCleanup(remove_directory_link)
+        with mock.patch.object(
+            rebind_module,
+            "_clean_build_final_apk",
+            side_effect=AssertionError("build must not run through a reparse path"),
+        ):
+            with self.assertRaises(ReferencePackageInstallError):
+                self._rebind()
+        self.assertTrue(escaped_apk.is_file())
+        self.assertFalse(self.output.exists())
+
     def test_rejects_unstaged_tracked_source_change(self) -> None:
         (self.repository / "tracked.txt").write_text("dirty\n", "utf-8")
 
@@ -503,6 +673,27 @@ class FinalPackageResultRebindTest(unittest.TestCase):
         self.assertEqual(
             [], list(self.output.parent.glob(f".{self.output.name}.stage-*"))
         )
+
+    def test_publication_mutation_removes_only_the_tool_created_link(self) -> None:
+        real_link = rebind_module.os.link
+
+        def link_then_mutate(
+            source: Path,
+            destination: Path,
+            *,
+            follow_symlinks: bool = True,
+        ) -> None:
+            real_link(
+                source,
+                destination,
+                follow_symlinks=follow_symlinks,
+            )
+            Path(destination).write_bytes(b"mutated-after-publication-link\n")
+
+        with mock.patch.object(
+            rebind_module.os, "link", side_effect=link_then_mutate
+        ):
+            self._assert_rejected_without_output()
 
     def test_stage_sync_failure_removes_only_the_owned_stage(self) -> None:
         with mock.patch.object(

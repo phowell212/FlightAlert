@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import os
 import re
+import stat
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -27,9 +29,100 @@ FINAL_APK_SELECTION = (
     "original package result validated before rebind"
 )
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_GRADLE_BUILD_ARGUMENTS = ("clean", "assembleDebug", "--no-daemon")
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def _resolved_beneath(repository: Path, path: Path) -> bool:
+    try:
+        common = Path(os.path.commonpath((str(repository), str(path))))
+    except ValueError:
+        return False
+    return _same_path(common, repository)
+
+
+def _canonical_apk_with_safe_components(repository: Path) -> Path:
+    try:
+        root_information = repository.stat(follow_symlinks=False)
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            "source repository changed during path validation"
+        ) from error
+    try:
+        resolved_root = repository.resolve(strict=True)
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            "source repository cannot be resolved during path validation"
+        ) from error
+    if (
+        not stat.S_ISDIR(root_information.st_mode)
+        or installer._is_reparse(root_information)
+        or not _same_path(resolved_root, repository)
+    ):
+        raise ReferencePackageInstallError(
+            "source repository is not one stable real directory"
+        )
+
+    current = repository
+    components = CANONICAL_APK_RELATIVE_PATH.parts
+    for index, component in enumerate(components):
+        current = current / component
+        try:
+            information = current.stat(follow_symlinks=False)
+        except OSError as error:
+            raise ReferencePackageInstallError(
+                "canonical final APK path component is missing"
+            ) from error
+        is_leaf = index == len(components) - 1
+        expected_kind = (
+            stat.S_ISREG(information.st_mode)
+            if is_leaf
+            else stat.S_ISDIR(information.st_mode)
+        )
+        if not expected_kind or installer._is_reparse(information):
+            raise ReferencePackageInstallError(
+                "canonical final APK path contains a non-real component"
+            )
+        try:
+            resolved = current.resolve(strict=True)
+        except OSError as error:
+            raise ReferencePackageInstallError(
+                "canonical final APK path component cannot be resolved"
+            ) from error
+        if not _resolved_beneath(repository, resolved):
+            raise ReferencePackageInstallError(
+                "canonical final APK path escapes the source repository"
+            )
+    return resolved
 
 
 def _source_commit(repository: Path) -> str:
+    try:
+        top_level = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            "Git top level cannot be inspected"
+        ) from error
+    if top_level.returncode != 0:
+        raise ReferencePackageInstallError("Git top level cannot be inspected")
+    top_level_lines = os.fsdecode(top_level.stdout).splitlines()
+    if len(top_level_lines) != 1 or not top_level_lines[0]:
+        raise ReferencePackageInstallError("Git top level is not one path")
+    reported_top_level = installer._real_directory(
+        Path(top_level_lines[0]), "Git top level"
+    )
+    if not _same_path(reported_top_level, repository):
+        raise ReferencePackageInstallError(
+            "source repository is not the exact Git top level"
+        )
+
     try:
         revision = subprocess.run(
             ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
@@ -72,6 +165,48 @@ def _source_commit(repository: Path) -> str:
                 "Git source cleanliness cannot be inspected"
             )
     return lines[0]
+
+
+def _clean_build_final_apk(
+    repository: Path, source_commit: str, canonical_apk: Path
+) -> Path:
+    wrapper = installer._real_file(repository / "gradlew.bat", "Gradle wrapper")
+    checked_canonical_apk = _canonical_apk_with_safe_components(repository)
+    if not _same_path(checked_canonical_apk, canonical_apk):
+        raise ReferencePackageInstallError(
+            "pre-build canonical final APK path changed"
+        )
+    canonical_apk = checked_canonical_apk
+    try:
+        canonical_apk.unlink()
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            "pre-build canonical final APK cannot be removed"
+        ) from error
+    if os.path.lexists(canonical_apk):
+        raise ReferencePackageInstallError(
+            "pre-build canonical final APK still exists after removal"
+        )
+
+    try:
+        build = subprocess.run(
+            [str(wrapper), *_GRADLE_BUILD_ARGUMENTS],
+            cwd=repository,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            "Gradle clean debug build cannot be started"
+        ) from error
+    if build.returncode != 0:
+        raise ReferencePackageInstallError("Gradle clean debug build failed")
+    if _source_commit(repository) != source_commit:
+        raise ReferencePackageInstallError(
+            "source commit or tracked cleanliness changed during Gradle build"
+        )
+    return _canonical_apk_with_safe_components(repository)
 
 
 def _fresh_output_path(path: Path) -> Path:
@@ -134,7 +269,10 @@ def _cleanup_owned_stage(path: Path | None, identity: tuple[int, int] | None) ->
 
 
 def _publish_stage(
-    stage: Path, output: Path, identity: tuple[int, int]
+    stage: Path,
+    output: Path,
+    identity: tuple[int, int],
+    expected_raw: bytes,
 ) -> None:
     if stage.parent != output.parent:
         raise ReferencePackageInstallError(
@@ -149,6 +287,24 @@ def _publish_stage(
             raise ReferencePackageInstallError(
                 "published result identity differs from its owned stage"
             )
+        published_file = installer._hash_regular_file(
+            output, "published rebound result"
+        )
+        published_raw = installer._read_bounded_regular_file(
+            output,
+            "published rebound result",
+            installer.MAX_JSON_BYTES,
+        )
+        expected_sha256 = hashlib.sha256(expected_raw).hexdigest()
+        if (
+            published_raw != expected_raw
+            or published_file.byte_length != len(expected_raw)
+            or published_file.sha256 != expected_sha256
+        ):
+            raise ReferencePackageInstallError(
+                "published rebound result differs from its canonical stage"
+            )
+        installer._assert_install_file_unchanged(published_file)
         stage.unlink()
     except BaseException as error:
         if linked:
@@ -231,14 +387,15 @@ def rebind_final_package_result(
             Path(source_repository), "source repository"
         )
         source_commit = _source_commit(repository)
+        canonical_apk = _canonical_apk_with_safe_components(repository)
         final_apk = installer._real_file(Path(apk_path), "final APK")
-        canonical_apk = installer._real_file(
-            repository / CANONICAL_APK_RELATIVE_PATH, "canonical final APK"
-        )
-        if os.path.normcase(str(final_apk)) != os.path.normcase(str(canonical_apk)):
+        if not _same_path(final_apk, canonical_apk):
             raise ReferencePackageInstallError(
                 "final APK is not at the canonical repository output path"
             )
+        final_apk = _clean_build_final_apk(
+            repository, source_commit, canonical_apk
+        )
         final_apk_file = installer._hash_regular_file(final_apk, "final APK")
 
         rebound = copy.deepcopy(original)
@@ -298,7 +455,7 @@ def rebind_final_package_result(
         if os.path.lexists(output):
             raise ReferencePackageInstallError("output path appeared during rebind")
         _assert_exact_stage(stage, rebound_raw)
-        _publish_stage(stage, output, stage_identity)
+        _publish_stage(stage, output, stage_identity, rebound_raw)
         stage = None
         stage_identity = None
         return output
