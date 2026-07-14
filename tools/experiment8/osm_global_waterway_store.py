@@ -3897,17 +3897,32 @@ def _resume_renderer_write_reservation(
 
 
 def _default_parallel_render_limits(workers: int = 1):
-    from .waterway_parallel_render import ParallelRenderLimits
+    from .waterway_parallel_render import (
+        ParallelRenderLimits,
+        maximum_parallel_render_workers,
+    )
 
+    if (
+        type(workers) is not int
+        or not 1 <= workers <= maximum_parallel_render_workers()
+    ):
+        raise GlobalWaterwayPackageError(
+            "parallel render worker count is invalid"
+        )
+    max_in_flight_jobs = workers * 2
+    max_spool_bytes_per_job = 1024 * 1024 * 1024
     return ParallelRenderLimits(
         workers=workers,
-        max_in_flight_jobs=workers * 2,
+        max_in_flight_jobs=max_in_flight_jobs,
         max_in_flight_points=1_048_576,
         max_points_per_job=524_288,
         max_in_flight_input_bytes=256 * 1024 * 1024,
         max_input_bytes_per_job=128 * 1024 * 1024,
-        max_spool_bytes=2 * 1024 * 1024 * 1024,
-        max_spool_bytes_per_job=1024 * 1024 * 1024,
+        max_spool_bytes=min(
+            max_in_flight_jobs * max_spool_bytes_per_job,
+            20 * 1024 * 1024 * 1024,
+        ),
+        max_spool_bytes_per_job=max_spool_bytes_per_job,
     )
 
 

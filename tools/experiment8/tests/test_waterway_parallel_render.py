@@ -439,6 +439,44 @@ class ParallelRenderLimitTests(unittest.TestCase):
         with self.assertRaisesRegex(GlobalWaterwayPackageError, "worker count"):
             _limits(workers=maximum + 1, max_in_flight_jobs=maximum + 1)
 
+    def test_default_spool_policy_scales_with_in_flight_jobs_and_caps_at_twenty_gibibytes(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        one_worker = store._default_parallel_render_limits(1)
+        ten_workers = store._default_parallel_render_limits(10)
+        maximum_workers = store._default_parallel_render_limits(
+            maximum_parallel_render_workers()
+        )
+
+        self.assertEqual(2, one_worker.max_in_flight_jobs)
+        self.assertEqual(2 * 1024**3, one_worker.max_spool_bytes)
+        self.assertEqual(1024**3, one_worker.max_spool_bytes_per_job)
+        self.assertEqual(20, ten_workers.max_in_flight_jobs)
+        self.assertEqual(20 * 1024**3, ten_workers.max_spool_bytes)
+        self.assertEqual(1024**3, ten_workers.max_spool_bytes_per_job)
+        self.assertEqual(20 * 1024**3, maximum_workers.max_spool_bytes)
+
+        for invalid in (0, maximum_parallel_render_workers() + 1):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "worker count|resource bound",
+            ):
+                store._default_parallel_render_limits(invalid)
+
+    def test_default_spool_policy_rejects_wrong_worker_types_before_arithmetic(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        for invalid in (True, False, "", b"", []):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "worker count",
+            ):
+                store._default_parallel_render_limits(invalid)
+
 
 class DurableProgressFileTests(unittest.TestCase):
     def _assert_process_death_progress_transition(
@@ -1542,6 +1580,110 @@ class ParallelSpoolOwnershipTests(unittest.TestCase):
 
 
 class ParallelFeatureRendererTests(unittest.TestCase):
+    def test_workers_ten_defaults_reserve_ten_ordinary_jobs_with_exact_bounds(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        gibibyte = 1024**3
+        destination_reserve = 1_500_000_000
+        limits = store._default_parallel_render_limits(10)
+        features = tuple(_feature(source_id) for source_id in range(1, 1_001))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                features,
+                factory,
+                limits=limits,
+                free_bytes=destination_reserve + 10 * gibibyte,
+            )
+            self.addCleanup(renderer.close)
+
+            renderer._submit_until_blocked()
+
+            executor = factory.instances[0]
+            decoded_jobs = tuple(
+                decode_feature_batch_job(arguments[0])
+                for _future, function, arguments in executor.submissions
+                if function is render_feature_batch_job
+            )
+            self.assertEqual(10, len(decoded_jobs))
+            self.assertEqual(10, executor.peak_jobs)
+            self.assertEqual(
+                [(start, start + 100) for start in range(0, 1_000, 100)],
+                [
+                    (job.start_ordinal, job.start_ordinal + len(job.features))
+                    for job in decoded_jobs
+                ],
+            )
+            self.assertEqual(
+                list(range(1, 1_001)),
+                [feature.source_id for job in decoded_jobs for feature in job.features],
+            )
+            point_counts = tuple(
+                sum(
+                    len(part)
+                    for feature in job.features
+                    for part in feature.parts
+                )
+                for job in decoded_jobs
+            )
+            input_byte_counts = tuple(
+                len(arguments[0])
+                for _future, _function, arguments in executor.submissions
+            )
+            self.assertEqual((300,) * 10, point_counts)
+            self.assertTrue(
+                all(count <= limits.max_points_per_job for count in point_counts)
+            )
+            self.assertLessEqual(sum(point_counts), limits.max_in_flight_points)
+            self.assertTrue(
+                all(
+                    count <= limits.max_input_bytes_per_job
+                    for count in input_byte_counts
+                )
+            )
+            self.assertLessEqual(
+                sum(input_byte_counts),
+                limits.max_in_flight_input_bytes,
+            )
+            self.assertEqual((gibibyte,) * 10, tuple(
+                job.spool_byte_quota for job in decoded_jobs
+            ))
+            actual, reserved_growth, accounted = renderer._inspect_spool_inventory()
+            self.assertEqual(0, actual)
+            self.assertEqual(10 * gibibyte, reserved_growth)
+            self.assertEqual(10 * gibibyte, accounted)
+            self.assertLessEqual(accounted, limits.max_spool_bytes)
+
+    def test_default_limits_reject_insufficient_destination_reserve_before_submit(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        limits = store._default_parallel_render_limits(1)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                (_feature(1_001),),
+                factory,
+                limits=limits,
+                free_bytes=1_500_000_000 + limits.max_spool_bytes_per_job - 1,
+            )
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "capacity|space|reserve",
+            ):
+                renderer.next_batch()
+
+            self.assertEqual([], factory.instances[0].submissions)
+
     def test_inventory_reconciles_atomic_temp_to_final_publication_during_scan(self) -> None:
         from tools.experiment8 import waterway_parallel_render as parallel
 

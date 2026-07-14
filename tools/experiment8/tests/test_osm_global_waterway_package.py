@@ -1947,7 +1947,7 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                     "maxInFlightPoints": 1_048_576,
                     "maxInputBytesPerJob": 128 * 1024 * 1024,
                     "maxPointsPerJob": 524_288,
-                    "maxSpoolBytes": 2 * 1024 * 1024 * 1024,
+                    "maxSpoolBytes": 4 * 1024 * 1024 * 1024,
                     "maxSpoolBytesPerJob": 1024 * 1024 * 1024,
                 },
                 document["hardBounds"],
