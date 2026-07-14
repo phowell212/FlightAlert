@@ -6441,6 +6441,89 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                 self._snapshot_database(prepared["database"]),
             )
 
+    def test_recovery_hashes_database_before_windows_write_reservation(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_connect = recovery.sqlite3.connect
+            real_identity = recovery.source_module._stream_identity
+            connections = []
+
+            def recording_connect(*args, **kwargs):
+                connection = real_connect(*args, **kwargs)
+                connections.append(connection)
+                return connection
+
+            def reject_locked_database_hash(path, label):
+                if label == "waterway recovery source database":
+                    self.assertTrue(connections)
+                    self.assertFalse(
+                        connections[-1].in_transaction,
+                        "Windows cannot stream SQLite lock bytes after BEGIN IMMEDIATE",
+                    )
+                return real_identity(path, label)
+
+            with patch.object(
+                recovery.sqlite3,
+                "connect",
+                side_effect=recording_connect,
+            ), patch.object(
+                recovery.source_module,
+                "_stream_identity",
+                side_effect=reject_locked_database_hash,
+            ):
+                result = self._recover(prepared, pause_after_features=2)
+
+            self.assertEqual("paused", result.state)
+
+    def test_recovery_rejects_database_drift_between_hash_and_write_reservation(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_signature = recovery._recovery_database_stat_signature
+            drifted = False
+            signature_calls = 0
+
+            def drift_after_post_hash_signature(path):
+                nonlocal drifted, signature_calls
+                signature = real_signature(path)
+                signature_calls += 1
+                if signature_calls == 2:
+                    external = sqlite3.connect(prepared["database"])
+                    try:
+                        store._meta_set(
+                            external,
+                            "syntheticPreReservationWriter",
+                            {"committed": True},
+                        )
+                        external.commit()
+                    finally:
+                        external.close()
+                    drifted = True
+                return signature
+
+            with patch.object(
+                recovery,
+                "_recovery_database_stat_signature",
+                side_effect=drift_after_post_hash_signature,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "database changed between identity and write reservation",
+            ):
+                self._recover(prepared)
+
+            self.assertTrue(drifted)
+
     def test_recovery_rechecks_output_paths_under_write_reservation(self) -> None:
         from tools.experiment8 import osm_global_waterway_recovery as recovery
         from tools.experiment8.osm_global_waterway_package import (

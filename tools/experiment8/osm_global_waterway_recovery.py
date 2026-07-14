@@ -1072,6 +1072,29 @@ def _require_destructive_inputs_current(
         )
 
 
+def _recovery_database_stat_signature(database_path: Path) -> tuple[int, ...]:
+    try:
+        status = os.lstat(database_path)
+    except OSError as error:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery source database is unavailable"
+        ) from error
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or getattr(status, "st_file_attributes", 0) & store._REPARSE_POINT
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery source database is not one regular non-link file"
+        )
+    return (
+        int(status.st_dev),
+        int(status.st_ino),
+        int(status.st_size),
+        int(status.st_mtime_ns),
+        int(status.st_ctime_ns),
+    )
+
+
 def _reset_renderer_state(
     connection: sqlite3.Connection,
     *,
@@ -1089,7 +1112,43 @@ def _reset_renderer_state(
 ) -> _RecoveryPlan:
     updated_plan = plan
     try:
+        if connection.in_transaction:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery source identity requires an idle SQLite connection"
+            )
+        data_version_before_hash = int(
+            connection.execute("PRAGMA data_version").fetchone()[0]
+        )
+        database_signature_before_hash = _recovery_database_stat_signature(
+            database_path
+        )
+        database_identity = source_module._stream_identity(
+            database_path, "waterway recovery source database"
+        )
+        database_signature_after_hash = _recovery_database_stat_signature(
+            database_path
+        )
+        if database_signature_after_hash != database_signature_before_hash:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery database changed while computing its identity"
+            )
+        if database_identity != _fact_document(
+            authority.database_bytes, authority.database_sha256
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway recovery database identity differs from exact incident"
+            )
+
         connection.execute("BEGIN IMMEDIATE")
+        if (
+            int(connection.execute("PRAGMA data_version").fetchone()[0])
+            != data_version_before_hash
+            or _recovery_database_stat_signature(database_path)
+            != database_signature_after_hash
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway recovery database changed between identity and write reservation"
+            )
         if progress_validator is not None:
             progress_validator()
         _require_reset_boundary(
@@ -1100,15 +1159,6 @@ def _reset_renderer_state(
             authority=authority,
             plan=plan,
         )
-        database_identity = source_module._stream_identity(
-            database_path, "waterway recovery source database"
-        )
-        if database_identity != _fact_document(
-            authority.database_bytes, authority.database_sha256
-        ):
-            raise GlobalWaterwayPackageError(
-                "waterway recovery database identity differs from exact incident"
-            )
         for key, raw in plan.incident_meta:
             actual = _raw_meta(connection, key)
             if actual is None or actual[0] != raw:
