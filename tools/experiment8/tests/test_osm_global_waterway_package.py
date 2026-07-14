@@ -896,10 +896,17 @@ class GlobalWaterwayCliTests(unittest.TestCase):
         self.assertEqual(300, arguments.pause_after_features)
         self.assertEqual(Path("progress.json"), arguments.progress_file)
 
+        maximum_pause = 999_999_999_999
+        maximum_arguments = pipeline._argument_parser().parse_args(
+            required + ["--pause-after-features", str(maximum_pause)]
+        )
+        self.assertEqual(maximum_pause, maximum_arguments.pause_after_features)
+
         for option, value in (
             ("--render-workers", "0"),
             ("--render-workers", str(maximum_workers + 1)),
             ("--pause-after-features", "0"),
+            ("--pause-after-features", str(maximum_pause + 1)),
         ):
             with self.subTest(option=option, value=value), redirect_stderr(
                 io.StringIO()
@@ -1014,6 +1021,15 @@ class GlobalWaterwayCliTests(unittest.TestCase):
                 store._validate_render_progress_location(
                     output / "progress.json", output
                 )
+
+            if os.name == "nt":
+                cased_progress = Path(str(output).swapcase()) / "progress.json"
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "progress.*output|outside"
+                ):
+                    store._validate_render_progress_location(
+                        cased_progress, output
+                    )
 
             real_parent = root / "real-progress"
             real_parent.mkdir()
@@ -2054,6 +2070,10 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                     + "\n"
                 ).encode("utf-8")
                 progress.write_bytes(tampered)
+                database = root / "resumed-work" / "waterway-state.sqlite"
+                database_before = database.read_bytes()
+                database_stat = database.stat()
+                progress_stat = progress.stat()
                 with self.assertRaisesRegex(GlobalWaterwayPackageError, pattern):
                     self._build(
                         root,
@@ -2062,6 +2082,15 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                         checkpoint_features=100,
                     )
                 self.assertEqual(tampered, progress.read_bytes())
+                self.assertEqual(database_before, database.read_bytes())
+                self.assertEqual(
+                    (database_stat.st_dev, database_stat.st_ino),
+                    (database.stat().st_dev, database.stat().st_ino),
+                )
+                self.assertEqual(
+                    (progress_stat.st_dev, progress_stat.st_ino),
+                    (progress.stat().st_dev, progress.stat().st_ino),
+                )
 
     def test_every_progress_hard_bound_is_policy_authenticated(self) -> None:
         from tools.experiment8 import osm_global_waterway_store as store
@@ -2138,6 +2167,323 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                     GlobalWaterwayPackageError, "unknown|malformed"
                 ):
                     publisher.reconcile(0)
+
+    def test_pre_ingest_progress_and_pause_validation_leave_no_mutation(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        for evidence_kind in ("unknown", "other-run"):
+            with self.subTest(evidence=evidence_kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                progress = root / "progress.json"
+                if evidence_kind == "unknown":
+                    progress.write_bytes(b"unknown progress\n")
+                else:
+                    publisher = store._RenderProgressPublisher(
+                        progress,
+                        render_run_sha256="0" * 64,
+                        checkpoint_features=2,
+                        total_admitted_features=0,
+                        initial_committed_features=0,
+                        limits=store._default_parallel_render_limits(),
+                    )
+                    publisher.publish(0)
+                before = progress.stat()
+                before_raw = progress.read_bytes()
+
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "progress|render run|SQLite|database|unknown|malformed",
+                ):
+                    self._build(root, "fresh", progress_file=progress)
+
+                after = progress.stat()
+                self.assertEqual(before_raw, progress.read_bytes())
+                self.assertEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino))
+                self.assertEqual(before.st_mtime_ns, after.st_mtime_ns)
+                self.assertFalse((root / "fresh-work").exists())
+                self.assertFalse((root / "fresh").exists())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "pause.*maximum|pause.*range|pause.*invalid"
+            ):
+                self._build(
+                    root,
+                    "oversized-pause",
+                    pause_after_features=1_000_000_000_000,
+                )
+            self.assertFalse((root / "oversized-pause-work").exists())
+            self.assertFalse((root / "oversized-pause").exists())
+
+    def test_progress_exact_integer_bounds_and_duplicate_guard(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            progress = root / "progress.json"
+            limits = store._default_parallel_render_limits()
+            publisher = store._RenderProgressPublisher(
+                progress,
+                render_run_sha256="3" * 64,
+                checkpoint_features=1,
+                total_admitted_features=1,
+                initial_committed_features=0,
+                limits=limits,
+            )
+            publisher.publish(0)
+            valid = json.loads(progress.read_bytes())
+
+            for key in ("checkpointFeatures", "totalAdmittedFeatures"):
+                with self.subTest(boolean_field=key):
+                    mutated = dict(valid)
+                    mutated[key] = True
+                    progress.write_bytes(
+                        (
+                            json.dumps(
+                                mutated,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            )
+                            + "\n"
+                        ).encode("utf-8")
+                    )
+                    candidate = store._RenderProgressPublisher(
+                        progress,
+                        render_run_sha256="3" * 64,
+                        checkpoint_features=1,
+                        total_admitted_features=1,
+                        initial_committed_features=0,
+                        limits=limits,
+                    )
+                    with self.assertRaisesRegex(
+                        GlobalWaterwayPackageError, "checkpoint|admitted|count|malformed"
+                    ):
+                        candidate.reconcile(0)
+
+            maximum = (1 << 63) - 1
+            boundary_path = root / "boundary.json"
+            boundary = store._RenderProgressPublisher(
+                boundary_path,
+                render_run_sha256="4" * 64,
+                checkpoint_features=maximum,
+                total_admitted_features=0,
+                initial_committed_features=0,
+                limits=limits,
+            )
+            boundary.publish(0)
+            resumed_boundary = store._RenderProgressPublisher(
+                boundary_path,
+                render_run_sha256="4" * 64,
+                checkpoint_features=maximum,
+                total_admitted_features=0,
+                initial_committed_features=0,
+                limits=limits,
+            )
+            resumed_boundary.reconcile(0)
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "checkpoint.*invalid|checkpoint.*bound"
+            ):
+                store._RenderProgressPublisher(
+                    root / "too-large.json",
+                    render_run_sha256="5" * 64,
+                    checkpoint_features=maximum + 1,
+                    total_admitted_features=0,
+                    initial_committed_features=0,
+                    limits=limits,
+                )
+
+            duplicate_path = root / "duplicate.json"
+            duplicate = store._RenderProgressPublisher(
+                duplicate_path,
+                render_run_sha256="6" * 64,
+                checkpoint_features=2,
+                total_admitted_features=0,
+                initial_committed_features=0,
+                limits=limits,
+            )
+            duplicate.publish(0)
+            original = duplicate_path.read_bytes()
+            tampered_buffer = bytearray(original)
+            tampered_buffer[original.index(b"6" * 64)] = ord("7")
+            tampered = bytes(tampered_buffer)
+            self.assertEqual(len(original), len(tampered))
+            self.assertNotEqual(original, tampered)
+            with duplicate_path.open("r+b", buffering=0) as handle:
+                handle.write(tampered)
+                handle.flush()
+                os.fsync(handle.fileno())
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "progress.*changed|bytes|identity"
+            ):
+                duplicate.publish(0)
+
+    def test_progress_session_excludes_appearance_during_internal_ingest_commit(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.waterway_parallel_render import DurableProgressFile
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            progress = root / "progress.json"
+            real_commit = store._progress_guarded_commit
+            attempted_at_ingest_checkpoint = False
+
+            def attempt_competing_publisher(connection, validator) -> None:
+                nonlocal attempted_at_ingest_checkpoint
+                checkpoint = store._meta_get(connection, "checkpoint")
+                if (
+                    validator is not None
+                    and not attempted_at_ingest_checkpoint
+                    and isinstance(checkpoint, dict)
+                    and checkpoint.get("inputObjects", 0) > 0
+                    and checkpoint.get("ingestComplete") is False
+                ):
+                    attempted_at_ingest_checkpoint = True
+                    with self.assertRaisesRegex(
+                        GlobalWaterwayPackageError, "session.*owned"
+                    ):
+                        DurableProgressFile(progress, acquire_session=True)
+                    self.assertFalse(progress.exists())
+                real_commit(connection, validator)
+
+            with patch.object(
+                store,
+                "_progress_guarded_commit",
+                side_effect=attempt_competing_publisher,
+            ):
+                result = self._build(root, "guarded-ingest", progress_file=progress)
+
+            self.assertEqual("complete", result.state)
+            self.assertTrue(attempted_at_ingest_checkpoint)
+            self.assertTrue(progress.is_file())
+            released = DurableProgressFile(progress, acquire_session=True)
+            released.close()
+
+    def test_same_inode_progress_rewrite_is_rejected_at_fresh_resume_boundaries(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        for boundary, target_preflight in (("pre-ingest", 1), ("stage", 2)):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                name = f"same-inode-{boundary}"
+                evidence = root / "evidence"
+                evidence.mkdir()
+                progress = evidence / "progress.json"
+                paused = self._build(
+                    root,
+                    name,
+                    pause_after_features=3,
+                    progress_file=progress,
+                )
+                self.assertEqual("paused", paused.state)
+                database = root / f"{name}-work" / "waterway-state.sqlite"
+                database_before = database.read_bytes()
+                database_stat = database.stat()
+                renderer_before = self._renderer_snapshot(database)
+                connection = sqlite3.connect(database)
+                try:
+                    render_meta_before = tuple(
+                        connection.execute(
+                            "SELECT key,value FROM meta WHERE key IN "
+                            "('renderRunIdentity','renderCheckpoint','peaks') "
+                            "ORDER BY key"
+                        )
+                    )
+                finally:
+                    connection.close()
+                progress_stat = progress.stat()
+                real_preflight = store._RenderProgressPublisher.preflight
+                calls = 0
+                rewrote = False
+                rewrite_blocked = False
+
+                def rewrite_after_target_preflight(
+                    publisher, committed_features: int
+                ) -> None:
+                    nonlocal calls, rewrote, rewrite_blocked
+                    real_preflight(publisher, committed_features)
+                    calls += 1
+                    if calls != target_preflight:
+                        return
+                    raw = progress.read_bytes()
+                    changed = bytearray(raw)
+                    marker = raw.index(b'"renderRunIdentitySha256":"') + len(
+                        b'"renderRunIdentitySha256":"'
+                    )
+                    changed[marker] = (
+                        ord("0") if changed[marker] != ord("0") else ord("1")
+                    )
+                    try:
+                        with progress.open("r+b", buffering=0) as handle:
+                            handle.write(changed)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                    except OSError as error:
+                        rewrite_blocked = True
+                        raise GlobalWaterwayPackageError(
+                            "progress rewrite denied by session ownership"
+                        ) from error
+                    rewrote = True
+
+                with patch.object(
+                    store._RenderProgressPublisher,
+                    "preflight",
+                    new=rewrite_after_target_preflight,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "progress.*changed|progress.*bytes|another render run|identity|"
+                    "progress.*denied",
+                ):
+                    self._build(root, name, progress_file=progress)
+
+                self.assertTrue(rewrote or rewrite_blocked)
+                self.assertGreaterEqual(calls, target_preflight)
+                self.assertEqual(
+                    (progress_stat.st_dev, progress_stat.st_ino),
+                    (progress.stat().st_dev, progress.stat().st_ino),
+                )
+                if boundary == "pre-ingest":
+                    self.assertEqual(database_before, database.read_bytes())
+                self.assertEqual(renderer_before, self._renderer_snapshot(database))
+                connection = sqlite3.connect(database)
+                try:
+                    self.assertEqual(
+                        render_meta_before,
+                        tuple(
+                            connection.execute(
+                                "SELECT key,value FROM meta WHERE key IN "
+                                "('renderRunIdentity','renderCheckpoint','peaks') "
+                                "ORDER BY key"
+                            )
+                        ),
+                    )
+                finally:
+                    connection.close()
+                self.assertEqual(
+                    (database_stat.st_dev, database_stat.st_ino),
+                    (database.stat().st_dev, database.stat().st_ino),
+                )
+                self.assertFalse((root / name).exists())
 
     def test_commit_before_progress_failure_is_stale_behind_and_repairs_on_resume(self) -> None:
         import sqlite3
@@ -4176,6 +4522,104 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
 
             self.assertEqual(before, self._snapshot_database(prepared["database"]))
             self.assertEqual(b"unknown progress\n", progress.read_bytes())
+
+    def test_oversized_pause_is_rejected_before_destructive_recovery_reset(self) -> None:
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepare_recovery(root)
+            before = self._snapshot_database(prepared["database"])
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "pause.*maximum|pause.*range|pause.*invalid"
+            ):
+                self._recover(
+                    prepared,
+                    pause_after_features=1_000_000_000_000,
+                )
+
+            self.assertEqual(before, self._snapshot_database(prepared["database"]))
+            self.assertFalse(prepared["output"].exists())
+
+    def test_same_inode_progress_rewrite_is_rejected_before_recovery_reset(self) -> None:
+        import shutil
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepare_recovery(root)
+            incident_database = prepared["database"].read_bytes()
+            progress = root / "progress.json"
+            minted = self._recover(
+                prepared,
+                pause_after_features=2,
+                progress_file=progress,
+            )
+            self.assertEqual("paused", minted.state)
+            self.assertTrue(progress.is_file())
+            progress_document = json.loads(progress.read_bytes())
+            progress_document["committedFeatures"] = 0
+            progress.write_bytes(self._canonical(progress_document))
+
+            prepared["database"].write_bytes(incident_database)
+            for spool in prepared["work"].glob("waterway-render-spool-*"):
+                self.assertEqual(prepared["work"], spool.parent)
+                shutil.rmtree(spool)
+            before = self._snapshot_database(prepared["database"])
+            progress_before = progress.stat()
+            real_preflight = store._RenderProgressPublisher.preflight
+            rewrote = False
+            rewrite_blocked = False
+
+            def rewrite_after_preflight(publisher, committed_features: int) -> None:
+                nonlocal rewrote, rewrite_blocked
+                real_preflight(publisher, committed_features)
+                if rewrote:
+                    return
+                raw = progress.read_bytes()
+                changed = bytearray(raw)
+                marker = raw.index(b'"renderRunIdentitySha256":"') + len(
+                    b'"renderRunIdentitySha256":"'
+                )
+                changed[marker] = ord("0") if changed[marker] != ord("0") else ord("1")
+                try:
+                    with progress.open("r+b", buffering=0) as handle:
+                        handle.write(changed)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except OSError as error:
+                    rewrite_blocked = True
+                    raise GlobalWaterwayPackageError(
+                        "progress rewrite denied by session ownership"
+                    ) from error
+                rewrote = True
+
+            with patch.object(
+                store._RenderProgressPublisher,
+                "preflight",
+                new=rewrite_after_preflight,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "progress.*changed|progress.*bytes|another render run|identity|"
+                "progress.*denied",
+            ):
+                self._recover(prepared, progress_file=progress)
+
+            self.assertTrue(rewrote or rewrite_blocked)
+            progress_after = progress.stat()
+            self.assertEqual(
+                (progress_before.st_dev, progress_before.st_ino),
+                (progress_after.st_dev, progress_after.st_ino),
+            )
+            self.assertEqual(before, self._snapshot_database(prepared["database"]))
+            self.assertFalse(prepared["output"].exists())
 
     def _validate_recovery(self, prepared, *, size_policy_mode="budgeted-release-v1"):
         from tools.experiment8 import osm_global_waterway_package as pipeline

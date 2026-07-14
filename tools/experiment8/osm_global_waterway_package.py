@@ -2510,7 +2510,10 @@ def recover_global_waterway_package(
         raise GlobalWaterwayPackageError(
             "waterway recovery paths must be pathlib.Path values"
         )
-    from .waterway_parallel_render import maximum_parallel_render_workers
+    from .waterway_parallel_render import (
+        maximum_parallel_render_features,
+        maximum_parallel_render_workers,
+    )
 
     if (
         type(render_workers) is not int
@@ -2518,10 +2521,11 @@ def recover_global_waterway_package(
     ):
         raise GlobalWaterwayPackageError("waterway recovery render worker count is invalid")
     if pause_after_features is not None and (
-        type(pause_after_features) is not int or pause_after_features <= 0
+        type(pause_after_features) is not int
+        or not 1 <= pause_after_features <= maximum_parallel_render_features()
     ):
         raise GlobalWaterwayPackageError(
-            "waterway recovery pause feature count must be positive"
+            "waterway recovery pause feature count is outside its valid range"
         )
     if progress_file is not None:
         from .osm_global_waterway_store import _validate_render_progress_location
@@ -2668,14 +2672,19 @@ def _render_worker_count(raw: str) -> int:
 
 
 def _pause_feature_count(raw: str) -> int:
+    from .waterway_parallel_render import maximum_parallel_render_features
+
+    maximum = maximum_parallel_render_features()
     try:
         value = int(raw)
     except (TypeError, ValueError) as error:
         raise argparse.ArgumentTypeError(
-            "pause feature count must be positive"
+            f"pause feature count must be between 1 and {maximum}"
         ) from error
-    if not 1 <= value <= _MAX_SIGNED_63:
-        raise argparse.ArgumentTypeError("pause feature count must be positive")
+    if not 1 <= value <= maximum:
+        raise argparse.ArgumentTypeError(
+            f"pause feature count must be between 1 and {maximum}"
+        )
     return value
 
 

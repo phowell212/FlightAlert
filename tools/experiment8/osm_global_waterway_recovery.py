@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from . import osm_global_waterway_package as source_module
 from . import osm_global_waterway_store as store
@@ -1085,10 +1085,13 @@ def _reset_renderer_state(
     root_ids_path: Path,
     source_binding: WaterwaySourceBinding,
     expected_code_identities: Mapping[str, object],
+    progress_validator: Callable[[], None] | None = None,
 ) -> _RecoveryPlan:
     updated_plan = plan
     try:
         connection.execute("BEGIN IMMEDIATE")
+        if progress_validator is not None:
+            progress_validator()
         _require_reset_boundary(
             database_path=database_path,
             output_directory=output_directory,
@@ -1152,6 +1155,8 @@ def _reset_renderer_state(
             database_path=database_path,
             output_directory=output_directory,
         )
+        if progress_validator is not None:
+            progress_validator()
         for table in _RENDERER_TABLES:
             connection.execute(f"DELETE FROM {table}")
         connection.execute(
@@ -1215,7 +1220,7 @@ def _reset_renderer_state(
             source_counts=plan.source_counts,
             renderer_reset_counts=plan.renderer_reset_counts,
         )
-        connection.commit()
+        store._progress_guarded_commit(connection, progress_validator)
     except BaseException:
         if connection.in_transaction:
             connection.rollback()
@@ -1439,6 +1444,18 @@ def _recover_bound_global_waterway_package(
     size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     from .osm_global_waterway_renderer import classifier_identity_sha256
+    from .waterway_parallel_render import (
+        DurableProgressFile,
+        maximum_parallel_render_features,
+    )
+
+    if pause_after_features is not None and (
+        type(pause_after_features) is not int
+        or not 1 <= pause_after_features <= maximum_parallel_render_features()
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery pause feature count is outside its valid range"
+        )
 
     if production_authority is not source_module._PRODUCTION_RENDER_AUTHORITY:
         raise GlobalWaterwayPackageError(
@@ -1478,8 +1495,15 @@ def _recover_bound_global_waterway_package(
             "waterway recovery size-policy module identity differs"
         )
     classifier = classifier_identity_sha256()
-    connection = sqlite3.connect(database_path)
+    progress_durable = None
+    connection = None
+    progress_preflight = None
     try:
+        if progress_file is not None:
+            progress_durable = DurableProgressFile(
+                progress_file, acquire_session=True
+            )
+        connection = sqlite3.connect(database_path)
         trusted_data_version = int(
             connection.execute("PRAGMA data_version").fetchone()[0]
         )
@@ -1538,6 +1562,7 @@ def _recover_bound_global_waterway_package(
                 total_admitted_features=total_admitted_features,
                 initial_committed_features=progress_prefix,
                 limits=parallel_limits,
+                _durable_file=progress_durable,
             )
             progress_preflight.preflight(progress_prefix)
         if not plan.resumed:
@@ -1553,7 +1578,14 @@ def _recover_bound_global_waterway_package(
                 root_ids_path=root_ids_path,
                 source_binding=source_binding,
                 expected_code_identities=code_identities,
+                progress_validator=(
+                    progress_preflight.require_unchanged
+                    if progress_preflight is not None
+                    else None
+                ),
             )
+        if progress_preflight is not None:
+            progress_preflight.require_unchanged()
         store._configure_render_connection(connection)
         complete = store._stage_renderer_records(
             connection,
@@ -1566,7 +1598,9 @@ def _recover_bound_global_waterway_package(
             trusted_data_version=trusted_data_version,
             parallel_limits=parallel_limits,
             progress_file=progress_file,
+            progress_durable=progress_durable,
         )
+        progress_preflight = None
         if not complete:
             return GlobalWaterwayBuildResult(
                 "paused",
@@ -1606,7 +1640,10 @@ def _recover_bound_global_waterway_package(
         )
         return GlobalWaterwayBuildResult("complete", output_directory, receipt)
     finally:
-        connection.close()
+        if progress_durable is not None:
+            progress_durable.close()
+        if connection is not None:
+            connection.close()
 
 
 __all__ = ["WaterwayRenderRecoveryAuthority"]

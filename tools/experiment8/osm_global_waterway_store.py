@@ -476,6 +476,17 @@ def _meta_set(connection: sqlite3.Connection, key: str, value: object) -> None:
     )
 
 
+def _progress_guarded_commit(
+    connection: sqlite3.Connection,
+    progress_validator: Callable[[], None] | None,
+) -> None:
+    if progress_validator is not None:
+        progress_validator()
+    connection.commit()
+    if progress_validator is not None:
+        progress_validator()
+
+
 def _sqlite_blob(value: object, label: str) -> bytes:
     if not isinstance(value, (bytes, bytearray, memoryview)):
         raise GlobalWaterwayPackageError(
@@ -510,8 +521,13 @@ def _run_identity(
 def _open_database(
     path: Path,
     run_identity: Mapping[str, object],
+    progress_validator: Callable[[], None] | None = None,
 ) -> tuple[sqlite3.Connection, bool]:
+    if progress_validator is not None:
+        progress_validator()
     path.parent.mkdir(parents=True, exist_ok=True)
+    if progress_validator is not None:
+        progress_validator()
     existed = path.exists()
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA journal_mode=DELETE")
@@ -520,6 +536,8 @@ def _open_database(
     connection.execute("PRAGMA mmap_size=0")
     connection.execute("PRAGMA cache_size=-65536")
     if not existed:
+        if progress_validator is not None:
+            progress_validator()
         connection.executescript(
             "CREATE TABLE meta(key TEXT PRIMARY KEY,value BLOB NOT NULL) WITHOUT ROWID;"
             "CREATE TABLE roots(kind INTEGER NOT NULL,id INTEGER NOT NULL,"
@@ -589,7 +607,7 @@ def _open_database(
                 "recordsPerTile": 0,
             },
         )
-        connection.commit()
+        _progress_guarded_commit(connection, progress_validator)
     elif _meta_get(connection, "runIdentity") != dict(run_identity):
         connection.close()
         raise GlobalWaterwayPackageError(
@@ -598,7 +616,11 @@ def _open_database(
     return connection, not existed
 
 
-def _insert_roots(connection: sqlite3.Connection, root_ids_path: Path) -> tuple[int, int]:
+def _insert_roots(
+    connection: sqlite3.Connection,
+    root_ids_path: Path,
+    progress_validator: Callable[[], None] | None = None,
+) -> tuple[int, int]:
     previous = (0, 0)
     counts = {1: 0, 2: 0}
     with root_ids_path.open("rb") as handle:
@@ -631,7 +653,7 @@ def _insert_roots(connection: sqlite3.Connection, root_ids_path: Path) -> tuple[
             counts[key[0]] += 1
     if not sum(counts.values()):
         raise GlobalWaterwayPackageError("root-ID file is empty")
-    connection.commit()
+    _progress_guarded_commit(connection, progress_validator)
     return counts[1], counts[2]
 
 
@@ -806,16 +828,17 @@ def _commit_checkpoint(
     database_path: Path,
     checkpoint: Mapping[str, object],
     peaks: dict[str, int],
+    progress_validator: Callable[[], None] | None = None,
 ) -> None:
     _meta_set(connection, "checkpoint", dict(checkpoint))
     _meta_set(connection, "peaks", peaks)
-    connection.commit()
+    _progress_guarded_commit(connection, progress_validator)
     peaks["observedPersistentSqliteBytesAtCheckpoints"] = max(
         peaks["observedPersistentSqliteBytesAtCheckpoints"],
         _database_bytes(database_path),
     )
     _meta_set(connection, "peaks", peaks)
-    connection.commit()
+    _progress_guarded_commit(connection, progress_validator)
 
 
 def _signature(status: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -879,6 +902,7 @@ def _ingest(
     checkpoint_objects: int,
     pause_after_objects: int | None,
     authenticate_prefix: bool,
+    progress_validator: Callable[[], None] | None = None,
 ) -> bool:
     checkpoint = dict(_meta_get(connection, "checkpoint") or {})
     if authenticate_prefix:
@@ -937,11 +961,23 @@ def _ingest(
             previous_id = value.object_id
             since_commit += 1
             if since_commit >= checkpoint_objects:
-                _commit_checkpoint(connection, database_path, checkpoint, peaks)
+                _commit_checkpoint(
+                    connection,
+                    database_path,
+                    checkpoint,
+                    peaks,
+                    progress_validator,
+                )
                 since_commit = 0
             if pause_after_objects is not None and total >= pause_after_objects:
                 _require_open_unchanged(handle, opl_path, open_signature)
-                _commit_checkpoint(connection, database_path, checkpoint, peaks)
+                _commit_checkpoint(
+                    connection,
+                    database_path,
+                    checkpoint,
+                    peaks,
+                    progress_validator,
+                )
                 return False
         _require_open_unchanged(handle, opl_path, open_signature)
     finally:
@@ -949,7 +985,13 @@ def _ingest(
     if offset != source_binding.closure_opl_bytes:
         raise GlobalWaterwayPackageError("closure OPL terminal offset differs from binding")
     checkpoint["ingestComplete"] = True
-    _commit_checkpoint(connection, database_path, checkpoint, peaks)
+    _commit_checkpoint(
+        connection,
+        database_path,
+        checkpoint,
+        peaks,
+        progress_validator,
+    )
     return True
 
 
@@ -2887,9 +2929,10 @@ def _authenticate_admission_prefix(
 def _commit_admission_checkpoint(
     connection: sqlite3.Connection,
     checkpoint: Mapping[str, object],
+    progress_validator: Callable[[], None] | None = None,
 ) -> None:
     _meta_set(connection, "admissionCheckpoint", dict(checkpoint))
-    connection.commit()
+    _progress_guarded_commit(connection, progress_validator)
 
 
 def _admission_receipt_document(
@@ -2967,6 +3010,7 @@ def _admit_waterway_candidates(
     ingest_semantic_sha256: str,
     checkpoint_roots: int,
     pause_after_roots: int | None,
+    progress_validator: Callable[[], None] | None = None,
 ) -> tuple[bool, Mapping[str, object]]:
     preexisting_receipt = _meta_get(connection, "admissionReceipt")
     if (
@@ -3004,7 +3048,7 @@ def _admit_waterway_candidates(
             reason_counts={reason: 0 for reason in _REASON_CODE_ORDER},
             fatal_count=0,
         )
-        _commit_admission_checkpoint(connection, checkpoint)
+        _commit_admission_checkpoint(connection, checkpoint, progress_validator)
     elif stored_identity != admission_identity:
         raise GlobalWaterwayPackageError(
             "waterway admission identity differs from source/run/policy identities"
@@ -3114,15 +3158,15 @@ def _admit_waterway_candidates(
             fatal_count=0,
         )
         if since_commit >= checkpoint_roots:
-            _commit_admission_checkpoint(connection, checkpoint)
+            _commit_admission_checkpoint(connection, checkpoint, progress_validator)
             since_commit = 0
         if (
             pause_after_roots is not None
             and processed_this_call >= pause_after_roots
         ):
-            _commit_admission_checkpoint(connection, checkpoint)
+            _commit_admission_checkpoint(connection, checkpoint, progress_validator)
             return False, MappingProxyType(checkpoint)
-    _commit_admission_checkpoint(connection, checkpoint)
+    _commit_admission_checkpoint(connection, checkpoint, progress_validator)
     receipt = _admission_receipt_document(
         connection,
         aggregate=aggregate,
@@ -3139,7 +3183,7 @@ def _admit_waterway_candidates(
         ingest_semantic_sha256=ingest_semantic_sha256,
     )
     _meta_set(connection, "admissionReceipt", receipt)
-    connection.commit()
+    _progress_guarded_commit(connection, progress_validator)
     return True, MappingProxyType(receipt)
 
 
@@ -3153,6 +3197,7 @@ def ingest_global_waterway_closure(
     checkpoint_admission_roots: int = _ADMISSION_CHECKPOINT_ROOTS,
     pause_after_objects: int | None = None,
     pause_after_admission_roots: int | None = None,
+    _progress_validator: Callable[[], None] | None = None,
 ) -> GlobalWaterwayIngestResult:
     """Stream one verified recursive closure into a resumable SQLite source store."""
 
@@ -3198,10 +3243,12 @@ def ingest_global_waterway_closure(
         source_binding, checkpoint_objects, checkpoint_admission_roots
     )
     database_path = work_directory / "waterway-state.sqlite"
-    connection, created = _open_database(database_path, run_identity)
+    connection, created = _open_database(
+        database_path, run_identity, _progress_validator
+    )
     try:
         if created:
-            _insert_roots(connection, root_ids_path)
+            _insert_roots(connection, root_ids_path, _progress_validator)
         else:
             _validate_root_table(connection, root_ids_path)
         complete = _ingest(
@@ -3212,6 +3259,7 @@ def ingest_global_waterway_closure(
             checkpoint_objects=checkpoint_objects,
             pause_after_objects=pause_after_objects,
             authenticate_prefix=not created,
+            progress_validator=_progress_validator,
         )
         run_sha256 = hashlib.sha256(_canonical_json_bytes(run_identity)).hexdigest()
         if not complete:
@@ -3235,6 +3283,7 @@ def ingest_global_waterway_closure(
             ingest_semantic_sha256=semantic_sha256,
             checkpoint_roots=checkpoint_admission_roots,
             pause_after_roots=pause_after_admission_roots,
+            progress_validator=_progress_validator,
         )
         if not admission_complete:
             return GlobalWaterwayIngestResult(
@@ -3273,7 +3322,7 @@ def ingest_global_waterway_closure(
             "state": "complete",
         }
         _meta_set(connection, "ingestReceipt", receipt)
-        connection.commit()
+        _progress_guarded_commit(connection, _progress_validator)
         return GlobalWaterwayIngestResult(
             "complete", database_path, MappingProxyType(receipt)
         )
@@ -3772,17 +3821,37 @@ def _commit_render_checkpoint(
     database_path: Path,
     checkpoint: Mapping[str, object],
     peaks: dict[str, int],
+    progress_validator: Callable[[], None] | None = None,
 ) -> None:
     _meta_set(connection, "renderCheckpoint", dict(checkpoint))
     _meta_set(connection, "peaks", peaks)
-    connection.commit()
+    _progress_guarded_commit(connection, progress_validator)
     observed_bytes = _recovery_adjusted_database_bytes(connection, database_path)
     peaks["observedPersistentSqliteBytesAtCheckpoints"] = max(
         peaks["observedPersistentSqliteBytesAtCheckpoints"],
         observed_bytes,
     )
     _meta_set(connection, "peaks", peaks)
-    connection.commit()
+    _progress_guarded_commit(connection, progress_validator)
+
+
+def _commit_render_checkpoint_with_progress(
+    connection: sqlite3.Connection,
+    database_path: Path,
+    checkpoint: Mapping[str, object],
+    peaks: dict[str, int],
+    progress_publisher: "_RenderProgressPublisher | None",
+) -> None:
+    if progress_publisher is None:
+        _commit_render_checkpoint(connection, database_path, checkpoint, peaks)
+        return
+    _commit_render_checkpoint(
+        connection,
+        database_path,
+        checkpoint,
+        peaks,
+        progress_publisher.require_unchanged,
+    )
 
 
 def _recovery_adjusted_database_bytes(
@@ -3876,7 +3945,7 @@ def _validate_render_progress_location(
         common_path = os.path.commonpath((str(progress_path), str(output_path)))
     except ValueError:
         common_path = ""
-    if common_path == str(output_path):
+    if os.path.normcase(common_path) == os.path.normcase(str(output_path)):
         raise GlobalWaterwayPackageError(
             "waterway render progress file must stay outside the output directory"
         )
@@ -4035,26 +4104,40 @@ class _RenderProgressPublisher:
         total_admitted_features: int,
         initial_committed_features: int,
         limits: object,
+        _durable_file: object | None = None,
     ) -> None:
         from .waterway_parallel_render import DurableProgressFile
 
-        self._file = DurableProgressFile(progress_file)
         self._render_run_sha256 = source_module._require_sha256(
             render_run_sha256, "waterway render progress run identity"
         )
-        if type(checkpoint_features) is not int or checkpoint_features <= 0:
+        if (
+            type(checkpoint_features) is not int
+            or not 1 <= checkpoint_features <= source_module._MAX_SIGNED_63
+        ):
             raise GlobalWaterwayPackageError(
                 "waterway render progress checkpoint count is invalid"
             )
         if (
             type(total_admitted_features) is not int
-            or total_admitted_features < 0
+            or not 0 <= total_admitted_features <= source_module._MAX_SIGNED_63
             or type(initial_committed_features) is not int
             or not 0 <= initial_committed_features <= total_admitted_features
         ):
             raise GlobalWaterwayPackageError(
                 "waterway render progress committed or total count is invalid"
             )
+        if _durable_file is None:
+            self._file = DurableProgressFile(progress_file)
+        elif (
+            type(_durable_file) is not DurableProgressFile
+            or _durable_file.path != Path(os.path.abspath(progress_file))
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway render progress retained file is invalid"
+            )
+        else:
+            self._file = _durable_file
         hard_bounds = _render_progress_hard_bounds(limits)
         self._checkpoint_features = checkpoint_features
         self._total_admitted_features = total_admitted_features
@@ -4095,11 +4178,13 @@ class _RenderProgressPublisher:
             raise GlobalWaterwayPackageError(
                 "existing waterway render progress belongs to another render run"
             )
-        if document.get("checkpointFeatures") != self._checkpoint_features:
+        checkpoint = document.get("checkpointFeatures")
+        if type(checkpoint) is not int or checkpoint != self._checkpoint_features:
             raise GlobalWaterwayPackageError(
                 "existing waterway render progress checkpoint count differs"
             )
-        if document.get("totalAdmittedFeatures") != self._total_admitted_features:
+        total = document.get("totalAdmittedFeatures")
+        if type(total) is not int or total != self._total_admitted_features:
             raise GlobalWaterwayPackageError(
                 "existing waterway render progress admitted count differs"
             )
@@ -4160,17 +4245,30 @@ class _RenderProgressPublisher:
     def preflight(self, committed_features: int) -> None:
         """Authenticate existing evidence without mutating it or SQLite."""
 
+        self._file.require_unchanged()
         self._validated_existing_position(committed_features)
+        self._file.require_unchanged()
+
+    def require_unchanged(self) -> None:
+        self._file.require_unchanged()
+
+    def close(self) -> None:
+        self._file.close()
 
     def reconcile(self, committed_features: int) -> None:
+        self._file.require_unchanged()
         existing_committed = self._validated_existing_position(committed_features)
         if existing_committed is None:
             if committed_features:
                 self.publish(committed_features)
+            else:
+                self._file.require_unchanged()
             return
         self._last_published_features = existing_committed
         if existing_committed < committed_features:
             self.publish(committed_features)
+        else:
+            self._file.require_unchanged()
 
     def publish(self, committed_features: int) -> None:
         if (
@@ -4181,6 +4279,7 @@ class _RenderProgressPublisher:
                 "waterway render progress publication count is invalid"
             )
         if committed_features == self._last_published_features:
+            self._file.require_unchanged()
             return
         elapsed = max(0, time.monotonic_ns() - self._started_ns)
         completed_this_invocation = max(
@@ -4220,14 +4319,24 @@ def _stage_renderer_records(
     parallel_limits: "ParallelRenderLimits | None" = None,
     spool_directory: str | os.PathLike[str] | None = None,
     progress_file: Path | None = None,
+    progress_durable: object | None = None,
 ) -> bool:
     from .waterway_parallel_render import (
         ParallelFeatureRenderer,
         ParallelRenderLimits,
         finish_spool_directory,
+        DurableProgressFile,
+        maximum_parallel_render_features,
         prepare_spool_directory,
     )
 
+    if pause_after_features is not None and (
+        type(pause_after_features) is not int
+        or not 1 <= pause_after_features <= maximum_parallel_render_features()
+    ):
+        raise GlobalWaterwayPackageError(
+            "parallel render pause feature count is outside its valid range"
+        )
     if parallel_limits is None:
         parallel_limits = _default_parallel_render_limits()
     if type(parallel_limits) is not ParallelRenderLimits:
@@ -4242,6 +4351,7 @@ def _stage_renderer_records(
     if type(package_id) is not str:
         raise GlobalWaterwayPackageError("renderer run identity package ID is malformed")
 
+    progress_publisher = None
     try:
         admission = _meta_get(connection, "admissionReceipt")
         if (
@@ -4277,7 +4387,6 @@ def _stage_renderer_records(
         else:
             checkpoint = dict(_meta_get(connection, "renderCheckpoint") or {})
             rendered_prefix = int(checkpoint.get("renderedFeatures", 0))
-        progress_publisher = None
         if progress_file is not None:
             if not isinstance(progress_file, Path):
                 raise GlobalWaterwayPackageError(
@@ -4288,6 +4397,10 @@ def _stage_renderer_records(
                     "SELECT COUNT(*) FROM admission_candidates"
                 ).fetchone()[0]
             )
+            if progress_durable is None:
+                progress_durable = DurableProgressFile(
+                    progress_file, acquire_session=True
+                )
             progress_publisher = _RenderProgressPublisher(
                 progress_file,
                 render_run_sha256=render_run_sha256,
@@ -4295,16 +4408,28 @@ def _stage_renderer_records(
                 total_admitted_features=total_admitted_features,
                 initial_committed_features=rendered_prefix,
                 limits=parallel_limits,
+                _durable_file=progress_durable,
             )
             progress_publisher.preflight(rendered_prefix)
         if stored_identity is None:
+            if progress_publisher is not None:
+                progress_publisher.require_unchanged()
             _meta_set(connection, "renderRunIdentity", dict(run_identity))
             _meta_set(
                 connection,
                 "renderCheckpoint",
                 checkpoint,
             )
-            connection.commit()
+            if progress_publisher is not None:
+                progress_publisher.require_unchanged()
+            _progress_guarded_commit(
+                connection,
+                (
+                    progress_publisher.require_unchanged
+                    if progress_publisher is not None
+                    else None
+                ),
+            )
             _resume_renderer_write_reservation(connection, trusted_data_version)
         source, registry = _validated_renderer_prefix_stream(
             connection,
@@ -4331,6 +4456,8 @@ def _stage_renderer_records(
             "recordsPerTile",
         ):
             peaks.setdefault(key, 0)
+        if progress_publisher is not None:
+            progress_publisher.require_unchanged()
         owned_spool_directory = prepare_spool_directory(
             spool_directory,
             package_id=package_id,
@@ -4388,8 +4515,14 @@ def _stage_renderer_records(
                     since_commit += 1
                     checkpoint_committed = False
                     if since_commit >= checkpoint_features:
-                        _commit_render_checkpoint(
-                            connection, database_path, checkpoint, peaks
+                        if progress_publisher is not None:
+                            progress_publisher.require_unchanged()
+                        _commit_render_checkpoint_with_progress(
+                            connection,
+                            database_path,
+                            checkpoint,
+                            peaks,
+                            progress_publisher,
                         )
                         if progress_publisher is not None:
                             progress_publisher.publish(seen)
@@ -4405,8 +4538,14 @@ def _stage_renderer_records(
                             pending_descriptors.remove(committed_descriptor)
                     if pause_after_features is not None and seen >= pause_after_features:
                         if not checkpoint_committed:
-                            _commit_render_checkpoint(
-                                connection, database_path, checkpoint, peaks
+                            if progress_publisher is not None:
+                                progress_publisher.require_unchanged()
+                            _commit_render_checkpoint_with_progress(
+                                connection,
+                                database_path,
+                                checkpoint,
+                                peaks,
+                                progress_publisher,
                             )
                             if progress_publisher is not None:
                                 progress_publisher.publish(seen)
@@ -4425,7 +4564,15 @@ def _stage_renderer_records(
                             trusted_data_version,
                         )
             checkpoint = {"renderComplete": True, "renderedFeatures": seen}
-            _commit_render_checkpoint(connection, database_path, checkpoint, peaks)
+            if progress_publisher is not None:
+                progress_publisher.require_unchanged()
+            _commit_render_checkpoint_with_progress(
+                connection,
+                database_path,
+                checkpoint,
+                peaks,
+                progress_publisher,
+            )
             if progress_publisher is not None:
                 progress_publisher.publish(seen)
             for descriptor in tuple(pending_descriptors):
@@ -4449,6 +4596,9 @@ def _stage_renderer_records(
         except BaseException as rollback_error:
             error.add_note(f"renderer checkpoint rollback failed: {rollback_error}")
         raise
+    finally:
+        if progress_publisher is not None:
+            progress_publisher.close()
 
 
 def _windows(connection: sqlite3.Connection) -> tuple[_Window, ...]:
@@ -5487,6 +5637,168 @@ def _validated_package_id(value: object) -> str:
     return value
 
 
+def _preflight_existing_progress_before_ingest(
+    *,
+    progress_file: Path,
+    database_path: Path,
+    package_id: str,
+    source_binding: WaterwaySourceBinding,
+    zooms: tuple[int, ...],
+    checkpoint_features: int,
+    code_identities: Mapping[str, object],
+    classifier_sha256: str,
+    size_policy_binding: Mapping[str, object],
+    parallel_limits: object,
+    durable: object,
+) -> _RenderProgressPublisher | None:
+    """Authenticate existing progress against query-only renderer state."""
+
+    from .waterway_parallel_render import DurableProgressFile
+
+    database_path = Path(os.path.abspath(database_path))
+    if type(durable) is not DurableProgressFile or durable.path != progress_file:
+        raise GlobalWaterwayPackageError(
+            "waterway render progress pre-ingest session is invalid"
+        )
+    if durable.existing_bytes is None:
+        durable.require_unchanged()
+        return None
+    try:
+        try:
+            database_stat = os.lstat(database_path)
+        except OSError as error:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress cannot be authenticated without "
+                "its SQLite renderer database"
+            ) from error
+        if (
+            stat.S_ISLNK(database_stat.st_mode)
+            or not stat.S_ISREG(database_stat.st_mode)
+            or getattr(database_stat, "st_file_attributes", 0) & _REPARSE_POINT
+            or getattr(database_stat, "st_nlink", 1) != 1
+        ):
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress SQLite database is unsafe"
+            )
+        uri = database_path.as_uri() + "?mode=ro"
+        try:
+            connection = sqlite3.connect(uri, uri=True)
+        except sqlite3.Error as error:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress SQLite database cannot be read"
+            ) from error
+        try:
+            try:
+                connection.execute("PRAGMA query_only=ON")
+                if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                    raise GlobalWaterwayPackageError(
+                        "waterway render progress preflight is not query-only"
+                    )
+                connection.execute("BEGIN")
+                ingest = _meta_get(connection, "ingestReceipt")
+                if not isinstance(ingest, dict) or not isinstance(
+                    ingest.get("admission"), dict
+                ):
+                    raise GlobalWaterwayPackageError(
+                        "existing waterway render progress lacks authenticated ingest state"
+                    )
+                try:
+                    ingest_semantic_sha256 = source_module._require_sha256(
+                        ingest.get("semanticSha256"),
+                        "waterway render progress preflight ingest semantic identity",
+                    )
+                    expected_identity = _render_run_identity(
+                        package_id=package_id,
+                        source_binding=source_binding,
+                        zooms=zooms,
+                        checkpoint_features=checkpoint_features,
+                        code_identities=code_identities,
+                        classifier_sha256=classifier_sha256,
+                        admission_receipt=ingest["admission"],
+                        ingest_semantic_sha256=ingest_semantic_sha256,
+                        size_policy_binding=size_policy_binding,
+                    )
+                except GlobalWaterwayPackageError:
+                    raise
+                except (AttributeError, KeyError, TypeError, ValueError) as error:
+                    raise GlobalWaterwayPackageError(
+                        "existing waterway render progress ingest identity is malformed"
+                    ) from error
+            except sqlite3.Error as error:
+                raise GlobalWaterwayPackageError(
+                    "existing waterway render progress SQLite state is malformed"
+                ) from error
+            stored_identity = _meta_get(connection, "renderRunIdentity")
+            checkpoint = _meta_get(connection, "renderCheckpoint")
+            if stored_identity is None and checkpoint is None:
+                rendered_prefix = 0
+            elif not isinstance(checkpoint, dict):
+                raise GlobalWaterwayPackageError(
+                    "existing waterway render progress SQLite checkpoint is absent"
+                )
+            else:
+                rendered_prefix = checkpoint.get("renderedFeatures")
+            if type(rendered_prefix) is not int or rendered_prefix < 0:
+                raise GlobalWaterwayPackageError(
+                    "existing waterway render progress SQLite checkpoint is malformed"
+                )
+            total_admitted_features = connection.execute(
+                "SELECT COUNT(*) FROM admission_candidates"
+            ).fetchone()[0]
+            if (
+                type(total_admitted_features) is not int
+                or not 0 <= total_admitted_features <= source_module._MAX_SIGNED_63
+                or rendered_prefix > total_admitted_features
+            ):
+                raise GlobalWaterwayPackageError(
+                    "existing waterway render progress SQLite counts are malformed"
+                )
+            publisher = _RenderProgressPublisher(
+                progress_file,
+                render_run_sha256=_canonical_render_run_sha256(expected_identity),
+                checkpoint_features=checkpoint_features,
+                total_admitted_features=total_admitted_features,
+                initial_committed_features=rendered_prefix,
+                limits=parallel_limits,
+                _durable_file=durable,
+            )
+            publisher.preflight(rendered_prefix)
+            if stored_identity != expected_identity:
+                raise GlobalWaterwayPackageError(
+                    "existing waterway render progress belongs to another render run"
+                )
+            database_after = os.lstat(database_path)
+            if (
+                int(database_after.st_dev),
+                int(database_after.st_ino),
+                int(database_after.st_size),
+                int(database_after.st_mtime_ns),
+                int(database_after.st_ctime_ns),
+            ) != (
+                int(database_stat.st_dev),
+                int(database_stat.st_ino),
+                int(database_stat.st_size),
+                int(database_stat.st_mtime_ns),
+                int(database_stat.st_ctime_ns),
+            ):
+                raise GlobalWaterwayPackageError(
+                    "existing waterway render progress SQLite database changed "
+                    "during query-only preflight"
+                )
+            return publisher
+        except sqlite3.Error as error:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress SQLite state is malformed"
+            ) from error
+        finally:
+            if connection.in_transaction:
+                connection.rollback()
+            connection.close()
+    except BaseException:
+        durable.close()
+        raise
+
+
 def _render_bound_global_waterway_package(
     *,
     opl_path: Path,
@@ -5541,10 +5853,18 @@ def _render_bound_global_waterway_package(
         )
     if type(checkpoint_features) is not int or checkpoint_features <= 0:
         raise GlobalWaterwayPackageError("checkpoint feature count must be positive")
+    from .waterway_parallel_render import (
+        DurableProgressFile,
+        maximum_parallel_render_features,
+    )
+
     if pause_after_features is not None and (
-        type(pause_after_features) is not int or pause_after_features <= 0
+        type(pause_after_features) is not int
+        or not 1 <= pause_after_features <= maximum_parallel_render_features()
     ):
-        raise GlobalWaterwayPackageError("pause feature count must be positive")
+        raise GlobalWaterwayPackageError(
+            "pause feature count is outside its valid range"
+        )
     parallel_limits = _default_parallel_render_limits(render_workers)
     if progress_file is not None:
         progress_file = _validate_render_progress_location(
@@ -5553,18 +5873,6 @@ def _render_bound_global_waterway_package(
     if output_directory.exists() or output_directory.is_symlink():
         raise GlobalWaterwayPackageError("global waterway output directory already exists")
     size_policy_binding = _reference_size_policy_binding(size_policy_mode)
-    ingest = ingest_global_waterway_closure(
-        opl_path=opl_path,
-        root_ids_path=root_ids_path,
-        work_directory=work_directory,
-        source_binding=source_binding,
-        checkpoint_objects=checkpoint_objects,
-        pause_after_objects=pause_after_objects,
-    )
-    if ingest.state != "complete":
-        return GlobalWaterwayBuildResult(
-            "paused", output_directory, ingest.receipt
-        )
     code_identities = _render_code_identities()
     if code_identities.get("referenceSizePolicy") != size_policy_binding.get(
         "module"
@@ -5573,37 +5881,77 @@ def _render_bound_global_waterway_package(
             "waterway renderer size-policy module identity differs"
         )
     classifier = classifier_identity_sha256()
-    render_identity = _render_run_identity(
-        package_id=checked_package_id,
-        source_binding=source_binding,
-        zooms=normalized_zooms,
-        checkpoint_features=checkpoint_features,
-        code_identities=code_identities,
-        classifier_sha256=classifier,
-        admission_receipt=ingest.receipt["admission"],
-        ingest_semantic_sha256=str(ingest.receipt["semanticSha256"]),
-        size_policy_binding=size_policy_binding,
-    )
-    render_sha256 = _canonical_render_run_sha256(render_identity)
-    partial_directory = output_directory.with_name(
-        output_directory.name + ".partial-" + render_sha256[:16]
-    )
-    connection = sqlite3.connect(ingest.database_path)
+    progress_durable = None
     try:
-        _configure_render_connection(connection)
-        complete = _stage_renderer_records(
-            connection,
-            ingest.database_path,
+        if progress_file is not None:
+            progress_durable = DurableProgressFile(
+                progress_file, acquire_session=True
+            )
+            _preflight_existing_progress_before_ingest(
+                progress_file=progress_file,
+                database_path=work_directory / "waterway-state.sqlite",
+                package_id=checked_package_id,
+                source_binding=source_binding,
+                zooms=normalized_zooms,
+                checkpoint_features=checkpoint_features,
+                code_identities=code_identities,
+                classifier_sha256=classifier,
+                size_policy_binding=size_policy_binding,
+                parallel_limits=parallel_limits,
+                durable=progress_durable,
+            )
+            progress_durable.require_unchanged()
+        ingest = ingest_global_waterway_closure(
+            opl_path=opl_path,
+            root_ids_path=root_ids_path,
+            work_directory=work_directory,
+            source_binding=source_binding,
+            checkpoint_objects=checkpoint_objects,
+            pause_after_objects=pause_after_objects,
+            _progress_validator=(
+                progress_durable.require_unchanged
+                if progress_durable is not None
+                else None
+            ),
+        )
+        if progress_durable is not None:
+            progress_durable.require_unchanged()
+        if ingest.state != "complete":
+            return GlobalWaterwayBuildResult(
+                "paused", output_directory, ingest.receipt
+            )
+        render_identity = _render_run_identity(
+            package_id=checked_package_id,
             source_binding=source_binding,
             zooms=normalized_zooms,
             checkpoint_features=checkpoint_features,
-            pause_after_features=pause_after_features,
-            run_identity=render_identity,
-            parallel_limits=parallel_limits,
-            progress_file=progress_file,
+            code_identities=code_identities,
+            classifier_sha256=classifier,
+            admission_receipt=ingest.receipt["admission"],
+            ingest_semantic_sha256=str(ingest.receipt["semanticSha256"]),
+            size_policy_binding=size_policy_binding,
         )
-        if not complete:
-            return GlobalWaterwayBuildResult(
+        render_sha256 = _canonical_render_run_sha256(render_identity)
+        partial_directory = output_directory.with_name(
+            output_directory.name + ".partial-" + render_sha256[:16]
+        )
+        connection = sqlite3.connect(ingest.database_path)
+        try:
+            _configure_render_connection(connection)
+            complete = _stage_renderer_records(
+                connection,
+                ingest.database_path,
+                source_binding=source_binding,
+                zooms=normalized_zooms,
+                checkpoint_features=checkpoint_features,
+                pause_after_features=pause_after_features,
+                run_identity=render_identity,
+                parallel_limits=parallel_limits,
+                progress_file=progress_file,
+                progress_durable=progress_durable,
+            )
+            if not complete:
+                return GlobalWaterwayBuildResult(
                 "paused",
                 output_directory,
                 MappingProxyType(
@@ -5614,23 +5962,26 @@ def _render_bound_global_waterway_package(
                         "state": "paused",
                     }
                 ),
+                )
+            windows = _windows(connection)
+            receipt = _publish(
+                connection,
+                ingest.database_path,
+                partial_directory=partial_directory,
+                output_directory=output_directory,
+                package_id=checked_package_id,
+                source_binding=source_binding,
+                windows=windows,
+                render_run_identity=render_identity,
+                render_run_sha256=render_sha256,
+                code_identities=code_identities,
             )
-        windows = _windows(connection)
-        receipt = _publish(
-            connection,
-            ingest.database_path,
-            partial_directory=partial_directory,
-            output_directory=output_directory,
-            package_id=checked_package_id,
-            source_binding=source_binding,
-            windows=windows,
-            render_run_identity=render_identity,
-            render_run_sha256=render_sha256,
-            code_identities=code_identities,
-        )
-        return GlobalWaterwayBuildResult("complete", output_directory, receipt)
+            return GlobalWaterwayBuildResult("complete", output_directory, receipt)
+        finally:
+            connection.close()
     finally:
-        connection.close()
+        if progress_durable is not None:
+            progress_durable.close()
 
 
 def render_fixture_global_waterway_package(

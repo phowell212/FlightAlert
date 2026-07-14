@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -8,6 +9,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from copy import copy
 from concurrent.futures import FIRST_COMPLETED, Future
@@ -512,11 +515,42 @@ class DurableProgressFileTests(unittest.TestCase):
             path = Path(temporary) / "progress.json"
             progress = DurableProgressFile(path)
             progress.replace(b"first\n")
-            with mock.patch.object(
-                parallel,
-                "_publish_windows_owned_temp_replace",
-                side_effect=OSError("injected replacement failure"),
-            ), self.assertRaisesRegex(
+            if os.name == "nt":
+                real_publish = parallel._publish_windows_owned_temp_no_replace
+                publication_count = 0
+
+                def fail_new_destination_publication(handle, destination: Path) -> None:
+                    nonlocal publication_count
+                    publication_count += 1
+                    if publication_count == 2:
+                        raise OSError("injected replacement failure")
+                    real_publish(handle, destination)
+
+                patcher = mock.patch.object(
+                    parallel,
+                    "_publish_windows_owned_temp_no_replace",
+                    side_effect=fail_new_destination_publication,
+                )
+            else:
+                real_link = parallel.os.link
+                failed = False
+                temporary_name = f"{path.name}.tmp-{os.getpid()}"
+
+                def fail_new_destination_publication(
+                    source, destination, *args, **kwargs
+                ) -> None:
+                    nonlocal failed
+                    if source == temporary_name and destination == path.name and not failed:
+                        failed = True
+                        raise OSError("injected replacement failure")
+                    real_link(source, destination, *args, **kwargs)
+
+                patcher = mock.patch.object(
+                    parallel.os,
+                    "link",
+                    side_effect=fail_new_destination_publication,
+                )
+            with patcher, self.assertRaisesRegex(
                 GlobalWaterwayPackageError, "progress.*atomic|publish|replace"
             ):
                 progress.replace(b"second\n")
@@ -524,6 +558,621 @@ class DurableProgressFileTests(unittest.TestCase):
             self.assertEqual(b"first\n", path.read_bytes())
             self.assertEqual(b"first\n", progress.existing_bytes)
             self.assertFalse(path.with_name(f"{path.name}.tmp-{os.getpid()}").exists())
+            self.assertFalse(tuple(path.parent.glob(f".{path.name}.displaced-*")))
+
+    def test_session_lease_excludes_a_second_cooperating_publisher(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            first = DurableProgressFile(path, acquire_session=True)
+            try:
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "session.*owned"
+                ):
+                    DurableProgressFile(path, acquire_session=True)
+            finally:
+                first.close()
+
+            released = DurableProgressFile(path, acquire_session=True)
+            released.close()
+
+    def test_session_lease_is_recoverable_after_process_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            child = subprocess.run(
+                (
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; import os,sys; "
+                    "from tools.experiment8.waterway_parallel_render import "
+                    "DurableProgressFile; "
+                    "lease=DurableProgressFile(Path(sys.argv[1]), "
+                    "acquire_session=True); os._exit(0)",
+                    str(path),
+                ),
+                cwd=Path(__file__).resolve().parents[3],
+                check=False,
+                capture_output=True,
+                timeout=30,
+            )
+            self.assertEqual(0, child.returncode, child.stderr.decode(errors="replace"))
+
+            recovered = DurableProgressFile(path, acquire_session=True)
+            recovered.close()
+            lock_path = path.with_name(f".{path.name}.flightalert-lock")
+            self.assertTrue(lock_path.is_file())
+            reacquired = DurableProgressFile(path, acquire_session=True)
+            reacquired.close()
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained progress write denial")
+    def test_session_retained_handle_denies_same_inode_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_bytes(b"authenticated\n")
+            progress = DurableProgressFile(path, acquire_session=True)
+            try:
+                progress.require_unchanged()
+                with self.assertRaises(OSError):
+                    with path.open("r+b", buffering=0) as handle:
+                        handle.write(b"compromised!!\n")
+                progress.require_unchanged()
+            finally:
+                progress.close()
+            self.assertEqual(b"authenticated\n", path.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "Windows reader-sharing replacement")
+    def test_ordinary_reader_overlapping_replacement_does_not_abort_publication(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_bytes(b"first\n")
+            progress = DurableProgressFile(path, acquire_session=True)
+            reader = path.open("rb", buffering=0)
+
+            def release_reader() -> None:
+                time.sleep(0.05)
+                reader.close()
+
+            release = threading.Thread(target=release_reader)
+            release.start()
+            try:
+                progress.replace(b"second\n")
+            finally:
+                release.join(timeout=5)
+                if not reader.closed:
+                    reader.close()
+                progress.close()
+
+            self.assertFalse(release.is_alive())
+            self.assertEqual(b"second\n", path.read_bytes())
+
+    def test_retained_handle_failure_rolls_back_published_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_bytes(b"first\n")
+            progress = DurableProgressFile(path, acquire_session=True)
+            real_retain = DurableProgressFile._retain_existing_handle
+            retain_calls = 0
+
+            def fail_first_retain_after_publication(progress_file) -> None:
+                nonlocal retain_calls
+                retain_calls += 1
+                if retain_calls == 1:
+                    raise OSError("injected retained-handle failure")
+                real_retain(progress_file)
+
+            try:
+                with mock.patch.object(
+                    DurableProgressFile,
+                    "_retain_existing_handle",
+                    new=fail_first_retain_after_publication,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "progress.*atomic|retained|replace|injected",
+                ):
+                    progress.replace(b"second\n")
+                progress.require_unchanged()
+            finally:
+                progress.close()
+
+            self.assertGreaterEqual(retain_calls, 1 if os.name == "posix" else 2)
+            self.assertEqual(b"first\n", path.read_bytes())
+            self.assertFalse(tuple(path.parent.glob(f".{path.name}.displaced-*")))
+
+    def test_destination_appearance_after_last_validator_is_not_clobbered(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            progress = DurableProgressFile(path)
+            real_require = DurableProgressFile._require_expected_destination
+            validations = 0
+
+            def appear_after_last_validator(progress_file) -> None:
+                nonlocal validations
+                real_require(progress_file)
+                validations += 1
+                if validations == 2:
+                    path.write_bytes(b"external\n")
+
+            with mock.patch.object(
+                DurableProgressFile,
+                "_require_expected_destination",
+                new=appear_after_last_validator,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "progress.*atomic|publish|replace"
+            ):
+                progress.replace(b"owned\n")
+
+            self.assertEqual(2, validations)
+            self.assertEqual(b"external\n", path.read_bytes())
+            self.assertFalse(path.with_name(f"{path.name}.tmp-{os.getpid()}").exists())
+
+    def test_same_inode_rewrite_after_last_validator_is_preserved_and_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_bytes(b"first\n")
+            progress = DurableProgressFile(path)
+            original_identity = (path.stat().st_dev, path.stat().st_ino)
+            real_require = DurableProgressFile._require_expected_destination
+            validations = 0
+
+            def rewrite_after_last_validator(progress_file) -> None:
+                nonlocal validations
+                real_require(progress_file)
+                validations += 1
+                if validations == 2:
+                    with path.open("r+b", buffering=0) as handle:
+                        handle.write(b"third\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+
+            with mock.patch.object(
+                DurableProgressFile,
+                "_require_expected_destination",
+                new=rewrite_after_last_validator,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "progress.*changed|progress.*bytes|progress.*atomic",
+            ):
+                progress.replace(b"second\n")
+
+            self.assertEqual(2, validations)
+            self.assertEqual(original_identity, (path.stat().st_dev, path.stat().st_ino))
+            self.assertEqual(b"third\n", path.read_bytes())
+            self.assertFalse(path.with_name(f"{path.name}.tmp-{os.getpid()}").exists())
+            self.assertFalse(tuple(path.parent.glob(f".{path.name}.displaced-*")))
+
+    def test_same_inode_rewrite_is_rejected_before_atomic_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_bytes(b"first\n")
+            progress = DurableProgressFile(path)
+            before = path.stat()
+            with path.open("r+b", buffering=0) as handle:
+                handle.write(b"third\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            rewritten = path.stat()
+            self.assertEqual(
+                (before.st_dev, before.st_ino),
+                (rewritten.st_dev, rewritten.st_ino),
+            )
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "progress.*changed|progress.*bytes|identity"
+            ):
+                progress.replace(b"second\n")
+
+            self.assertEqual(b"third\n", path.read_bytes())
+            self.assertFalse(path.with_name(f"{path.name}.tmp-{os.getpid()}").exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX retained-dirfd progress safety")
+    def test_posix_progress_read_is_not_redirected_by_parent_symlink_swap(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "evidence"
+            original_parent = root / "evidence-original"
+            attacker = root / "attacker"
+            parent.mkdir()
+            attacker.mkdir()
+            (parent / "progress.json").write_bytes(b"authenticated\n")
+            (attacker / "progress.json").write_bytes(b"redirected\n")
+            real_require = parallel._require_directory_chain_unchanged
+            swapped = False
+
+            def swap_after_chain_check(chain, label: str) -> None:
+                nonlocal swapped
+                real_require(chain, label)
+                if not swapped:
+                    os.replace(parent, original_parent)
+                    os.symlink(attacker, parent, target_is_directory=True)
+                    swapped = True
+
+            with mock.patch.object(
+                parallel,
+                "_require_directory_chain_unchanged",
+                side_effect=swap_after_chain_check,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "parent.*changed|ancestor.*changed"
+            ):
+                DurableProgressFile(parent / "progress.json")
+
+            self.assertTrue(swapped)
+            self.assertEqual(
+                b"authenticated\n",
+                (original_parent / "progress.json").read_bytes(),
+            )
+            self.assertEqual(
+                b"redirected\n", (attacker / "progress.json").read_bytes()
+            )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-replace displacement")
+    def test_posix_displacement_does_not_clobber_a_racing_token_entry(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            path = parent / "progress.json"
+            first = b"first\n"
+            path.write_bytes(first)
+            progress = DurableProgressFile(path)
+            real_displace = parallel._rename_posix_no_replace
+            injected = False
+
+            def inject_token_entry(
+                source_name,
+                destination_name,
+                *,
+                source_directory_fd,
+                destination_directory_fd,
+            ) -> None:
+                nonlocal injected
+                descriptor = os.open(
+                    destination_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=destination_directory_fd,
+                )
+                with os.fdopen(descriptor, "wb", buffering=0) as handle:
+                    handle.write(b"alien\n")
+                injected = True
+                real_displace(
+                    source_name,
+                    destination_name,
+                    source_directory_fd=source_directory_fd,
+                    destination_directory_fd=destination_directory_fd,
+                )
+
+            try:
+                with mock.patch.object(
+                    parallel,
+                    "_rename_posix_no_replace",
+                    side_effect=inject_token_entry,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "atomic|exist|replace|displaced"
+                ):
+                    progress.replace(b"second\n")
+            finally:
+                progress.close()
+
+            self.assertTrue(injected)
+            self.assertEqual(b"first\n", path.read_bytes())
+            tokens = tuple(parent.glob(f".{path.name}.displaced-*"))
+            self.assertEqual(1, len(tokens))
+            self.assertEqual(b"alien\n", tokens[0].read_bytes())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-replace displacement")
+    def test_posix_unavailable_no_replace_primitive_fails_without_unlinking(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_bytes(b"first\n")
+            progress = DurableProgressFile(path)
+            try:
+                with mock.patch.object(
+                    parallel,
+                    "_rename_posix_no_replace",
+                    side_effect=OSError(errno.EINVAL, "unsupported no-replace rename"),
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "atomic|replace"
+                ):
+                    progress.replace(b"second\n")
+            finally:
+                progress.close()
+
+            self.assertEqual(b"first\n", path.read_bytes())
+            self.assertFalse(tuple(path.parent.glob(f".{path.name}.displaced-*")))
+            self.assertFalse(path.with_name(f"{path.name}.tmp-{os.getpid()}").exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-replace displacement")
+    def test_posix_replacement_does_not_depend_on_directory_cleanup(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            path.write_bytes(b"first\n")
+            progress = DurableProgressFile(path)
+
+            def controlled_no_replace(
+                source_name,
+                destination_name,
+                *,
+                source_directory_fd,
+                destination_directory_fd,
+            ) -> None:
+                with self.assertRaises(FileNotFoundError):
+                    os.lstat(destination_name, dir_fd=destination_directory_fd)
+                os.rename(
+                    source_name,
+                    destination_name,
+                    src_dir_fd=source_directory_fd,
+                    dst_dir_fd=destination_directory_fd,
+                )
+
+            try:
+                with mock.patch.object(
+                    parallel,
+                    "_rename_posix_no_replace",
+                    side_effect=controlled_no_replace,
+                ), mock.patch.object(
+                    parallel.os,
+                    "rmdir",
+                    side_effect=OSError(errno.EIO, "injected rmdir failure"),
+                ) as rmdir:
+                    progress.replace(b"second\n")
+                    rmdir.assert_not_called()
+            finally:
+                progress.close()
+
+            self.assertEqual(b"second\n", path.read_bytes())
+            self.assertFalse(tuple(path.parent.glob(f".{path.name}.displaced-*")))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX displaced-token ownership")
+    def test_posix_post_publish_token_swap_is_preserved_and_rejected(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            path = parent / "progress.json"
+            path.write_bytes(b"first\n")
+            progress = DurableProgressFile(path)
+            temporary_name = f"{path.name}.tmp-{os.getpid()}"
+            displaced_name = (
+                f".{path.name}.displaced-{os.getpid()}-"
+                f"{hashlib.sha256(first).hexdigest()[:16]}"
+            )
+            moved_name = f"{displaced_name}.moved"
+            real_link = parallel.os.link
+            swapped = False
+
+            def swap_after_new_publication(source, destination, *args, **kwargs) -> None:
+                nonlocal swapped
+                real_link(source, destination, *args, **kwargs)
+                if (
+                    source == temporary_name
+                    and destination == path.name
+                    and not swapped
+                ):
+                    os.rename(
+                        displaced_name,
+                        moved_name,
+                        src_dir_fd=kwargs["dst_dir_fd"],
+                        dst_dir_fd=kwargs["dst_dir_fd"],
+                    )
+                    descriptor = os.open(
+                        displaced_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=kwargs["dst_dir_fd"],
+                    )
+                    with os.fdopen(descriptor, "wb", buffering=0) as handle:
+                        handle.write(b"alien\n")
+                    swapped = True
+
+            try:
+                with mock.patch.object(
+                    parallel.os,
+                    "link",
+                    side_effect=swap_after_new_publication,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "displaced.*changed|progress.*atomic|recovery",
+                ):
+                    progress.replace(b"second\n")
+            finally:
+                progress.close()
+
+            self.assertTrue(swapped)
+            self.assertEqual(b"alien\n", (parent / displaced_name).read_bytes())
+            self.assertEqual(b"first\n", (parent / moved_name).read_bytes())
+            self.assertFalse(path.exists())
+            self.assertFalse((parent / temporary_name).exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX displaced-token ownership")
+    def test_posix_retention_failure_does_not_restore_swapped_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            path = parent / "progress.json"
+            first = b"first\n"
+            path.write_bytes(first)
+            progress = DurableProgressFile(path, acquire_session=True)
+            displaced_name = (
+                f".{path.name}.displaced-{os.getpid()}-"
+                f"{hashlib.sha256(first).hexdigest()[:16]}"
+            )
+            moved_name = f"{displaced_name}.moved"
+            swapped = False
+
+            def swap_token_then_fail_retain(progress_file) -> None:
+                nonlocal swapped
+                parent_fd = progress_file._require_parent_fd()
+                os.rename(
+                    displaced_name,
+                    moved_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                descriptor = os.open(
+                    displaced_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                with os.fdopen(descriptor, "wb", buffering=0) as handle:
+                    handle.write(b"alien\n")
+                swapped = True
+                raise OSError("injected retained-handle failure")
+
+            try:
+                with mock.patch.object(
+                    DurableProgressFile,
+                    "_retain_existing_handle",
+                    new=swap_token_then_fail_retain,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "progress.*atomic|retained|replace|injected",
+                ):
+                    progress.replace(b"second\n")
+            finally:
+                progress.close()
+
+            self.assertTrue(swapped)
+            self.assertEqual(b"alien\n", (parent / displaced_name).read_bytes())
+            self.assertEqual(b"first\n", (parent / moved_name).read_bytes())
+            self.assertFalse(path.exists())
+            self.assertFalse(
+                path.with_name(f"{path.name}.tmp-{os.getpid()}").exists()
+            )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX retained-dirfd progress safety")
+    def test_posix_first_publish_unlink_failure_leaves_no_orphan_link(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            progress = DurableProgressFile(path)
+            temporary_name = f"{path.name}.tmp-{os.getpid()}"
+            real_unlink = parallel.os.unlink
+            failed = False
+
+            def fail_first_temp_unlink(name, *args, **kwargs) -> None:
+                nonlocal failed
+                if name == temporary_name and not failed:
+                    failed = True
+                    raise OSError("injected first-publish temp unlink failure")
+                real_unlink(name, *args, **kwargs)
+
+            try:
+                with mock.patch.object(
+                    parallel.os,
+                    "unlink",
+                    side_effect=fail_first_temp_unlink,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "atomically"
+                ):
+                    progress.replace(b"authenticated\n")
+            finally:
+                progress.close()
+
+            self.assertTrue(failed)
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_name(temporary_name).exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX retained-dirfd progress safety")
+    def test_posix_progress_publish_is_not_redirected_by_pre_temp_parent_swap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "evidence"
+            original_parent = root / "evidence-original"
+            attacker = root / "attacker"
+            parent.mkdir()
+            attacker.mkdir()
+            progress = DurableProgressFile(parent / "progress.json")
+            real_require = DurableProgressFile._require_expected_destination
+            swapped = False
+
+            def swap_after_destination_check(progress_file) -> None:
+                nonlocal swapped
+                real_require(progress_file)
+                if not swapped:
+                    os.replace(parent, original_parent)
+                    os.symlink(attacker, parent, target_is_directory=True)
+                    swapped = True
+
+            try:
+                with mock.patch.object(
+                    DurableProgressFile,
+                    "_require_expected_destination",
+                    new=swap_after_destination_check,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "parent.*changed|ancestor.*changed|atomically",
+                ):
+                    progress.replace(b"authenticated\n")
+            finally:
+                progress.close()
+
+            self.assertTrue(swapped)
+            self.assertFalse((attacker / "progress.json").exists())
+            self.assertFalse((original_parent / "progress.json").exists())
+            self.assertFalse(
+                (attacker / f"progress.json.tmp-{os.getpid()}").exists()
+            )
+            self.assertFalse(
+                (original_parent / f"progress.json.tmp-{os.getpid()}").exists()
+            )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX retained-dirfd progress safety")
+    def test_posix_progress_publish_swap_leaves_no_redirect_or_orphan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "evidence"
+            original_parent = root / "evidence-original"
+            attacker = root / "attacker"
+            parent.mkdir()
+            attacker.mkdir()
+            progress = DurableProgressFile(parent / "progress.json")
+            real_write = DurableProgressFile._write_all
+            swapped = False
+
+            def swap_after_write(handle, raw: bytes) -> None:
+                nonlocal swapped
+                real_write(handle, raw)
+                if not swapped:
+                    os.replace(parent, original_parent)
+                    os.symlink(attacker, parent, target_is_directory=True)
+                    swapped = True
+
+            try:
+                with mock.patch.object(
+                    DurableProgressFile,
+                    "_write_all",
+                    side_effect=swap_after_write,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "parent.*changed|ancestor.*changed|atomically",
+                ):
+                    progress.replace(b"authenticated\n")
+            finally:
+                close = getattr(progress, "close", None)
+                if close is not None:
+                    close()
+
+            self.assertTrue(swapped)
+            self.assertFalse((attacker / "progress.json").exists())
+            self.assertFalse((original_parent / "progress.json").exists())
+            self.assertFalse(
+                (attacker / f"progress.json.tmp-{os.getpid()}").exists()
+            )
+            self.assertFalse(
+                (original_parent / f"progress.json.tmp-{os.getpid()}").exists()
+            )
 
 
 class ParallelSpoolOwnershipTests(unittest.TestCase):
