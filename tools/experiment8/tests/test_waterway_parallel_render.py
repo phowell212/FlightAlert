@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from copy import copy
@@ -41,6 +44,49 @@ _SOURCE_SHA256 = hashlib.sha256(b"parallel source fixture").hexdigest()
 _CLASSIFIER_SHA256 = hashlib.sha256(b"parallel classifier fixture").hexdigest()
 _RUN_SHA256 = hashlib.sha256(b"parallel render run fixture").hexdigest()
 _PACKAGE_ID = "world-osm-named-waterways-test"
+
+
+_SQLITE_GUARDED_WORKER_SCRIPT = r"""
+import builtins
+import importlib
+import json
+import sys
+
+forbidden_roots = frozenset(("sqlite3", "_sqlite3"))
+if any(name.split(".", 1)[0] in forbidden_roots for name in sys.modules):
+    raise AssertionError("clean worker bootstrap started with SQLite loaded")
+if any(name.startswith("tools.experiment8") for name in sys.modules):
+    raise AssertionError("clean worker bootstrap started after a worker import")
+
+class BlockSqliteImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in forbidden_roots:
+            raise AssertionError("spawned waterway worker attempted SQLite import")
+        return None
+
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name.split(".", 1)[0] in forbidden_roots:
+        raise AssertionError("spawned waterway worker attempted SQLite import")
+    return original_import(name, *args, **kwargs)
+
+payload = sys.stdin.buffer.read()
+sys.meta_path.insert(0, BlockSqliteImports())
+builtins.__import__ = guarded_import
+parallel = importlib.import_module("tools.experiment8.waterway_parallel_render")
+descriptor = parallel.render_feature_batch_job(payload)
+if any(name.split(".", 1)[0] in forbidden_roots for name in sys.modules):
+    raise AssertionError("spawned waterway worker loaded SQLite")
+sys.stdout.write(json.dumps({
+    "start_ordinal": descriptor.start_ordinal,
+    "end_ordinal_exclusive": descriptor.end_ordinal_exclusive,
+    "file_name": descriptor.file_name,
+    "byte_count": descriptor.byte_count,
+    "sha256": descriptor.sha256,
+    "source_range_sha256": descriptor.source_range_sha256,
+    "point_count": descriptor.point_count,
+}, sort_keys=True))
+"""
 
 
 def _feature(source_id: int = 7) -> ExactWaterwayFeature:
@@ -816,6 +862,35 @@ class ParallelFeatureRendererTests(unittest.TestCase):
             self.assertEqual((101,), tuple(feature.source_id for feature in exact))
             self.assertEqual((0,), tuple(frame.ordinal for frame in frames))
             self.assertIsNone(renderer.next_batch())
+
+    def test_real_spawned_worker_import_and_execution_are_sqlite_free(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            payload = encode_feature_batch_job(_job(root, _feature(102)))
+            completed = subprocess.run(
+                [sys.executable, "-c", _SQLITE_GUARDED_WORKER_SCRIPT],
+                input=payload,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=Path(__file__).resolve().parents[3],
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(
+                0,
+                completed.returncode,
+                completed.stderr.decode("utf-8", "replace"),
+            )
+            descriptor = SpoolDescriptor(**json.loads(completed.stdout))
+            frames = read_feature_batch(
+                root,
+                descriptor,
+                expected_render_run_identity_sha256=_RUN_SHA256,
+                expected_source_range_sha256=descriptor.source_range_sha256,
+            )
+
+        self.assertEqual((20, 21), (descriptor.start_ordinal, descriptor.end_ordinal_exclusive))
+        self.assertEqual((102,), tuple(frame.source_id for frame in frames))
 
     def test_reverse_completion_still_yields_checkpoint_and_pause_aligned_ranges_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1941,6 +2016,51 @@ class ParentFrameValidationTests(unittest.TestCase):
             object.__setattr__(changed, name, value)
         return changed
 
+    @staticmethod
+    def _render_one(root: Path, feature: ExactWaterwayFeature):
+        root.mkdir()
+        job = _job(root, feature)
+        descriptor = render_feature_batch_job(encode_feature_batch_job(job))
+        return read_feature_batch(
+            root,
+            descriptor,
+            expected_render_run_identity_sha256=_RUN_SHA256,
+            expected_source_range_sha256=descriptor.source_range_sha256,
+        )[0]
+
+    @staticmethod
+    def _row_with_world_wrap(row, world_wrap: int):
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.model import TileKey
+        from tools.experiment8.renderer_tile_package import RendererTileRecord
+
+        tile = TileKey(int(row[0]), int(row[2]), int(row[1]))
+        renderer, sourced = parallel._decode_parent_record_envelope(row[11], tile)
+        posting = replace(renderer.posting, world_wrap=world_wrap)
+        changed_renderer = replace(renderer, posting=posting)
+        envelope = parallel._record_envelope(
+            RendererTileRecord(changed_renderer, sourced),
+            tile,
+        )
+        posting_key = struct.pack(
+            ">QQQi",
+            posting.feature_id,
+            posting.canonical_variant_id,
+            posting.owner_tile.packed,
+            posting.world_wrap,
+        )
+        return row[:3] + (posting_key,) + row[4:11] + (envelope,) + row[12:]
+
+    @staticmethod
+    def _validate_rows(exact: ExactWaterwayFeature, frame):
+        return validate_and_decode_record_rows(
+            exact,
+            frame,
+            source_generation_sha256=_SOURCE_SHA256,
+            classifier_sha256=_CLASSIFIER_SHA256,
+            expected_zooms=(10, 11),
+        )
+
     def test_parent_validates_exact_source_and_decodes_every_record_relationship(self) -> None:
         exact = _feature()
         with tempfile.TemporaryDirectory() as temporary:
@@ -1951,7 +2071,7 @@ class ParentFrameValidationTests(unittest.TestCase):
         validate_frame_against_exact_source(20, exact, frame)
         self.assertEqual(
             frame.record_rows,
-            validate_and_decode_record_rows(exact, frame),
+            self._validate_rows(exact, frame),
         )
 
         wrong_source = self._tamper(frame, source_id=exact.source_id + 1)
@@ -1967,7 +2087,7 @@ class ParentFrameValidationTests(unittest.TestCase):
             GlobalWaterwayPackageError,
             "envelope|sourced|identity",
         ):
-            validate_and_decode_record_rows(exact, corrupt_envelope)
+            self._validate_rows(exact, corrupt_envelope)
 
         rows = list(frame.record_rows)
         changed_envelope = bytearray(rows[0][11])
@@ -1976,7 +2096,20 @@ class ParentFrameValidationTests(unittest.TestCase):
         rows[0] = rows[0][:11] + (bytes(changed_envelope),) + rows[0][12:]
         corrupt_renderer = self._tamper(frame, record_rows=tuple(rows))
         with self.assertRaises(GlobalWaterwayPackageError):
-            validate_and_decode_record_rows(exact, corrupt_renderer)
+            self._validate_rows(exact, corrupt_renderer)
+
+    def test_parent_validation_never_rerenders_the_exact_feature(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        exact = _feature()
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "frame", exact)
+        with mock.patch.object(
+            parallel,
+            "build_adaptive_waterway_feature",
+            side_effect=AssertionError("parent attempted a serial rerender"),
+        ):
+            self.assertEqual(frame.record_rows, self._validate_rows(exact, frame))
 
     def test_parent_rejects_false_geometry_label_variant_and_sourced_identity_sets(self) -> None:
         exact = _feature()
@@ -1993,7 +2126,290 @@ class ParentFrameValidationTests(unittest.TestCase):
                     GlobalWaterwayPackageError,
                     "identity",
                 ):
-                    validate_and_decode_record_rows(exact, changed)
+                    self._validate_rows(exact, changed)
+
+    def test_parent_rejects_canonical_geometry_not_derived_from_exact_parts(self) -> None:
+        exact = _feature()
+        altered_middle = replace(
+            exact.parts[0][1],
+            longitude_e7=exact.parts[0][1].longitude_e7 + 1_000_000,
+        )
+        altered = replace(
+            exact,
+            parts=((exact.parts[0][0], altered_middle, exact.parts[0][2]),),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exact_frame = self._render_one(root / "exact", exact)
+            altered_frame = self._render_one(root / "altered", altered)
+        forged = self._tamper(
+            altered_frame,
+            source_frame_sha256=exact_frame.source_frame_sha256,
+        )
+
+        validate_frame_against_exact_source(20, exact, forged)
+        with self.assertRaisesRegex(
+            GlobalWaterwayPackageError,
+            "exact.*geometry|geometry.*exact",
+        ):
+            self._validate_rows(exact, forged)
+
+    def test_parent_geometry_proof_requires_source_anchors_and_half_pixel_bound(self) -> None:
+        exact = _feature()
+        without_anchor = replace(exact, required_node_ids=frozenset())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exact_frame = self._render_one(root / "exact", exact)
+            without_anchor_frame = self._render_one(
+                root / "without-anchor",
+                without_anchor,
+            )
+        forged_anchor = self._tamper(
+            without_anchor_frame,
+            source_frame_sha256=exact_frame.source_frame_sha256,
+            required_node_count=exact_frame.required_node_count,
+        )
+        validate_frame_against_exact_source(20, exact, forged_anchor)
+        with self.assertRaisesRegex(
+            GlobalWaterwayPackageError,
+            "required source node",
+        ):
+            self._validate_rows(exact, forged_anchor)
+
+        far_middle = replace(exact.parts[0][1], latitude_e7=500_000_000)
+        bounded_exact = replace(
+            exact,
+            parts=((exact.parts[0][0], far_middle, exact.parts[0][2]),),
+            required_node_ids=frozenset(),
+        )
+        easy_worker = replace(exact, required_node_ids=frozenset())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bounded_frame = self._render_one(root / "bounded", bounded_exact)
+            easy_frame = self._render_one(root / "easy", easy_worker)
+        forged_bound = self._tamper(
+            easy_frame,
+            source_frame_sha256=bounded_frame.source_frame_sha256,
+        )
+        validate_frame_against_exact_source(20, bounded_exact, forged_bound)
+        with self.assertRaisesRegex(
+            GlobalWaterwayPackageError,
+            "half-pixel omission bound",
+        ):
+            self._validate_rows(bounded_exact, forged_bound)
+
+    def test_parent_geometry_proof_matches_repeated_required_coordinates_monotonically(self) -> None:
+        repeated = tuple(
+            ExactWaterwayPoint(
+                9_000 + index,
+                -760_000_000,
+                390_000_000,
+            )
+            for index in range(5)
+        )
+        endpoint = ExactWaterwayPoint(9_005, -754_000_000, 394_000_000)
+        exact = replace(
+            _feature(),
+            parts=(repeated + (endpoint,),),
+            required_node_ids=frozenset((repeated[2].node_id, repeated[3].node_id)),
+            source_feature_sha256=hashlib.sha256(
+                b"repeated required coordinate source"
+            ).digest(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "frame", exact)
+
+        self.assertEqual(
+            ((0, 2, 3, 5),),
+            dict(frame.geometry_source_witnesses)[10],
+        )
+        self.assertEqual(frame.record_rows, self._validate_rows(exact, frame))
+
+    def test_parent_geometry_proof_accepts_globally_feasible_repeated_anchors(self) -> None:
+        coordinates = (
+            (-760_000_000, 390_000_000),
+            (-760_000_000, 390_000_000),
+            (-760_000_000, 390_000_000),
+            (-760_000_000, 390_000_000),
+            (-700_000_000, 650_000_000),
+            (-760_000_000, 390_000_000),
+            (-754_000_000, 394_000_000),
+        )
+        points = tuple(
+            ExactWaterwayPoint(9_100 + index, longitude, latitude)
+            for index, (longitude, latitude) in enumerate(coordinates)
+        )
+        exact = replace(
+            _feature(),
+            parts=(points,),
+            required_node_ids=frozenset((points[2].node_id, points[3].node_id)),
+            source_feature_sha256=hashlib.sha256(
+                b"globally feasible repeated anchor source"
+            ).digest(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "frame", exact)
+
+        self.assertEqual(
+            ((0, 2, 3, 4, 5, 6),),
+            dict(frame.geometry_source_witnesses)[10],
+        )
+        self.assertEqual(frame.record_rows, self._validate_rows(exact, frame))
+
+    def test_parent_geometry_proof_uses_worker_omission_intervals_for_duplicates(self) -> None:
+        coordinates = (
+            (-760_000_000, 390_000_000),
+            (-700_000_000, 650_000_000),
+            (-760_000_000, 390_000_000),
+            (-700_000_000, 650_000_000),
+            (-760_000_000, 390_000_000),
+            (-700_000_000, 650_000_000),
+            (-754_000_000, 394_000_000),
+        )
+        points = tuple(
+            ExactWaterwayPoint(9_200 + index, longitude, latitude)
+            for index, (longitude, latitude) in enumerate(coordinates)
+        )
+        exact = replace(
+            _feature(),
+            parts=(points,),
+            required_node_ids=frozenset((points[3].node_id,)),
+            source_feature_sha256=hashlib.sha256(
+                b"duplicate omission interval source"
+            ).digest(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "frame", exact)
+
+        self.assertEqual(
+            ((0, 3, 4, 5, 6),),
+            dict(frame.geometry_source_witnesses)[10],
+        )
+        self.assertEqual(frame.record_rows, self._validate_rows(exact, frame))
+        altered_witnesses = tuple(
+            (zoom, ((0, 1, 2, 3, 6),) if zoom == 10 else parts)
+            for zoom, parts in frame.geometry_source_witnesses
+        )
+        altered = self._tamper(
+            frame,
+            geometry_source_witnesses=altered_witnesses,
+        )
+        with self.assertRaisesRegex(
+            GlobalWaterwayPackageError,
+            "half-pixel omission bound",
+        ):
+            self._validate_rows(exact, altered)
+
+    def test_parent_rejects_omitted_duplicate_and_altered_postings(self) -> None:
+        exact = _feature()
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "frame", exact)
+        rows = list(frame.record_rows)
+        repeated_variant_index = next(
+            index
+            for index, row in enumerate(rows)
+            if sum(candidate[8] == row[8] for candidate in rows) > 1
+        )
+        omitted_rows = rows[:repeated_variant_index] + rows[repeated_variant_index + 1 :]
+        duplicate_rows = rows + [rows[repeated_variant_index]]
+        renderer_row = rows[repeated_variant_index]
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.model import TileKey
+
+        tile = TileKey(
+            int(renderer_row[0]),
+            int(renderer_row[2]),
+            int(renderer_row[1]),
+        )
+        renderer, _sourced = parallel._decode_parent_record_envelope(
+            renderer_row[11], tile
+        )
+        altered_rows = list(rows)
+        altered_rows[repeated_variant_index] = self._row_with_world_wrap(
+            renderer_row,
+            renderer.posting.world_wrap + 1,
+        )
+        cases = {
+            "omitted": omitted_rows,
+            "duplicate": duplicate_rows,
+            "altered": altered_rows,
+        }
+        for name, candidate_rows in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "posting",
+            ):
+                changed = self._tamper(
+                    frame,
+                    record_rows=tuple(candidate_rows),
+                    posting_bytes=sum(len(row[11]) for row in candidate_rows),
+                )
+                self._validate_rows(exact, changed)
+
+    def test_parent_rejects_an_entire_omitted_requested_zoom(self) -> None:
+        exact = _feature()
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "frame", exact)
+        rows = tuple(row for row in frame.record_rows if int(row[0]) != 10)
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.model import TileKey
+
+        retained_identity_keys = {("feature_ids", exact.source_feature_sha256[:8])}
+        for row in rows:
+            tile = TileKey(int(row[0]), int(row[2]), int(row[1]))
+            renderer, sourced = parallel._decode_parent_record_envelope(row[11], tile)
+            variant = renderer.variant
+            retained_identity_keys.update(
+                (
+                    ("geometry_ids", variant.geometry_id.to_bytes(8, "big")),
+                    (
+                        "label_ids",
+                        variant.placement.label_candidate_id.to_bytes(8, "big"),
+                    ),
+                    (
+                        "variant_ids",
+                        variant.canonical_variant_id.to_bytes(8, "big"),
+                    ),
+                    ("sourced_ids", sourced.full_sha256[:8]),
+                )
+            )
+        retained_identities = tuple(
+            identity
+            for identity in frame.identity_rows
+            if (identity[0], identity[1]) in retained_identity_keys
+        )
+        changed = self._tamper(
+            frame,
+            record_rows=rows,
+            identity_rows=retained_identities,
+            posting_bytes=sum(len(row[11]) for row in rows),
+        )
+
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "posting|zoom"):
+            self._validate_rows(exact, changed)
+
+    def test_parent_binds_exact_registry_claim_sequence_to_validated_frame(self) -> None:
+        exact = _feature()
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "frame", exact)
+        extra_registry = RecordingHotIdRegistry()
+        extra_registry.register(b"FAE8OSMID1\0", b"forged-extra-claim")
+        extra = extra_registry.claims[0]
+        claims = frame.registry_claims
+        cases = {
+            "omitted": claims[1:],
+            "extra": claims + (extra,),
+            "altered": (extra,) + claims[1:],
+            "duplicate": claims + (claims[0],),
+            "reordered": tuple(reversed(claims)),
+        }
+        for name, candidate_claims in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "registry claim",
+            ):
+                changed = self._tamper(frame, registry_claims=candidate_claims)
+                self._validate_rows(exact, changed)
 
     def test_worker_module_has_no_sqlite_import_or_connection_surface(self) -> None:
         from tools.experiment8 import waterway_parallel_render as parallel

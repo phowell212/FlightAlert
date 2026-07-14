@@ -19,7 +19,26 @@ from .osm_global_waterway_renderer import (
     ExactWaterwayFeature,
     ExactWaterwayPoint,
     _SUBTYPE_BY_WATERWAY,
+    _WORLD_DENOMINATOR,
+    _candidate_tiles,
+    _great_circle_length_m,
+    _simplified_indices,
+    _u64_identity,
+    _unwrapped_world_points,
     build_adaptive_waterway_feature,
+)
+from .reference_presentation_policy import (
+    LABEL_ACTIVE_BAND_LIMIT,
+    LABEL_DISPLAY_MAX_ZOOM_CENTI,
+    LABEL_FADE_OUT_ZOOM_CENTI,
+    LINE_LABEL_REPEAT_SPACING_PX,
+    PRESENTATION_POLICY_SHA256,
+    REFERENCE_LABEL_COLLISION_GROUP,
+    LabelFacts,
+    SourceEvidenceContext,
+    prominence_decision_for_label,
+    prominence_decision_sha256,
+    visibility_rule_for_label,
 )
 from .renderer_tile_package import (
     MAX_RENDERER_RECORD_BYTES,
@@ -28,7 +47,18 @@ from .renderer_tile_package import (
     _decode_sourced_text,
 )
 from .semantic_model import (
+    FeatureKind,
     HotIdRegistry,
+    LandEvidence,
+    LayerGroup,
+    PlacementSourceKind,
+    ProminenceTier as RendererProminenceTier,
+    ProtectedStatus,
+    RendererGeometry,
+    TextEvidenceKind,
+    make_canonical_variant,
+    make_normalized_placement,
+    renderer_geometry_fingerprint,
     renderer_record_bytes,
     variant_fingerprint,
 )
@@ -38,8 +68,8 @@ from .sourced_text import create_sourced_map_text
 _JOB_MAGIC = b"FAE8WRJOB"
 _JOB_VERSION = 2
 _BATCH_MAGIC = b"FAE8WRBATCH"
-_BATCH_VERSION = 1
-_BATCH_SCHEMA = "flightalert.experiment8.waterway-render-batch.v1"
+_BATCH_VERSION = 2
+_BATCH_SCHEMA = "flightalert.experiment8.waterway-render-batch.v2"
 _SPOOL_OWNER_SCHEMA = "flightalert.experiment8.waterway-parallel-spool.v1"
 _SPOOL_OWNER_FILE = "owner.json"
 _SPOOL_OWNER_MAX_BYTES = 16 * 1024
@@ -338,6 +368,9 @@ class FeatureRenderFrame:
     part_count: int
     point_count: int
     required_node_count: int
+    geometry_source_witnesses: tuple[
+        tuple[int, tuple[tuple[int, ...], ...]], ...
+    ]
     rendered_feature_row: tuple[object, ...]
     registry_claims: tuple[RegistryClaim, ...]
     identity_rows: tuple[tuple[str, bytes, bytes], ...]
@@ -371,6 +404,40 @@ class FeatureRenderFrame:
             self.point_count,
             "feature frame required-node count",
         )
+        if (
+            type(self.geometry_source_witnesses) is not tuple
+            or not 1 <= len(self.geometry_source_witnesses) <= 30
+        ):
+            raise _error("feature frame geometry witness count is outside its bound")
+        previous_zoom = -1
+        for witness in self.geometry_source_witnesses:
+            if type(witness) is not tuple or len(witness) != 2:
+                raise _error("feature frame geometry source witness is malformed")
+            zoom, parts = witness
+            if type(zoom) is not int or not previous_zoom < zoom <= 29:
+                raise _error("feature frame geometry witness zooms are not canonical")
+            previous_zoom = zoom
+            if type(parts) is not tuple or len(parts) != self.part_count:
+                raise _error("feature frame geometry witness part count differs")
+            selected_points = 0
+            for indices in parts:
+                if (
+                    type(indices) is not tuple
+                    or not 2 <= len(indices) <= self.point_count
+                    or any(type(index) is not int for index in indices)
+                    or any(
+                        not 0 <= index < self.point_count
+                        for index in indices
+                    )
+                    or any(
+                        first >= second
+                        for first, second in zip(indices, indices[1:])
+                    )
+                ):
+                    raise _error("feature frame geometry source indices are malformed")
+                selected_points += len(indices)
+            if selected_points > self.point_count:
+                raise _error("feature frame geometry witness exceeds source point count")
         expected_rendered_row = (
             self.ordinal,
             self.source_kind,
@@ -966,6 +1033,16 @@ def _encode_feature_render_frame(
     writer.u32(frame.part_count, "feature frame part count")
     writer.u32(frame.point_count, "feature frame point count")
     writer.u32(frame.required_node_count, "feature frame required-node count")
+    writer.u32(
+        len(frame.geometry_source_witnesses),
+        "feature frame geometry witness count",
+    )
+    for zoom, parts in frame.geometry_source_witnesses:
+        writer.u8(zoom, "feature frame geometry witness zoom")
+        for indices in parts:
+            writer.u32(len(indices), "feature frame geometry witness point count")
+            for index in indices:
+                writer.u32(index, "feature frame geometry source index")
     rendered = frame.rendered_feature_row
     writer.u64(rendered[0], "rendered-feature ordinal")
     writer.u8(_source_kind_code(rendered[1]), "rendered-feature source kind")
@@ -1039,6 +1116,31 @@ def _decode_feature_render_frame(reader) -> FeatureRenderFrame:
     required_node_count = reader.u32("feature frame required-node count")
     if required_node_count > point_count:
         raise _error("feature frame required-node count exceeds its point count")
+    witness_count = reader.u32("feature frame geometry witness count")
+    if not 1 <= witness_count <= 30:
+        raise _error("feature frame geometry witness count is outside its bound")
+    geometry_source_witnesses: list[
+        tuple[int, tuple[tuple[int, ...], ...]]
+    ] = []
+    for _ in range(witness_count):
+        zoom = reader.u8("feature frame geometry witness zoom")
+        parts: list[tuple[int, ...]] = []
+        selected_points = 0
+        for _part in range(part_count):
+            selected_count = reader.u32(
+                "feature frame geometry witness point count"
+            )
+            if not 2 <= selected_count <= point_count - selected_points:
+                raise _error(
+                    "feature frame geometry witness point count is outside its bound"
+                )
+            indices = tuple(
+                reader.u32("feature frame geometry source index")
+                for _index in range(selected_count)
+            )
+            parts.append(indices)
+            selected_points += selected_count
+        geometry_source_witnesses.append((zoom, tuple(parts)))
     rendered_feature_row = (
         reader.u64("rendered-feature ordinal"),
         _decode_code(
@@ -1105,6 +1207,7 @@ def _decode_feature_render_frame(reader) -> FeatureRenderFrame:
         part_count=part_count,
         point_count=point_count,
         required_node_count=required_node_count,
+        geometry_source_witnesses=tuple(geometry_source_witnesses),
         rendered_feature_row=rendered_feature_row,
         registry_claims=claims,
         identity_rows=tuple(identity_rows),
@@ -1165,12 +1268,6 @@ def validate_frame_against_exact_source(
         raise _error("feature frame rendered-feature row differs from its exact source")
 
 
-def _source_field_hot_id(label: str) -> int:
-    canonical = _utf8(label, _MAX_SOURCE_KEY_BYTES + 32, "source field label")
-    digest = hashlib.sha256(b"FAE8OSMID1\0" + canonical).digest()
-    return int.from_bytes(digest[:8], "big")
-
-
 def _decode_parent_record_envelope(
     envelope: bytes,
     tile: TileKey,
@@ -1214,9 +1311,120 @@ def _remember_validated_identity(
         raise _error("fatal 64-bit identity collision between unequal canonical values")
 
 
+def _normalized_validation_zooms(zooms: tuple[int, ...]) -> tuple[int, ...]:
+    if (
+        type(zooms) is not tuple
+        or not zooms
+        or len(set(zooms)) != len(zooms)
+        or any(type(zoom) is not int or not 0 <= zoom <= 29 for zoom in zooms)
+    ):
+        raise _error("feature frame expected zooms are malformed")
+    return zooms
+
+
+def _geometry_world_parts(
+    geometry: RendererGeometry,
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+    if not isinstance(geometry, RendererGeometry):
+        raise _error("feature frame geometry proof requires renderer geometry")
+    denominator = geometry.world_denominator
+    if _WORLD_DENOMINATOR % denominator:
+        raise _error("feature frame geometry is not derived from exact world coordinates")
+    multiplier = _WORLD_DENOMINATOR // denominator
+    flat = tuple(
+        (
+            geometry.world_coordinate_numerators[index] * multiplier,
+            geometry.world_coordinate_numerators[index + 1] * multiplier,
+        )
+        for index in range(0, len(geometry.world_coordinate_numerators), 2)
+    )
+    ends = geometry.parts[1:] + (len(flat),)
+    return tuple(flat[start:end] for start, end in zip(geometry.parts, ends))
+
+
+def _validate_exact_geometry_selection(
+    exact: ExactWaterwayFeature,
+    projected_parts: tuple[tuple[tuple[int, int], ...], ...],
+    geometry: RendererGeometry,
+    source_indices_by_part: tuple[tuple[int, ...], ...],
+    *,
+    zoom: int,
+) -> None:
+    selected_parts = _geometry_world_parts(geometry)
+    if (
+        len(selected_parts) != len(projected_parts)
+        or len(source_indices_by_part) != len(projected_parts)
+    ):
+        raise _error("feature frame geometry part count differs from exact source")
+    pixel_denominator = (1 << zoom) * 512
+    tolerance = max(
+        1,
+        (_WORLD_DENOMINATOR + pixel_denominator - 1) // pixel_denominator,
+    )
+    tolerance_squared = tolerance * tolerance
+    for exact_part, projected, selected, indices in zip(
+        exact.parts,
+        projected_parts,
+        selected_parts,
+        source_indices_by_part,
+    ):
+        required_indices = frozenset(
+            index
+            for index, point in enumerate(exact_part)
+            if point.node_id in exact.required_node_ids
+        )
+        final_source_index = len(projected) - 1
+        if (
+            type(indices) is not tuple
+            or len(indices) != len(selected)
+            or indices[0] != 0
+            or indices[-1] != final_source_index
+            or any(
+                type(index) is not int or not 0 <= index <= final_source_index
+                for index in indices
+            )
+            or any(
+                first >= second
+                for first, second in zip(indices, indices[1:])
+            )
+        ):
+            raise _error("feature frame geometry source-index witness is malformed")
+        if not required_indices.issubset(indices):
+            raise _error("feature frame geometry omits an exact required source node")
+        if any(
+            selected_coordinate != projected[index]
+            for selected_coordinate, index in zip(selected, indices)
+        ):
+            raise _error("feature frame geometry is not derived from exact source points")
+        for start, end in zip(indices, indices[1:]):
+            first_x, first_y = projected[start]
+            last_x, last_y = projected[end]
+            delta_x = last_x - first_x
+            delta_y = last_y - first_y
+            segment_squared = delta_x * delta_x + delta_y * delta_y
+            for x, y in projected[start + 1 : end]:
+                if segment_squared:
+                    cross = abs(
+                        delta_x * (first_y - y)
+                        - (first_x - x) * delta_y
+                    )
+                    if cross * cross > tolerance_squared * segment_squared:
+                        raise _error(
+                            "feature frame geometry exceeds the exact half-pixel omission bound"
+                        )
+                elif (x - first_x) ** 2 + (y - first_y) ** 2 > tolerance_squared:
+                    raise _error(
+                        "feature frame geometry exceeds the exact half-pixel omission bound"
+                    )
+
+
 def validate_and_decode_record_rows(
     exact: ExactWaterwayFeature,
     frame: FeatureRenderFrame,
+    *,
+    source_generation_sha256: str,
+    classifier_sha256: str,
+    expected_zooms: tuple[int, ...],
 ) -> tuple[tuple[object, ...], ...]:
     """Decode every envelope and prove its SQL/identity relationships."""
 
@@ -1224,16 +1432,56 @@ def validate_and_decode_record_rows(
         raise _error("feature frame row validation requires one exact source feature")
     if type(frame) is not FeatureRenderFrame:
         raise _error("feature frame row validation requires one decoded frame")
-    feature_hot = exact.source_feature_sha256[:8]
-    feature_id = int.from_bytes(feature_hot, "big")
-    primary_field_id = _source_field_hot_id(
-        "openstreetmap.tag." + exact.name_source_key
+    _require_sha256_text(
+        source_generation_sha256,
+        "feature frame source generation SHA-256",
+    )
+    _require_sha256_text(
+        classifier_sha256,
+        "feature frame classifier SHA-256",
+    )
+    normalized_zooms = _normalized_validation_zooms(expected_zooms)
+    expected_registry = RecordingHotIdRegistry()
+    primary_field_id = _u64_identity(
+        "openstreetmap.tag." + exact.name_source_key,
+        expected_registry,
     )
     english_field_id = (
-        _source_field_hot_id("openstreetmap.tag.name:en")
+        _u64_identity("openstreetmap.tag.name:en", expected_registry)
         if exact.english_name is not None
         else None
     )
+    evidence_context = SourceEvidenceContext(
+        source_generation_sha256=source_generation_sha256,
+        classifier_sha256=classifier_sha256,
+        source_field_id=primary_field_id,
+    )
+    complete_length_m = _great_circle_length_m(exact.parts)
+    subtype = _SUBTYPE_BY_WATERWAY[exact.waterway_type]
+    facts = LabelFacts(
+        subtype=subtype,
+        evidence_context=evidence_context,
+        complete_named_relation=exact.complete_named_relation,
+        complete_relation_length_m=(
+            complete_length_m if exact.complete_named_relation else None
+        ),
+    )
+    decision = prominence_decision_for_label(facts)
+    visibility = visibility_rule_for_label(facts)
+    active_zooms = tuple(
+        zoom
+        for zoom in normalized_zooms
+        if (zoom + 1) * 100 > visibility.min_zoom_centi
+    )
+    if not active_zooms:
+        raise _error("feature frame exact source is invisible at every requested zoom")
+    projected_parts = tuple(
+        _unwrapped_world_points(part)
+        for part in exact.parts
+    )
+    witnesses_by_zoom = dict(frame.geometry_source_witnesses)
+    feature_hot = exact.source_feature_sha256[:8]
+    feature_id = int.from_bytes(feature_hot, "big")
     try:
         expected_sourced = create_sourced_map_text(
             primary=exact.primary_name,
@@ -1243,7 +1491,7 @@ def validate_and_decode_record_rows(
         )
     except ValueError as error:
         raise _error("feature frame exact sourced text cannot be reconstructed") from error
-    expected_subtype = _SUBTYPE_BY_WATERWAY[exact.waterway_type].value
+    expected_subtype = subtype.value
     expected_identities: dict[tuple[str, bytes], bytes] = {}
     _remember_validated_identity(
         expected_identities,
@@ -1252,6 +1500,8 @@ def validate_and_decode_record_rows(
         exact.source_feature_sha256,
     )
     validated_rows: list[tuple[object, ...]] = []
+    variants_by_zoom: dict[int, object] = {}
+    actual_postings: list[tuple[TileKey, int, int, TileKey, int]] = []
     for row in frame.record_rows:
         _validate_record_row(
             row,
@@ -1300,6 +1550,21 @@ def validate_and_decode_record_rows(
             or bytes(row[10]) != sourced.full_sha256
         ):
             raise _error("feature frame sourced text differs from its exact source")
+        zoom = placement.source_zoom
+        if posting.requested_tile.z != zoom:
+            raise _error("feature frame posting zoom differs from its label geometry")
+        previous_variant = variants_by_zoom.setdefault(zoom, variant)
+        if previous_variant != variant:
+            raise _error("feature frame contains unequal variants at one zoom")
+        actual_postings.append(
+            (
+                posting.requested_tile,
+                posting.feature_id,
+                posting.canonical_variant_id,
+                posting.owner_tile,
+                posting.world_wrap,
+            )
+        )
         geometry_hot = variant.geometry_id.to_bytes(8, "big")
         label_hot = placement.label_candidate_id.to_bytes(8, "big")
         sourced_hot = sourced.full_sha256[:8]
@@ -1328,6 +1593,142 @@ def validate_and_decode_record_rows(
             sourced.full_sha256,
         )
         validated_rows.append(row)
+    if set(variants_by_zoom) != set(active_zooms):
+        raise _error("feature frame posting zooms differ from the exact source")
+    if set(witnesses_by_zoom) != set(active_zooms):
+        raise _error("feature frame geometry witnesses differ from requested zooms")
+    expected_postings_by_tile: dict[
+        TileKey,
+        list[tuple[TileKey, int, int, TileKey, int]],
+    ] = {}
+    for zoom in active_zooms:
+        actual_variant = variants_by_zoom[zoom]
+        geometry = actual_variant.geometry
+        _validate_exact_geometry_selection(
+            exact,
+            projected_parts,
+            geometry,
+            witnesses_by_zoom[zoom],
+            zoom=zoom,
+        )
+        geometry_identity = renderer_geometry_fingerprint(geometry)
+        candidates = _candidate_tiles(geometry, zoom)
+        owner_tile, owner_wrap = min(
+            candidates,
+            key=lambda item: (item[0].packed, item[1]),
+        )
+        scale = 1 << zoom
+        owner_raw_x = owner_tile.x + owner_wrap * scale
+        edge_domain = (
+            geometry.bounds_numerators[0] * scale
+            - owner_raw_x * geometry.world_denominator,
+            geometry.bounds_numerators[1] * scale
+            - owner_tile.y * geometry.world_denominator,
+            geometry.bounds_numerators[2] * scale
+            - owner_raw_x * geometry.world_denominator,
+            geometry.bounds_numerators[3] * scale
+            - owner_tile.y * geometry.world_denominator,
+        )
+        expected_placement = make_normalized_placement(
+            text=exact.primary_name,
+            source_feature_sha256=exact.source_feature_sha256,
+            placement_geometry_sha256=geometry_identity.full_sha256,
+            text_evidence_kind=TextEvidenceKind.SOURCE_FIELD,
+            text_source_field_id=primary_field_id,
+            placement_source_feature_id=feature_id,
+            placement_geometry_id=geometry_identity.hot_id,
+            source_tile=owner_tile,
+            source_zoom=zoom,
+            source_declared_extent=geometry.world_denominator,
+            source_edge_domain=edge_domain,
+            placement_source_kind=(
+                PlacementSourceKind.EXACT_PARENT_PATH
+                if exact.complete_named_relation
+                else PlacementSourceKind.DIRECT_SOURCE_PATH
+            ),
+            display_min_zoom_centi=visibility.min_zoom_centi,
+            display_max_zoom_centi=LABEL_DISPLAY_MAX_ZOOM_CENTI,
+            spacing_px=LINE_LABEL_REPEAT_SPACING_PX,
+            max_angle_degrees=visibility.max_bend_centi_degrees // 100,
+            collision_group=REFERENCE_LABEL_COLLISION_GROUP,
+            semantic_priority=decision.semantic_priority,
+            prominence_tier=RendererProminenceTier[decision.tier.name],
+            provider_rank=decision.provider_rank,
+            complete_geometry_measure_bucket=(
+                decision.complete_geometry_measure_bucket
+            ),
+            prominence_rule_id=decision.prominence_rule_id,
+            prominence_decision_sha256=bytes.fromhex(
+                prominence_decision_sha256(decision)
+            ),
+            avoid_edges=True,
+            keep_upright=True,
+            active_band_limit=LABEL_ACTIVE_BAND_LIMIT,
+            style_policy_sha256=bytes.fromhex(PRESENTATION_POLICY_SHA256),
+            provider_feature_id=exact.source_id,
+            identity_registry=expected_registry,
+        )
+        expected_variant = make_canonical_variant(
+            dedupe_id=feature_id,
+            geometry_id=geometry_identity.hot_id,
+            source_layer_id=_u64_identity(
+                f"openstreetmap.{exact.source_kind}.waterway",
+                expected_registry,
+            ),
+            source_scale_band_id=_u64_identity(
+                f"openstreetmap.waterway.adaptive-half-pixel.z{zoom}",
+                expected_registry,
+            ),
+            layer_group=LayerGroup.WATER,
+            feature_kind=FeatureKind.LABEL,
+            semantic_subtype=subtype.value,
+            source_style_layer_ids=(
+                _u64_identity(
+                    "openstreetmap.tag.waterway." + exact.waterway_type,
+                    expected_registry,
+                ),
+            ),
+            render_style_token_ids=(
+                _u64_identity(
+                    "flightalert.reference.water." + exact.waterway_type,
+                    expected_registry,
+                ),
+            ),
+            text=exact.primary_name,
+            geometry=geometry,
+            min_zoom_centi=visibility.min_zoom_centi,
+            max_zoom_centi=LABEL_DISPLAY_MAX_ZOOM_CENTI,
+            fade_in_centi=visibility.full_alpha_zoom_centi,
+            fade_out_centi=LABEL_FADE_OUT_ZOOM_CENTI,
+            draw_order=40,
+            priority=decision.semantic_priority,
+            placement=expected_placement,
+            land_evidence=LandEvidence.NOT_APPLICABLE,
+            protected_status=ProtectedStatus.NOT_APPLICABLE,
+            flags=0,
+            identity_registry=expected_registry,
+        )
+        if actual_variant != expected_variant:
+            raise _error("feature frame variant differs from exact source rendering")
+        for tile, world_wrap in candidates:
+            expected_postings_by_tile.setdefault(tile, []).append(
+                (
+                    tile,
+                    feature_id,
+                    expected_variant.canonical_variant_id,
+                    owner_tile,
+                    world_wrap,
+                )
+            )
+    expected_postings = tuple(
+        posting
+        for tile in sorted(expected_postings_by_tile)
+        for posting in expected_postings_by_tile[tile]
+    )
+    if tuple(actual_postings) != expected_postings:
+        raise _error("feature frame postings differ from exact source tile coverage")
+    if frame.registry_claims != expected_registry.claims:
+        raise _error("feature frame registry claims differ from validated records")
     actual_identities = tuple(frame.identity_rows)
     if (
         len(actual_identities) != len(expected_identities)
@@ -1449,9 +1850,53 @@ class _FrameByteBudget:
         self.used_bytes += byte_count
 
 
+def _geometry_source_witnesses(
+    exact: ExactWaterwayFeature,
+    zooms: tuple[int, ...],
+) -> tuple[tuple[int, tuple[tuple[int, ...], ...]], ...]:
+    """Record the worker's exact simplification indices without parent rerendering."""
+
+    normalized_zooms = _normalized_validation_zooms(zooms)
+    witnesses: list[tuple[int, tuple[tuple[int, ...], ...]]] = []
+    for zoom in normalized_zooms:
+        pixel_denominator = (1 << zoom) * 512
+        tolerance = max(
+            1,
+            (_WORLD_DENOMINATOR + pixel_denominator - 1) // pixel_denominator,
+        )
+        parts: list[tuple[int, ...]] = []
+        for part in exact.parts:
+            projected = _unwrapped_world_points(part)
+            anchors = tuple(
+                sorted(
+                    {0, len(part) - 1}
+                    | {
+                        index
+                        for index, point in enumerate(part)
+                        if point.node_id in exact.required_node_ids
+                    }
+                )
+            )
+            kept: set[int] = set()
+            for start, end in zip(anchors, anchors[1:]):
+                kept.update(
+                    start + index
+                    for index in _simplified_indices(
+                        projected[start : end + 1],
+                        tolerance,
+                    )
+                )
+            parts.append(tuple(sorted(kept)))
+        witnesses.append((zoom, tuple(parts)))
+    return tuple(witnesses)
+
+
 def _initial_frame_encoded_bytes(
     exact: ExactWaterwayFeature,
     registry_claims: tuple[RegistryClaim, ...],
+    geometry_source_witnesses: tuple[
+        tuple[int, tuple[tuple[int, ...], ...]], ...
+    ],
 ) -> int:
     timestamp_bytes = _utf8(
         exact.source_timestamp,
@@ -1467,6 +1912,10 @@ def _initial_frame_encoded_bytes(
         + 8
         for claim in registry_claims
     )
+    witness_bytes = 4 + sum(
+        1 + sum(4 + 4 * len(indices) for indices in parts)
+        for _zoom, parts in geometry_source_witnesses
+    )
     return (
         8
         + 1
@@ -1480,6 +1929,7 @@ def _initial_frame_encoded_bytes(
         + 4
         + 4
         + 4
+        + witness_bytes
         + 8
         + 1
         + 8
@@ -1533,9 +1983,17 @@ def _build_feature_render_frame(
     registry_claims: tuple[RegistryClaim, ...],
     maximum_encoded_bytes: int,
 ) -> FeatureRenderFrame:
+    geometry_source_witnesses = _geometry_source_witnesses(
+        exact,
+        tuple(sorted({tile.z for tile in rendered.tiles})),
+    )
     budget = _FrameByteBudget(
         maximum_encoded_bytes,
-        _initial_frame_encoded_bytes(exact, registry_claims),
+        _initial_frame_encoded_bytes(
+            exact,
+            registry_claims,
+            geometry_source_witnesses,
+        ),
     )
     feature_hot = exact.source_feature_sha256[:8]
     identity_rows: list[tuple[str, bytes, bytes]] = []
@@ -1648,6 +2106,7 @@ def _build_feature_render_frame(
         part_count=len(exact.parts),
         point_count=_feature_point_count(exact),
         required_node_count=len(exact.required_node_ids),
+        geometry_source_witnesses=geometry_source_witnesses,
         rendered_feature_row=(
             ordinal,
             exact.source_kind,

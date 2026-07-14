@@ -3485,6 +3485,9 @@ def _stage_feature_render_frame(
     exact: "ExactWaterwayFeature",
     frame: "FeatureRenderFrame",
     registry: "HotIdRegistry",
+    source_generation_sha256: str,
+    classifier_sha256: str,
+    zooms: tuple[int, ...],
     peaks: dict[str, int],
 ) -> None:
     from .waterway_parallel_render import (
@@ -3494,7 +3497,13 @@ def _stage_feature_render_frame(
     )
 
     validate_frame_against_exact_source(ordinal, exact, frame)
-    record_rows = validate_and_decode_record_rows(exact, frame)
+    record_rows = validate_and_decode_record_rows(
+        exact,
+        frame,
+        source_generation_sha256=source_generation_sha256,
+        classifier_sha256=classifier_sha256,
+        expected_zooms=zooms,
+    )
     replay_registry_claims(registry, frame.registry_claims)
     for table, hot_id, full_sha256 in frame.identity_rows:
         _insert_hot_identity(connection, table, hot_id, full_sha256)
@@ -3986,6 +3995,9 @@ def _stage_renderer_records(
                         exact=exact,
                         frame=frame,
                         registry=registry,
+                        source_generation_sha256=source_binding.planet_sha256,
+                        classifier_sha256=str(run_identity["classifierSha256"]),
+                        zooms=zooms,
                         peaks=peaks,
                     )
                     seen = ordinal + 1

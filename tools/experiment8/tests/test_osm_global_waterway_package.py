@@ -1933,6 +1933,68 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
         self.assertEqual(1, len(render_connections))
         self.assertNotIn("sqlite3", parallel.__dict__)
 
+    def test_parallel_staging_uses_exactly_one_parent_sqlite_connection(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_renderer import (
+            classifier_identity_sha256,
+        )
+
+        source_binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        zooms = tuple(range(4, 12))
+        checkpoint_features = 2
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ingest = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=root / "work",
+                source_binding=source_binding,
+                checkpoint_objects=4,
+            )
+            render_identity = store._render_run_identity(
+                package_id="fixture-global-waterways-v3",
+                source_binding=source_binding,
+                zooms=zooms,
+                checkpoint_features=checkpoint_features,
+                code_identities=store._render_code_identities(),
+                classifier_sha256=classifier_identity_sha256(),
+                admission_receipt=ingest.receipt["admission"],
+                ingest_semantic_sha256=ingest.receipt["semanticSha256"],
+            )
+            real_connect = sqlite3.connect
+            parent_connects = []
+
+            def recording_connect(*args, **kwargs):
+                parent_connects.append((args, kwargs))
+                return real_connect(*args, **kwargs)
+
+            with patch.object(
+                store.sqlite3,
+                "connect",
+                side_effect=recording_connect,
+            ):
+                connection = store.sqlite3.connect(ingest.database_path)
+                try:
+                    store._configure_render_connection(connection)
+                    complete = store._stage_renderer_records(
+                        connection,
+                        ingest.database_path,
+                        source_binding=source_binding,
+                        zooms=zooms,
+                        checkpoint_features=checkpoint_features,
+                        pause_after_features=None,
+                        run_identity=render_identity,
+                        parallel_limits=self._parallel_limits(1),
+                        spool_directory=root / "spool",
+                    )
+                finally:
+                    connection.close()
+
+        self.assertTrue(complete)
+        self.assertEqual(1, len(parent_connects), parent_connects)
+
     def test_workers_one_two_and_reverse_completion_are_byte_and_table_identical(self) -> None:
         from tools.experiment8.tests.test_waterway_parallel_render import (
             _ReverseExecutorFactory,
@@ -2093,6 +2155,196 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                 self.assertTrue((root / "spool" / "owner.json").is_file())
             finally:
                 connection.close()
+
+    def test_interior_reducer_collisions_preserve_checkpoint_and_later_spools(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.osm_global_waterway_renderer import (
+            classifier_identity_sha256,
+        )
+        from tools.experiment8.tests.test_waterway_parallel_render import (
+            _ReverseExecutorFactory,
+        )
+
+        collision_targets = (
+            "registry_claims",
+            "feature_ids",
+            "geometry_ids",
+            "label_ids",
+            "variant_ids",
+            "sourced_ids",
+        )
+        source_binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        zooms = tuple(range(4, 12))
+        checkpoint_features = 2
+        for collision_target in collision_targets:
+            with self.subTest(collision_target=collision_target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                ingest = store.ingest_global_waterway_closure(
+                    opl_path=CLOSURE_FIXTURE,
+                    root_ids_path=ROOT_FIXTURE,
+                    work_directory=root / "work",
+                    source_binding=source_binding,
+                    checkpoint_objects=4,
+                )
+                render_identity = store._render_run_identity(
+                    package_id="fixture-global-waterways-v3",
+                    source_binding=source_binding,
+                    zooms=zooms,
+                    checkpoint_features=checkpoint_features,
+                    code_identities=store._render_code_identities(),
+                    classifier_sha256=classifier_identity_sha256(),
+                    admission_receipt=ingest.receipt["admission"],
+                    ingest_semantic_sha256=ingest.receipt["semanticSha256"],
+                )
+                spool = root / "spool"
+                connection = sqlite3.connect(ingest.database_path)
+                try:
+                    store._configure_render_connection(connection)
+                    paused = store._stage_renderer_records(
+                        connection,
+                        ingest.database_path,
+                        source_binding=source_binding,
+                        zooms=zooms,
+                        checkpoint_features=checkpoint_features,
+                        pause_after_features=2,
+                        run_identity=render_identity,
+                        parallel_limits=self._parallel_limits(
+                            1,
+                            max_in_flight_jobs=1,
+                        ),
+                        spool_directory=spool,
+                    )
+                    self.assertFalse(paused)
+                    checkpoint_before = store._meta_get(
+                        connection,
+                        "renderCheckpoint",
+                    )
+                    snapshot_before = self._renderer_snapshot(ingest.database_path)
+                    completed_ranges = []
+
+                    def remember_completion(job, descriptor):
+                        completed_ranges.append(
+                            (
+                                job.start_ordinal,
+                                descriptor.end_ordinal_exclusive,
+                            )
+                        )
+
+                    factory = _ReverseExecutorFactory(
+                        completion_hook=remember_completion
+                    )
+                    real_renderer = parallel.ParallelFeatureRenderer
+
+                    def reverse_renderer(*args, **kwargs):
+                        kwargs["executor_factory"] = factory
+                        kwargs["wait_for_futures"] = factory.wait
+                        kwargs["disk_usage"] = lambda _path: type(
+                            "Usage", (), {"free": 100_000_000_000}
+                        )()
+                        return real_renderer(*args, **kwargs)
+
+                    real_stage = store._stage_feature_render_frame
+
+                    def inject_collision(*args, **kwargs):
+                        if kwargs["ordinal"] == 3:
+                            self.assertTrue(
+                                any(start > 3 for start, _end in completed_ranges),
+                                completed_ranges,
+                            )
+                            if collision_target == "registry_claims":
+                                registry = kwargs["registry"]
+                                target_claim = next(
+                                    claim
+                                    for claim in kwargs["frame"].registry_claims
+                                    if (
+                                        claim.full_sha256,
+                                        claim.domain,
+                                        claim.canonical_bytes,
+                                    )
+                                    not in registry._entries.values()
+                                )
+                                collision_hot = next(iter(registry._entries))
+                                target_preimage = (
+                                    target_claim.domain
+                                    + target_claim.canonical_bytes
+                                )
+
+                                def colliding_digest(data: bytes) -> bytes:
+                                    normal = hashlib.sha256(data).digest()
+                                    if data == target_preimage:
+                                        return (
+                                            collision_hot.to_bytes(8, "big")
+                                            + normal[8:]
+                                        )
+                                    return normal
+
+                                registry._digest_function = colliding_digest
+                            else:
+                                table, hot_id, full_sha = next(
+                                    identity
+                                    for identity in kwargs["frame"].identity_rows
+                                    if identity[0] == collision_target
+                                )
+                                conflicting_sha = bytes((full_sha[0] ^ 1,)) + full_sha[1:]
+                                stage_connection = (
+                                    args[0] if args else kwargs["connection"]
+                                )
+                                stage_connection.execute(
+                                    f"INSERT OR REPLACE INTO {table}(hot_id,full_sha) VALUES (?,?)",
+                                    (hot_id, conflicting_sha),
+                                )
+                        return real_stage(*args, **kwargs)
+
+                    with patch.object(
+                        parallel,
+                        "ParallelFeatureRenderer",
+                        side_effect=reverse_renderer,
+                    ), patch.object(
+                        store,
+                        "_stage_feature_render_frame",
+                        side_effect=inject_collision,
+                    ), self.assertRaisesRegex(Exception, "collision"):
+                        store._stage_renderer_records(
+                            connection,
+                            ingest.database_path,
+                            source_binding=source_binding,
+                            zooms=zooms,
+                            checkpoint_features=checkpoint_features,
+                            pause_after_features=None,
+                            run_identity=render_identity,
+                            parallel_limits=self._parallel_limits(
+                                2,
+                                max_in_flight_jobs=4,
+                            ),
+                            spool_directory=spool,
+                        )
+
+                    self.assertFalse(connection.in_transaction)
+                    self.assertEqual(
+                        checkpoint_before,
+                        store._meta_get(connection, "renderCheckpoint"),
+                    )
+                    self.assertEqual(
+                        snapshot_before,
+                        self._renderer_snapshot(ingest.database_path),
+                    )
+                    self.assertTrue(
+                        any(start > 3 for start, _end in completed_ranges),
+                        completed_ranges,
+                    )
+                    self.assertTrue(
+                        any(
+                            path.suffix == ".batch"
+                            and int(path.name[:12]) > 3
+                            for path in spool.iterdir()
+                        ),
+                        tuple(path.name for path in spool.iterdir()),
+                    )
+                finally:
+                    connection.close()
 
     def test_corrupt_later_spool_keeps_prior_checkpoint_and_resume_matches_clean(self) -> None:
         import sqlite3
