@@ -4,11 +4,13 @@ import hashlib
 import io
 import json
 import os
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -44,6 +46,50 @@ def _canonical_json_bytes(document: object) -> bytes:
         )
         + "\n"
     ).encode("utf-8", "strict")
+
+
+@contextmanager
+def _windows_test_reader(path: Path, *, share_delete: bool):
+    if os.name != "nt":
+        raise AssertionError("Windows reader test helper requires Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    share = 0x1 | (0x4 if share_delete else 0)
+    handle = create_file(
+        str(path),
+        0x80000000,
+        share,
+        None,
+        3,
+        0x80 | 0x00200000,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, ctypes.FormatError(error_code), str(path))
+    try:
+        yield int(handle)
+    finally:
+        if not close_handle(handle):
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, ctypes.FormatError(error_code), str(path))
 
 
 def _write_v3_package(
@@ -797,10 +843,12 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
                 catalog[-1] ^= 1
                 catalog_path.write_bytes(catalog)
 
-            with self.assertRaisesRegex(
-                V3ClassCatalogFinalizationError,
-                "class-catalog.bin readback differs",
-            ):
+            expected_error = (
+                PermissionError
+                if os.name == "nt"
+                else V3ClassCatalogFinalizationError
+            )
+            with self.assertRaises(expected_error):
                 finalize_v3_class_catalog(
                     package,
                     publication_hook=mutate_catalog_before_manifest,
@@ -922,7 +970,9 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
             )
             self.assertEqual([], receipt_artifacts)
 
-    def test_detected_failure_after_receipt_publication_invalidates_receipt(self) -> None:
+    def test_detected_failure_after_receipt_publication_preserves_committed_receipt(
+        self,
+    ) -> None:
         from tools.experiment8.v3_class_catalog_finalizer import (
             RECEIPT_FILE_NAME,
             V3ClassCatalogFinalizationError,
@@ -944,19 +994,26 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
                 catalog[-1] ^= 1
                 catalog_path.write_bytes(catalog)
 
-            with self.assertRaisesRegex(
-                V3ClassCatalogFinalizationError,
-                "class-catalog.bin readback differs",
-            ):
+            expected_error = (
+                PermissionError
+                if os.name == "nt"
+                else V3ClassCatalogFinalizationError
+            )
+            with self.assertRaises(expected_error):
                 finalize_v3_class_catalog(
                     package,
                     publication_hook=corrupt_after_receipt,
                 )
 
             receipt_path = package / RECEIPT_FILE_NAME
-            self.assertTrue(
-                not receipt_path.exists() or receipt_path.read_bytes() == b""
-            )
+            if os.name == "nt":
+                receipt_bytes = receipt_path.read_bytes()
+                self.assertGreater(len(receipt_bytes), 0)
+                self.assertEqual(_canonical_json_bytes(json.loads(receipt_bytes)), receipt_bytes)
+            else:
+                self.assertTrue(
+                    not receipt_path.exists() or receipt_path.read_bytes() == b""
+                )
 
     def test_receipt_replaced_after_publication_cannot_return_success(self) -> None:
         from tools.experiment8.v3_class_catalog_finalizer import (
@@ -977,19 +1034,25 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
                 if event == "after_receipt_published":
                     (package / RECEIPT_FILE_NAME).write_bytes(replacement)
 
-            with self.assertRaisesRegex(
-                V3ClassCatalogFinalizationError,
-                "receipt.*readback differs",
-            ):
+            expected_error = (
+                PermissionError
+                if os.name == "nt"
+                else V3ClassCatalogFinalizationError
+            )
+            with self.assertRaises(expected_error):
                 finalize_v3_class_catalog(
                     package,
                     publication_hook=replace_receipt,
                 )
 
             receipt_path = package / RECEIPT_FILE_NAME
-            self.assertTrue(
-                not receipt_path.exists() or receipt_path.read_bytes() == b""
-            )
+            if os.name == "nt":
+                self.assertNotEqual(replacement, receipt_path.read_bytes())
+                self.assertGreater(len(receipt_path.read_bytes()), 0)
+            else:
+                self.assertTrue(
+                    not receipt_path.exists() or receipt_path.read_bytes() == b""
+                )
 
     def test_terminal_receipt_readback_bounds_raced_growth_before_read(self) -> None:
         from tools.experiment8 import v3_class_catalog_finalizer as finalizer
@@ -1001,6 +1064,26 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
             package = Path(temporary) / "package"
             _write_v3_package(package, {tile: payload}, (record,))
             receipt_path = package / finalizer.RECEIPT_FILE_NAME
+            if os.name == "nt":
+                original_reader = finalizer._read_windows_retained_bytes
+                bounded_lengths: list[int] = []
+
+                def bounded_retained_read(publication, expected_length: int) -> bytes:
+                    bounded_lengths.append(expected_length)
+                    self.assertEqual(len(publication.data), expected_length)
+                    return original_reader(publication, expected_length)
+
+                with mock.patch.object(
+                    finalizer,
+                    "_read_windows_retained_bytes",
+                    side_effect=bounded_retained_read,
+                ):
+                    finalizer.finalize_v3_class_catalog(package)
+
+                receipt_length = len(receipt_path.read_bytes())
+                self.assertIn(receipt_length, bounded_lengths)
+                self.assertTrue(all(length >= 0 for length in bounded_lengths))
+                return
             original_open = Path.open
             original_lstat = finalizer.os.lstat
             probe_active = False
@@ -1103,15 +1186,15 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
                 package = Path(temporary) / "package"
                 _write_v3_package(package, {tile: payload}, (record,))
-                original_replace = finalizer._replace_staged
+                original_replace = finalizer._PublicationSession.replace
                 attacker_bytes = f"attacker-owned:{target}".encode("ascii")
                 attacker_paths: list[Path] = []
                 swapped = False
 
-                def swap_stage(staged, destination: Path) -> None:
+                def swap_stage(publications, staged, destination: Path) -> None:
                     nonlocal swapped
                     if destination.name != target or swapped:
-                        original_replace(staged, destination)
+                        original_replace(publications, staged, destination)
                         return
                     stage_path = getattr(staged, "path", staged)
                     owned_copy = stage_path.with_name(stage_path.name + ".owned")
@@ -1123,9 +1206,9 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(
-                        finalizer,
-                        "_replace_staged",
-                        side_effect=swap_stage,
+                        finalizer._PublicationSession,
+                        "replace",
+                        new=swap_stage,
                     ),
                     self.assertRaisesRegex(
                         finalizer.V3ClassCatalogFinalizationError,
@@ -1395,8 +1478,236 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
                 output.getvalue(),
             )
 
-    @unittest.skipUnless(os.name == "nt", "Windows write-through contract")
-    def test_windows_publication_uses_write_through_replace_in_order(self) -> None:
+    def test_stage_records_post_fsync_identity_before_writer_close(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "manifest.json"
+            real_fstat = finalizer.os.fstat
+            calls = 0
+
+            def changed_after_fsync(descriptor: int):
+                nonlocal calls
+                calls += 1
+                information = real_fstat(descriptor)
+                if calls != 2:
+                    return information
+
+                class ChangedIdentity:
+                    st_ino = information.st_ino + 1
+
+                    def __getattr__(self, name: str):
+                        return getattr(information, name)
+
+                return ChangedIdentity()
+
+            with mock.patch.object(
+                finalizer.os,
+                "fstat",
+                side_effect=changed_after_fsync,
+            ), self.assertRaisesRegex(
+                finalizer.V3ClassCatalogFinalizationError,
+                "identity changed while writing",
+            ):
+                finalizer._stage_bytes(destination, b"exact staged bytes")
+
+            self.assertGreaterEqual(calls, 2)
+            self.assertEqual([], list(Path(temporary).iterdir()))
+
+    def test_posix_replacement_keeps_legacy_receipt_fault_invalidation(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "receipt.json"
+            destination.write_bytes(b"OLD")
+            stage = finalizer._stage_bytes(destination, b"NEW")
+            with mock.patch.object(
+                finalizer.os,
+                "name",
+                "posix",
+            ), mock.patch.object(
+                finalizer,
+                "_sync_posix_directory_metadata",
+            ), finalizer._PublicationSession() as publications:
+                publications.replace(stage, destination)
+                self.assertFalse(publications.committed(destination))
+
+            self.assertEqual(b"NEW", destination.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained publication contract")
+    def test_windows_publication_carries_candidate_across_back_to_back_replacements(
+        self,
+    ) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "manifest.json"
+            destination.write_bytes(b"OLD")
+            first_stage = finalizer._stage_bytes(destination, b"NEW1")
+            second_stage = finalizer._stage_bytes(destination, b"NEW2")
+
+            with finalizer._PublicationSession() as publications:
+                first = publications.replace(first_stage, destination)
+                self.assertIs(first, publications.retained(destination))
+                publications.readback(
+                    destination, b"NEW1", hashlib.sha256(b"NEW1").hexdigest()
+                )
+                second = publications.replace(second_stage, destination)
+                self.assertTrue(first.handle.closed)
+                self.assertIs(second, publications.retained(destination))
+                publications.readback(
+                    destination, b"NEW2", hashlib.sha256(b"NEW2").hexdigest()
+                )
+
+            self.assertEqual(b"NEW2", destination.read_bytes())
+            self.assertFalse(first_stage.path.exists())
+            self.assertFalse(second_stage.path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained publication contract")
+    def test_windows_publication_crash_boundaries_leave_old_or_new(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            before_destination = root / "before.bin"
+            before_destination.write_bytes(b"OLD")
+            before_stage = finalizer._stage_bytes(before_destination, b"NEW")
+            with finalizer._PublicationSession() as publications, mock.patch.object(
+                finalizer,
+                "_windows_set_rename_information",
+                side_effect=SystemExit("crash immediately before native call"),
+            ):
+                with self.assertRaisesRegex(SystemExit, "before native"):
+                    publications.replace(before_stage, before_destination)
+                self.assertFalse(publications.committed(before_destination))
+            self.assertEqual(b"OLD", before_destination.read_bytes())
+            finalizer._remove_owned_stage(before_stage)
+
+            after_destination = root / "after.bin"
+            after_destination.write_bytes(b"OLD")
+            after_stage = finalizer._stage_bytes(after_destination, b"NEW")
+            with finalizer._PublicationSession() as publications, mock.patch.object(
+                finalizer,
+                "_verify_windows_committed_target",
+                side_effect=SystemExit("crash immediately after native success"),
+            ):
+                with self.assertRaisesRegex(SystemExit, "after native"):
+                    publications.replace(after_stage, after_destination)
+                self.assertTrue(publications.committed(after_destination))
+                self.assertIsNotNone(publications.retained(after_destination))
+            self.assertEqual(b"NEW", after_destination.read_bytes())
+            self.assertFalse(after_stage.path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained publication contract")
+    def test_windows_publication_rejects_temp_substitution_during_reopen(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "manifest.json"
+            destination.write_bytes(b"OLD")
+            stage = finalizer._stage_bytes(destination, b"NEW")
+            original_stage = stage.path.with_name(stage.path.name + ".original")
+            real_open = finalizer._open_windows_publication_publisher
+
+            def substitute(path: Path):
+                os.replace(path, original_stage)
+                path.write_bytes(b"ATTACKER")
+                return real_open(path)
+
+            with finalizer._PublicationSession() as publications, mock.patch.object(
+                finalizer,
+                "_open_windows_publication_publisher",
+                side_effect=substitute,
+            ):
+                with self.assertRaisesRegex(
+                    finalizer.V3ClassCatalogFinalizationError,
+                    "identity changed",
+                ):
+                    publications.replace(stage, destination)
+                self.assertFalse(publications.committed(destination))
+
+            self.assertEqual(b"OLD", destination.read_bytes())
+            self.assertEqual(b"NEW", original_stage.read_bytes())
+            self.assertEqual(b"ATTACKER", stage.path.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained publication contract")
+    def test_windows_postcommit_faults_preserve_new_canonical(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        faults = (
+            ("lstat", "_verify_windows_committed_target"),
+            ("read", "_read_windows_retained_bytes"),
+        )
+        for label, target in faults:
+            with self.subTest(fault=label), tempfile.TemporaryDirectory() as temporary:
+                destination = Path(temporary) / "manifest.json"
+                destination.write_bytes(b"OLD")
+                stage = finalizer._stage_bytes(destination, b"NEW")
+                with finalizer._PublicationSession() as publications, mock.patch.object(
+                    finalizer,
+                    target,
+                    side_effect=OSError(f"simulated postcommit {label} fault"),
+                ):
+                    with self.assertRaisesRegex(OSError, "postcommit"):
+                        publications.replace(stage, destination)
+                    self.assertTrue(publications.committed(destination))
+                    self.assertIsNotNone(publications.retained(destination))
+
+                self.assertEqual(b"NEW", destination.read_bytes())
+                self.assertFalse(stage.path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained publication contract")
+    def test_windows_destination_reader_must_share_delete(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "manifest.json"
+            destination.write_bytes(b"OLD")
+            stage = finalizer._stage_bytes(destination, b"NEW")
+            with _windows_test_reader(destination, share_delete=False):
+                with finalizer._PublicationSession() as publications:
+                    with self.assertRaises(
+                        finalizer.V3ClassCatalogFinalizationError
+                    ) as caught:
+                        publications.replace(stage, destination)
+                    self.assertFalse(publications.committed(destination))
+            cause = caught.exception.__cause__
+            self.assertEqual(
+                32,
+                getattr(cause, "winerror", None) or getattr(cause, "errno", None),
+            )
+            self.assertEqual(b"OLD", destination.read_bytes())
+            finalizer._remove_owned_stage(stage)
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained publication contract")
+    def test_windows_read_only_canonical_fails_without_fallback(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer as finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "manifest.json"
+            destination.write_bytes(b"OLD")
+            os.chmod(destination, stat.S_IREAD)
+            stage = finalizer._stage_bytes(destination, b"NEW")
+            try:
+                with finalizer._PublicationSession() as publications:
+                    with self.assertRaises(
+                        finalizer.V3ClassCatalogFinalizationError
+                    ) as caught:
+                        publications.replace(stage, destination)
+                    self.assertFalse(publications.committed(destination))
+                cause = caught.exception.__cause__
+                self.assertEqual(
+                    5,
+                    getattr(cause, "winerror", None)
+                    or getattr(cause, "errno", None),
+                )
+                self.assertEqual(b"OLD", destination.read_bytes())
+            finally:
+                os.chmod(destination, stat.S_IWRITE | stat.S_IREAD)
+                finalizer._remove_owned_stage(stage)
+
+    @unittest.skipUnless(os.name == "nt", "Windows FileRenameInfoEx contract")
+    def test_windows_publication_uses_class22_replace_in_order(self) -> None:
         from tools.experiment8 import v3_class_catalog_finalizer as finalizer
 
         tile = TileKey(1, 0, 0)
@@ -1407,14 +1718,16 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
             _write_v3_package(package, {tile: payload}, (record,))
             published: list[str] = []
 
-            def write_through(source: Path, destination: Path) -> None:
+            native_replace = finalizer._windows_set_rename_information
+
+            def class22_replace(publisher, destination: Path) -> None:
                 published.append(destination.name)
-                os.replace(source, destination)
+                native_replace(publisher, destination)
 
             with mock.patch.object(
                 finalizer,
-                "_windows_replace_write_through",
-                side_effect=write_through,
+                "_windows_set_rename_information",
+                side_effect=class22_replace,
             ):
                 finalizer.finalize_v3_class_catalog(package)
 

@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import stat
 import struct
+import sys
 import tempfile
 import unicodedata
 import zlib
@@ -15,6 +16,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from .model import TileKey
 from .reference_presentation_policy import (
@@ -103,6 +105,18 @@ _MAX_COMPRESSED_TILE_BYTES = (
 _ZERO_INDEX_ENTRY = b"\0" * INDEX_ENTRY_BYTES
 _U64_MAX = (1 << 64) - 1
 _REPARSE_POINT_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_DELETE_ACCESS = 0x00010000
+_WINDOWS_SYNCHRONIZE_ACCESS = 0x00100000
+_WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_DELETE = 0x00000004
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_FILE_RENAME_INFO_EX_CLASS = 22
+_WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001
+_WINDOWS_FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 
 
 class V3ClassCatalogFinalizationError(ValueError):
@@ -141,10 +155,20 @@ class _FileBinding:
     inode: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _OwnedStagedFile:
     path: Path
     identity: tuple[int, int, int, int]
+    data: bytes
+
+
+@dataclass(slots=True)
+class _RetainedPublication:
+    path: Path
+    handle: BinaryIO
+    identity: tuple[int, int, int, int]
+    data: bytes
+    committed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1792,12 +1816,30 @@ def _stage_bytes(path: Path, data: bytes) -> _OwnedStagedFile:
     staged = _OwnedStagedFile(
         path=staged_path,
         identity=_stat_identity(created_information),
+        data=data,
     )
     try:
-        with os.fdopen(descriptor, "wb") as handle:
+        with os.fdopen(descriptor, "w+b") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+            written_information = os.fstat(handle.fileno())
+            _validate_owned_stage_stat(
+                written_information,
+                f"staged {path.name}",
+            )
+            if (
+                _stat_identity(written_information) != staged.identity
+                or written_information.st_size != len(data)
+            ):
+                raise V3ClassCatalogFinalizationError(
+                    f"staged {path.name} identity changed while writing"
+                )
+            handle.seek(0)
+            if handle.read(len(data) + 1) != data:
+                raise V3ClassCatalogFinalizationError(
+                    f"staged {path.name} readback differs while writing"
+                )
         _assert_owned_stage(staged, f"staged {path.name}")
         if staged.path.read_bytes() != data:
             raise V3ClassCatalogFinalizationError(
@@ -1840,6 +1882,7 @@ def _rewrite_owned_stage(
     _assert_owned_stage(stage, label)
     if stage.path.read_bytes() != data:
         raise V3ClassCatalogFinalizationError(f"{label} readback differs")
+    stage.data = data
 
 
 def _publication_capacity(directory: Path) -> int:
@@ -1919,50 +1962,442 @@ def _sync_posix_directory_metadata(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _windows_replace_write_through(source: Path, destination: Path) -> None:
+def _open_windows_publication_file(
+    path: Path,
+    *,
+    access: int,
+    share: int,
+) -> BinaryIO:
+    if os.name != "nt" or not path.is_absolute():
+        raise V3ClassCatalogFinalizationError(
+            "Windows retained publication requires one absolute path"
+        )
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(
+        str(path),
+        access,
+        share,
+        None,
+        _WINDOWS_OPEN_EXISTING,
+        _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, ctypes.FormatError(error_code), str(path))
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            int(handle), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+    except BaseException:
+        close_handle(handle)
+        raise
+    try:
+        return os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_windows_publication_publisher(path: Path) -> BinaryIO:
+    return _open_windows_publication_file(
+        path,
+        access=(
+            _WINDOWS_GENERIC_READ
+            | _WINDOWS_DELETE_ACCESS
+            | _WINDOWS_FILE_READ_ATTRIBUTES
+            | _WINDOWS_SYNCHRONIZE_ACCESS
+        ),
+        share=_WINDOWS_FILE_SHARE_READ,
+    )
+
+
+def _open_windows_publication_candidate(path: Path) -> BinaryIO:
+    return _open_windows_publication_file(
+        path,
+        access=(
+            _WINDOWS_GENERIC_READ
+            | _WINDOWS_FILE_READ_ATTRIBUTES
+            | _WINDOWS_SYNCHRONIZE_ACCESS
+        ),
+        share=_WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_DELETE,
+    )
+
+
+def _windows_file_rename_info_ex_buffer(destination: Path) -> object:
+    if os.name != "nt" or not destination.is_absolute():
+        raise V3ClassCatalogFinalizationError(
+            "Windows retained publication requires one absolute destination"
+        )
+    if "\0" in str(destination):
+        raise V3ClassCatalogFinalizationError(
+            "Windows retained publication destination contains NUL"
+        )
     import ctypes
     from ctypes import wintypes
 
-    move_file_ex = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
-    move_file_ex.argtypes = (
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
+    class _FileRenameInfoEx(ctypes.Structure):
+        _fields_ = (
+            ("flags", wintypes.DWORD),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * 1),
+        )
+
+    name_offset = _FileRenameInfoEx.file_name.offset
+    if (
+        ctypes.sizeof(ctypes.c_void_p) != 8
+        or name_offset != 20
+        or ctypes.sizeof(_FileRenameInfoEx) != 24
+    ):
+        raise V3ClassCatalogFinalizationError(
+            "Windows retained publication requires the verified x64 rename layout"
+        )
+    encoded = str(destination).encode("utf-16-le", "strict")
+    buffer = ctypes.create_string_buffer(
+        max(ctypes.sizeof(_FileRenameInfoEx), name_offset + len(encoded) + 2)
+    )
+    information = _FileRenameInfoEx.from_buffer(buffer)
+    information.flags = (
+        _WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS
+        | _WINDOWS_FILE_RENAME_POSIX_SEMANTICS
+    )
+    information.root_directory = None
+    information.file_name_length = len(encoded)
+    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
+    return buffer
+
+
+def _windows_set_rename_information(
+    publisher: BinaryIO,
+    destination: Path,
+) -> None:
+    if os.name != "nt":
+        raise V3ClassCatalogFinalizationError(
+            "Windows retained publication requires Windows"
+        )
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    buffer = _windows_file_rename_info_ex_buffer(destination)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
         wintypes.DWORD,
     )
-    move_file_ex.restype = wintypes.BOOL
-    movefile_replace_existing = 0x1
-    movefile_write_through = 0x8
-    if not move_file_ex(
-        str(source),
-        str(destination),
-        movefile_replace_existing | movefile_write_through,
+    set_information.restype = wintypes.BOOL
+    if not set_information(
+        msvcrt.get_osfhandle(publisher.fileno()),
+        _WINDOWS_FILE_RENAME_INFO_EX_CLASS,
+        ctypes.byref(buffer),
+        len(buffer),
     ):
-        raise ctypes.WinError(ctypes.get_last_error())
-
-
-def _replace_staged(staged: _OwnedStagedFile, destination: Path) -> None:
-    if staged.path.parent != destination.parent:
-        raise V3ClassCatalogFinalizationError(
-            f"atomic {destination.name} publication must stay in one directory"
+        error_code = ctypes.get_last_error()
+        raise OSError(
+            error_code,
+            ctypes.FormatError(error_code),
+            str(destination),
         )
-    _assert_owned_stage(staged, f"staged {destination.name}")
-    try:
-        if os.name == "nt":
-            _windows_replace_write_through(staged.path, destination)
-        elif os.name == "posix":
-            os.replace(staged.path, destination)
-            _sync_posix_directory_metadata(destination.parent)
-        else:
-            raise V3ClassCatalogFinalizationError(
-                "durable class-catalog publication is unsupported on this platform"
-            )
-    except OSError as error:
+
+
+def _read_windows_retained_bytes(
+    publication: _RetainedPublication,
+    expected_length: int,
+) -> bytes:
+    publication.handle.seek(0)
+    actual = publication.handle.read(expected_length + 1)
+    publication.handle.seek(0)
+    return actual
+
+
+def _verify_windows_committed_target(
+    destination: Path,
+    publication: _RetainedPublication,
+) -> None:
+    information = os.lstat(destination)
+    _validate_owned_stage_stat(information, f"published {destination.name}")
+    handle_information = os.fstat(publication.handle.fileno())
+    _validate_owned_stage_stat(
+        handle_information,
+        f"retained published {destination.name}",
+    )
+    if (
+        _stat_identity(information) != publication.identity
+        or _stat_identity(handle_information) != publication.identity
+        or information.st_size != len(publication.data)
+        or handle_information.st_size != len(publication.data)
+    ):
         raise V3ClassCatalogFinalizationError(
-            f"atomic {destination.name} publication failed: {error}"
-        ) from error
+            f"published {destination.name} identity changed after publication"
+        )
 
 
-def _invalidate_existing_receipt(receipt_path: Path) -> None:
+def _assert_windows_retained_bytes(publication: _RetainedPublication) -> None:
+    actual = _read_windows_retained_bytes(publication, len(publication.data))
+    if actual != publication.data:
+        raise V3ClassCatalogFinalizationError(
+            f"published {publication.path.name} readback differs"
+        )
+
+
+def _windows_existing_canonical(path: Path) -> _RetainedPublication | None:
+    try:
+        information = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    _validate_owned_stage_stat(information, f"existing {path.name}")
+    handle = _open_windows_publication_candidate(path)
+    try:
+        handle_information = os.fstat(handle.fileno())
+        _validate_owned_stage_stat(
+            handle_information,
+            f"retained existing {path.name}",
+        )
+        identity = _stat_identity(information)
+        if _stat_identity(handle_information) != identity:
+            raise V3ClassCatalogFinalizationError(
+                f"existing {path.name} identity changed while opening"
+            )
+        handle.seek(0)
+        data = handle.read(information.st_size + 1)
+        handle.seek(0)
+        if len(data) != information.st_size:
+            raise V3ClassCatalogFinalizationError(
+                f"existing {path.name} readback differs"
+            )
+        return _RetainedPublication(
+            path=path,
+            handle=handle,
+            identity=identity,
+            data=data,
+            committed=True,
+        )
+    except BaseException:
+        handle.close()
+        raise
+
+
+class _PublicationSession:
+    def __init__(self) -> None:
+        self._retained: dict[Path, _RetainedPublication] = {}
+
+    def __enter__(self) -> _PublicationSession:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        close_errors: list[OSError] = []
+        for publication in tuple(self._retained.values()):
+            if publication.handle.closed:
+                continue
+            try:
+                publication.handle.close()
+            except OSError as error:
+                close_errors.append(error)
+        self._retained.clear()
+        if close_errors:
+            close_error = V3ClassCatalogFinalizationError(
+                "retained publication handle could not be closed"
+            )
+            if exception is None:
+                raise close_error from close_errors[0]
+            exception.add_note(f"{close_error}: {close_errors[0]}")
+        return False
+
+    @staticmethod
+    def _key(path: Path) -> Path:
+        return path.resolve(strict=False)
+
+    def retained(self, path: Path) -> _RetainedPublication | None:
+        publication = self._retained.get(self._key(path))
+        if publication is None or not publication.committed:
+            return None
+        return publication
+
+    def committed(self, path: Path) -> bool:
+        key = self._key(path)
+        publication = self._retained.get(key)
+        return publication is not None and publication.committed
+
+    def replace(
+        self,
+        staged: _OwnedStagedFile,
+        destination: Path,
+    ) -> _RetainedPublication | None:
+        destination = self._key(destination)
+        stage_parent = staged.path.parent.resolve(strict=False)
+        if stage_parent != destination.parent:
+            raise V3ClassCatalogFinalizationError(
+                f"atomic {destination.name} publication must stay in one directory"
+            )
+        _assert_owned_stage(staged, f"staged {destination.name}")
+        if os.name == "nt":
+            return self._replace_windows(staged, destination)
+        if os.name == "posix":
+            try:
+                os.replace(staged.path, destination)
+                _sync_posix_directory_metadata(destination.parent)
+            except OSError as error:
+                raise V3ClassCatalogFinalizationError(
+                    f"atomic {destination.name} publication failed: {error}"
+                ) from error
+            return None
+        raise V3ClassCatalogFinalizationError(
+            "durable class-catalog publication is unsupported on this platform"
+        )
+
+    def _replace_windows(
+        self,
+        staged: _OwnedStagedFile,
+        destination: Path,
+    ) -> _RetainedPublication:
+        publisher: BinaryIO | None = None
+        candidate: BinaryIO | None = None
+        key = self._key(destination)
+        old = self._retained.get(key)
+        old_was_retained = old is not None
+        committed = False
+        pending_installed = False
+        new_publication: _RetainedPublication | None = None
+        try:
+            publisher = _open_windows_publication_publisher(staged.path)
+            publisher_information = os.fstat(publisher.fileno())
+            _validate_owned_stage_stat(
+                publisher_information,
+                f"publisher staged {destination.name}",
+            )
+            if _stat_identity(publisher_information) != staged.identity:
+                raise V3ClassCatalogFinalizationError(
+                    f"staged {destination.name} identity changed while reopening publisher"
+                )
+            candidate = _open_windows_publication_candidate(staged.path)
+            candidate_information = os.fstat(candidate.fileno())
+            _validate_owned_stage_stat(
+                candidate_information,
+                f"candidate staged {destination.name}",
+            )
+            try:
+                path_information = os.lstat(staged.path)
+            except OSError as error:
+                raise V3ClassCatalogFinalizationError(
+                    f"staged {destination.name} cannot be inspected while reopened"
+                ) from error
+            _validate_owned_stage_stat(
+                path_information,
+                f"staged {destination.name}",
+            )
+            if (
+                _stat_identity(candidate_information) != staged.identity
+                or _stat_identity(path_information) != staged.identity
+                or candidate_information.st_size != len(staged.data)
+                or path_information.st_size != len(staged.data)
+            ):
+                raise V3ClassCatalogFinalizationError(
+                    f"staged {destination.name} identity changed while reopening candidate"
+                )
+            candidate.seek(0)
+            staged_readback = candidate.read(len(staged.data) + 1)
+            candidate.seek(0)
+            if staged_readback != staged.data:
+                raise V3ClassCatalogFinalizationError(
+                    f"staged {destination.name} readback differs while reopening"
+                )
+
+            if old is not None:
+                _verify_windows_committed_target(destination, old)
+                _assert_windows_retained_bytes(old)
+            else:
+                old = _windows_existing_canonical(destination)
+
+            new_publication = _RetainedPublication(
+                path=destination,
+                handle=candidate,
+                identity=staged.identity,
+                data=staged.data,
+            )
+            self._retained[key] = new_publication
+            pending_installed = True
+            _windows_set_rename_information(publisher, destination)
+            committed = True
+            new_publication.committed = True
+            candidate = None
+            _verify_windows_committed_target(destination, new_publication)
+            _assert_windows_retained_bytes(new_publication)
+            return new_publication
+        except OSError as error:
+            if committed:
+                raise
+            raise V3ClassCatalogFinalizationError(
+                f"atomic {destination.name} publication failed: {error}"
+            ) from error
+        finally:
+            if not committed and pending_installed:
+                if old_was_retained:
+                    assert old is not None
+                    self._retained[key] = old
+                else:
+                    self._retained.pop(key, None)
+            if publisher is not None:
+                publisher.close()
+            if candidate is not None:
+                candidate.close()
+            if old is not None and (committed or not old_was_retained):
+                old.handle.close()
+
+    def readback(self, path: Path, expected: bytes, expected_sha256: str) -> None:
+        publication = self.retained(path)
+        if publication is None:
+            _readback_path(path, expected, expected_sha256)
+            return
+        _verify_windows_committed_target(self._key(path), publication)
+        actual = _read_windows_retained_bytes(publication, len(expected))
+        if actual != expected or hashlib.sha256(actual).hexdigest() != expected_sha256:
+            raise V3ClassCatalogFinalizationError(
+                f"published {path.name} readback differs"
+            )
+
+
+def _replace_staged(
+    staged: _OwnedStagedFile,
+    destination: Path,
+    publications: _PublicationSession | None = None,
+) -> _RetainedPublication | None:
+    if publications is not None:
+        return publications.replace(staged, destination)
+    with _PublicationSession() as local_publications:
+        return local_publications.replace(staged, destination)
+
+
+def _invalidate_existing_receipt(
+    receipt_path: Path,
+    publications: _PublicationSession,
+) -> None:
     try:
         receipt_status = os.lstat(receipt_path)
     except FileNotFoundError:
@@ -1977,14 +2412,14 @@ def _invalidate_existing_receipt(receipt_path: Path) -> None:
         )
     staged_marker = _stage_bytes(receipt_path, b"")
     try:
-        _replace_staged(staged_marker, receipt_path)
+        publications.replace(staged_marker, receipt_path)
     except Exception:
         _remove_owned_stage(staged_marker)
         raise
-    _readback(receipt_path, b"", hashlib.sha256(b"").hexdigest())
+    publications.readback(receipt_path, b"", hashlib.sha256(b"").hexdigest())
 
 
-def _readback(path: Path, expected: bytes, expected_sha256: str) -> None:
+def _readback_path(path: Path, expected: bytes, expected_sha256: str) -> None:
     try:
         information = os.lstat(path)
     except OSError as error:
@@ -2073,6 +2508,8 @@ def finalize_v3_class_catalog(
     manifest_path = package.directory / "manifest.json"
     receipt_path = package.directory / RECEIPT_FILE_NAME
     staged_paths: list[_OwnedStagedFile] = []
+    publications = _PublicationSession()
+    publications.__enter__()
     try:
         staged_catalog = _stage_bytes(catalog_path, catalog_bytes)
         staged_paths.append(staged_catalog)
@@ -2089,9 +2526,9 @@ def finalize_v3_class_catalog(
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
         _assert_authority_receipt_binding(package)
-        _replace_staged(staged_catalog, catalog_path)
+        publications.replace(staged_catalog, catalog_path)
         staged_paths.remove(staged_catalog)
-        _readback(catalog_path, catalog_bytes, catalog_sha256)
+        publications.readback(catalog_path, catalog_bytes, catalog_sha256)
         _notify(publication_hook, "after_catalog_published")
 
         _assert_file_binding(package.manifest_file)
@@ -2108,23 +2545,23 @@ def finalize_v3_class_catalog(
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
         _assert_authority_receipt_binding(package)
-        _invalidate_existing_receipt(receipt_path)
+        _invalidate_existing_receipt(receipt_path, publications)
         _assert_file_binding(package.manifest_file)
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
         _assert_authority_receipt_binding(package)
-        _readback(catalog_path, catalog_bytes, catalog_sha256)
-        _replace_staged(staged_manifest, manifest_path)
+        publications.readback(catalog_path, catalog_bytes, catalog_sha256)
+        publications.replace(staged_manifest, manifest_path)
         staged_paths.remove(staged_manifest)
-        _readback(manifest_path, final_manifest_bytes, manifest_sha256)
+        publications.readback(manifest_path, final_manifest_bytes, manifest_sha256)
         _notify(publication_hook, "after_manifest_published")
 
         _notify(publication_hook, "before_receipt_replace")
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
         _assert_authority_receipt_binding(package)
-        _readback(catalog_path, catalog_bytes, catalog_sha256)
-        _readback(manifest_path, final_manifest_bytes, manifest_sha256)
+        publications.readback(catalog_path, catalog_bytes, catalog_sha256)
+        publications.readback(manifest_path, final_manifest_bytes, manifest_sha256)
         if package.merge_receipt_file is not None:
             _assert_authority_preflight_inventory(package.directory)
             receipt, receipt_bytes, staged_receipt = (
@@ -2148,17 +2585,17 @@ def finalize_v3_class_catalog(
                     package.directory,
                     staged_receipt,
                 )
-            _replace_staged(staged_receipt, receipt_path)
+            publications.replace(staged_receipt, receipt_path)
             staged_paths.remove(staged_receipt)
             assert receipt_bytes is not None
-            _readback(
+            publications.readback(
                 receipt_path,
                 receipt_bytes,
                 hashlib.sha256(receipt_bytes).hexdigest(),
             )
             _notify(publication_hook, "after_receipt_published")
 
-            _readback(
+            publications.readback(
                 receipt_path,
                 receipt_bytes,
                 hashlib.sha256(receipt_bytes).hexdigest(),
@@ -2166,15 +2603,19 @@ def finalize_v3_class_catalog(
             _assert_file_binding(package.records_file)
             _assert_file_binding(package.index_file)
             _assert_authority_receipt_binding(package)
-            _readback(catalog_path, catalog_bytes, catalog_sha256)
-            _readback(manifest_path, final_manifest_bytes, manifest_sha256)
+            publications.readback(catalog_path, catalog_bytes, catalog_sha256)
+            publications.readback(manifest_path, final_manifest_bytes, manifest_sha256)
             if package.merge_receipt_file is not None:
                 _assert_authority_final_inventory(package.directory)
         except BaseException:
-            _invalidate_existing_receipt(receipt_path)
+            if not publications.committed(receipt_path):
+                _invalidate_existing_receipt(receipt_path, publications)
             raise
     finally:
-        _cleanup_owned_stages(staged_paths)
+        try:
+            _cleanup_owned_stages(staged_paths)
+        finally:
+            publications.__exit__(*sys.exc_info())
     assert receipt is not None
     return FinalizationResult(
         package_directory=package.directory,
