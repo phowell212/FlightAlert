@@ -244,4 +244,3 @@ Create monitor `r4` from the accepted monitor template with only the reviewed pr
 - [ ] **Step 5: Authenticate atomic publication**
 
 On renderer exit, require output publication, absent partial sibling, empty stderr, complete recovery receipt, fixed-code run identity, and exact four-file water package inventory. Then require monitor `r4` to advance into merge/finalize rather than reporting producer loss.
-
