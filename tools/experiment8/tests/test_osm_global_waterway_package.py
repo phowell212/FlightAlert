@@ -1615,6 +1615,159 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             pause_after_features=pause_after_features,
         )
 
+    def test_renderer_staging_uses_one_connection_across_dirty_cache_spill(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_renderer import (
+            classifier_identity_sha256,
+        )
+
+        source_binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        zooms = tuple(range(4, 12))
+        checkpoint_features = 2
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ingest = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=root / "work",
+                source_binding=source_binding,
+                checkpoint_objects=4,
+            )
+            self.assertEqual("complete", ingest.state)
+            self.assertGreaterEqual(
+                len(
+                    tuple(
+                        store.iter_exact_waterway_features(
+                            ingest.database_path,
+                            source_binding=source_binding,
+                        )
+                    )
+                ),
+                2,
+            )
+            render_identity = store._render_run_identity(
+                package_id="fixture-global-waterways-v3",
+                source_binding=source_binding,
+                zooms=zooms,
+                checkpoint_features=checkpoint_features,
+                code_identities=store._render_code_identities(),
+                classifier_sha256=classifier_identity_sha256(),
+                admission_receipt=ingest.receipt["admission"],
+                ingest_semantic_sha256=ingest.receipt["semanticSha256"],
+            )
+
+            real_connect = sqlite3.connect
+
+            def immediate_connect(*args, **kwargs):
+                kwargs.setdefault("timeout", 0.0)
+                return real_connect(*args, **kwargs)
+
+            writer = real_connect(ingest.database_path)
+            try:
+                writer.execute("PRAGMA journal_mode=DELETE")
+                writer.execute("PRAGMA synchronous=FULL")
+                writer.execute("PRAGMA temp_store=FILE")
+                writer.execute("PRAGMA mmap_size=0")
+                writer.execute("PRAGMA cache_size=1")
+                writer.execute("PRAGMA cache_spill=1")
+                with patch.object(
+                    store.sqlite3, "connect", side_effect=immediate_connect
+                ):
+                    old_topology = store.iter_exact_waterway_features(
+                        ingest.database_path,
+                        source_binding=source_binding,
+                    )
+                    try:
+                        next(old_topology)
+                        writer.execute(
+                            "CREATE TABLE renderer_lock_probe(payload BLOB NOT NULL)"
+                        )
+                        writer.execute(
+                            "INSERT INTO renderer_lock_probe(payload) VALUES (?)",
+                            (sqlite3.Binary(b"\0" * (1024 * 1024)),),
+                        )
+                        with self.assertRaisesRegex(
+                            sqlite3.OperationalError, "database is locked"
+                        ):
+                            next(old_topology)
+                    finally:
+                        old_topology.close()
+                        writer.rollback()
+
+                    complete = store._stage_renderer_records(
+                        writer,
+                        ingest.database_path,
+                        source_binding=source_binding,
+                        zooms=zooms,
+                        checkpoint_features=checkpoint_features,
+                        pause_after_features=None,
+                        run_identity=render_identity,
+                    )
+                checkpoint = store._meta_get(writer, "renderCheckpoint")
+                self.assertTrue(complete)
+                self.assertTrue(checkpoint["renderComplete"])
+                self.assertGreaterEqual(checkpoint["renderedFeatures"], 2)
+                self.assertFalse(writer.in_transaction)
+            finally:
+                writer.close()
+
+    def test_render_writer_uses_exact_runtime_cache_contract(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        render_connections = []
+
+        class RecordingConnection(sqlite3.Connection):
+            def close(self) -> None:
+                try:
+                    query_only = int(self.execute("PRAGMA query_only").fetchone()[0])
+                    render_identity = self.execute(
+                        "SELECT 1 FROM meta WHERE key='renderRunIdentity'"
+                    ).fetchone()
+                    if query_only == 0 and render_identity is not None:
+                        render_connections.append(
+                            {
+                                pragma: self.execute(f"PRAGMA {pragma}").fetchone()[0]
+                                for pragma in (
+                                    "journal_mode",
+                                    "synchronous",
+                                    "temp_store",
+                                    "mmap_size",
+                                    "cache_size",
+                                )
+                            }
+                        )
+                finally:
+                    super().close()
+
+        real_connect = sqlite3.connect
+
+        def recording_connect(*args, **kwargs):
+            return real_connect(*args, factory=RecordingConnection, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(
+                store.sqlite3, "connect", side_effect=recording_connect
+            ):
+                result = self._build(Path(temporary), "runtime")
+
+        self.assertEqual("complete", result.state)
+        self.assertEqual(
+            [
+                {
+                    "journal_mode": "delete",
+                    "synchronous": 2,
+                    "temp_store": 1,
+                    "mmap_size": 0,
+                    "cache_size": -65536,
+                }
+            ],
+            render_connections,
+        )
+
     def test_fixture_publication_is_real_v3_typed_source_honest_and_deterministic(self) -> None:
         from tools.experiment8.reference_presentation_policy import SemanticSubtype
         from tools.experiment8.sourced_text import LayoutMode

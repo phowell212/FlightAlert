@@ -2310,12 +2310,90 @@ def _analysis_features(analysis: _AdmissionRootAnalysis):
         )
 
 
+def _iter_exact_waterway_features(
+    connection: sqlite3.Connection,
+    *,
+    source_binding: WaterwaySourceBinding,
+):
+    """Recompute and authenticate every admitted root before yielding candidates."""
+
+    run_identity = _meta_get(connection, "runIdentity")
+    admission_receipt = _meta_get(connection, "admissionReceipt")
+    if (
+        not isinstance(run_identity, dict)
+        or run_identity.get("source") != source_binding.document()
+    ):
+        raise GlobalWaterwayPackageError("waterway database source binding differs")
+    if (
+        not isinstance(admission_receipt, dict)
+        or admission_receipt.get("fatalCount") != 0
+        or admission_receipt.get("policy", {}).get("sha256")
+        != LINE_CANDIDATE_POLICY_SHA256
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway database lacks complete v2 admission evidence"
+        )
+    previous_kind = 0
+    previous_id = 0
+    while True:
+        root_cursor = connection.execute(
+            "SELECT kind,id FROM roots "
+            "WHERE kind>? OR (kind=? AND id>?) ORDER BY kind,id LIMIT 1",
+            (previous_kind, previous_kind, previous_id),
+        )
+        root_row = root_cursor.fetchone()
+        root_cursor.close()
+        if root_row is None:
+            break
+        root_kind, root_id = int(root_row[0]), int(root_row[1])
+        previous_kind, previous_id = root_kind, root_id
+        analysis = _analyze_admission_root(
+            connection,
+            root_kind,
+            root_id,
+            materialize=True,
+        )
+        stored = connection.execute(
+            "SELECT entry_json,entry_sha,candidate_stream_sha "
+            "FROM admission_roots WHERE root_kind=? AND root_id=?",
+            (root_kind, root_id),
+        ).fetchone()
+        if stored is None:
+            raise GlobalWaterwayPackageError(
+                "waterway admitted root evidence is absent"
+            )
+        expected_entry_sha = hashlib.sha256(analysis.entry_bytes).digest()
+        if (
+            _sqlite_blob(stored[0], "admitted root entry") != analysis.entry_bytes
+            or _sqlite_blob(stored[1], "admitted root entry SHA-256") != expected_entry_sha
+            or _sqlite_blob(stored[2], "admitted candidate stream SHA-256").hex()
+            != analysis.entry["candidateStreamSha256"]
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway admitted root candidate stream differs from exact source"
+            )
+        actual_candidates = tuple(
+            connection.execute(
+                "SELECT root_kind,root_id,feature_ordinal,waterway_type,"
+                "complete_named_relation,candidate_feature_sha,source_feature_sha,"
+                "part_count,point_count FROM admission_candidates "
+                "WHERE root_kind=? AND root_id=? ORDER BY feature_ordinal",
+                (root_kind, root_id),
+            )
+        )
+        if actual_candidates != _candidate_rows(analysis):
+            raise GlobalWaterwayPackageError(
+                "waterway admitted candidate feature evidence differs"
+            )
+        yield from _analysis_features(analysis)
+
+
 def iter_exact_waterway_features(
     database_path: Path,
     *,
     source_binding: WaterwaySourceBinding,
 ):
-    """Recompute and authenticate every admitted root before yielding candidates."""
+    """Open the admitted store query-only and yield authenticated candidates."""
 
     if (
         not isinstance(database_path, Path)
@@ -2330,75 +2408,10 @@ def iter_exact_waterway_features(
     connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
     try:
         connection.execute("PRAGMA query_only=ON")
-        run_identity = _meta_get(connection, "runIdentity")
-        admission_receipt = _meta_get(connection, "admissionReceipt")
-        if (
-            not isinstance(run_identity, dict)
-            or run_identity.get("source") != source_binding.document()
-        ):
-            raise GlobalWaterwayPackageError("waterway database source binding differs")
-        if (
-            not isinstance(admission_receipt, dict)
-            or admission_receipt.get("fatalCount") != 0
-            or admission_receipt.get("policy", {}).get("sha256")
-            != LINE_CANDIDATE_POLICY_SHA256
-        ):
-            raise GlobalWaterwayPackageError(
-                "waterway database lacks complete v2 admission evidence"
-            )
-        previous_kind = 0
-        previous_id = 0
-        while True:
-            root_cursor = connection.execute(
-                "SELECT kind,id FROM roots "
-                "WHERE kind>? OR (kind=? AND id>?) ORDER BY kind,id LIMIT 1",
-                (previous_kind, previous_kind, previous_id),
-            )
-            root_row = root_cursor.fetchone()
-            root_cursor.close()
-            if root_row is None:
-                break
-            root_kind, root_id = int(root_row[0]), int(root_row[1])
-            previous_kind, previous_id = root_kind, root_id
-            analysis = _analyze_admission_root(
-                connection,
-                root_kind,
-                root_id,
-                materialize=True,
-            )
-            stored = connection.execute(
-                "SELECT entry_json,entry_sha,candidate_stream_sha "
-                "FROM admission_roots WHERE root_kind=? AND root_id=?",
-                (root_kind, root_id),
-            ).fetchone()
-            if stored is None:
-                raise GlobalWaterwayPackageError(
-                    "waterway admitted root evidence is absent"
-                )
-            expected_entry_sha = hashlib.sha256(analysis.entry_bytes).digest()
-            if (
-                _sqlite_blob(stored[0], "admitted root entry") != analysis.entry_bytes
-                or _sqlite_blob(stored[1], "admitted root entry SHA-256") != expected_entry_sha
-                or _sqlite_blob(stored[2], "admitted candidate stream SHA-256").hex()
-                != analysis.entry["candidateStreamSha256"]
-            ):
-                raise GlobalWaterwayPackageError(
-                    "waterway admitted root candidate stream differs from exact source"
-                )
-            actual_candidates = tuple(
-                connection.execute(
-                    "SELECT root_kind,root_id,feature_ordinal,waterway_type,"
-                    "complete_named_relation,candidate_feature_sha,source_feature_sha,"
-                    "part_count,point_count FROM admission_candidates "
-                    "WHERE root_kind=? AND root_id=? ORDER BY feature_ordinal",
-                    (root_kind, root_id),
-                )
-            )
-            if actual_candidates != _candidate_rows(analysis):
-                raise GlobalWaterwayPackageError(
-                    "waterway admitted candidate feature evidence differs"
-                )
-            yield from _analysis_features(analysis)
+        yield from _iter_exact_waterway_features(
+            connection,
+            source_binding=source_binding,
+        )
     finally:
         connection.close()
 
@@ -3331,6 +3344,14 @@ def _commit_render_checkpoint(
     connection.commit()
 
 
+def _configure_render_connection(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA journal_mode=DELETE")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("PRAGMA temp_store=FILE")
+    connection.execute("PRAGMA mmap_size=0")
+    connection.execute("PRAGMA cache_size=-65536")
+
+
 def _stage_renderer_records(
     connection: sqlite3.Connection,
     database_path: Path,
@@ -3399,7 +3420,7 @@ def _stage_renderer_records(
     since_commit = 0
     seen = 0
     for ordinal, exact in enumerate(
-        iter_exact_waterway_features(database_path, source_binding=source_binding)
+        _iter_exact_waterway_features(connection, source_binding=source_binding)
     ):
         seen = ordinal + 1
         rendered = build_adaptive_waterway_feature(
@@ -4352,8 +4373,7 @@ def _render_bound_global_waterway_package(
     )
     connection = sqlite3.connect(ingest.database_path)
     try:
-        connection.execute("PRAGMA journal_mode=DELETE")
-        connection.execute("PRAGMA synchronous=FULL")
+        _configure_render_connection(connection)
         complete = _stage_renderer_records(
             connection,
             ingest.database_path,
