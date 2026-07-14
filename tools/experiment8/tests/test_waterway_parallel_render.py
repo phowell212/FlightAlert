@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import tempfile
 import unittest
 from concurrent.futures import FIRST_COMPLETED, Future
@@ -63,6 +64,33 @@ def _feature(source_id: int = 7) -> ExactWaterwayFeature:
 
 
 def _job(spool_directory: Path, *features: ExactWaterwayFeature) -> FeatureRenderBatchJob:
+    from tools.experiment8 import waterway_parallel_render as parallel
+
+    owner_bytes = parallel._spool_owner_bytes(
+        package_id=_PACKAGE_ID,
+        render_run_identity_sha256=_RUN_SHA256,
+        source_document_sha256=_SOURCE_SHA256,
+    )
+    candidate = spool_directory
+    plain_chain = True
+    try:
+        while True:
+            observed = os.lstat(candidate)
+            if (
+                stat.S_ISLNK(observed.st_mode)
+                or not stat.S_ISDIR(observed.st_mode)
+                or getattr(observed, "st_file_attributes", 0) & 0x400
+            ):
+                plain_chain = False
+                break
+            if candidate == candidate.parent:
+                break
+            candidate = candidate.parent
+    except OSError:
+        plain_chain = False
+    owner_path = spool_directory / "owner.json"
+    if plain_chain and not os.path.lexists(owner_path):
+        owner_path.write_bytes(owner_bytes)
     return FeatureRenderBatchJob(
         start_ordinal=20,
         features=tuple(features) or (_feature(),),
@@ -70,6 +98,34 @@ def _job(spool_directory: Path, *features: ExactWaterwayFeature) -> FeatureRende
         classifier_sha256=_CLASSIFIER_SHA256,
         zooms=(10, 11),
         render_run_identity_sha256=_RUN_SHA256,
+        package_id=_PACKAGE_ID,
+        spool_owner_sha256=hashlib.sha256(owner_bytes).hexdigest(),
+        spool_directory=str(spool_directory),
+        spool_byte_quota=16 * 1024 * 1024,
+    )
+
+
+def _owner_bound_job(
+    spool_directory: Path,
+    *features: ExactWaterwayFeature,
+    package_id: str = _PACKAGE_ID,
+) -> FeatureRenderBatchJob:
+    from tools.experiment8 import waterway_parallel_render as parallel
+
+    owner_bytes = parallel._spool_owner_bytes(
+        package_id=package_id,
+        render_run_identity_sha256=_RUN_SHA256,
+        source_document_sha256=_SOURCE_SHA256,
+    )
+    return FeatureRenderBatchJob(
+        start_ordinal=20,
+        features=tuple(features) or (_feature(),),
+        source_generation_sha256=_SOURCE_SHA256,
+        classifier_sha256=_CLASSIFIER_SHA256,
+        zooms=(10, 11),
+        render_run_identity_sha256=_RUN_SHA256,
+        package_id=package_id,
+        spool_owner_sha256=hashlib.sha256(owner_bytes).hexdigest(),
         spool_directory=str(spool_directory),
         spool_byte_quota=16 * 1024 * 1024,
     )
@@ -111,10 +167,18 @@ def _prepare(root: Path) -> Path:
 
 
 class _ReverseExecutor:
-    def __init__(self, *, result_mutator=None, completion_hook=None, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        result_mutator=None,
+        completion_hook=None,
+        shutdown_error: BaseException | None = None,
+        **kwargs,
+    ) -> None:
         self.creation_arguments = kwargs
         self.result_mutator = result_mutator
         self.completion_hook = completion_hook
+        self.shutdown_error = shutdown_error
         self.submissions: list[tuple[Future, object, tuple[object, ...]]] = []
         self.shutdown_calls: list[tuple[bool, bool]] = []
         self.peak_jobs = 0
@@ -168,6 +232,8 @@ class _ReverseExecutor:
 
     def shutdown(self, *, wait=True, cancel_futures=False) -> None:
         self.shutdown_calls.append((wait, cancel_futures))
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
 
 
 class _ReverseExecutorFactory:
@@ -408,8 +474,154 @@ class ParallelSpoolOwnershipTests(unittest.TestCase):
             )
             self.assertFalse(root.exists())
 
+    def test_finish_restores_owner_when_a_child_appears_during_directory_removal(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            real_remove = parallel._remove_exact_empty_directory
+            late_child = root / "late-child.txt"
+
+            def add_child_then_remove(path: Path, identity: object) -> None:
+                late_child.write_bytes(b"preserve")
+                real_remove(path, identity)
+
+            with mock.patch.object(
+                parallel,
+                "_remove_exact_empty_directory",
+                side_effect=add_child_then_remove,
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "finish|remove|empty|recovery",
+                ):
+                    finish_spool_directory(
+                        root,
+                        package_id=_PACKAGE_ID,
+                        render_run_identity_sha256=_RUN_SHA256,
+                        source_document_sha256=_SOURCE_SHA256,
+                    )
+
+            self.assertTrue((root / "owner.json").is_file())
+            self.assertTrue(late_child.is_file())
+
+    def test_finish_restores_owner_when_exact_directory_removal_fails(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            with mock.patch.object(
+                parallel,
+                "_remove_exact_empty_directory",
+                side_effect=GlobalWaterwayPackageError(
+                    "injected exact directory removal failure"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "removal|finish|recovery",
+                ):
+                    finish_spool_directory(
+                        root,
+                        package_id=_PACKAGE_ID,
+                        render_run_identity_sha256=_RUN_SHA256,
+                        source_document_sha256=_SOURCE_SHA256,
+                    )
+
+            self.assertTrue((root / "owner.json").is_file())
+            backups = tuple(root.parent.glob(f".{root.name}.owner-finish-*"))
+            self.assertEqual((), backups)
+
 
 class ParallelFeatureRendererTests(unittest.TestCase):
+    def test_inventory_reconciles_atomic_temp_to_final_publication_during_scan(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(root, (_feature(93),), factory)
+            self.addCleanup(renderer.close)
+            renderer._submit_until_blocked()
+            reservation = next(iter(renderer._reservations.values()))
+            base = (
+                f"{reservation.start_ordinal:012d}-"
+                f"{reservation.end_ordinal_exclusive:012d}.batch"
+            )
+            temporary_path = root / f"{base}.tmp-4242"
+            final_path = root / base
+            temporary_path.write_bytes(b"in progress")
+            real_lstat = parallel.os.lstat
+            transitioned = False
+
+            def publish_while_scanning(path: object):
+                nonlocal transitioned
+                if Path(path) == temporary_path and not transitioned:
+                    transitioned = True
+                    os.replace(temporary_path, final_path)
+                return real_lstat(path)
+
+            with mock.patch.object(
+                parallel.os,
+                "lstat",
+                side_effect=publish_while_scanning,
+            ):
+                actual, _growth, accounted = renderer._inspect_spool_inventory()
+
+            self.assertTrue(transitioned)
+            self.assertEqual(len(b"in progress"), actual)
+            self.assertEqual(reservation.spool_byte_quota, accounted)
+            self.assertTrue(final_path.is_file())
+
+    def test_inventory_fails_closed_when_an_active_temp_never_stabilizes(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(root, (_feature(94),), factory)
+            self.addCleanup(renderer.close)
+            renderer._submit_until_blocked()
+            reservation = next(iter(renderer._reservations.values()))
+            temporary_path = root / (
+                f"{reservation.start_ordinal:012d}-"
+                f"{reservation.end_ordinal_exclusive:012d}.batch.tmp-4343"
+            )
+            temporary_path.write_bytes(b"x")
+            real_lstat = parallel.os.lstat
+            observations = 0
+
+            def changing_lstat(path: object):
+                nonlocal observations
+                observed = real_lstat(path)
+                if Path(path) != temporary_path:
+                    return observed
+                observations += 1
+                return SimpleNamespace(
+                    st_mode=observed.st_mode,
+                    st_nlink=observed.st_nlink,
+                    st_file_attributes=getattr(observed, "st_file_attributes", 0),
+                    st_dev=observed.st_dev,
+                    st_ino=observed.st_ino,
+                    st_size=1 + observations % 2,
+                    st_mtime_ns=observed.st_mtime_ns,
+                    st_ctime_ns=observed.st_ctime_ns,
+                )
+
+            with mock.patch.object(
+                parallel.os,
+                "lstat",
+                side_effect=changing_lstat,
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "stable|stabilize|changed|churn",
+                ):
+                    renderer._inspect_spool_inventory()
+
+            self.assertGreaterEqual(observations, 2)
+            self.assertTrue(temporary_path.exists())
+
     def test_renderer_rejects_owner_for_another_package(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _prepare(Path(temporary) / "spool")
@@ -460,6 +672,45 @@ class ParallelFeatureRendererTests(unittest.TestCase):
             self.assertLessEqual(peak_known_ranges, limits.max_in_flight_jobs)
             with self.assertRaisesRegex(GlobalWaterwayPackageError, "yielded|release"):
                 renderer.release_batch(descriptors[0])
+
+    def test_release_batch_preserves_same_inode_same_length_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(root, (_feature(131),), factory)
+            descriptor, _exact, _frames = renderer.next_batch()
+            path = root / descriptor.file_name
+            identity_before = (path.stat().st_dev, path.stat().st_ino)
+            path.write_bytes(b"x" * descriptor.byte_count)
+            identity_after = (path.stat().st_dev, path.stat().st_ino)
+            self.assertEqual(identity_before, identity_after)
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "SHA-256|content|spool",
+            ):
+                renderer.release_batch(descriptor)
+
+            self.assertTrue(path.exists())
+
+    def test_release_batch_preserves_target_when_inventory_has_unknown_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(root, (_feature(132),), factory)
+            descriptor, _exact, _frames = renderer.next_batch()
+            path = root / descriptor.file_name
+            unknown = root / "unknown-during-release.txt"
+            unknown.write_bytes(b"preserve")
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "unknown|inventory|child",
+            ):
+                renderer.release_batch(descriptor)
+
+            self.assertTrue(path.exists())
+            self.assertTrue(unknown.exists())
 
     def test_default_spawn_executor_renders_one_canonical_job(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -637,7 +888,10 @@ class ParallelFeatureRendererTests(unittest.TestCase):
 
             factory = _ReverseExecutorFactory(completion_hook=add_excess_temp)
             renderer = _parallel_renderer(root, (_feature(81),), factory, limits=limits)
-            with self.assertRaisesRegex(GlobalWaterwayPackageError, "spool.*byte|quota"):
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "spool.*byte|quota|multiple",
+            ):
                 renderer.next_batch()
             self.assertTrue(tuple(root.glob("*.batch*")))
 
@@ -665,8 +919,77 @@ class ParallelFeatureRendererTests(unittest.TestCase):
 
             self.assertEqual([], factory.instances[0].submissions)
 
+    def test_abort_surfaces_shutdown_failure_as_recovery_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            unknown = root / "force-primary-failure.txt"
+            unknown.write_bytes(b"preserve")
+            factory = _ReverseExecutorFactory(
+                shutdown_error=OSError("injected shutdown failure")
+            )
+            renderer = _parallel_renderer(root, (_feature(133),), factory)
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "shutdown|quiescence|recovery",
+            ) as raised:
+                renderer.next_batch()
+
+            notes = "\n".join(getattr(raised.exception, "__notes__", ()))
+            self.assertRegex(notes, "unknown|primary|child")
+            self.assertTrue(unknown.exists())
+            self.assertFalse(renderer._closed)
+
 
 class AuthenticatedFeatureBatchTests(unittest.TestCase):
+    def test_worker_rejects_wrong_package_owner_before_any_spool_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = prepare_spool_directory(
+                Path(temporary) / "spool",
+                package_id="another-package",
+                render_run_identity_sha256=_RUN_SHA256,
+                source_document_sha256=_SOURCE_SHA256,
+            )
+            job = _owner_bound_job(root, _feature(6))
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "owner|package|render run",
+            ):
+                render_feature_batch_job(encode_feature_batch_job(job))
+
+            self.assertEqual(("owner.json",), tuple(path.name for path in root.iterdir()))
+
+    def test_worker_rejects_queue_to_worker_root_swap_before_any_spool_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            active = _prepare(base / "active")
+            wrong = prepare_spool_directory(
+                base / "wrong",
+                package_id="another-package",
+                render_run_identity_sha256=_RUN_SHA256,
+                source_document_sha256=_SOURCE_SHA256,
+            )
+            encoded = encode_feature_batch_job(
+                _owner_bound_job(active, _feature(5))
+            )
+            saved = base / "saved-active"
+            os.rename(active, saved)
+            os.rename(wrong, active)
+            try:
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "owner|package|render run",
+                ):
+                    render_feature_batch_job(encoded)
+                self.assertEqual(
+                    ("owner.json",),
+                    tuple(path.name for path in active.iterdir()),
+                )
+            finally:
+                os.rename(active, wrong)
+                os.rename(saved, active)
+
     def test_spool_anchor_fails_closed_without_windows_handle_semantics(self) -> None:
         from tools.experiment8 import waterway_parallel_render as parallel
 
@@ -913,10 +1236,20 @@ class AuthenticatedFeatureBatchTests(unittest.TestCase):
             temporary_path = root / (
                 f"000000000020-000000000021.batch.tmp-{os.getpid()}"
             )
+            real_open_osfhandle = msvcrt.open_osfhandle
+            adoption_calls = 0
+
+            def fail_temp_adoption(handle: int, flags: int) -> int:
+                nonlocal adoption_calls
+                adoption_calls += 1
+                if adoption_calls == 2:
+                    raise OSError("injected fd adoption failure")
+                return real_open_osfhandle(handle, flags)
+
             with mock.patch.object(
                 msvcrt,
                 "open_osfhandle",
-                side_effect=OSError("injected fd adoption failure"),
+                side_effect=fail_temp_adoption,
             ):
                 with self.assertRaisesRegex(
                     GlobalWaterwayPackageError, "published atomically"
