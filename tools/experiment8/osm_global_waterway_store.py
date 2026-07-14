@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
 import stat
 import struct
+import time
 import unicodedata
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, Callable, Iterator, Mapping, Sequence
@@ -80,6 +83,7 @@ _MAX_RELATION_PARTS = MAX_RECORDS_PER_TILE
 _MAX_RELATION_POINTS = MAX_RENDERER_RECORD_BYTES // _RELATION_POINT_ACCOUNTING_BYTES
 _BUILD_SCHEMA = "flightalert.experiment8.osm-global-waterway-build.v2"
 _RENDER_RUN_SCHEMA = "flightalert.experiment8.osm-global-waterway-render-run.v2"
+_RENDER_PROGRESS_SCHEMA = "flightalert.experiment8.waterway-render-progress.v1"
 _SEMANTIC_STREAM_DOMAIN = b"flight-alert-exp8-semantic-v1\0"
 _DEFAULT_ZOOMS = tuple(range(4, 12))
 _ZERO_INDEX_ENTRY = b"\0" * INDEX_ENTRY_BYTES
@@ -3823,12 +3827,12 @@ def _resume_renderer_write_reservation(
     return trusted_data_version
 
 
-def _default_parallel_render_limits():
+def _default_parallel_render_limits(workers: int = 1):
     from .waterway_parallel_render import ParallelRenderLimits
 
     return ParallelRenderLimits(
-        workers=1,
-        max_in_flight_jobs=2,
+        workers=workers,
+        max_in_flight_jobs=workers * 2,
         max_in_flight_points=1_048_576,
         max_points_per_job=524_288,
         max_in_flight_input_bytes=256 * 1024 * 1024,
@@ -3854,6 +3858,355 @@ def _default_render_spool_directory(
     )
 
 
+def _validate_render_progress_location(
+    progress_file: Path,
+    output_directory: Path,
+) -> Path:
+    if not isinstance(progress_file, Path) or not isinstance(output_directory, Path):
+        raise GlobalWaterwayPackageError(
+            "waterway render progress and output paths must be pathlib.Path values"
+        )
+    if not progress_file.is_absolute():
+        raise GlobalWaterwayPackageError(
+            "waterway render progress file must be one absolute path"
+        )
+    progress_path = Path(os.path.abspath(progress_file))
+    output_path = Path(os.path.abspath(output_directory))
+    try:
+        common_path = os.path.commonpath((str(progress_path), str(output_path)))
+    except ValueError:
+        common_path = ""
+    if common_path == str(output_path):
+        raise GlobalWaterwayPackageError(
+            "waterway render progress file must stay outside the output directory"
+        )
+    parent = progress_path.parent
+    for candidate in reversed((parent, *parent.parents)):
+        try:
+            observed = os.lstat(candidate)
+        except OSError as error:
+            raise GlobalWaterwayPackageError(
+                "waterway render progress parent or one of its ancestors is unavailable"
+            ) from error
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISDIR(observed.st_mode)
+            or getattr(observed, "st_file_attributes", 0) & _REPARSE_POINT
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway render progress parent and every ancestor must be plain "
+                "non-link, non-reparse directories"
+            )
+    try:
+        existing = os.lstat(progress_path)
+    except FileNotFoundError:
+        return progress_path
+    except OSError as error:
+        raise GlobalWaterwayPackageError(
+            "waterway render progress file cannot be inspected"
+        ) from error
+    if (
+        stat.S_ISLNK(existing.st_mode)
+        or not stat.S_ISREG(existing.st_mode)
+        or getattr(existing, "st_file_attributes", 0) & _REPARSE_POINT
+        or getattr(existing, "st_nlink", 1) != 1
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway render progress file must be one plain regular non-link, "
+            "non-reparse file"
+        )
+    return progress_path
+
+
+def _render_progress_hard_bounds(limits: object) -> dict[str, int]:
+    from .waterway_parallel_render import ParallelRenderLimits
+
+    if type(limits) is not ParallelRenderLimits:
+        raise GlobalWaterwayPackageError("parallel render limits are invalid")
+    return {
+        "maxInFlightInputBytes": limits.max_in_flight_input_bytes,
+        "maxInFlightJobs": limits.max_in_flight_jobs,
+        "maxInFlightPoints": limits.max_in_flight_points,
+        "maxInputBytesPerJob": limits.max_input_bytes_per_job,
+        "maxPointsPerJob": limits.max_points_per_job,
+        "maxSpoolBytes": limits.max_spool_bytes,
+        "maxSpoolBytesPerJob": limits.max_spool_bytes_per_job,
+    }
+
+
+def _progress_limits_from_document(
+    worker_count: object,
+    hard_bounds: object,
+):
+    from .waterway_parallel_render import ParallelRenderLimits
+
+    expected_keys = {
+        "maxInFlightInputBytes",
+        "maxInFlightJobs",
+        "maxInFlightPoints",
+        "maxInputBytesPerJob",
+        "maxPointsPerJob",
+        "maxSpoolBytes",
+        "maxSpoolBytesPerJob",
+    }
+    if type(worker_count) is not int or not isinstance(hard_bounds, dict):
+        raise GlobalWaterwayPackageError(
+            "waterway render progress worker or hard bounds are malformed"
+        )
+    if set(hard_bounds) != expected_keys or any(
+        type(hard_bounds[key]) is not int for key in expected_keys
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway render progress hard bounds are malformed"
+        )
+    try:
+        limits = ParallelRenderLimits(
+            workers=worker_count,
+            max_in_flight_jobs=hard_bounds["maxInFlightJobs"],
+            max_in_flight_points=hard_bounds["maxInFlightPoints"],
+            max_points_per_job=hard_bounds["maxPointsPerJob"],
+            max_in_flight_input_bytes=hard_bounds["maxInFlightInputBytes"],
+            max_input_bytes_per_job=hard_bounds["maxInputBytesPerJob"],
+            max_spool_bytes=hard_bounds["maxSpoolBytes"],
+            max_spool_bytes_per_job=hard_bounds["maxSpoolBytesPerJob"],
+        )
+    except GlobalWaterwayPackageError as error:
+        raise GlobalWaterwayPackageError(
+            "waterway render progress worker or hard bounds are invalid"
+        ) from error
+    if limits != _default_parallel_render_limits(worker_count):
+        raise GlobalWaterwayPackageError(
+            "waterway render progress hard bounds differ from the supported policy"
+        )
+    return limits
+
+
+def _progress_json_integer(raw: str) -> int:
+    digits = raw[1:] if raw.startswith("-") else raw
+    if not digits or len(digits) > 19:
+        raise ValueError("waterway render progress integer exceeds its bound")
+    value = int(raw)
+    if not -source_module._MAX_SIGNED_63 <= value <= source_module._MAX_SIGNED_63:
+        raise ValueError("waterway render progress integer exceeds its bound")
+    return value
+
+
+def _progress_json_float(raw: str) -> float:
+    if len(raw) > 128:
+        raise ValueError("waterway render progress float exceeds its bound")
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("waterway render progress float is not finite")
+    return value
+
+
+def _reject_progress_json_constant(raw: str) -> object:
+    raise ValueError(f"waterway render progress constant {raw!r} is invalid")
+
+
+def _progress_utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+class _RenderProgressPublisher:
+    _FIELDS = {
+        "checkpointFeatures",
+        "committedFeatures",
+        "elapsedNanoseconds",
+        "hardBounds",
+        "renderRunIdentitySha256",
+        "schema",
+        "throughputFeaturesPerSecond",
+        "totalAdmittedFeatures",
+        "updatedUtc",
+        "workerCount",
+    }
+
+    def __init__(
+        self,
+        progress_file: Path,
+        *,
+        render_run_sha256: str,
+        checkpoint_features: int,
+        total_admitted_features: int,
+        initial_committed_features: int,
+        limits: object,
+    ) -> None:
+        from .waterway_parallel_render import DurableProgressFile
+
+        self._file = DurableProgressFile(progress_file)
+        self._render_run_sha256 = source_module._require_sha256(
+            render_run_sha256, "waterway render progress run identity"
+        )
+        if type(checkpoint_features) is not int or checkpoint_features <= 0:
+            raise GlobalWaterwayPackageError(
+                "waterway render progress checkpoint count is invalid"
+            )
+        if (
+            type(total_admitted_features) is not int
+            or total_admitted_features < 0
+            or type(initial_committed_features) is not int
+            or not 0 <= initial_committed_features <= total_admitted_features
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway render progress committed or total count is invalid"
+            )
+        hard_bounds = _render_progress_hard_bounds(limits)
+        self._checkpoint_features = checkpoint_features
+        self._total_admitted_features = total_admitted_features
+        self._initial_committed_features = initial_committed_features
+        self._worker_count = limits.workers
+        self._hard_bounds = hard_bounds
+        self._started_ns = time.monotonic_ns()
+        self._last_published_features: int | None = None
+
+    def _existing_document(self) -> dict[str, object] | None:
+        raw = self._file.existing_bytes
+        if raw is None:
+            return None
+        try:
+            document = json.loads(
+                raw.decode("utf-8", "strict"),
+                parse_int=_progress_json_integer,
+                parse_float=_progress_json_float,
+                parse_constant=_reject_progress_json_constant,
+            )
+        except (UnicodeError, ValueError, RecursionError) as error:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress file is unknown or malformed"
+            ) from error
+        if not isinstance(document, dict) or set(document) != self._FIELDS:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress fields are unknown or malformed"
+            )
+        if _canonical_json_bytes(document) != raw:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress is not canonical JSON"
+            )
+        if document.get("schema") != _RENDER_PROGRESS_SCHEMA:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress schema is unknown"
+            )
+        if document.get("renderRunIdentitySha256") != self._render_run_sha256:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress belongs to another render run"
+            )
+        if document.get("checkpointFeatures") != self._checkpoint_features:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress checkpoint count differs"
+            )
+        if document.get("totalAdmittedFeatures") != self._total_admitted_features:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress admitted count differs"
+            )
+        committed = document.get("committedFeatures")
+        elapsed = document.get("elapsedNanoseconds")
+        throughput = document.get("throughputFeaturesPerSecond")
+        updated_utc = document.get("updatedUtc")
+        if (
+            type(committed) is not int
+            or not 0 <= committed <= self._total_admitted_features
+            or type(elapsed) is not int
+            or elapsed < 0
+            or not isinstance(throughput, (int, float))
+            or isinstance(throughput, bool)
+            or not math.isfinite(throughput)
+            or throughput < 0
+            or type(updated_utc) is not str
+            or not updated_utc.endswith("Z")
+        ):
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress counters or timing are malformed"
+            )
+        try:
+            parsed_utc = datetime.fromisoformat(updated_utc.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress UTC is malformed"
+            ) from error
+        if parsed_utc.utcoffset() != timezone.utc.utcoffset(parsed_utc):
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress UTC is not UTC"
+            )
+        _progress_limits_from_document(
+            document.get("workerCount"), document.get("hardBounds")
+        )
+        return document
+
+    def _validated_existing_position(
+        self, committed_features: int
+    ) -> int | None:
+        if (
+            type(committed_features) is not int
+            or not 0 <= committed_features <= self._total_admitted_features
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway render progress reconciliation count is invalid"
+            )
+        existing = self._existing_document()
+        if existing is None:
+            return None
+        existing_committed = int(existing["committedFeatures"])
+        if existing_committed > committed_features:
+            raise GlobalWaterwayPackageError(
+                "existing waterway render progress is ahead of the SQLite checkpoint"
+            )
+        return existing_committed
+
+    def preflight(self, committed_features: int) -> None:
+        """Authenticate existing evidence without mutating it or SQLite."""
+
+        self._validated_existing_position(committed_features)
+
+    def reconcile(self, committed_features: int) -> None:
+        existing_committed = self._validated_existing_position(committed_features)
+        if existing_committed is None:
+            if committed_features:
+                self.publish(committed_features)
+            return
+        self._last_published_features = existing_committed
+        if existing_committed < committed_features:
+            self.publish(committed_features)
+
+    def publish(self, committed_features: int) -> None:
+        if (
+            type(committed_features) is not int
+            or not 0 <= committed_features <= self._total_admitted_features
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway render progress publication count is invalid"
+            )
+        if committed_features == self._last_published_features:
+            return
+        elapsed = max(0, time.monotonic_ns() - self._started_ns)
+        completed_this_invocation = max(
+            0, committed_features - self._initial_committed_features
+        )
+        throughput = (
+            0.0
+            if elapsed == 0
+            else round(completed_this_invocation * 1_000_000_000 / elapsed, 6)
+        )
+        document = {
+            "checkpointFeatures": self._checkpoint_features,
+            "committedFeatures": committed_features,
+            "elapsedNanoseconds": elapsed,
+            "hardBounds": self._hard_bounds,
+            "renderRunIdentitySha256": self._render_run_sha256,
+            "schema": _RENDER_PROGRESS_SCHEMA,
+            "throughputFeaturesPerSecond": throughput,
+            "totalAdmittedFeatures": self._total_admitted_features,
+            "updatedUtc": _progress_utc_now(),
+            "workerCount": self._worker_count,
+        }
+        self._file.replace(_canonical_json_bytes(document))
+        self._last_published_features = committed_features
+
+
 def _stage_renderer_records(
     connection: sqlite3.Connection,
     database_path: Path,
@@ -3866,6 +4219,7 @@ def _stage_renderer_records(
     trusted_data_version: int | None = None,
     parallel_limits: "ParallelRenderLimits | None" = None,
     spool_directory: str | os.PathLike[str] | None = None,
+    progress_file: Path | None = None,
 ) -> bool:
     from .waterway_parallel_render import (
         ParallelFeatureRenderer,
@@ -3914,20 +4268,44 @@ def _stage_renderer_records(
         )
         stored_identity = _meta_get(connection, "renderRunIdentity")
         if stored_identity is None:
-            _meta_set(connection, "renderRunIdentity", dict(run_identity))
-            _meta_set(
-                connection,
-                "renderCheckpoint",
-                {"renderComplete": False, "renderedFeatures": 0},
-            )
-            connection.commit()
-            _resume_renderer_write_reservation(connection, trusted_data_version)
+            checkpoint = {"renderComplete": False, "renderedFeatures": 0}
+            rendered_prefix = 0
         elif stored_identity != dict(run_identity):
             raise GlobalWaterwayPackageError(
                 "renderer checkpoint identity differs from exact source/config/code identity"
             )
-        checkpoint = dict(_meta_get(connection, "renderCheckpoint") or {})
-        rendered_prefix = int(checkpoint.get("renderedFeatures", 0))
+        else:
+            checkpoint = dict(_meta_get(connection, "renderCheckpoint") or {})
+            rendered_prefix = int(checkpoint.get("renderedFeatures", 0))
+        progress_publisher = None
+        if progress_file is not None:
+            if not isinstance(progress_file, Path):
+                raise GlobalWaterwayPackageError(
+                    "waterway render progress path must be a pathlib.Path value"
+                )
+            total_admitted_features = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM admission_candidates"
+                ).fetchone()[0]
+            )
+            progress_publisher = _RenderProgressPublisher(
+                progress_file,
+                render_run_sha256=render_run_sha256,
+                checkpoint_features=checkpoint_features,
+                total_admitted_features=total_admitted_features,
+                initial_committed_features=rendered_prefix,
+                limits=parallel_limits,
+            )
+            progress_publisher.preflight(rendered_prefix)
+        if stored_identity is None:
+            _meta_set(connection, "renderRunIdentity", dict(run_identity))
+            _meta_set(
+                connection,
+                "renderCheckpoint",
+                checkpoint,
+            )
+            connection.commit()
+            _resume_renderer_write_reservation(connection, trusted_data_version)
         source, registry = _validated_renderer_prefix_stream(
             connection,
             source_binding=source_binding,
@@ -3935,6 +4313,8 @@ def _stage_renderer_records(
             run_identity=run_identity,
             rendered_prefix=rendered_prefix,
         )
+        if progress_publisher is not None:
+            progress_publisher.reconcile(rendered_prefix)
         if (
             pause_after_features is not None
             and pause_after_features <= rendered_prefix
@@ -4011,6 +4391,8 @@ def _stage_renderer_records(
                         _commit_render_checkpoint(
                             connection, database_path, checkpoint, peaks
                         )
+                        if progress_publisher is not None:
+                            progress_publisher.publish(seen)
                         since_commit = 0
                         checkpoint_committed = True
                         releasable = [
@@ -4026,6 +4408,8 @@ def _stage_renderer_records(
                             _commit_render_checkpoint(
                                 connection, database_path, checkpoint, peaks
                             )
+                            if progress_publisher is not None:
+                                progress_publisher.publish(seen)
                             releasable = [
                                 value
                                 for value in pending_descriptors
@@ -4042,6 +4426,8 @@ def _stage_renderer_records(
                         )
             checkpoint = {"renderComplete": True, "renderedFeatures": seen}
             _commit_render_checkpoint(connection, database_path, checkpoint, peaks)
+            if progress_publisher is not None:
+                progress_publisher.publish(seen)
             for descriptor in tuple(pending_descriptors):
                 if descriptor.end_ordinal_exclusive > seen:
                     raise GlobalWaterwayPackageError(
@@ -5114,6 +5500,8 @@ def _render_bound_global_waterway_package(
     checkpoint_features: int = 100,
     pause_after_objects: int | None = None,
     pause_after_features: int | None = None,
+    render_workers: int = 1,
+    progress_file: Path | None = None,
     production_authority: object | None = None,
     size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
@@ -5157,6 +5545,11 @@ def _render_bound_global_waterway_package(
         type(pause_after_features) is not int or pause_after_features <= 0
     ):
         raise GlobalWaterwayPackageError("pause feature count must be positive")
+    parallel_limits = _default_parallel_render_limits(render_workers)
+    if progress_file is not None:
+        progress_file = _validate_render_progress_location(
+            progress_file, output_directory
+        )
     if output_directory.exists() or output_directory.is_symlink():
         raise GlobalWaterwayPackageError("global waterway output directory already exists")
     size_policy_binding = _reference_size_policy_binding(size_policy_mode)
@@ -5206,6 +5599,8 @@ def _render_bound_global_waterway_package(
             checkpoint_features=checkpoint_features,
             pause_after_features=pause_after_features,
             run_identity=render_identity,
+            parallel_limits=parallel_limits,
+            progress_file=progress_file,
         )
         if not complete:
             return GlobalWaterwayBuildResult(
@@ -5251,6 +5646,8 @@ def render_fixture_global_waterway_package(
     checkpoint_features: int = 100,
     pause_after_objects: int | None = None,
     pause_after_features: int | None = None,
+    render_workers: int = 1,
+    progress_file: Path | None = None,
     size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     if (
@@ -5272,6 +5669,8 @@ def render_fixture_global_waterway_package(
         checkpoint_features=checkpoint_features,
         pause_after_objects=pause_after_objects,
         pause_after_features=pause_after_features,
+        render_workers=render_workers,
+        progress_file=progress_file,
         size_policy_mode=size_policy_mode,
     )
 

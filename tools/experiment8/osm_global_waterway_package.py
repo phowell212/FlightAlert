@@ -2490,6 +2490,9 @@ def recover_global_waterway_package(
     failure_log: Path,
     backup_receipt: Path,
     checkpoint_features: int = 100,
+    render_workers: int = 1,
+    pause_after_features: int | None = None,
+    progress_file: Path | None = None,
     size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     """Resume only the exact authenticated 260629 renderer-lock incident."""
@@ -2503,9 +2506,28 @@ def recover_global_waterway_package(
             failure_log,
             backup_receipt,
         )
-    ):
+    ) or (progress_file is not None and not isinstance(progress_file, Path)):
         raise GlobalWaterwayPackageError(
             "waterway recovery paths must be pathlib.Path values"
+        )
+    from .waterway_parallel_render import maximum_parallel_render_workers
+
+    if (
+        type(render_workers) is not int
+        or not 1 <= render_workers <= maximum_parallel_render_workers()
+    ):
+        raise GlobalWaterwayPackageError("waterway recovery render worker count is invalid")
+    if pause_after_features is not None and (
+        type(pause_after_features) is not int or pause_after_features <= 0
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery pause feature count must be positive"
+        )
+    if progress_file is not None:
+        from .osm_global_waterway_store import _validate_render_progress_location
+
+        progress_file = _validate_render_progress_location(
+            progress_file, output_directory
         )
     source_binding = _source_binding_from_recovery_extraction(
         extraction_directory
@@ -2525,6 +2547,9 @@ def recover_global_waterway_package(
         backup_receipt=backup_receipt,
         authority=_production_waterway_render_recovery_authority(),
         checkpoint_features=checkpoint_features,
+        render_workers=render_workers,
+        pause_after_features=pause_after_features,
+        progress_file=progress_file,
         production_authority=_PRODUCTION_RENDER_AUTHORITY,
         size_policy_mode=size_policy_mode,
     )
@@ -2592,6 +2617,8 @@ def render_fixture_global_waterway_package(
     checkpoint_features: int = 100,
     pause_after_objects: int | None = None,
     pause_after_features: int | None = None,
+    render_workers: int = 1,
+    progress_file: Path | None = None,
     size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     if (
@@ -2617,8 +2644,39 @@ def render_fixture_global_waterway_package(
         checkpoint_features=checkpoint_features,
         pause_after_objects=pause_after_objects,
         pause_after_features=pause_after_features,
+        render_workers=render_workers,
+        progress_file=progress_file,
         size_policy_mode=size_policy_mode,
     )
+
+
+def _render_worker_count(raw: str) -> int:
+    from .waterway_parallel_render import maximum_parallel_render_workers
+
+    maximum = maximum_parallel_render_workers()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            f"render worker count must be between 1 and {maximum}"
+        ) from error
+    if not 1 <= value <= maximum:
+        raise argparse.ArgumentTypeError(
+            f"render worker count must be between 1 and {maximum}"
+        )
+    return value
+
+
+def _pause_feature_count(raw: str) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "pause feature count must be positive"
+        ) from error
+    if not 1 <= value <= _MAX_SIGNED_63:
+        raise argparse.ArgumentTypeError("pause feature count must be positive")
+    return value
 
 
 def _argument_parser() -> argparse.ArgumentParser:
@@ -2662,6 +2720,11 @@ def _argument_parser() -> argparse.ArgumentParser:
     recover.add_argument("--failure-log", type=Path, required=True)
     recover.add_argument("--backup-receipt", type=Path, required=True)
     recover.add_argument("--checkpoint-features", type=int, default=100)
+    recover.add_argument("--render-workers", type=_render_worker_count, default=1)
+    recover.add_argument(
+        "--pause-after-features", type=_pause_feature_count, default=None
+    )
+    recover.add_argument("--progress-file", type=Path, default=None)
     recover.add_argument(
         "--size-policy",
         default=size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
@@ -2743,6 +2806,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 failure_log=arguments.failure_log,
                 backup_receipt=arguments.backup_receipt,
                 checkpoint_features=arguments.checkpoint_features,
+                render_workers=arguments.render_workers,
+                pause_after_features=arguments.pause_after_features,
+                progress_file=arguments.progress_file,
                 size_policy_mode=arguments.size_policy,
             )
         _write_json(

@@ -23,6 +23,7 @@ from tools.experiment8.osm_global_waterway_renderer import (
 )
 from tools.experiment8.semantic_model import HotIdRegistry
 from tools.experiment8.waterway_parallel_render import (
+    DurableProgressFile,
     FeatureRenderBatchJob,
     ParallelFeatureRenderer,
     ParallelRenderLimits,
@@ -31,6 +32,7 @@ from tools.experiment8.waterway_parallel_render import (
     decode_feature_batch_job,
     encode_feature_batch_job,
     finish_spool_directory,
+    maximum_parallel_render_workers,
     prepare_spool_directory,
     read_feature_batch,
     render_feature_batch_job,
@@ -425,6 +427,103 @@ class ParallelRenderLimitTests(unittest.TestCase):
     def test_limits_reject_workers_above_the_windows_process_pool_ceiling(self) -> None:
         with self.assertRaisesRegex(GlobalWaterwayPackageError, "worker count"):
             _limits(workers=62, max_in_flight_jobs=62)
+
+    def test_exported_worker_ceiling_matches_limits_on_this_platform(self) -> None:
+        maximum = 61 if os.name == "nt" else 64
+        self.assertEqual(maximum, maximum_parallel_render_workers())
+        accepted = _limits(workers=maximum, max_in_flight_jobs=maximum)
+        self.assertEqual(maximum, accepted.workers)
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "worker count"):
+            _limits(workers=maximum + 1, max_in_flight_jobs=maximum + 1)
+
+
+class DurableProgressFileTests(unittest.TestCase):
+    def test_progress_file_fsyncs_then_atomically_publishes_and_resumes(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            first = b'{"committedFeatures":100}\n'
+            second = b'{"committedFeatures":200}\n'
+            progress = DurableProgressFile(path)
+            self.assertIsNone(progress.existing_bytes)
+            events: list[str] = []
+            real_fsync = parallel.os.fsync
+            real_publish = parallel._publish_windows_owned_temp_no_replace
+
+            def recording_fsync(descriptor: int) -> None:
+                events.append("fsync")
+                real_fsync(descriptor)
+
+            def recording_publish(handle, destination: Path) -> None:
+                events.append("publish")
+                real_publish(handle, destination)
+
+            with mock.patch.object(
+                parallel.os, "fsync", side_effect=recording_fsync
+            ), mock.patch.object(
+                parallel,
+                "_publish_windows_owned_temp_no_replace",
+                side_effect=recording_publish,
+            ):
+                progress.replace(first)
+
+            self.assertLess(events.index("fsync"), events.index("publish"))
+            self.assertEqual(first, path.read_bytes())
+            self.assertFalse(path.with_name(f"{path.name}.tmp-{os.getpid()}").exists())
+
+            resumed = DurableProgressFile(path)
+            self.assertEqual(first, resumed.existing_bytes)
+            resumed.replace(second)
+            self.assertEqual(second, path.read_bytes())
+            self.assertEqual(second, resumed.existing_bytes)
+
+    def test_progress_file_rejects_link_reparse_or_changed_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.json"
+            target.write_bytes(b"target\n")
+            linked = root / "progress.json"
+            try:
+                os.symlink(target, linked)
+            except OSError as error:
+                self.skipTest(f"file symlinks are unavailable: {error}")
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "link|reparse|plain"
+            ):
+                DurableProgressFile(linked)
+
+            linked.unlink()
+            linked.write_bytes(b"first\n")
+            progress = DurableProgressFile(linked)
+            replacement = root / "replacement.json"
+            replacement.write_bytes(b"external\n")
+            os.replace(replacement, linked)
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "changed|identity"
+            ):
+                progress.replace(b"second\n")
+            self.assertEqual(b"external\n", linked.read_bytes())
+
+    def test_failed_atomic_replacement_preserves_authenticated_progress(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "progress.json"
+            progress = DurableProgressFile(path)
+            progress.replace(b"first\n")
+            with mock.patch.object(
+                parallel,
+                "_publish_windows_owned_temp_replace",
+                side_effect=OSError("injected replacement failure"),
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "progress.*atomic|publish|replace"
+            ):
+                progress.replace(b"second\n")
+
+            self.assertEqual(b"first\n", path.read_bytes())
+            self.assertEqual(b"first\n", progress.existing_bytes)
+            self.assertFalse(path.with_name(f"{path.name}.tmp-{os.getpid()}").exists())
 
 
 class ParallelSpoolOwnershipTests(unittest.TestCase):

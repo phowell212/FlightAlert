@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import runpy
 import struct
 import sys
@@ -12,7 +13,7 @@ import warnings
 import zlib
 from pathlib import Path
 from unittest.mock import patch
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 
 FIXTURE_DIRECTORY = Path(__file__).with_name("fixtures")
@@ -861,6 +862,217 @@ class GlobalWaterwayCliTests(unittest.TestCase):
         )
         self.assertEqual(list(range(4, 12)), document["render"]["zooms"])
 
+    def test_recover_cli_validates_platform_workers_and_positive_pause(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+
+        maximum_workers = 61 if os.name == "nt" else 64
+        required = [
+            "recover-render",
+            "--extraction",
+            "extraction",
+            "--output",
+            "output",
+            "--work",
+            "work",
+            "--package-id",
+            "fixture",
+            "--failure-log",
+            "failure.log",
+            "--backup-receipt",
+            "backup.json",
+        ]
+        arguments = pipeline._argument_parser().parse_args(
+            required
+            + [
+                "--render-workers",
+                str(maximum_workers),
+                "--pause-after-features",
+                "300",
+                "--progress-file",
+                "progress.json",
+            ]
+        )
+        self.assertEqual(maximum_workers, arguments.render_workers)
+        self.assertEqual(300, arguments.pause_after_features)
+        self.assertEqual(Path("progress.json"), arguments.progress_file)
+
+        for option, value in (
+            ("--render-workers", "0"),
+            ("--render-workers", str(maximum_workers + 1)),
+            ("--pause-after-features", "0"),
+        ):
+            with self.subTest(option=option, value=value), redirect_stderr(
+                io.StringIO()
+            ), self.assertRaises(SystemExit):
+                pipeline._argument_parser().parse_args(required + [option, value])
+
+    def test_recover_cli_threads_execution_controls_without_changing_defaults(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            progress = root / "progress.json"
+            result = pipeline.GlobalWaterwayBuildResult(
+                "paused", root / "output", {"state": "paused"}
+            )
+            output = io.StringIO()
+            with patch.object(
+                pipeline,
+                "recover_global_waterway_package",
+                return_value=result,
+            ) as recover, redirect_stdout(output):
+                exit_code = pipeline.main(
+                    [
+                        "recover-render",
+                        "--extraction",
+                        str(root / "extraction"),
+                        "--output",
+                        str(root / "output"),
+                        "--work",
+                        str(root / "work"),
+                        "--package-id",
+                        "fixture",
+                        "--failure-log",
+                        str(root / "failure.log"),
+                        "--backup-receipt",
+                        str(root / "backup.json"),
+                        "--render-workers",
+                        "10",
+                        "--pause-after-features",
+                        "300",
+                        "--progress-file",
+                        str(progress),
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            recover.assert_called_once_with(
+                extraction_directory=root / "extraction",
+                output_directory=root / "output",
+                work_directory=root / "work",
+                package_id="fixture",
+                failure_log=root / "failure.log",
+                backup_receipt=root / "backup.json",
+                checkpoint_features=100,
+                render_workers=10,
+                pause_after_features=300,
+                progress_file=progress,
+                size_policy_mode=(
+                    pipeline.size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE
+                ),
+            )
+
+            defaults = pipeline._argument_parser().parse_args(
+                [
+                    "recover-render",
+                    "--extraction",
+                    "extraction",
+                    "--output",
+                    "output",
+                    "--work",
+                    "work",
+                    "--package-id",
+                    "fixture",
+                    "--failure-log",
+                    "failure.log",
+                    "--backup-receipt",
+                    "backup.json",
+                ]
+            )
+            self.assertEqual(1, defaults.render_workers)
+            self.assertIsNone(defaults.pause_after_features)
+            self.assertIsNone(defaults.progress_file)
+
+    def test_progress_location_requires_a_real_parent_and_stays_outside_output(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            progress_parent = root / "evidence"
+            progress_parent.mkdir()
+            progress = progress_parent / "progress.json"
+            output = root / "output"
+            self.assertEqual(
+                progress,
+                store._validate_render_progress_location(progress, output),
+            )
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "progress.*parent|directory"
+            ):
+                store._validate_render_progress_location(
+                    root / "missing" / "progress.json", output
+                )
+
+            output.mkdir()
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "progress.*output|outside"
+            ):
+                store._validate_render_progress_location(
+                    output / "progress.json", output
+                )
+
+            real_parent = root / "real-progress"
+            real_parent.mkdir()
+            linked_parent = root / "linked-progress"
+            try:
+                os.symlink(real_parent, linked_parent, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks are unavailable: {error}")
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "link|reparse|plain"
+            ):
+                store._validate_render_progress_location(
+                    linked_parent / "progress.json", root / "other-output"
+                )
+
+    def test_recovery_facade_threads_execution_controls_to_bound_recovery(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            extraction = root / "extraction"
+            output = root / "output"
+            work = root / "work"
+            failure = root / "failure.log"
+            backup = root / "backup.json"
+            progress = root / "progress.json"
+            binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+            result = pipeline.GlobalWaterwayBuildResult(
+                "paused", output, {"state": "paused"}
+            )
+            with patch.object(
+                pipeline,
+                "_source_binding_from_recovery_extraction",
+                return_value=binding,
+            ), patch.object(
+                recovery,
+                "_recover_bound_global_waterway_package",
+                return_value=result,
+            ) as implementation:
+                actual = pipeline.recover_global_waterway_package(
+                    extraction_directory=extraction,
+                    output_directory=output,
+                    work_directory=work,
+                    package_id="fixture",
+                    failure_log=failure,
+                    backup_receipt=backup,
+                    checkpoint_features=100,
+                    render_workers=10,
+                    pause_after_features=300,
+                    progress_file=progress,
+                )
+
+            self.assertIs(result, actual)
+            call = implementation.call_args
+            self.assertEqual(10, call.kwargs["render_workers"])
+            self.assertEqual(300, call.kwargs["pause_after_features"])
+            self.assertEqual(progress, call.kwargs["progress_file"])
+
     def test_runner_and_powershell_wrapper_target_host_only_pipeline(self) -> None:
         runner = Path("tools/experiment8/run_osm_global_waterway_package.py")
         wrapper = Path("tools/build-osm-global-waterway-package.ps1")
@@ -1642,6 +1854,9 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
         name: str,
         *,
         pause_after_features: int | None = None,
+        render_workers: int = 1,
+        progress_file: Path | None = None,
+        checkpoint_features: int = 2,
         size_policy_mode: str = "budgeted-release-v1",
     ):
         from tools.experiment8.osm_global_waterway_package import (
@@ -1656,10 +1871,491 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             package_id="fixture-global-waterways-v3",
             source_binding=_source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE),
             checkpoint_objects=4,
-            checkpoint_features=2,
+            checkpoint_features=checkpoint_features,
             pause_after_features=pause_after_features,
+            render_workers=render_workers,
+            progress_file=progress_file,
             size_policy_mode=size_policy_mode,
         )
+
+    def test_progress_schema_and_worker_change_preserve_exact_package_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            progress = evidence / "progress.json"
+            paused = self._build(
+                root,
+                "resumed",
+                pause_after_features=3,
+                render_workers=2,
+                progress_file=progress,
+                checkpoint_features=100,
+            )
+            self.assertEqual("paused", paused.state)
+            raw = progress.read_bytes()
+            document = json.loads(raw)
+            self.assertEqual(
+                {
+                    "checkpointFeatures",
+                    "committedFeatures",
+                    "elapsedNanoseconds",
+                    "hardBounds",
+                    "renderRunIdentitySha256",
+                    "schema",
+                    "throughputFeaturesPerSecond",
+                    "totalAdmittedFeatures",
+                    "updatedUtc",
+                    "workerCount",
+                },
+                set(document),
+            )
+            self.assertEqual(
+                "flightalert.experiment8.waterway-render-progress.v1",
+                document["schema"],
+            )
+            self.assertEqual(paused.receipt["runIdentitySha256"], document["renderRunIdentitySha256"])
+            self.assertEqual(100, document["checkpointFeatures"])
+            self.assertEqual(3, document["committedFeatures"])
+            self.assertEqual(6, document["totalAdmittedFeatures"])
+            self.assertEqual(2, document["workerCount"])
+            self.assertIs(type(document["elapsedNanoseconds"]), int)
+            self.assertGreaterEqual(document["elapsedNanoseconds"], 0)
+            self.assertIsNot(type(document["throughputFeaturesPerSecond"]), bool)
+            self.assertGreaterEqual(document["throughputFeaturesPerSecond"], 0)
+            self.assertTrue(document["updatedUtc"].endswith("Z"))
+            self.assertEqual(
+                {
+                    "maxInFlightInputBytes": 256 * 1024 * 1024,
+                    "maxInFlightJobs": 4,
+                    "maxInFlightPoints": 1_048_576,
+                    "maxInputBytesPerJob": 128 * 1024 * 1024,
+                    "maxPointsPerJob": 524_288,
+                    "maxSpoolBytes": 2 * 1024 * 1024 * 1024,
+                    "maxSpoolBytesPerJob": 1024 * 1024 * 1024,
+                },
+                document["hardBounds"],
+            )
+            self.assertEqual(
+                (
+                    json.dumps(
+                        document,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8"),
+                raw,
+            )
+
+            resumed = self._build(
+                root,
+                "resumed",
+                render_workers=1,
+                progress_file=progress,
+                checkpoint_features=100,
+            )
+            self.assertEqual("complete", resumed.state)
+            completed_progress = json.loads(progress.read_bytes())
+            self.assertEqual(6, completed_progress["committedFeatures"])
+            self.assertEqual(1, completed_progress["workerCount"])
+            self.assertEqual(
+                document["renderRunIdentitySha256"],
+                completed_progress["renderRunIdentitySha256"],
+            )
+
+            clean = self._build(
+                root,
+                "clean",
+                render_workers=1,
+                checkpoint_features=100,
+            )
+            self.assertEqual("complete", clean.state)
+            self.assertEqual(
+                clean.receipt["rendererSemanticStreamSha256"],
+                resumed.receipt["rendererSemanticStreamSha256"],
+            )
+            for name in (
+                "manifest.json",
+                "records.fadictpack",
+                "tile-index.bin",
+                "build-receipt.json",
+            ):
+                self.assertEqual(
+                    (root / "clean" / name).read_bytes(),
+                    (root / "resumed" / name).read_bytes(),
+                    name,
+                )
+
+    def test_progress_resume_rejects_unknown_other_run_or_ahead_document(self) -> None:
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "unknown-evidence"
+            evidence.mkdir()
+            progress = evidence / "progress.json"
+            progress.write_bytes(b"unknown progress\n")
+            from tools.experiment8 import osm_global_waterway_store as store
+
+            ingest = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=root / "unknown-work",
+                source_binding=_source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE),
+                checkpoint_objects=4,
+            )
+            database_before = ingest.database_path.read_bytes()
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "unknown|malformed|canonical"
+            ):
+                self._build(root, "unknown", progress_file=progress)
+            self.assertEqual(b"unknown progress\n", progress.read_bytes())
+            self.assertEqual(database_before, ingest.database_path.read_bytes())
+
+        for mutation, pattern in (
+            ("ahead", "ahead"),
+            ("other-run", "another render run|belongs"),
+            ("hard-bounds", "hard bounds|invalid"),
+        ):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                evidence = root / "evidence"
+                evidence.mkdir()
+                progress = evidence / "progress.json"
+                paused = self._build(
+                    root,
+                    "resumed",
+                    pause_after_features=3,
+                    progress_file=progress,
+                    checkpoint_features=100,
+                )
+                self.assertEqual("paused", paused.state)
+                document = json.loads(progress.read_bytes())
+                if mutation == "ahead":
+                    document["committedFeatures"] = 4
+                elif mutation == "other-run":
+                    document["renderRunIdentitySha256"] = "0" * 64
+                else:
+                    document["hardBounds"]["maxInFlightPoints"] = 1
+                    document["hardBounds"]["maxPointsPerJob"] = 999_999_999
+                tampered = (
+                    json.dumps(
+                        document,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                progress.write_bytes(tampered)
+                with self.assertRaisesRegex(GlobalWaterwayPackageError, pattern):
+                    self._build(
+                        root,
+                        "resumed",
+                        progress_file=progress,
+                        checkpoint_features=100,
+                    )
+                self.assertEqual(tampered, progress.read_bytes())
+
+    def test_every_progress_hard_bound_is_policy_authenticated(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            progress = Path(temporary) / "progress.json"
+            limits = store._default_parallel_render_limits(2)
+            publisher = store._RenderProgressPublisher(
+                progress,
+                render_run_sha256="2" * 64,
+                checkpoint_features=100,
+                total_admitted_features=1,
+                initial_committed_features=0,
+                limits=limits,
+            )
+            publisher.publish(0)
+            valid = json.loads(progress.read_bytes())
+
+            for key in tuple(valid["hardBounds"]):
+                with self.subTest(key=key):
+                    mutated = json.loads(json.dumps(valid))
+                    mutated["hardBounds"][key] += 1
+                    progress.write_bytes(
+                        (
+                            json.dumps(
+                                mutated,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            )
+                            + "\n"
+                        ).encode("utf-8")
+                    )
+                    candidate = store._RenderProgressPublisher(
+                        progress,
+                        render_run_sha256="2" * 64,
+                        checkpoint_features=100,
+                        total_admitted_features=1,
+                        initial_committed_features=0,
+                        limits=limits,
+                    )
+                    with self.assertRaisesRegex(
+                        GlobalWaterwayPackageError, "hard bounds|invalid"
+                    ):
+                        candidate.reconcile(0)
+
+    def test_progress_parser_normalizes_bounded_hostile_json(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        hostile_documents = (
+            b'{"value":' + (b"9" * 5_000) + b"}\n",
+            (b"[" * 1_100) + b"0" + (b"]" * 1_100) + b"\n",
+        )
+        for raw in hostile_documents:
+            with self.subTest(prefix=raw[:16]), tempfile.TemporaryDirectory() as temporary:
+                progress = Path(temporary) / "progress.json"
+                progress.write_bytes(raw)
+                publisher = store._RenderProgressPublisher(
+                    progress,
+                    render_run_sha256="1" * 64,
+                    checkpoint_features=100,
+                    total_admitted_features=0,
+                    initial_committed_features=0,
+                    limits=store._default_parallel_render_limits(),
+                )
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "unknown|malformed"
+                ):
+                    publisher.reconcile(0)
+
+    def test_commit_before_progress_failure_is_stale_behind_and_repairs_on_resume(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            progress = evidence / "progress.json"
+            real_replace = parallel.DurableProgressFile.replace
+
+            def fail_after_second_checkpoint(progress_file, raw: bytes) -> None:
+                document = json.loads(raw)
+                if document["committedFeatures"] == 4:
+                    raise GlobalWaterwayPackageError(
+                        "injected crash after SQLite commit"
+                    )
+                real_replace(progress_file, raw)
+
+            with patch.object(
+                parallel.DurableProgressFile,
+                "replace",
+                new=fail_after_second_checkpoint,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "injected crash"
+            ):
+                self._build(
+                    root,
+                    "crash-resume",
+                    progress_file=progress,
+                    checkpoint_features=2,
+                )
+
+            self.assertEqual(2, json.loads(progress.read_bytes())["committedFeatures"])
+            database = root / "crash-resume-work" / "waterway-state.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                self.assertEqual(
+                    4,
+                    store._meta_get(connection, "renderCheckpoint")[
+                        "renderedFeatures"
+                    ],
+                )
+            finally:
+                connection.close()
+            spools = tuple((root / "crash-resume-work").glob("waterway-render-spool-*"))
+            self.assertEqual(1, len(spools))
+            self.assertTrue(tuple(spools[0].glob("*.batch")))
+
+            transitions: list[int] = []
+
+            def record_repair(progress_file, raw: bytes) -> None:
+                transitions.append(json.loads(raw)["committedFeatures"])
+                real_replace(progress_file, raw)
+
+            with patch.object(
+                parallel.DurableProgressFile,
+                "replace",
+                new=record_repair,
+            ):
+                resumed = self._build(
+                    root,
+                    "crash-resume",
+                    render_workers=2,
+                    progress_file=progress,
+                    checkpoint_features=2,
+                )
+            self.assertEqual("complete", resumed.state)
+            self.assertEqual([4, 6], transitions)
+            self.assertEqual(6, json.loads(progress.read_bytes())["committedFeatures"])
+
+            clean = self._build(root, "crash-clean", checkpoint_features=2)
+            self.assertEqual("complete", clean.state)
+            for name in (
+                "manifest.json",
+                "records.fadictpack",
+                "tile-index.bin",
+                "build-receipt.json",
+            ):
+                self.assertEqual(
+                    (root / "crash-clean" / name).read_bytes(),
+                    (root / "crash-resume" / name).read_bytes(),
+                    name,
+                )
+
+    def test_three_hundred_feature_probe_pauses_then_resumes_with_other_workers(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            opl = root / "probe-closure.opl"
+            roots = root / "probe-root-ids.txt"
+            opl_lines: list[str] = []
+            root_lines: list[str] = []
+            for ordinal in range(301):
+                first_node = ordinal * 2 + 1
+                second_node = first_node + 1
+                longitude = -120.0 + ordinal / 10_000
+                latitude = 35.0 + (ordinal % 100) / 10_000
+                opl_lines.extend(
+                    (
+                        f"n{first_node} v1 dV t2026-06-29T00:00:00Z "
+                        f"x{longitude:.7f} y{latitude:.7f}",
+                        f"n{second_node} v1 dV t2026-06-29T00:00:00Z "
+                        f"x{longitude + 0.0001:.7f} y{latitude + 0.0001:.7f}",
+                    )
+                )
+            for ordinal in range(301):
+                way_id = 100_000 + ordinal
+                first_node = ordinal * 2 + 1
+                opl_lines.append(
+                    f"w{way_id} v1 dV t2026-06-29T00:01:00Z "
+                    f"Tname=Probe%20%River%20%{ordinal},waterway=river "
+                    f"Nn{first_node},n{first_node + 1}"
+                )
+                root_lines.append(f"w{way_id}")
+            opl.write_text("\n".join(opl_lines) + "\n", encoding="utf-8", newline="\n")
+            roots.write_text(
+                "\n".join(root_lines) + "\n", encoding="ascii", newline="\n"
+            )
+            binding = _source_binding(opl, roots)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            progress = evidence / "progress.json"
+            real_replace = parallel.DurableProgressFile.replace
+            first_transitions: list[int] = []
+
+            def record_first(progress_file, raw: bytes) -> None:
+                first_transitions.append(json.loads(raw)["committedFeatures"])
+                real_replace(progress_file, raw)
+
+            with patch.object(
+                parallel.DurableProgressFile,
+                "replace",
+                new=record_first,
+            ):
+                paused = pipeline.render_fixture_global_waterway_package(
+                    opl_path=opl,
+                    root_ids_path=roots,
+                    output_directory=root / "resumed",
+                    work_directory=root / "resumed-work",
+                    package_id="fixture-300-feature-waterway-probe",
+                    source_binding=binding,
+                    checkpoint_objects=1_000,
+                    checkpoint_features=100,
+                    pause_after_features=300,
+                    render_workers=1,
+                    progress_file=progress,
+                )
+            self.assertEqual("paused", paused.state)
+            self.assertEqual([100, 200, 300], first_transitions)
+            paused_progress = json.loads(progress.read_bytes())
+            self.assertEqual(300, paused_progress["committedFeatures"])
+            self.assertEqual(301, paused_progress["totalAdmittedFeatures"])
+            self.assertEqual(1, paused_progress["workerCount"])
+
+            resume_transitions: list[int] = []
+
+            def record_resume(progress_file, raw: bytes) -> None:
+                resume_transitions.append(json.loads(raw)["committedFeatures"])
+                real_replace(progress_file, raw)
+
+            with patch.object(
+                parallel.DurableProgressFile,
+                "replace",
+                new=record_resume,
+            ):
+                resumed = pipeline.render_fixture_global_waterway_package(
+                    opl_path=opl,
+                    root_ids_path=roots,
+                    output_directory=root / "resumed",
+                    work_directory=root / "resumed-work",
+                    package_id="fixture-300-feature-waterway-probe",
+                    source_binding=binding,
+                    checkpoint_objects=1_000,
+                    checkpoint_features=100,
+                    render_workers=2,
+                    progress_file=progress,
+                )
+            self.assertEqual("complete", resumed.state)
+            self.assertEqual([301], resume_transitions)
+            completed_progress = json.loads(progress.read_bytes())
+            self.assertEqual(301, completed_progress["committedFeatures"])
+            self.assertEqual(2, completed_progress["workerCount"])
+
+            clean = pipeline.render_fixture_global_waterway_package(
+                opl_path=opl,
+                root_ids_path=roots,
+                output_directory=root / "clean",
+                work_directory=root / "clean-work",
+                package_id="fixture-300-feature-waterway-probe",
+                source_binding=binding,
+                checkpoint_objects=1_000,
+                checkpoint_features=100,
+                render_workers=2,
+            )
+            self.assertEqual("complete", clean.state)
+            self.assertEqual(
+                clean.receipt["rendererSemanticStreamSha256"],
+                resumed.receipt["rendererSemanticStreamSha256"],
+            )
+            for name in (
+                "manifest.json",
+                "records.fadictpack",
+                "tile-index.bin",
+            ):
+                self.assertEqual(
+                    (root / "clean" / name).read_bytes(),
+                    (root / "resumed" / name).read_bytes(),
+                    name,
+                )
 
     @staticmethod
     def _parallel_limits(workers: int, *, max_in_flight_jobs: int | None = None):
@@ -3402,10 +4098,11 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
         prepared,
         *,
         pause_after_features: int | None = None,
+        render_workers: int = 1,
+        progress_file: Path | None = None,
         size_policy_mode: str = "budgeted-release-v1",
     ):
         from tools.experiment8 import osm_global_waterway_package as pipeline
-        from tools.experiment8 import osm_global_waterway_store as store
 
         patches = [
             patch.object(
@@ -3419,41 +4116,66 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                 return_value=prepared["binding"],
             ),
         ]
-        stage_patch = None
-        if pause_after_features is not None:
-            real_stage = store._stage_renderer_records
-
-            def pause_stage(*args, **kwargs):
-                kwargs["pause_after_features"] = pause_after_features
-                return real_stage(*args, **kwargs)
-
-            stage_patch = patch.object(
-                store, "_stage_renderer_records", side_effect=pause_stage
-            )
-            patches.append(stage_patch)
         with patches[0], patches[1]:
-            if stage_patch is None:
-                return pipeline.recover_global_waterway_package(
-                    extraction_directory=prepared["extraction"],
-                    output_directory=prepared["output"],
-                    work_directory=prepared["work"],
-                    package_id="fixture-global-waterways-v3",
-                    failure_log=prepared["failure_log"],
-                    backup_receipt=prepared["backup_receipt"],
-                    checkpoint_features=2,
-                    size_policy_mode=size_policy_mode,
+            return pipeline.recover_global_waterway_package(
+                extraction_directory=prepared["extraction"],
+                output_directory=prepared["output"],
+                work_directory=prepared["work"],
+                package_id="fixture-global-waterways-v3",
+                failure_log=prepared["failure_log"],
+                backup_receipt=prepared["backup_receipt"],
+                checkpoint_features=2,
+                render_workers=render_workers,
+                pause_after_features=pause_after_features,
+                progress_file=progress_file,
+                size_policy_mode=size_policy_mode,
+            )
+
+    def test_recovery_execution_controls_reach_parallel_stage_only(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepare_recovery(root)
+            progress = root / "progress.json"
+            with patch.object(
+                store, "_stage_renderer_records", return_value=False
+            ) as stage:
+                result = self._recover(
+                    prepared,
+                    pause_after_features=4,
+                    render_workers=2,
+                    progress_file=progress,
                 )
-            with stage_patch:
-                return pipeline.recover_global_waterway_package(
-                    extraction_directory=prepared["extraction"],
-                    output_directory=prepared["output"],
-                    work_directory=prepared["work"],
-                    package_id="fixture-global-waterways-v3",
-                    failure_log=prepared["failure_log"],
-                    backup_receipt=prepared["backup_receipt"],
-                    checkpoint_features=2,
-                    size_policy_mode=size_policy_mode,
-                )
+
+            self.assertEqual("paused", result.state)
+            arguments = stage.call_args.kwargs
+            self.assertEqual(4, arguments["pause_after_features"])
+            self.assertEqual(progress, arguments["progress_file"])
+            self.assertEqual(2, arguments["parallel_limits"].workers)
+            self.assertNotIn("renderWorkers", arguments["run_identity"])
+            self.assertNotIn("pauseAfterFeatures", arguments["run_identity"])
+            self.assertNotIn("progressFile", arguments["run_identity"])
+
+    def test_unknown_progress_is_rejected_before_destructive_recovery_reset(self) -> None:
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepare_recovery(root)
+            progress = root / "progress.json"
+            progress.write_bytes(b"unknown progress\n")
+            before = self._snapshot_database(prepared["database"])
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "unknown|malformed|canonical"
+            ):
+                self._recover(prepared, progress_file=progress)
+
+            self.assertEqual(before, self._snapshot_database(prepared["database"]))
+            self.assertEqual(b"unknown progress\n", progress.read_bytes())
 
     def _validate_recovery(self, prepared, *, size_policy_mode="budgeted-release-v1"):
         from tools.experiment8 import osm_global_waterway_package as pipeline

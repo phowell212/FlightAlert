@@ -1432,6 +1432,9 @@ def _recover_bound_global_waterway_package(
     backup_receipt: Path,
     authority: WaterwayRenderRecoveryAuthority,
     checkpoint_features: int,
+    render_workers: int = 1,
+    pause_after_features: int | None = None,
+    progress_file: Path | None = None,
     production_authority: object,
     size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
@@ -1514,6 +1517,29 @@ def _recover_bound_global_waterway_package(
             new_render_identity=render_identity,
             new_render_sha256=render_sha256,
         )
+        parallel_limits = store._default_parallel_render_limits(render_workers)
+        if progress_file is not None:
+            if plan.resumed:
+                progress_checkpoint = store._meta_get(
+                    connection, "renderCheckpoint"
+                )
+                progress_prefix = int(progress_checkpoint["renderedFeatures"])
+            else:
+                progress_prefix = 0
+            total_admitted_features = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM admission_candidates"
+                ).fetchone()[0]
+            )
+            progress_preflight = store._RenderProgressPublisher(
+                progress_file,
+                render_run_sha256=render_sha256,
+                checkpoint_features=checkpoint_features,
+                total_admitted_features=total_admitted_features,
+                initial_committed_features=progress_prefix,
+                limits=parallel_limits,
+            )
+            progress_preflight.preflight(progress_prefix)
         if not plan.resumed:
             plan = _reset_renderer_state(
                 connection,
@@ -1535,9 +1561,11 @@ def _recover_bound_global_waterway_package(
             source_binding=source_binding,
             zooms=zooms,
             checkpoint_features=checkpoint_features,
-            pause_after_features=None,
+            pause_after_features=pause_after_features,
             run_identity=render_identity,
             trusted_data_version=trusted_data_version,
+            parallel_limits=parallel_limits,
+            progress_file=progress_file,
         )
         if not complete:
             return GlobalWaterwayBuildResult(
