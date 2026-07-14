@@ -1425,6 +1425,50 @@ def _validate_bound_global_waterway_recovery(
         connection.close()
 
 
+def _close_recovery_resources(
+    *,
+    connection_close: Callable[[], None] | None,
+    progress_close: Callable[[], None] | None,
+    operation_error: BaseException | None,
+) -> None:
+    """Close SQLite before releasing progress ownership without masking errors."""
+
+    connection_error: BaseException | None = None
+    progress_error: BaseException | None = None
+    if connection_close is not None:
+        try:
+            connection_close()
+        except BaseException as error:
+            connection_error = error
+    if progress_close is not None:
+        try:
+            progress_close()
+        except BaseException as error:
+            progress_error = error
+
+    if operation_error is not None:
+        if connection_error is not None:
+            operation_error.add_note(
+                "waterway recovery SQLite connection close also failed: "
+                f"{connection_error}"
+            )
+        if progress_error is not None:
+            operation_error.add_note(
+                "waterway recovery progress session close also failed: "
+                f"{progress_error}"
+            )
+        return
+    if connection_error is not None:
+        if progress_error is not None:
+            connection_error.add_note(
+                "waterway recovery progress session close also failed: "
+                f"{progress_error}"
+            )
+        raise connection_error
+    if progress_error is not None:
+        raise progress_error
+
+
 def _recover_bound_global_waterway_package(
     *,
     opl_path: Path,
@@ -1498,6 +1542,7 @@ def _recover_bound_global_waterway_package(
     progress_durable = None
     connection = None
     progress_preflight = None
+    operation_error = None
     try:
         if progress_file is not None:
             progress_durable = DurableProgressFile(
@@ -1639,11 +1684,17 @@ def _recover_bound_global_waterway_package(
             ),
         )
         return GlobalWaterwayBuildResult("complete", output_directory, receipt)
+    except BaseException as error:
+        operation_error = error
+        raise
     finally:
-        if progress_durable is not None:
-            progress_durable.close()
-        if connection is not None:
-            connection.close()
+        _close_recovery_resources(
+            connection_close=(connection.close if connection is not None else None),
+            progress_close=(
+                progress_durable.close if progress_durable is not None else None
+            ),
+            operation_error=operation_error,
+        )
 
 
 __all__ = ["WaterwayRenderRecoveryAuthority"]

@@ -5103,6 +5103,194 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             self.assertGreaterEqual(len(transaction_states), 2)
             self.assertTrue(transaction_states[-1])
 
+    def test_recovery_progress_session_outlives_sqlite_connection(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+        from tools.experiment8.waterway_parallel_render import DurableProgressFile
+
+        for (
+            pause_after_features,
+            expected_state,
+            output_published,
+            transaction_active,
+        ) in (
+            (None, "complete", True, True),
+            (4, "paused", False, False),
+        ):
+            with self.subTest(
+                state=expected_state
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                prepared = self._prepare_recovery(root)
+                progress = root / "recovery-progress.json"
+                real_connect = recovery.sqlite3.connect
+                probe = {
+                    "attempted": False,
+                    "denied": False,
+                    "output_published": False,
+                    "transaction_active": False,
+                }
+
+                class ProbedConnection(sqlite3.Connection):
+                    def close(connection) -> None:
+                        if not probe["attempted"]:
+                            probe["attempted"] = True
+                            probe["output_published"] = prepared["output"].is_dir()
+                            probe["transaction_active"] = connection.in_transaction
+                            try:
+                                contender = DurableProgressFile(
+                                    progress, acquire_session=True
+                                )
+                            except GlobalWaterwayPackageError as error:
+                                self.assertRegex(str(error), "session.*owned")
+                                probe["denied"] = True
+                            else:
+                                contender.close()
+                        super().close()
+
+                def probed_connect(*args, **kwargs):
+                    return real_connect(*args, factory=ProbedConnection, **kwargs)
+
+                with patch.object(
+                    recovery.sqlite3,
+                    "connect",
+                    side_effect=probed_connect,
+                ):
+                    result = self._recover(
+                        prepared,
+                        pause_after_features=pause_after_features,
+                        progress_file=progress,
+                    )
+
+                self.assertEqual(expected_state, result.state)
+                self.assertEqual(
+                    {
+                        "attempted": True,
+                        "denied": True,
+                        "output_published": output_published,
+                        "transaction_active": transaction_active,
+                    },
+                    probe,
+                )
+                released = DurableProgressFile(progress, acquire_session=True)
+                released.close()
+
+    def test_recovery_cleanup_orders_closes_and_preserves_primary_errors(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+
+        events = []
+        operation_error = RuntimeError("primary recovery failure")
+
+        def close_connection() -> None:
+            events.append("connection")
+            raise RuntimeError("connection close failure")
+
+        def close_progress() -> None:
+            events.append("progress")
+            raise RuntimeError("progress close failure")
+
+        recovery._close_recovery_resources(
+            connection_close=close_connection,
+            progress_close=close_progress,
+            operation_error=operation_error,
+        )
+        self.assertEqual(["connection", "progress"], events)
+        self.assertEqual(
+            [
+                "waterway recovery SQLite connection close also failed: "
+                "connection close failure",
+                "waterway recovery progress session close also failed: "
+                "progress close failure",
+            ],
+            operation_error.__notes__,
+        )
+
+        events.clear()
+        with self.assertRaisesRegex(
+            RuntimeError, "connection close failure"
+        ) as raised:
+            recovery._close_recovery_resources(
+                connection_close=close_connection,
+                progress_close=close_progress,
+                operation_error=None,
+            )
+        self.assertEqual(["connection", "progress"], events)
+        self.assertEqual(
+            [
+                "waterway recovery progress session close also failed: "
+                "progress close failure"
+            ],
+            raised.exception.__notes__,
+        )
+
+    def test_recovery_exception_remains_primary_when_both_closes_fail(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepare_recovery(root)
+            progress = root / "recovery-progress.json"
+            real_connect = recovery.sqlite3.connect
+            real_progress_close = parallel.DurableProgressFile.close
+
+            class CloseFailConnection(sqlite3.Connection):
+                def close(connection) -> None:
+                    super().close()
+                    raise RuntimeError("connection close failure")
+
+            def probed_connect(*args, **kwargs):
+                return real_connect(*args, factory=CloseFailConnection, **kwargs)
+
+            def close_progress_then_fail(durable) -> None:
+                real_progress_close(durable)
+                raise RuntimeError("progress close failure")
+
+            with patch.object(
+                recovery.sqlite3,
+                "connect",
+                side_effect=probed_connect,
+            ), patch.object(
+                store,
+                "_publish",
+                side_effect=GlobalWaterwayPackageError("publication failure"),
+            ), patch.object(
+                parallel.DurableProgressFile,
+                "close",
+                new=close_progress_then_fail,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "publication failure"
+            ) as raised:
+                self._recover(prepared, progress_file=progress)
+
+            self.assertEqual(
+                [
+                    "waterway recovery SQLite connection close also failed: "
+                    "connection close failure",
+                    "waterway recovery progress session close also failed: "
+                    "progress close failure",
+                ],
+                raised.exception.__notes__,
+            )
+            released = parallel.DurableProgressFile(
+                progress, acquire_session=True
+            )
+            real_progress_close(released)
+
     def test_renderer_checkpoint_rejects_external_writer_between_reservations(
         self,
     ) -> None:
