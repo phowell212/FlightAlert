@@ -563,7 +563,10 @@ def _require_external_evidence(
         failure_log, authority.failure_log_bytes, "waterway recovery failure log"
     )
     if not failure_raw.endswith(
-        b"sqlite3.OperationalError: database is locked\n"
+        (
+            b"sqlite3.OperationalError: database is locked\n",
+            b"sqlite3.OperationalError: database is locked\r\n",
+        )
     ):
         raise GlobalWaterwayPackageError(
             "waterway recovery failure class/message differs from exact incident"

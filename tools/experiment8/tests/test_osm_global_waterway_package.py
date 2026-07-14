@@ -2823,6 +2823,59 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             self.assertTrue(uri_kwargs.get("uri"))
             self.assertIn("mode=ro", str(uri_args[0]))
 
+    def test_validate_recovery_accepts_windows_incident_line_ending_only_for_exact_failure(self) -> None:
+        from dataclasses import replace
+
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        cases = (
+            (
+                "exact-windows-incident",
+                b"Traceback (most recent call last):\r\n"
+                b"sqlite3.OperationalError: database is locked\r\n",
+                True,
+            ),
+            (
+                "different-windows-failure",
+                b"Traceback (most recent call last):\r\n"
+                b"sqlite3.OperationalError: database is malformed\r\n",
+                False,
+            ),
+        )
+        for label, failure_raw, accepted in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                prepared["failure_log"].write_bytes(failure_raw)
+                failure_fact = {
+                    "bytes": len(failure_raw),
+                    "sha256": hashlib.sha256(failure_raw).hexdigest(),
+                }
+                prepared["authority"] = replace(
+                    prepared["authority"],
+                    failure_log_bytes=failure_fact["bytes"],
+                    failure_log_sha256=failure_fact["sha256"],
+                )
+                receipt = json.loads(
+                    prepared["backup_receipt"].read_text("utf-8")
+                )
+                receipt["failureLog"] = failure_fact
+                prepared["backup_receipt"].write_bytes(self._canonical(receipt))
+                before = self._snapshot_database(prepared["database"])
+                if accepted:
+                    validation = self._validate_recovery(prepared)
+                    self.assertEqual("accepted", validation["state"])
+                else:
+                    with self.assertRaisesRegex(
+                        GlobalWaterwayPackageError,
+                        "failure class/message differs from exact incident",
+                    ):
+                        self._validate_recovery(prepared)
+                self.assertEqual(
+                    before, self._snapshot_database(prepared["database"])
+                )
+
     def test_validate_recovery_rejects_malformed_evidence_without_mutation(self) -> None:
         from tools.experiment8.osm_global_waterway_package import (
             GlobalWaterwayPackageError,
