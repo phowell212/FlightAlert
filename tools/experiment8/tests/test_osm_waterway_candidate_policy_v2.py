@@ -319,9 +319,9 @@ class CandidatePolicyIdentityTests(unittest.TestCase):
         rule = "/tools/experiment8/osm_global_waterway_package.py text eol=lf"
         self.assertEqual(1, attributes.count(rule))
         source = (repository / "tools/experiment8/osm_global_waterway_package.py").read_bytes()
-        self.assertEqual(107_127, len(source))
+        self.assertEqual(110_012, len(source))
         self.assertEqual(
-            "5971cf12483cfb24fd36760a8ed02fe22cd7841678ae3e83e7a174c0b269ae78",
+            "ecd57a973c4afef0b0896032d42cc03e9a32d509e5a5d05bc679602fd41f6e55",
             hashlib.sha256(source).hexdigest(),
         )
         self.assertNotIn(b"\r\n", source)
@@ -776,6 +776,189 @@ class CandidateTraversalTests(unittest.TestCase):
                 roots=(("w", way),),
             )
         self.assertEqual(1, result.receipt["admission"]["candidateRootCount"])
+
+    def test_render_reauthentication_scans_each_direct_way_once_and_reuses_source(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        first_way = _SYNTHETIC_BASE + 218
+        second_way = _SYNTHETIC_BASE + 219
+        node_ids = tuple(_SYNTHETIC_BASE + index for index in range(1, 1_027))
+        nodes = {
+            node_id: (f"-76.{index:07d}", "39.0000000")
+            for index, node_id in enumerate(node_ids, start=1)
+        }
+
+        class RecordingConnection(sqlite3.Connection):
+            way_node_queries: list[tuple[str, tuple[object, ...]]]
+            meta_queries: list[tuple[str, tuple[object, ...]]]
+
+            def execute(self, sql: str, parameters=(), /):
+                normalized = " ".join(sql.split())
+                if "FROM way_nodes" in normalized:
+                    self.way_node_queries.append((normalized, tuple(parameters)))
+                if "FROM meta" in normalized:
+                    self.meta_queries.append((normalized, tuple(parameters)))
+                return super().execute(sql, parameters)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            result, binding, _, _ = _ingest(
+                Path(temporary),
+                ways={
+                    first_way: (
+                        {"name": "SyntheticLongRiver", "waterway": "river"},
+                        node_ids[:1_024],
+                    ),
+                    second_way: (
+                        {"name": "SyntheticShortCanal", "waterway": "canal"},
+                        node_ids[1_024:],
+                    ),
+                },
+                relations={},
+                roots=(("w", first_way), ("w", second_way)),
+                nodes=nodes,
+            )
+            expected = _features(result.database_path, binding)
+            connection = sqlite3.connect(
+                result.database_path,
+                factory=RecordingConnection,
+            )
+            try:
+                connection.way_node_queries = []
+                connection.meta_queries = []
+                connection.execute("PRAGMA query_only=ON")
+                with patch.object(
+                    store,
+                    "_source_document_from_database",
+                    wraps=store._source_document_from_database,
+                ) as source_document_reader:
+                    actual = tuple(
+                        store._iter_exact_waterway_features(
+                            connection,
+                            source_binding=binding,
+                        )
+                    )
+                source_document_reads = source_document_reader.call_count
+                way_node_queries = tuple(connection.way_node_queries)
+                meta_queries = tuple(connection.meta_queries)
+            finally:
+                connection.close()
+
+        self.assertEqual(expected, actual)
+        self.assertEqual(0, source_document_reads)
+        self.assertEqual(
+            1,
+            sum(parameters == ("runIdentity",) for _sql, parameters in meta_queries),
+        )
+        self.assertEqual(2, len(way_node_queries))
+        self.assertEqual(
+            {(first_way,), (second_way,)},
+            {parameters for _sql, parameters in way_node_queries},
+        )
+        for sql, _parameters in way_node_queries:
+            self.assertIn("LEFT JOIN nodes", sql)
+            self.assertIn("n.longitude_e7", sql)
+            self.assertIn("n.latitude_e7", sql)
+            self.assertIn("n.payload_sha", sql)
+            self.assertIn("ORDER BY wn.ordinal", sql)
+            self.assertNotIn("COUNT(*)", sql)
+
+    def test_materialized_direct_capture_preserves_structural_failure_precedence(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        way = _SYNTHETIC_BASE + 220
+        n1, n2 = _SYNTHETIC_BASE + 1, _SYNTHETIC_BASE + 2
+        with tempfile.TemporaryDirectory() as temporary:
+            result, _, _, _ = _ingest(
+                Path(temporary),
+                ways={
+                    way: (
+                        {"name": "SyntheticOrdinalRiver", "waterway": "river"},
+                        (n1, n2),
+                    )
+                },
+                relations={},
+                roots=(("w", way),),
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                connection.execute(
+                    "UPDATE way_nodes SET ordinal=2 WHERE way_id=? AND ordinal=1",
+                    (way,),
+                )
+                connection.commit()
+                limits = replace(
+                    store._AdmissionLimits.production(),
+                    max_candidate_points=1,
+                )
+                for materialize in (False, True):
+                    with self.subTest(materialize=materialize), self.assertRaisesRegex(
+                        GlobalWaterwayPackageError,
+                        "ordinal.*malformed|noncontiguous",
+                    ):
+                        store._analyze_admission_root(
+                            connection,
+                            1,
+                            way,
+                            limits=limits,
+                            materialize=materialize,
+                        )
+            finally:
+                connection.close()
+
+    def test_materialized_direct_capture_checks_candidate_limits_before_coordinates(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        way = _SYNTHETIC_BASE + 221
+        n1, n2 = _SYNTHETIC_BASE + 1, _SYNTHETIC_BASE + 2
+        with tempfile.TemporaryDirectory() as temporary:
+            result, _, _, _ = _ingest(
+                Path(temporary),
+                ways={
+                    way: (
+                        {"name": "SyntheticLimitedRiver", "waterway": "river"},
+                        (n1, n2),
+                    )
+                },
+                relations={},
+                roots=(("w", way),),
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                connection.execute(
+                    "UPDATE nodes SET longitude_e7='malformed' WHERE id=?",
+                    (n1,),
+                )
+                connection.commit()
+                limits = replace(
+                    store._AdmissionLimits.production(),
+                    max_candidate_raw_parts=0,
+                )
+                for materialize in (False, True):
+                    with self.subTest(materialize=materialize), self.assertRaisesRegex(
+                        GlobalWaterwayPackageError,
+                        "candidate raw-part ceiling exceeded",
+                    ):
+                        store._analyze_admission_root(
+                            connection,
+                            1,
+                            way,
+                            limits=limits,
+                            materialize=materialize,
+                        )
+            finally:
+                connection.close()
 
 
 class AdmissionDurabilityAndFatalTests(unittest.TestCase):

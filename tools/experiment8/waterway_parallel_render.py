@@ -839,20 +839,39 @@ def _source_range_sha256(features: Sequence[ExactWaterwayFeature]) -> str:
     return digest.hexdigest()
 
 
-def encode_feature_batch_job(job: FeatureRenderBatchJob) -> bytes:
+def _encode_feature_batch_job_from_canonical_feature_bytes(
+    job: FeatureRenderBatchJob,
+    canonical_feature_bytes: Iterable[bytes],
+) -> bytes:
     if type(job) is not FeatureRenderBatchJob:
         raise _error("feature batch job encoder requires FeatureRenderBatchJob")
+    try:
+        feature_byte_iterator = iter(canonical_feature_bytes)
+    except TypeError as error:
+        raise _error("feature batch canonical feature bytes are not iterable") from error
     writer = _BufferWriter(_MAX_JOB_BYTES, "feature batch job")
     writer.raw(_JOB_MAGIC)
     writer.u8(_JOB_VERSION, "feature batch job version")
     writer.u64(job.start_ordinal, "feature batch start ordinal")
     writer.u32(len(job.features), "feature batch feature count")
-    for feature in job.features:
+    for _feature in job.features:
+        try:
+            encoded = next(feature_byte_iterator)
+        except StopIteration as error:
+            raise _error("feature batch canonical feature byte count differs") from error
+        if type(encoded) is not bytes or not encoded or len(encoded) > _MAX_FEATURE_BYTES:
+            raise _error("feature batch canonical feature bytes are invalid")
         writer.blob(
-            _encode_exact_feature(feature),
+            encoded,
             _MAX_FEATURE_BYTES,
             "feature batch exact feature",
         )
+    try:
+        next(feature_byte_iterator)
+    except StopIteration:
+        pass
+    else:
+        raise _error("feature batch canonical feature byte count differs")
     writer.raw(bytes.fromhex(job.source_generation_sha256))
     writer.raw(bytes.fromhex(job.classifier_sha256))
     writer.u8(len(job.zooms), "feature batch zoom count")
@@ -864,6 +883,15 @@ def encode_feature_batch_job(job: FeatureRenderBatchJob) -> bytes:
     writer.text(job.spool_directory, _MAX_PATH_BYTES, "feature batch spool directory")
     writer.u64(job.spool_byte_quota, "feature batch spool byte quota")
     return writer.finish()
+
+
+def encode_feature_batch_job(job: FeatureRenderBatchJob) -> bytes:
+    if type(job) is not FeatureRenderBatchJob:
+        raise _error("feature batch job encoder requires FeatureRenderBatchJob")
+    return _encode_feature_batch_job_from_canonical_feature_bytes(
+        job,
+        (_encode_exact_feature(feature) for feature in job.features),
+    )
 
 
 def decode_feature_batch_job(data: bytes) -> FeatureRenderBatchJob:
@@ -5164,9 +5192,11 @@ class ParallelFeatureRenderer:
                 break
         if not features:
             return None
+        frozen_features = tuple(features)
+        frozen_encoded_features = tuple(encoded_features)
         job = FeatureRenderBatchJob(
             start_ordinal=start,
-            features=tuple(features),
+            features=frozen_features,
             source_generation_sha256=self._source_generation_sha256,
             classifier_sha256=self._classifier_sha256,
             zooms=self._zooms,
@@ -5176,7 +5206,10 @@ class ParallelFeatureRenderer:
             spool_directory=str(self._root),
             spool_byte_quota=self._limits.max_spool_bytes_per_job,
         )
-        job_bytes = encode_feature_batch_job(job)
+        job_bytes = _encode_feature_batch_job_from_canonical_feature_bytes(
+            job,
+            frozen_encoded_features,
+        )
         if len(job_bytes) != encoded_byte_count:
             raise _error("parallel render exact input byte accounting differs")
         end = start + len(features)
@@ -5184,11 +5217,11 @@ class ParallelFeatureRenderer:
         self._ready_job = _ReadyRenderJob(
             start_ordinal=start,
             end_ordinal_exclusive=end,
-            features=tuple(features),
+            features=frozen_features,
             point_count=point_count,
             input_bytes=job_bytes,
             source_range_sha256=self._source_range_from_encoded_features(
-                encoded_features
+                frozen_encoded_features
             ),
             spool_byte_quota=self._limits.max_spool_bytes_per_job,
         )

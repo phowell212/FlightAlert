@@ -397,6 +397,37 @@ class FeatureBatchJobCodecTests(unittest.TestCase):
             self.assertEqual(job, decoded)
             self.assertEqual(encoded, encode_feature_batch_job(decoded))
 
+    def test_public_job_encoder_stops_encoding_at_the_job_byte_bound(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            features = (_feature(71), _feature(72), _feature(73))
+            job = _job(Path(temporary), *features)
+            first_feature_bytes = parallel._encode_exact_feature(features[0])
+            bound_after_first_feature = (
+                len(b"FAE8WRJOB")
+                + 1
+                + 8
+                + 4
+                + 4
+                + len(first_feature_bytes)
+            )
+            with mock.patch.object(
+                parallel,
+                "_MAX_JOB_BYTES",
+                bound_after_first_feature,
+            ), mock.patch.object(
+                parallel,
+                "_encode_exact_feature",
+                wraps=parallel._encode_exact_feature,
+            ) as encoder:
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "feature batch job exceeds its canonical byte bound",
+                ):
+                    encode_feature_batch_job(job)
+                self.assertEqual(2, encoder.call_count)
+
     def test_job_decoder_rejects_trailing_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             encoded = encode_feature_batch_job(_job(Path(temporary), _feature()))
@@ -2030,6 +2061,47 @@ class ParallelFeatureRendererTests(unittest.TestCase):
                 self.assertIs(bytes, type(arguments[0]))
                 decoded = decode_feature_batch_job(arguments[0])
                 self.assertEqual(arguments[0], encode_feature_batch_job(decoded))
+
+    def test_ready_jobs_reuse_one_encoding_per_feature_with_public_codec_bytes(
+        self,
+    ) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        features = tuple(_feature(source_id) for source_id in range(201, 204))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                features,
+                factory,
+                limits=_limits(max_points_per_job=6),
+            )
+            try:
+                with mock.patch.object(
+                    parallel,
+                    "_encode_exact_feature",
+                    wraps=parallel._encode_exact_feature,
+                ) as encoder:
+                    renderer._submit_until_blocked()
+                    observed_calls = encoder.call_count
+
+                payloads = tuple(
+                    arguments[0]
+                    for _future, function, arguments in factory.instances[0].submissions
+                    if function is render_feature_batch_job
+                )
+                self.assertEqual(2, len(payloads))
+                self.assertEqual(
+                    payloads,
+                    tuple(
+                        encode_feature_batch_job(decode_feature_batch_job(payload))
+                        for payload in payloads
+                    ),
+                )
+                self.assertEqual(len(features), observed_calls)
+            finally:
+                renderer.close()
 
     def test_jobs_split_at_exact_encoded_input_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

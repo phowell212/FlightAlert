@@ -50,6 +50,9 @@ class RunGlobalWaterwayRecoveryCliTests(unittest.TestCase):
             failure_log=Path("stderr.log"),
             backup_receipt=Path("backup.json"),
             checkpoint_features=7,
+            render_workers=1,
+            pause_after_features=None,
+            progress_file=None,
             size_policy_mode="complete-uncompressed-visual-evaluation-v1",
         )
         expected = {

@@ -1860,25 +1860,48 @@ def _structural_way(
     evidence: _DependencyEvidence,
     usage: _StructuralUsage,
     path: Sequence[Sequence[int]],
-) -> None:
-    row = connection.execute(
-        "SELECT payload_sha FROM ways WHERE id=?", (way_id,)
-    ).fetchone()
-    if row is None:
-        raise GlobalWaterwayPackageError(
-            f"waterway structural closure references missing way {way_id}"
-        )
+    *,
+    capture_point_limit: int | None = None,
+    known_way_payload_sha256: str | None = None,
+) -> tuple[tuple[object, ...], int] | None:
+    if known_way_payload_sha256 is None:
+        row = connection.execute(
+            "SELECT payload_sha FROM ways WHERE id=?", (way_id,)
+        ).fetchone()
+        if row is None:
+            raise GlobalWaterwayPackageError(
+                f"waterway structural closure references missing way {way_id}"
+            )
+        way_payload_sha256 = bytes(row[0]).hex()
+    else:
+        way_payload_sha256 = known_way_payload_sha256
     usage.has_reachable_way = True
-    evidence.add(["way", way_id, bytes(row[0]).hex(), [list(item) for item in path]])
-    rows = connection.execute(
-        "SELECT wn.ordinal,wn.node_id,n.payload_sha "
-        "FROM way_nodes wn LEFT JOIN nodes n ON n.id=wn.node_id "
-        "WHERE wn.way_id=? ORDER BY wn.ordinal",
-        (way_id,),
+    evidence.add(["way", way_id, way_payload_sha256, [list(item) for item in path]])
+    captured_rows: list[object] | None = (
+        [] if capture_point_limit is not None else None
     )
+    if captured_rows is None:
+        rows = connection.execute(
+            "SELECT wn.ordinal,wn.node_id,n.payload_sha "
+            "FROM way_nodes wn LEFT JOIN nodes n ON n.id=wn.node_id "
+            "WHERE wn.way_id=? ORDER BY wn.ordinal",
+            (way_id,),
+        )
+    else:
+        rows = connection.execute(
+            "SELECT wn.ordinal,wn.node_id,n.longitude_e7,n.latitude_e7,n.payload_sha "
+            "FROM way_nodes wn LEFT JOIN nodes n ON n.id=wn.node_id "
+            "WHERE wn.way_id=? ORDER BY wn.ordinal",
+            (way_id,),
+        )
     seen = 0
     try:
-        for expected, (ordinal, node_id, payload_sha) in enumerate(rows):
+        for expected, row in enumerate(rows):
+            if captured_rows is None:
+                ordinal, node_id, payload_sha = row
+                longitude_e7 = latitude_e7 = None
+            else:
+                ordinal, node_id, longitude_e7, latitude_e7, payload_sha = row
             if int(ordinal) != expected:
                 raise GlobalWaterwayPackageError(
                     f"waterway way {way_id} node ordinal is malformed or noncontiguous"
@@ -1891,6 +1914,10 @@ def _structural_way(
             evidence.add(
                 ["way-node", way_id, expected, int(node_id), bytes(payload_sha).hex()]
             )
+            if captured_rows is not None and seen < capture_point_limit:
+                captured_rows.append(
+                    (int(node_id), longitude_e7, latitude_e7)
+                )
             seen += 1
     finally:
         rows.close()
@@ -1898,6 +1925,9 @@ def _structural_way(
         raise GlobalWaterwayPackageError(
             f"waterway structural member way {way_id} has fewer than two nodes"
         )
+    if captured_rows is None:
+        return None
+    return tuple(captured_rows), seen
 
 
 def _structural_relation(
@@ -2264,15 +2294,42 @@ def _direct_candidate(
     dependency_evidence: Mapping[str, object],
     usage: _CandidateUsage,
     materialize: bool,
+    captured_way: tuple[tuple[object, ...], int] | None = None,
 ) -> _CandidateEvidence:
     root_id = int(root["id"])
     waterway_type = str(dict(tags)["waterway"])
-    point_count = int(
-        connection.execute(
-            "SELECT COUNT(*) FROM way_nodes WHERE way_id=?", (root_id,)
-        ).fetchone()[0]
-    )
+    captured_rows: tuple[object, ...] | None
+    if captured_way is None:
+        point_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM way_nodes WHERE way_id=?", (root_id,)
+            ).fetchone()[0]
+        )
+        point_source = _iter_exact_way_points(connection, root_id)
+        captured_part: tuple[object, ...] | None = None
+        captured_rows = None
+    else:
+        if not materialize:
+            raise GlobalWaterwayPackageError(
+                "waterway direct capture requires materialized admission"
+            )
+        captured_rows, point_count = captured_way
+        captured_part = None
     usage.reserve_way(point_count)
+    if captured_rows is not None:
+        if len(captured_rows) != point_count:
+            raise GlobalWaterwayPackageError(
+                f"direct way {root_id} exceeded its exact capture bound"
+            )
+        from .osm_global_waterway_renderer import ExactWaterwayPoint
+
+        captured_part = tuple(
+            ExactWaterwayPoint(
+                int(node_id), int(longitude_e7), int(latitude_e7)
+            )
+            for node_id, longitude_e7, latitude_e7 in captured_rows
+        )
+        point_source = iter(captured_part)
     source_path = (((1, root_id, -1),),)
     candidate_meta, source_meta = _feature_metadata(
         root=root,
@@ -2292,9 +2349,11 @@ def _direct_candidate(
     source_digest.update(struct.pack(">Q", 1))
     _update_geometry_part_start(candidate_digest, point_count)
     _update_geometry_part_start(source_digest, point_count)
-    points: list[object] | None = [] if materialize else None
+    points: list[object] | None = (
+        [] if materialize and captured_part is None else None
+    )
     seen = 0
-    for point in _iter_exact_way_points(connection, root_id):
+    for point in point_source:
         _update_geometry_point(candidate_digest, point)
         _update_geometry_point(source_digest, point)
         if points is not None:
@@ -2304,7 +2363,10 @@ def _direct_candidate(
         raise GlobalWaterwayPackageError(
             f"direct way {root_id} point count drifted during admission"
         )
-    parts = (tuple(points),) if points is not None else ()
+    if captured_part is not None:
+        parts = (captured_part,)
+    else:
+        parts = (tuple(points),) if points is not None else ()
     return _CandidateEvidence(
         waterway_type,
         False,
@@ -2325,21 +2387,44 @@ def _analyze_admission_root(
     *,
     limits: _AdmissionLimits | None = None,
     materialize: bool = False,
+    source_document: Mapping[str, object] | None = None,
 ) -> _AdmissionRootAnalysis:
     if root_kind not in (1, 2):
         raise GlobalWaterwayPackageError("waterway admission root kind is unsupported")
     checked_limits = limits or _AdmissionLimits.production()
     if not isinstance(checked_limits, _AdmissionLimits):
         raise GlobalWaterwayPackageError("waterway admission limits are invalid")
-    source_document = _source_document_from_database(connection)
+    exact_source_document = (
+        source_document
+        if source_document is not None
+        else _source_document_from_database(connection)
+    )
     root, tags, name_key, primary, english = _root_row(
         connection, root_kind, root_id
     )
     dependency = _DependencyEvidence(checked_limits)
     structural = _StructuralUsage(checked_limits)
     root_path = ((root_kind, root_id, -1),)
+    captured_direct_way = None
     if root_kind == 1:
-        _structural_way(connection, root_id, dependency, structural, root_path)
+        capture_point_limit = None
+        if materialize:
+            capture_point_limit = (
+                checked_limits.max_candidate_points
+                if checked_limits.max_candidate_raw_parts > 0
+                else 0
+            )
+        captured_direct_way = _structural_way(
+            connection,
+            root_id,
+            dependency,
+            structural,
+            root_path,
+            capture_point_limit=capture_point_limit,
+            known_way_payload_sha256=(
+                str(root["payloadSha256"]) if materialize else None
+            ),
+        )
     else:
         _structural_relation(
             connection,
@@ -2374,10 +2459,11 @@ def _analyze_admission_root(
                 name_key=name_key,
                 primary=primary,
                 english=english,
-                source_document=source_document,
+                source_document=exact_source_document,
                 dependency_evidence=dependency_document,
                 usage=candidate_usage,
                 materialize=materialize,
+                captured_way=captured_direct_way,
             )
         )
         legacy_reason = None
@@ -2434,7 +2520,7 @@ def _analyze_admission_root(
             occurrence_paths = tuple(paths_by_type[waterway_type])
             candidate_meta, source_meta = _feature_metadata(
                 root=root,
-                source_document=source_document,
+                source_document=exact_source_document,
                 name_source_key=name_key,
                 primary_name=primary,
                 english_name=english,
@@ -2578,6 +2664,7 @@ def _iter_exact_waterway_features(
         or run_identity.get("source") != source_binding.document()
     ):
         raise GlobalWaterwayPackageError("waterway database source binding differs")
+    source_document = dict(run_identity["source"])
     if (
         not isinstance(admission_receipt, dict)
         or admission_receipt.get("fatalCount") != 0
@@ -2606,6 +2693,7 @@ def _iter_exact_waterway_features(
             root_kind,
             root_id,
             materialize=True,
+            source_document=source_document,
         )
         stored = connection.execute(
             "SELECT entry_json,entry_sha,candidate_stream_sha "
