@@ -12,7 +12,7 @@ import unittest
 import warnings
 import zlib
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from contextlib import redirect_stderr, redirect_stdout
 
 
@@ -2372,6 +2372,87 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             released = DurableProgressFile(progress, acquire_session=True)
             released.close()
 
+    def test_progress_session_remains_owned_through_final_package_publish(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.waterway_parallel_render import DurableProgressFile
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            progress = evidence / "progress.json"
+            real_publish = store._publish
+            attempted_during_publish = False
+
+            def probe_competing_session(*args, **kwargs):
+                nonlocal attempted_during_publish
+                attempted_during_publish = True
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "session.*owned"
+                ):
+                    DurableProgressFile(progress, acquire_session=True)
+                return real_publish(*args, **kwargs)
+
+            with patch.object(
+                store,
+                "_publish",
+                side_effect=probe_competing_session,
+            ):
+                result = self._build(
+                    root,
+                    "guarded-publish",
+                    progress_file=progress,
+                )
+
+            self.assertEqual("complete", result.state)
+            self.assertTrue(attempted_during_publish)
+            self.assertTrue(progress.is_file())
+            released = DurableProgressFile(progress, acquire_session=True)
+            released.close()
+
+    def test_progress_publisher_closes_owned_file_but_not_injected_file(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.waterway_parallel_render import DurableProgressFile
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            limits = store._default_parallel_render_limits()
+            owned = store._RenderProgressPublisher(
+                root / "owned.json",
+                render_run_sha256="8" * 64,
+                checkpoint_features=2,
+                total_admitted_features=0,
+                initial_committed_features=0,
+                limits=limits,
+            )
+            owned_close = Mock(wraps=owned._file.close)
+            owned._file.close = owned_close
+            owned.close()
+            owned_close.assert_called_once_with()
+
+            borrowed_file = DurableProgressFile(
+                root / "borrowed.json", acquire_session=True
+            )
+            borrowed_close = Mock(wraps=borrowed_file.close)
+            borrowed_file.close = borrowed_close
+            borrowed = store._RenderProgressPublisher(
+                borrowed_file.path,
+                render_run_sha256="9" * 64,
+                checkpoint_features=2,
+                total_admitted_features=0,
+                initial_committed_features=0,
+                limits=limits,
+                _durable_file=borrowed_file,
+            )
+            try:
+                borrowed.close()
+                borrowed_close.assert_not_called()
+            finally:
+                borrowed_file.close()
+
     def test_same_inode_progress_rewrite_is_rejected_at_fresh_resume_boundaries(
         self,
     ) -> None:
@@ -2574,6 +2655,82 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                     (root / "crash-resume" / name).read_bytes(),
                     name,
                 )
+
+    def test_first_commit_before_progress_failure_repairs_absent_progress(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            progress = evidence / "progress.json"
+            real_replace = parallel.DurableProgressFile.replace
+            failed_first_publication = False
+
+            def fail_first_publication(progress_file, raw: bytes) -> None:
+                nonlocal failed_first_publication
+                document = json.loads(raw)
+                if not failed_first_publication:
+                    failed_first_publication = True
+                    self.assertEqual(2, document["committedFeatures"])
+                    raise GlobalWaterwayPackageError(
+                        "injected crash before first progress publication"
+                    )
+                real_replace(progress_file, raw)
+
+            with patch.object(
+                parallel.DurableProgressFile,
+                "replace",
+                new=fail_first_publication,
+            ), self.assertRaisesRegex(GlobalWaterwayPackageError, "injected crash"):
+                self._build(
+                    root,
+                    "absent-progress-resume",
+                    progress_file=progress,
+                    checkpoint_features=2,
+                )
+
+            self.assertTrue(failed_first_publication)
+            self.assertFalse(progress.exists())
+            database = root / "absent-progress-resume-work" / "waterway-state.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                self.assertEqual(
+                    2,
+                    store._meta_get(connection, "renderCheckpoint")[
+                        "renderedFeatures"
+                    ],
+                )
+            finally:
+                connection.close()
+
+            repaired_transitions: list[int] = []
+
+            def record_repair(progress_file, raw: bytes) -> None:
+                repaired_transitions.append(json.loads(raw)["committedFeatures"])
+                real_replace(progress_file, raw)
+
+            with patch.object(
+                parallel.DurableProgressFile,
+                "replace",
+                new=record_repair,
+            ):
+                resumed = self._build(
+                    root,
+                    "absent-progress-resume",
+                    progress_file=progress,
+                    checkpoint_features=2,
+                )
+
+            self.assertEqual("complete", resumed.state)
+            self.assertEqual([2, 4, 6], repaired_transitions)
+            self.assertEqual(6, json.loads(progress.read_bytes())["committedFeatures"])
 
     def test_three_hundred_feature_probe_pauses_then_resumes_with_other_workers(self) -> None:
         from tools.experiment8 import osm_global_waterway_package as pipeline

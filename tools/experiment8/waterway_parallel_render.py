@@ -118,7 +118,10 @@ _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_FILE_RENAME_INFO_CLASS = 3
+_WINDOWS_FILE_RENAME_INFO_EX_CLASS = 22
 _WINDOWS_FILE_DISPOSITION_INFO_CLASS = 4
+_WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001
+_WINDOWS_FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 _WINDOWS_PROGRESS_READER_RETRY_SECONDS = 2.0
 _WINDOWS_PROGRESS_READER_RETRY_INTERVAL_SECONDS = 0.01
 _POSIX_RENAME_NOREPLACE = 1
@@ -146,6 +149,12 @@ _IDENTITY_TABLES_BY_CODE = {
 
 def _error(message: str) -> GlobalWaterwayPackageError:
     return GlobalWaterwayPackageError(message)
+
+
+def _add_exception_note(exception: BaseException, note: str) -> None:
+    add_note = getattr(exception, "add_note", None)
+    if callable(add_note):
+        add_note(note)
 
 
 def _require_int(value: object, minimum: int, maximum: int, label: str) -> int:
@@ -2333,7 +2342,10 @@ def _open_windows_owned_existing(
 
 
 def _windows_file_rename_info_buffer(
-    destination: Path, *, replace_if_exists: bool = False
+    destination: Path,
+    *,
+    replace_if_exists: bool = False,
+    posix_semantics: bool = False,
 ) -> object:
     if os.name != "nt" or not destination.is_absolute():
         raise _error("Windows handle publication requires an absolute destination")
@@ -2342,19 +2354,34 @@ def _windows_file_rename_info_buffer(
     import ctypes
     from ctypes import wintypes
 
-    class _FileRenameInfo(ctypes.Structure):
-        _fields_ = (
-            ("replace_if_exists", wintypes.BOOLEAN),
-            ("root_directory", wintypes.HANDLE),
-            ("file_name_length", wintypes.DWORD),
-            ("file_name", wintypes.WCHAR * 1),
-        )
+    if posix_semantics:
+        class _FileRenameInfo(ctypes.Structure):
+            _fields_ = (
+                ("flags", wintypes.DWORD),
+                ("root_directory", wintypes.HANDLE),
+                ("file_name_length", wintypes.DWORD),
+                ("file_name", wintypes.WCHAR * 1),
+            )
+    else:
+        class _FileRenameInfo(ctypes.Structure):
+            _fields_ = (
+                ("replace_if_exists", wintypes.BOOLEAN),
+                ("root_directory", wintypes.HANDLE),
+                ("file_name_length", wintypes.DWORD),
+                ("file_name", wintypes.WCHAR * 1),
+            )
 
     encoded = str(destination).encode("utf-16-le")
     name_offset = _FileRenameInfo.file_name.offset
     buffer = ctypes.create_string_buffer(name_offset + len(encoded) + 2)
     information = _FileRenameInfo.from_buffer(buffer)
-    information.replace_if_exists = replace_if_exists
+    if posix_semantics:
+        information.flags = (
+            _WINDOWS_FILE_RENAME_REPLACE_IF_EXISTS
+            | _WINDOWS_FILE_RENAME_POSIX_SEMANTICS
+        )
+    else:
+        information.replace_if_exists = replace_if_exists
     information.root_directory = None
     information.file_name_length = len(encoded)
     ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
@@ -2410,7 +2437,9 @@ def _publish_windows_owned_temp_replace(
     from ctypes import wintypes
 
     buffer = _windows_file_rename_info_buffer(
-        destination, replace_if_exists=True
+        destination,
+        replace_if_exists=True,
+        posix_semantics=True,
     )
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     set_information = kernel32.SetFileInformationByHandle
@@ -2423,7 +2452,7 @@ def _publish_windows_owned_temp_replace(
     set_information.restype = wintypes.BOOL
     if not set_information(
         msvcrt.get_osfhandle(handle.fileno()),
-        _WINDOWS_FILE_RENAME_INFO_CLASS,
+        _WINDOWS_FILE_RENAME_INFO_EX_CLASS,
         ctypes.byref(buffer),
         len(buffer),
     ):
@@ -2821,6 +2850,7 @@ class DurableProgressFile:
         )
         self._parent_fd: int | None = None
         self._session_lock_name = f".{self.path.name}.flightalert-lock"
+        self._temporary_name = f"{self.path.name}.tmp"
         self._session_lock_handle: BinaryIO | None = None
         self._retained_handle: BinaryIO | None = None
         self._session_owned = acquire_session
@@ -2849,6 +2879,7 @@ class DurableProgressFile:
                 )
             if acquire_session:
                 self._acquire_session_lock()
+                self._recover_crash_artifacts()
             self._read_existing()
             if acquire_session and self._identity is not None:
                 self._retain_existing_handle()
@@ -2890,6 +2921,101 @@ class DurableProgressFile:
             handle,
             int(observed.st_size),
             label=label,
+        )
+
+    def _has_stable_crash_temporary(self) -> bool:
+        if os.name == "nt":
+            with _AnchoredSpoolDirectory(
+                self.path.parent, "waterway render progress parent"
+            ) as anchored:
+                if anchored._chain != self._parent_chain:
+                    raise _error("waterway render progress parent identity changed")
+                with os.scandir(anchored.root) as entries:
+                    names = tuple(entry.name for entry in entries)
+                anchored.require_unchanged()
+        else:
+            names = tuple(os.listdir(self._require_parent_fd()))
+            _require_directory_chain_unchanged(
+                self._parent_chain, "waterway render progress parent"
+            )
+        unsupported_prefixes = (
+            f"{self.path.name}.tmp-",
+            f".{self.path.name}.displaced-",
+        )
+        stable_present = False
+        for name in names:
+            if name == self._temporary_name:
+                stable_present = True
+            elif name.startswith(unsupported_prefixes):
+                raise _error(
+                    "ambiguous legacy waterway render progress artifact requires manual review"
+                )
+        return stable_present
+
+    def _recover_crash_artifacts(self) -> None:
+        if not self._has_stable_crash_temporary():
+            return
+        if os.name == "nt":
+            self._recover_windows_crash_temporary()
+        else:
+            self._recover_posix_crash_temporary()
+
+    def _recover_windows_crash_temporary(self) -> None:
+        with _AnchoredSpoolDirectory(
+            self.path.parent, "waterway render progress parent"
+        ) as anchored:
+            if anchored._chain != self._parent_chain:
+                raise _error("waterway render progress parent identity changed")
+            handle, identity = anchored.open_existing(
+                self._temporary_name,
+                label="waterway render progress stable temporary",
+                delete_access=True,
+                share_delete=False,
+            )
+            anchored.dispose_existing_open_file(
+                self._temporary_name,
+                handle,
+                identity,
+                label="waterway render progress stable temporary",
+            )
+            anchored.require_unchanged()
+
+    def _recover_posix_crash_temporary(self) -> None:
+        parent_fd = self._require_parent_fd()
+        before = self._posix_lstat(self._temporary_name)
+        _require_plain_file_stat(
+            before, "waterway render progress stable temporary"
+        )
+        identity = _owned_file_identity(before)
+        descriptor = os.open(
+            self._temporary_name,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            _require_plain_file_stat(
+                opened, "waterway render progress stable temporary"
+            )
+            named = self._posix_lstat(self._temporary_name)
+            _require_plain_file_stat(
+                named, "waterway render progress stable temporary"
+            )
+            if (
+                _owned_file_identity(opened) != identity
+                or _owned_file_identity(named) != identity
+            ):
+                raise _error(
+                    "waterway render progress stable temporary identity changed"
+                )
+            os.unlink(self._temporary_name, dir_fd=parent_fd)
+        finally:
+            os.close(descriptor)
+        os.fsync(parent_fd)
+        _require_directory_chain_unchanged(
+            self._parent_chain, "waterway render progress parent"
         )
 
     def _acquire_session_lock(self) -> None:
@@ -2938,7 +3064,12 @@ class DurableProgressFile:
         try:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise _error(
+                    "waterway render progress session is already owned"
+                ) from error
             observed = os.fstat(handle.fileno())
             _require_plain_file_stat(
                 observed, "waterway render progress session lock"
@@ -2964,6 +3095,7 @@ class DurableProgressFile:
                     self.path.name,
                     label="waterway render progress file",
                     delete_access=False,
+                    share_delete=True,
                 )
         else:
             flags = os.O_RDONLY
@@ -3168,77 +3300,6 @@ class DurableProgressFile:
     def _require_expected_destination(self) -> None:
         self.require_unchanged()
 
-    def _open_windows_displacement_handle(
-        self,
-        anchored: _AnchoredSpoolDirectory,
-    ) -> tuple[BinaryIO, tuple[int, int]]:
-        deadline = time.monotonic() + _WINDOWS_PROGRESS_READER_RETRY_SECONDS
-        while True:
-            self.require_unchanged()
-            try:
-                return anchored.open_existing(
-                    self.path.name,
-                    label="waterway render progress file",
-                    delete_access=True,
-                    share_delete=True,
-                )
-            except GlobalWaterwayPackageError as error:
-                cause = error.__cause__
-                error_code = (
-                    getattr(cause, "winerror", None)
-                    if isinstance(cause, OSError)
-                    else None
-                )
-                if error_code is None and isinstance(cause, OSError):
-                    error_code = cause.errno
-                if error_code not in {32, 33} or time.monotonic() >= deadline:
-                    raise
-                time.sleep(_WINDOWS_PROGRESS_READER_RETRY_INTERVAL_SECONDS)
-
-    def _open_windows_published_handle_for_cleanup(
-        self,
-        anchored: _AnchoredSpoolDirectory,
-        expected_identity: tuple[int, int],
-        expected_bytes: bytes,
-    ) -> BinaryIO:
-        deadline = time.monotonic() + _WINDOWS_PROGRESS_READER_RETRY_SECONDS
-        while True:
-            try:
-                handle, identity = anchored.open_existing(
-                    self.path.name,
-                    label="waterway render progress published file",
-                    delete_access=True,
-                    share_delete=True,
-                )
-            except GlobalWaterwayPackageError as error:
-                cause = error.__cause__
-                error_code = (
-                    getattr(cause, "winerror", None)
-                    if isinstance(cause, OSError)
-                    else None
-                )
-                if error_code is None and isinstance(cause, OSError):
-                    error_code = cause.errno
-                if error_code not in {32, 33} or time.monotonic() >= deadline:
-                    raise
-                time.sleep(_WINDOWS_PROGRESS_READER_RETRY_INTERVAL_SECONDS)
-                continue
-            try:
-                if (
-                    identity != expected_identity
-                    or self._read_plain_handle(
-                        handle, "waterway render progress published file"
-                    )
-                    != expected_bytes
-                ):
-                    raise _error(
-                        "waterway render progress published file changed before cleanup"
-                    )
-                return handle
-            except BaseException:
-                handle.close()
-                raise
-
     @staticmethod
     def _write_all(handle: BinaryIO, raw: bytes) -> None:
         offset = 0
@@ -3251,12 +3312,11 @@ class DurableProgressFile:
     def replace(self, raw: bytes) -> None:
         if type(raw) is not bytes or not 0 < len(raw) <= self._MAX_BYTES:
             raise _error("waterway render progress bytes are outside their bound")
-        temporary_name = f"{self.path.name}.tmp-{os.getpid()}"
         try:
             if os.name == "nt":
-                self._replace_windows(raw, temporary_name)
+                self._replace_windows_atomic(raw)
             else:
-                self._replace_posix(raw, temporary_name)
+                self._replace_posix_atomic(raw)
         except GlobalWaterwayPackageError:
             raise
         except OSError as error:
@@ -3264,20 +3324,18 @@ class DurableProgressFile:
                 "waterway render progress could not be replaced atomically"
             ) from error
 
-    def _replace_windows(self, raw: bytes, temporary_name: str) -> None:
-        previous_identity = self._identity
-        previous_signature = self._signature
-        previous_bytes = self._existing_bytes
-        handle: BinaryIO | None = None
+    def _replace_windows_atomic(self, raw: bytes) -> None:
+        """Publish one fsynced file with one handle-anchored namespace transition."""
+
+        temporary_name = self._temporary_name
+        writer: BinaryIO | None = None
+        publisher: BinaryIO | None = None
+        retained_candidate: BinaryIO | None = None
         identity: tuple[int, int] | None = None
-        displaced_handle: BinaryIO | None = None
-        displaced_identity: tuple[int, int] | None = None
-        displaced_name = (
-            f".{self.path.name}.displaced-{os.getpid()}-"
-            f"{hashlib.sha256(self._existing_bytes or b'').hexdigest()[:16]}"
-        )
-        displaced = False
-        destination_created = False
+        committed = False
+        adopted = False
+        candidate_signature: tuple[int, int, int, int, int] | None = None
+        previous_retained = self._retained_handle
         with _AnchoredSpoolDirectory(
             self.path.parent, "waterway render progress parent"
         ) as anchored:
@@ -3291,10 +3349,17 @@ class DurableProgressFile:
             else:
                 raise _error("waterway render progress temporary file already exists")
             try:
-                handle, identity = anchored.open_exclusive(temporary_name)
-                self._write_all(handle, raw)
-                handle.flush()
-                os.fsync(handle.fileno())
+                writer = _create_windows_owned_temp(
+                    self.path.parent / temporary_name
+                )
+                opened = os.fstat(writer.fileno())
+                _require_plain_file_stat(
+                    opened, "waterway render progress temporary file"
+                )
+                identity = _owned_file_identity(opened)
+                self._write_all(writer, raw)
+                writer.flush()
+                os.fsync(writer.fileno())
                 anchored.require_unchanged()
                 temporary = anchored.lstat(temporary_name)
                 _require_plain_file_stat(
@@ -3303,79 +3368,134 @@ class DurableProgressFile:
                 if (
                     _owned_file_identity(temporary) != identity
                     or temporary.st_size != len(raw)
+                    or _stat_signature(temporary)
+                    != _stat_signature(os.fstat(writer.fileno()))
                 ):
                     raise _error(
                         "waterway render progress temporary identity or bytes changed"
                     )
-                self._require_expected_destination()
-                if self._identity is None:
-                    anchored.publish_owned_no_replace(
+                if (
+                    self._read_plain_handle(
+                        writer, "waterway render progress temporary file"
+                    )
+                    != raw
+                ):
+                    raise _error("waterway render progress temporary bytes changed")
+
+                # Reopen the fsynced inode with only read/delete rights.  The
+                # publisher denies delete sharing until the transition completes;
+                # the second, already-authenticated handle is safe to retain after
+                # publication without leaving a write-denial gap.
+                writer.close()
+                writer = None
+                publisher, published_identity = anchored.open_existing(
+                    temporary_name,
+                    label="waterway render progress temporary file",
+                    delete_access=True,
+                    share_delete=False,
+                )
+                if published_identity != identity or self._read_plain_handle(
+                    publisher, "waterway render progress temporary file"
+                ) != raw:
+                    raise _error(
+                        "waterway render progress temporary changed while reopening"
+                    )
+                if self._session_owned:
+                    retained_candidate, retained_identity = anchored.open_existing(
                         temporary_name,
-                        self.path.name,
-                        handle,
-                        identity,
+                        label="waterway render progress temporary file",
+                        delete_access=False,
+                        share_delete=True,
                     )
-                    destination_created = True
-                else:
-                    try:
-                        anchored.lstat(displaced_name)
-                    except FileNotFoundError:
-                        pass
-                    else:
+                    if retained_identity != identity or self._read_plain_handle(
+                        retained_candidate,
+                        "waterway render progress temporary file",
+                    ) != raw:
                         raise _error(
-                            "waterway render progress displaced token already exists"
+                            "waterway render progress retained candidate changed"
                         )
-                    if self._retained_handle is not None:
-                        self._require_retained_unchanged()
-                        self._retained_handle.close()
-                        self._retained_handle = None
-                    displaced_handle, displaced_identity = (
-                        self._open_windows_displacement_handle(anchored)
+
+                candidate_handle = retained_candidate or publisher
+                candidate_stat = os.fstat(candidate_handle.fileno())
+                _require_plain_file_stat(
+                    candidate_stat, "waterway render progress retained candidate"
+                )
+                if _owned_file_identity(candidate_stat) != identity:
+                    raise _error(
+                        "waterway render progress retained candidate identity changed"
                     )
-                    if (
-                        displaced_identity != self._identity
-                        or self._read_plain_handle(
-                            displaced_handle,
-                            "waterway render progress displaced file",
-                        )
-                        != self._existing_bytes
-                    ):
-                        raise _error(
-                            "waterway render progress changed before displacement"
-                        )
-                    _publish_windows_owned_temp_no_replace(
-                        displaced_handle,
-                        self.path.parent / displaced_name,
-                    )
-                    displaced = True
-                    displaced_stat = anchored.lstat(displaced_name)
-                    if (
-                        _owned_file_identity(displaced_stat) != self._identity
-                        or self._read_plain_handle(
-                            displaced_handle,
-                            "waterway render progress displaced file",
-                        )
-                        != self._existing_bytes
-                    ):
-                        raise _error(
-                            "waterway render progress changed during displacement"
-                        )
-                    try:
-                        anchored.lstat(self.path.name)
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        raise _error(
-                            "waterway render progress destination reappeared during displacement"
-                        )
-                    anchored.publish_owned_no_replace(
-                        temporary_name,
-                        self.path.name,
-                        handle,
-                        identity,
-                    )
-                    destination_created = True
+                candidate_signature = _stat_signature(candidate_stat)
                 anchored.require_unchanged()
+                self._require_expected_destination()
+                transition_error: OSError | None = None
+                if self._identity is None:
+                    try:
+                        _publish_windows_owned_temp_no_replace(
+                            publisher,
+                            self.path,
+                        )
+                    except OSError as error:
+                        if self._windows_candidate_is_canonical(
+                            anchored,
+                            temporary_name,
+                            publisher,
+                            identity,
+                            raw,
+                        ):
+                            committed = True
+                            transition_error = error
+                        else:
+                            raise
+                    else:
+                        committed = True
+                else:
+                    deadline = (
+                        time.monotonic() + _WINDOWS_PROGRESS_READER_RETRY_SECONDS
+                    )
+                    while True:
+                        self._require_retained_unchanged()
+                        try:
+                            _publish_windows_owned_temp_replace(
+                                publisher,
+                                self.path,
+                            )
+                            committed = True
+                            break
+                        except OSError as error:
+                            if self._windows_candidate_is_canonical(
+                                anchored,
+                                temporary_name,
+                                publisher,
+                                identity,
+                                raw,
+                            ):
+                                committed = True
+                                transition_error = error
+                                break
+                            error_code = getattr(error, "winerror", None)
+                            if error_code is None:
+                                error_code = error.errno
+                            if (
+                                error_code not in {5, 13, 32, 33}
+                                or time.monotonic() >= deadline
+                            ):
+                                raise
+                            self._require_expected_destination()
+                            time.sleep(
+                                _WINDOWS_PROGRESS_READER_RETRY_INTERVAL_SECONDS
+                            )
+
+                # The successful helper call above is the commit point.  Nothing
+                # below may remove or roll back the canonical name.
+                state_handle = retained_candidate or publisher
+                state_stat = os.fstat(state_handle.fileno())
+                _require_plain_file_stat(
+                    state_stat, "waterway render progress published file"
+                )
+                if _owned_file_identity(state_stat) != identity:
+                    raise _error(
+                        "waterway render progress published handle identity changed"
+                    )
                 published = anchored.lstat(self.path.name)
                 _require_plain_file_stat(published, "waterway render progress file")
                 if (
@@ -3385,126 +3505,147 @@ class DurableProgressFile:
                     raise _error(
                         "waterway render progress published identity or bytes changed"
                     )
-                handle.seek(0)
                 if self._read_plain_handle(
-                    handle, "waterway render progress file"
+                    state_handle, "waterway render progress file"
                 ) != raw:
                     raise _error("waterway render progress published bytes changed")
-                os.fsync(handle.fileno())
-                published_signature = _stat_signature(os.fstat(handle.fileno()))
-                handle.close()
-                handle = None
+                anchored.require_unchanged()
                 self._identity = identity
-                self._signature = published_signature
+                self._signature = _stat_signature(state_stat)
                 self._existing_bytes = raw
                 if self._session_owned:
-                    self._retain_existing_handle()
-                if displaced_handle is not None:
-                    _mark_windows_owned_temp_for_delete(displaced_handle)
-                    displaced_handle.close()
-                    displaced_handle = None
-                    displaced = False
+                    if retained_candidate is None:
+                        raise _error(
+                            "waterway render progress retained candidate is unavailable"
+                        )
+                    self._retained_handle = retained_candidate
+                    retained_candidate = None
+                adopted = True
+                if previous_retained is not None:
+                    previous_retained.close()
+                    previous_retained = None
+                if transition_error is not None:
+                    raise transition_error
             except BaseException as operation_error:
-                if self._retained_handle is not None and identity is not None:
-                    try:
-                        retained_identity = _owned_file_identity(
-                            os.fstat(self._retained_handle.fileno())
-                        )
-                    except OSError:
-                        retained_identity = None
-                    if retained_identity == identity:
-                        self._retained_handle.close()
-                        self._retained_handle = None
-                if handle is not None and identity is not None:
-                    try:
-                        anchored.dispose_owned_open_file(
-                            (temporary_name, self.path.name),
-                            handle,
-                            identity,
-                        )
-                        destination_created = False
-                    except BaseException as cleanup_error:
-                        operation_error.add_note(
-                            f"owned progress temporary cleanup failed: {cleanup_error}"
-                        )
-                    finally:
-                        handle = None
-                elif destination_created and identity is not None:
-                    try:
-                        cleanup_handle = (
-                            self._open_windows_published_handle_for_cleanup(
-                                anchored,
-                                identity,
-                                raw,
-                            )
-                        )
-                        anchored.dispose_existing_open_file(
-                            self.path.name,
-                            cleanup_handle,
-                            identity,
-                            label="waterway render progress published file",
-                        )
-                        destination_created = False
-                    except BaseException as cleanup_error:
-                        operation_error.add_note(
-                            f"owned progress publication cleanup failed: {cleanup_error}"
-                        )
-                if displaced_handle is not None:
-                    if displaced:
+                if committed and not adopted and identity is not None:
+                    # Native success is irrevocable even when a wrapper or a
+                    # post-commit verifier faults.  Preserve the pre-authenticated
+                    # candidate as the live retained inode and never attempt a
+                    # canonical unlink/rollback from this branch.
+                    self._identity = identity
+                    state_handle = retained_candidate or publisher
+                    if state_handle is not None:
                         try:
-                            anchored.lstat(self.path.name)
-                        except FileNotFoundError:
-                            try:
-                                _publish_windows_owned_temp_no_replace(
-                                    displaced_handle,
-                                    self.path,
-                                )
-                                displaced = False
-                                previous_signature = _stat_signature(
-                                    os.fstat(displaced_handle.fileno())
-                                )
-                            except BaseException as restore_error:
-                                operation_error.add_note(
-                                    "displaced progress restoration failed: "
-                                    f"{restore_error}"
-                                )
-                        except OSError as restore_error:
-                            operation_error.add_note(
-                                "displaced progress destination inspection failed: "
-                                f"{restore_error}"
+                            committed_stat = os.fstat(state_handle.fileno())
+                            _require_plain_file_stat(
+                                committed_stat,
+                                "waterway render progress retained candidate",
                             )
-                    if not displaced:
-                        displaced_handle.close()
-                        displaced_handle = None
-                if not displaced and not destination_created:
-                    self._identity = previous_identity
-                    self._signature = previous_signature
-                    self._existing_bytes = previous_bytes
-                if (
-                    not displaced
-                    and not destination_created
-                    and self._session_owned
-                    and previous_identity is not None
-                    and self._retained_handle is None
-                ):
+                            if _owned_file_identity(committed_stat) == identity:
+                                candidate_signature = _stat_signature(committed_stat)
+                        except (OSError, GlobalWaterwayPackageError) as state_error:
+                            _add_exception_note(
+                                operation_error,
+                                "committed progress signature refresh failed: "
+                                f"{state_error}",
+                            )
+                    self._signature = candidate_signature
+                    self._existing_bytes = raw
+                    if self._session_owned and retained_candidate is not None:
+                        self._retained_handle = retained_candidate
+                        retained_candidate = None
+                    adopted = True
+                    if previous_retained is not None:
+                        try:
+                            previous_retained.close()
+                        except OSError as close_error:
+                            _add_exception_note(
+                                operation_error,
+                                "previous progress retained handle could not be closed: "
+                                f"{close_error}",
+                            )
+                        previous_retained = None
+                if not committed and identity is not None:
                     try:
-                        self._retain_existing_handle()
-                    except BaseException as retain_error:
-                        operation_error.add_note(
-                            "progress write-denying handle restoration failed: "
-                            f"{retain_error}"
+                        temporary = anchored.lstat(temporary_name)
+                        _require_plain_file_stat(
+                            temporary,
+                            "waterway render progress temporary file",
+                        )
+                        if _owned_file_identity(temporary) != identity:
+                            raise _error(
+                                "waterway render progress temporary identity changed before cleanup"
+                            )
+                        cleanup_handle = publisher or writer
+                        if cleanup_handle is None:
+                            cleanup_handle, cleanup_identity = anchored.open_existing(
+                                temporary_name,
+                                label="waterway render progress temporary file",
+                                delete_access=True,
+                                share_delete=False,
+                            )
+                            if cleanup_identity != identity:
+                                cleanup_handle.close()
+                                raise _error(
+                                    "waterway render progress temporary changed before cleanup"
+                                )
+                            publisher = cleanup_handle
+                        _mark_windows_owned_temp_for_delete(cleanup_handle)
+                    except FileNotFoundError:
+                        # A transition wrapper may fail after the native commit.
+                        # Missing temp is therefore never grounds to delete the
+                        # canonical name or restore the prior state.
+                        pass
+                    except BaseException as cleanup_error:
+                        _add_exception_note(
+                            operation_error,
+                            f"owned progress temporary cleanup failed: {cleanup_error}",
                         )
                 raise
             finally:
-                if handle is not None:
-                    handle.close()
-                if displaced_handle is not None:
-                    displaced_handle.close()
+                if retained_candidate is not None:
+                    retained_candidate.close()
+                if publisher is not None:
+                    publisher.close()
+                if writer is not None:
+                    writer.close()
 
-    def _replace_posix(self, raw: bytes, temporary_name: str) -> None:
-        previous_identity = self._identity
-        previous_signature = self._signature
-        previous_bytes = self._existing_bytes
+    def _windows_candidate_is_canonical(
+        self,
+        anchored: _AnchoredSpoolDirectory,
+        temporary_name: str,
+        candidate: BinaryIO,
+        expected_identity: tuple[int, int],
+        expected_bytes: bytes,
+    ) -> bool:
+        """Recognize a native commit reported as an exception without mutating."""
+
+        try:
+            anchored.lstat(temporary_name)
+        except FileNotFoundError:
+            pass
+        else:
+            return False
+        try:
+            canonical = anchored.lstat(self.path.name)
+            _require_plain_file_stat(canonical, "waterway render progress file")
+            opened = os.fstat(candidate.fileno())
+            _require_plain_file_stat(opened, "waterway render progress file")
+            return (
+                _owned_file_identity(canonical) == expected_identity
+                and _owned_file_identity(opened) == expected_identity
+                and self._read_plain_handle(
+                    candidate, "waterway render progress file"
+                )
+                == expected_bytes
+            )
+        except (OSError, GlobalWaterwayPackageError):
+            return False
+
+    def _replace_posix_atomic(self, raw: bytes) -> None:
+        """Publish one fsynced file with one anchored rename transition."""
+
+        temporary_name = self._temporary_name
         _require_directory_chain_unchanged(
             self._parent_chain, "waterway render progress parent"
         )
@@ -3512,14 +3653,10 @@ class DurableProgressFile:
         parent_fd = self._require_parent_fd()
         handle: BinaryIO | None = None
         identity: tuple[int, int] | None = None
-        destination_created = False
-        displaced_name = (
-            f".{self.path.name}.displaced-{os.getpid()}-"
-            f"{hashlib.sha256(self._existing_bytes or b'').hexdigest()[:16]}"
-        )
-        displaced = False
-        displaced_handle: BinaryIO | None = None
-        previous_retained_handle: BinaryIO | None = None
+        committed = False
+        adopted = False
+        candidate_signature: tuple[int, int, int, int, int] | None = None
+        previous_retained = self._retained_handle
         try:
             try:
                 self._posix_lstat(temporary_name)
@@ -3563,237 +3700,178 @@ class DurableProgressFile:
                 self._parent_chain, "waterway render progress parent"
             )
             self._require_expected_destination()
-            if self._identity is not None:
+            candidate_signature = _stat_signature(os.fstat(handle.fileno()))
+            transition_error: OSError | None = None
+            if self._identity is None:
                 try:
-                    self._posix_lstat(displaced_name)
-                except FileNotFoundError:
-                    pass
+                    _rename_posix_no_replace(
+                        temporary_name,
+                        self.path.name,
+                        source_directory_fd=parent_fd,
+                        destination_directory_fd=parent_fd,
+                    )
+                except OSError as error:
+                    if self._posix_candidate_is_canonical(
+                        temporary_name, handle, identity, raw
+                    ):
+                        committed = True
+                        transition_error = error
+                    else:
+                        raise
                 else:
-                    raise _error(
-                        "waterway render progress displaced token already exists"
-                    )
-                _rename_posix_no_replace(
-                    self.path.name,
-                    displaced_name,
-                    source_directory_fd=parent_fd,
-                    destination_directory_fd=parent_fd,
-                )
-                displaced = True
-                displaced_descriptor = os.open(
-                    displaced_name,
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=parent_fd,
-                )
-                try:
-                    displaced_handle = os.fdopen(
-                        displaced_descriptor, "rb", buffering=0
-                    )
-                except BaseException:
-                    os.close(displaced_descriptor)
-                    raise
-                self._require_posix_named_handle(
-                    displaced_name,
-                    displaced_handle,
-                    previous_identity,
-                    previous_bytes,
-                    label="waterway render progress displaced file",
-                )
+                    committed = True
+            else:
                 self._require_retained_unchanged()
                 try:
-                    self._posix_lstat(self.path.name)
-                except FileNotFoundError:
-                    pass
-                else:
-                    raise _error(
-                        "waterway render progress destination reappeared during displacement"
+                    os.replace(
+                        temporary_name,
+                        self.path.name,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
                     )
-            os.link(
-                temporary_name,
-                self.path.name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-                follow_symlinks=False,
+                except OSError as error:
+                    if self._posix_candidate_is_canonical(
+                        temporary_name, handle, identity, raw
+                    ):
+                        committed = True
+                        transition_error = error
+                    else:
+                        raise
+                else:
+                    committed = True
+
+            # Rename success is the commit point.  Transfer the already-open new
+            # inode before any fallible durability or post-publication checks.
+            published_stat = os.fstat(handle.fileno())
+            _require_plain_file_stat(
+                published_stat, "waterway render progress published file"
             )
-            destination_created = True
-            os.unlink(temporary_name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
-            published = self._posix_lstat(self.path.name)
-            _require_plain_file_stat(published, "waterway render progress file")
-            if (
-                _owned_file_identity(published) != identity
-                or published.st_size != len(raw)
-            ):
+            if _owned_file_identity(published_stat) != identity:
                 raise _error(
-                    "waterway render progress published identity or bytes changed"
+                    "waterway render progress published handle identity changed"
                 )
-            handle.seek(0)
-            if self._read_plain_handle(handle, "waterway render progress file") != raw:
-                raise _error("waterway render progress published bytes changed")
+            self._identity = identity
+            self._signature = _stat_signature(published_stat)
+            self._existing_bytes = raw
+            if self._session_owned:
+                self._retained_handle = handle
+                handle = None
+            adopted = True
+            if previous_retained is not None:
+                previous_retained.close()
+                previous_retained = None
+
+            os.fsync(parent_fd)
+            state_handle = self._retained_handle if self._session_owned else handle
+            if state_handle is None:
+                raise _error(
+                    "waterway render progress published descriptor is unavailable"
+                )
+            self._require_posix_named_handle(
+                self.path.name,
+                state_handle,
+                identity,
+                raw,
+                label="waterway render progress published file",
+            )
             _require_directory_chain_unchanged(
                 self._parent_chain, "waterway render progress parent"
             )
-            published_signature = _stat_signature(os.fstat(handle.fileno()))
-            if self._session_owned:
-                previous_retained_handle = self._retained_handle
-                self._retained_handle = None
-            self._identity = identity
-            self._signature = published_signature
-            self._existing_bytes = raw
-            if self._session_owned:
-                self._retain_existing_handle()
-            if displaced:
-                if displaced_handle is None:
-                    raise _error(
-                        "waterway render progress displaced descriptor is unavailable"
-                    )
-                self._require_posix_named_handle(
-                    displaced_name,
-                    displaced_handle,
-                    previous_identity,
-                    previous_bytes,
-                    label="waterway render progress displaced file",
-                )
-                # The cooperating-publisher session flock keeps this adjacent
-                # pathname mutation stable; the retained descriptor authenticates
-                # the exact entry immediately before it.
-                os.unlink(displaced_name, dir_fd=parent_fd)
-                displaced = False
-            if previous_retained_handle is not None:
-                previous_retained_handle.close()
-                previous_retained_handle = None
+            if transition_error is not None:
+                raise transition_error
         except BaseException as operation_error:
-            if self._retained_handle is not None and identity is not None:
-                try:
-                    retained_identity = _owned_file_identity(
-                        os.fstat(self._retained_handle.fileno())
-                    )
-                except OSError:
-                    retained_identity = None
-                if retained_identity == identity:
-                    self._retained_handle.close()
-                    self._retained_handle = None
-            if destination_created and identity is not None:
+            if committed and not adopted and identity is not None:
+                self._identity = identity
+                if handle is not None:
+                    try:
+                        committed_stat = os.fstat(handle.fileno())
+                        _require_plain_file_stat(
+                            committed_stat,
+                            "waterway render progress retained candidate",
+                        )
+                        if _owned_file_identity(committed_stat) == identity:
+                            candidate_signature = _stat_signature(committed_stat)
+                    except (OSError, GlobalWaterwayPackageError) as state_error:
+                        _add_exception_note(
+                            operation_error,
+                            "committed progress signature refresh failed: "
+                            f"{state_error}",
+                        )
+                self._signature = candidate_signature
+                self._existing_bytes = raw
+                if self._session_owned and handle is not None:
+                    self._retained_handle = handle
+                    handle = None
+                adopted = True
+                if previous_retained is not None:
+                    try:
+                        previous_retained.close()
+                    except OSError as close_error:
+                        _add_exception_note(
+                            operation_error,
+                            "previous progress retained handle could not be closed: "
+                            f"{close_error}",
+                        )
+                    previous_retained = None
+            if not committed and identity is not None:
                 try:
                     self._require_posix_named_handle(
-                        self.path.name,
+                        temporary_name,
                         handle,
                         identity,
                         raw,
-                        label="waterway render progress published file",
+                        label="waterway render progress temporary file",
                     )
                 except FileNotFoundError:
+                    # As on Windows, a wrapper can report failure after the one
+                    # namespace transition committed.  Never infer rollback from
+                    # the missing source name.
                     pass
-                except (OSError, GlobalWaterwayPackageError) as cleanup_error:
-                    operation_error.add_note(
-                        f"owned progress destination inspection failed: {cleanup_error}"
+                except BaseException as cleanup_error:
+                    _add_exception_note(
+                        operation_error,
+                        f"owned progress temporary inspection failed: {cleanup_error}",
                     )
                 else:
                     try:
-                        # As above, POSIX cleanup relies on the held session flock
-                        # after exact descriptor/name authentication.
-                        os.unlink(self.path.name, dir_fd=parent_fd)
-                        destination_created = False
+                        os.unlink(temporary_name, dir_fd=parent_fd)
+                        os.fsync(parent_fd)
                     except OSError as cleanup_error:
-                        operation_error.add_note(
-                            f"owned progress destination cleanup failed: {cleanup_error}"
+                        _add_exception_note(
+                            operation_error,
+                            f"owned progress temporary cleanup failed: {cleanup_error}",
                         )
-            if displaced:
-                try:
-                    self._posix_lstat(self.path.name)
-                except FileNotFoundError:
-                    try:
-                        if displaced_handle is None:
-                            raise _error(
-                                "waterway render progress displaced descriptor is unavailable"
-                            )
-                        self._require_posix_named_handle(
-                            displaced_name,
-                            displaced_handle,
-                            previous_identity,
-                            previous_bytes,
-                            label="waterway render progress displaced file",
-                        )
-                        _rename_posix_no_replace(
-                            displaced_name,
-                            self.path.name,
-                            source_directory_fd=parent_fd,
-                            destination_directory_fd=parent_fd,
-                        )
-                        try:
-                            self._require_posix_named_handle(
-                                self.path.name,
-                                displaced_handle,
-                                previous_identity,
-                                previous_bytes,
-                                label="waterway render progress restored file",
-                            )
-                        except BaseException:
-                            try:
-                                _rename_posix_no_replace(
-                                    self.path.name,
-                                    displaced_name,
-                                    source_directory_fd=parent_fd,
-                                    destination_directory_fd=parent_fd,
-                                )
-                            except BaseException as preserve_error:
-                                operation_error.add_note(
-                                    "unauthenticated displaced progress preservation "
-                                    f"failed: {preserve_error}"
-                                )
-                            raise
-                        displaced = False
-                        if previous_retained_handle is not None:
-                            previous_signature = _stat_signature(
-                                os.fstat(previous_retained_handle.fileno())
-                            )
-                        else:
-                            previous_signature = _stat_signature(
-                                self._posix_lstat(self.path.name)
-                            )
-                    except OSError as restore_error:
-                        operation_error.add_note(
-                            f"displaced progress restoration failed: {restore_error}"
-                        )
-                except OSError as restore_error:
-                    operation_error.add_note(
-                        "displaced progress destination inspection failed: "
-                        f"{restore_error}"
-                    )
-            try:
-                temporary = self._posix_lstat(temporary_name)
-            except FileNotFoundError:
-                temporary = None
-            except OSError as cleanup_error:
-                operation_error.add_note(
-                    f"owned progress temporary inspection failed: {cleanup_error}"
-                )
-                temporary = None
-            if temporary is not None and (
-                identity is None or _owned_file_identity(temporary) == identity
-            ):
-                try:
-                    os.unlink(temporary_name, dir_fd=parent_fd)
-                except OSError as cleanup_error:
-                    operation_error.add_note(
-                        f"owned progress temporary cleanup failed: {cleanup_error}"
-                    )
-            if not displaced and not destination_created:
-                self._identity = previous_identity
-                self._signature = previous_signature
-                self._existing_bytes = previous_bytes
-                if previous_retained_handle is not None:
-                    self._retained_handle = previous_retained_handle
-                    previous_retained_handle = None
             raise
         finally:
             if handle is not None:
                 handle.close()
-            if displaced_handle is not None:
-                displaced_handle.close()
-            if previous_retained_handle is not None:
-                previous_retained_handle.close()
+
+    def _posix_candidate_is_canonical(
+        self,
+        temporary_name: str,
+        candidate: BinaryIO,
+        expected_identity: tuple[int, int],
+        expected_bytes: bytes,
+    ) -> bool:
+        """Recognize a completed POSIX rename reported as an exception."""
+
+        try:
+            self._posix_lstat(temporary_name)
+        except FileNotFoundError:
+            pass
+        else:
+            return False
+        try:
+            self._require_posix_named_handle(
+                self.path.name,
+                candidate,
+                expected_identity,
+                expected_bytes,
+                label="waterway render progress published file",
+            )
+        except (OSError, GlobalWaterwayPackageError):
+            return False
+        return True
 
 
 class _QuotaFileWriter:

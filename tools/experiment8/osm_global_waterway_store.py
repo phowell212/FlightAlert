@@ -4129,6 +4129,7 @@ class _RenderProgressPublisher:
             )
         if _durable_file is None:
             self._file = DurableProgressFile(progress_file)
+            self._owns_file = True
         elif (
             type(_durable_file) is not DurableProgressFile
             or _durable_file.path != Path(os.path.abspath(progress_file))
@@ -4138,6 +4139,7 @@ class _RenderProgressPublisher:
             )
         else:
             self._file = _durable_file
+            self._owns_file = False
         hard_bounds = _render_progress_hard_bounds(limits)
         self._checkpoint_features = checkpoint_features
         self._total_admitted_features = total_admitted_features
@@ -4253,7 +4255,8 @@ class _RenderProgressPublisher:
         self._file.require_unchanged()
 
     def close(self) -> None:
-        self._file.close()
+        if self._owns_file:
+            self._file.close()
 
     def reconcile(self, committed_features: int) -> None:
         self._file.require_unchanged()
@@ -4352,6 +4355,7 @@ def _stage_renderer_records(
         raise GlobalWaterwayPackageError("renderer run identity package ID is malformed")
 
     progress_publisher = None
+    owned_progress_durable = None
     try:
         admission = _meta_get(connection, "admissionReceipt")
         if (
@@ -4398,9 +4402,10 @@ def _stage_renderer_records(
                 ).fetchone()[0]
             )
             if progress_durable is None:
-                progress_durable = DurableProgressFile(
+                owned_progress_durable = DurableProgressFile(
                     progress_file, acquire_session=True
                 )
+                progress_durable = owned_progress_durable
             progress_publisher = _RenderProgressPublisher(
                 progress_file,
                 render_run_sha256=render_run_sha256,
@@ -4597,8 +4602,12 @@ def _stage_renderer_records(
             error.add_note(f"renderer checkpoint rollback failed: {rollback_error}")
         raise
     finally:
-        if progress_publisher is not None:
-            progress_publisher.close()
+        try:
+            if progress_publisher is not None:
+                progress_publisher.close()
+        finally:
+            if owned_progress_durable is not None:
+                owned_progress_durable.close()
 
 
 def _windows(connection: sqlite3.Connection) -> tuple[_Window, ...]:
