@@ -18,17 +18,21 @@ from .osm_global_waterway_package import GlobalWaterwayPackageError
 from .osm_global_waterway_renderer import (
     ExactWaterwayFeature,
     ExactWaterwayPoint,
+    _SUBTYPE_BY_WATERWAY,
     build_adaptive_waterway_feature,
 )
 from .renderer_tile_package import (
     MAX_RENDERER_RECORD_BYTES,
     MAX_SOURCED_TEXT_RECORD_BYTES,
+    _decode_renderer_record,
+    _decode_sourced_text,
 )
 from .semantic_model import (
     HotIdRegistry,
     renderer_record_bytes,
     variant_fingerprint,
 )
+from .sourced_text import create_sourced_map_text
 
 
 _JOB_MAGIC = b"FAE8WRJOB"
@@ -1107,6 +1111,239 @@ def _decode_feature_render_frame(reader) -> FeatureRenderFrame:
         record_rows=record_rows,
         posting_bytes=posting_bytes,
     )
+
+
+def validate_frame_against_exact_source(
+    ordinal: int,
+    exact: ExactWaterwayFeature,
+    frame: FeatureRenderFrame,
+) -> None:
+    """Bind one decoded worker frame to the parent-held exact source value."""
+
+    _require_int(ordinal, 0, _MAX_FILE_ORDINAL, "feature frame parent ordinal")
+    if type(exact) is not ExactWaterwayFeature:
+        raise _error("feature frame validation requires one exact source feature")
+    if type(frame) is not FeatureRenderFrame:
+        raise _error("feature frame validation requires one decoded frame")
+    encoded_exact = _encode_exact_feature(exact)
+    expected_source = (
+        ordinal,
+        exact.source_kind,
+        exact.source_id,
+        exact.source_version,
+        exact.source_timestamp,
+        exact.waterway_type,
+        exact.source_feature_sha256,
+        _source_frame_sha256(encoded_exact),
+        len(exact.parts),
+        _feature_point_count(exact),
+        len(exact.required_node_ids),
+    )
+    actual_source = (
+        frame.ordinal,
+        frame.source_kind,
+        frame.source_id,
+        frame.source_version,
+        frame.source_timestamp,
+        frame.waterway_type,
+        frame.source_feature_sha256,
+        frame.source_frame_sha256,
+        frame.part_count,
+        frame.point_count,
+        frame.required_node_count,
+    )
+    if actual_source != expected_source:
+        raise _error("feature frame differs from its parent-held exact source")
+    expected_rendered = (
+        ordinal,
+        exact.source_kind,
+        exact.source_id,
+        exact.waterway_type,
+        exact.source_feature_sha256,
+    )
+    if frame.rendered_feature_row != expected_rendered:
+        raise _error("feature frame rendered-feature row differs from its exact source")
+
+
+def _source_field_hot_id(label: str) -> int:
+    canonical = _utf8(label, _MAX_SOURCE_KEY_BYTES + 32, "source field label")
+    digest = hashlib.sha256(b"FAE8OSMID1\0" + canonical).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def _decode_parent_record_envelope(
+    envelope: bytes,
+    tile: TileKey,
+):
+    reader = _MemoryReader(
+        envelope,
+        _MAX_RECORD_ENVELOPE_BYTES,
+        "feature frame record envelope",
+    )
+    renderer_bytes = reader.blob(
+        MAX_RENDERER_RECORD_BYTES,
+        "feature frame renderer record",
+    )
+    if not renderer_bytes:
+        raise _error("feature frame renderer record is empty")
+    sourced_byte_count = reader.u32("feature frame sourced-text byte count")
+    if not 0 < sourced_byte_count <= MAX_SOURCED_TEXT_RECORD_BYTES:
+        raise _error("feature frame sourced-text byte count is outside its bound")
+    sourced_sha256 = reader.take(32, "feature frame sourced-text identity")
+    sourced_bytes = reader.take(
+        sourced_byte_count,
+        "feature frame sourced-text record",
+    )
+    reader.finish("feature frame record envelope has trailing bytes")
+    try:
+        renderer = _decode_renderer_record(tile, renderer_bytes)
+        sourced = _decode_sourced_text(sourced_bytes, sourced_sha256)
+    except ValueError as error:
+        raise _error("feature frame record envelope is not canonical") from error
+    return renderer, sourced
+
+
+def _remember_validated_identity(
+    identities: dict[tuple[str, bytes], bytes],
+    table: str,
+    hot_id: bytes,
+    full_sha256: bytes,
+) -> None:
+    previous = identities.setdefault((table, hot_id), full_sha256)
+    if previous != full_sha256:
+        raise _error("fatal 64-bit identity collision between unequal canonical values")
+
+
+def validate_and_decode_record_rows(
+    exact: ExactWaterwayFeature,
+    frame: FeatureRenderFrame,
+) -> tuple[tuple[object, ...], ...]:
+    """Decode every envelope and prove its SQL/identity relationships."""
+
+    if type(exact) is not ExactWaterwayFeature:
+        raise _error("feature frame row validation requires one exact source feature")
+    if type(frame) is not FeatureRenderFrame:
+        raise _error("feature frame row validation requires one decoded frame")
+    feature_hot = exact.source_feature_sha256[:8]
+    feature_id = int.from_bytes(feature_hot, "big")
+    primary_field_id = _source_field_hot_id(
+        "openstreetmap.tag." + exact.name_source_key
+    )
+    english_field_id = (
+        _source_field_hot_id("openstreetmap.tag.name:en")
+        if exact.english_name is not None
+        else None
+    )
+    try:
+        expected_sourced = create_sourced_map_text(
+            primary=exact.primary_name,
+            primary_source_field_id=primary_field_id,
+            declared_english=exact.english_name,
+            english_source_field_id=english_field_id,
+        )
+    except ValueError as error:
+        raise _error("feature frame exact sourced text cannot be reconstructed") from error
+    expected_subtype = _SUBTYPE_BY_WATERWAY[exact.waterway_type].value
+    expected_identities: dict[tuple[str, bytes], bytes] = {}
+    _remember_validated_identity(
+        expected_identities,
+        "feature_ids",
+        feature_hot,
+        exact.source_feature_sha256,
+    )
+    validated_rows: list[tuple[object, ...]] = []
+    for row in frame.record_rows:
+        _validate_record_row(
+            row,
+            expected_feature_hot=feature_hot,
+            expected_source_type=exact.waterway_type,
+        )
+        tile = TileKey(int(row[0]), int(row[2]), int(row[1]))
+        renderer, sourced = _decode_parent_record_envelope(row[11], tile)
+        posting = renderer.posting
+        variant = renderer.variant
+        placement = variant.placement
+        posting_key = struct.pack(
+            ">QQQi",
+            posting.feature_id,
+            posting.canonical_variant_id,
+            posting.owner_tile.packed,
+            posting.world_wrap,
+        )
+        if posting.requested_tile != tile or bytes(row[3]) != posting_key:
+            raise _error("feature frame record tile or posting envelope differs")
+        if (
+            posting.feature_id != feature_id
+            or variant.dedupe_id != feature_id
+            or bytes(row[9]) != feature_hot
+            or placement.source_feature_sha256 != exact.source_feature_sha256
+            or placement.placement_source_feature_id != feature_id
+            or placement.provider_feature_id != exact.source_id
+        ):
+            raise _error("feature frame record differs from its exact source identity")
+        variant_hot = variant.canonical_variant_id.to_bytes(8, "big")
+        if (
+            bytes(row[8]) != variant_hot
+            or int(row[4]) != variant.draw_order
+            or int(row[5]) != variant.priority
+            or int(row[6]) != variant.layer_group.value
+            or int(row[7]) != variant.feature_kind.value
+            or int(row[12]) != variant.semantic_subtype
+            or variant.semantic_subtype != expected_subtype
+            or variant.text != exact.primary_name
+            or placement.text_source_field_id != primary_field_id
+        ):
+            raise _error("feature frame record variant differs from its exact label")
+        if (
+            sourced.canonical_bytes != expected_sourced.canonical_bytes
+            or sourced.full_sha256 != expected_sourced.full_sha256
+            or bytes(row[10]) != sourced.full_sha256
+        ):
+            raise _error("feature frame sourced text differs from its exact source")
+        geometry_hot = variant.geometry_id.to_bytes(8, "big")
+        label_hot = placement.label_candidate_id.to_bytes(8, "big")
+        sourced_hot = sourced.full_sha256[:8]
+        _remember_validated_identity(
+            expected_identities,
+            "geometry_ids",
+            geometry_hot,
+            placement.placement_geometry_sha256,
+        )
+        _remember_validated_identity(
+            expected_identities,
+            "label_ids",
+            label_hot,
+            placement.label_candidate_sha256,
+        )
+        _remember_validated_identity(
+            expected_identities,
+            "variant_ids",
+            variant_hot,
+            variant_fingerprint(variant).full_sha256,
+        )
+        _remember_validated_identity(
+            expected_identities,
+            "sourced_ids",
+            sourced_hot,
+            sourced.full_sha256,
+        )
+        validated_rows.append(row)
+    actual_identities = tuple(frame.identity_rows)
+    if (
+        len(actual_identities) != len(expected_identities)
+        or {
+            (table, hot_id, full_sha256)
+            for table, hot_id, full_sha256 in actual_identities
+        }
+        != {
+            (table, hot_id, full_sha256)
+            for (table, hot_id), full_sha256 in expected_identities.items()
+        }
+    ):
+        raise _error("feature frame identity rows differ from decoded records")
+    if frame.posting_bytes != sum(len(row[11]) for row in validated_rows):
+        raise _error("feature frame posting-byte peak differs from decoded records")
+    return tuple(validated_rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3918,4 +4155,6 @@ __all__ = [
     "read_feature_batch",
     "render_feature_batch_job",
     "replay_registry_claims",
+    "validate_and_decode_record_rows",
+    "validate_frame_against_exact_source",
 ]

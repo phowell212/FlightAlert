@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import struct
 import tempfile
 import unittest
+from copy import copy
 from concurrent.futures import FIRST_COMPLETED, Future
 from dataclasses import replace
 from pathlib import Path
@@ -30,6 +32,8 @@ from tools.experiment8.waterway_parallel_render import (
     read_feature_batch,
     render_feature_batch_job,
     replay_registry_claims,
+    validate_and_decode_record_rows,
+    validate_frame_against_exact_source,
 )
 
 
@@ -280,6 +284,15 @@ def _parallel_renderer(
 
 
 class RecordingRegistryTests(unittest.TestCase):
+    def test_recording_registry_preserves_hidden_hot_id_collisions(self) -> None:
+        def colliding_digest(data: bytes) -> bytes:
+            return b"collision" + hashlib.sha256(data).digest()[9:]
+
+        registry = RecordingHotIdRegistry(digest_function=colliding_digest)
+        registry.register(b"FAE8OSMID1\0", b"one")
+        with self.assertRaisesRegex(Exception, "collision"):
+            registry.register(b"FAE8OSMID1\0", b"two")
+
     def test_replay_rejects_excess_claims_without_materializing_the_iterable(self) -> None:
         worker = RecordingHotIdRegistry()
         worker.register(b"FAE8OSMID1\0", b"one")
@@ -1918,6 +1931,77 @@ class AuthenticatedFeatureBatchTests(unittest.TestCase):
                         expected_render_run_identity_sha256=_RUN_SHA256,
                         expected_source_range_sha256=descriptor.source_range_sha256,
                     )
+
+
+class ParentFrameValidationTests(unittest.TestCase):
+    @staticmethod
+    def _tamper(frame, **changes):
+        changed = copy(frame)
+        for name, value in changes.items():
+            object.__setattr__(changed, name, value)
+        return changed
+
+    def test_parent_validates_exact_source_and_decodes_every_record_relationship(self) -> None:
+        exact = _feature()
+        with tempfile.TemporaryDirectory() as temporary:
+            _descriptor, frames = _render(Path(temporary))
+        self.assertEqual(1, len(frames))
+        frame = frames[0]
+
+        validate_frame_against_exact_source(20, exact, frame)
+        self.assertEqual(
+            frame.record_rows,
+            validate_and_decode_record_rows(exact, frame),
+        )
+
+        wrong_source = self._tamper(frame, source_id=exact.source_id + 1)
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "exact source"):
+            validate_frame_against_exact_source(20, exact, wrong_source)
+
+        rows = list(frame.record_rows)
+        changed_envelope = bytearray(rows[0][11])
+        changed_envelope[-1] ^= 0x01
+        rows[0] = rows[0][:11] + (bytes(changed_envelope),) + rows[0][12:]
+        corrupt_envelope = self._tamper(frame, record_rows=tuple(rows))
+        with self.assertRaisesRegex(
+            GlobalWaterwayPackageError,
+            "envelope|sourced|identity",
+        ):
+            validate_and_decode_record_rows(exact, corrupt_envelope)
+
+        rows = list(frame.record_rows)
+        changed_envelope = bytearray(rows[0][11])
+        renderer_bytes = struct.unpack_from("<I", changed_envelope, 0)[0]
+        changed_envelope[4 + renderer_bytes - 1] ^= 0x01
+        rows[0] = rows[0][:11] + (bytes(changed_envelope),) + rows[0][12:]
+        corrupt_renderer = self._tamper(frame, record_rows=tuple(rows))
+        with self.assertRaises(GlobalWaterwayPackageError):
+            validate_and_decode_record_rows(exact, corrupt_renderer)
+
+    def test_parent_rejects_false_geometry_label_variant_and_sourced_identity_sets(self) -> None:
+        exact = _feature()
+        with tempfile.TemporaryDirectory() as temporary:
+            _descriptor, frames = _render(Path(temporary))
+        frame = frames[0]
+        for table in ("geometry_ids", "label_ids", "variant_ids", "sourced_ids"):
+            with self.subTest(table=table):
+                identities = tuple(
+                    row for row in frame.identity_rows if row[0] != table
+                )
+                changed = self._tamper(frame, identity_rows=identities)
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "identity",
+                ):
+                    validate_and_decode_record_rows(exact, changed)
+
+    def test_worker_module_has_no_sqlite_import_or_connection_surface(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        source = Path(parallel.__file__).read_text("utf-8")
+        self.assertNotIn("import sqlite3", source)
+        self.assertNotIn("from sqlite3", source)
+        self.assertNotIn("sqlite3", parallel.__dict__)
 
 
 if __name__ == "__main__":

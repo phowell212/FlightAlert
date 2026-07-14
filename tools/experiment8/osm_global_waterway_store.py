@@ -3285,6 +3285,7 @@ def _render_code_identities() -> dict[str, object]:
         renderer_tile_package,
         semantic_model,
         sourced_text,
+        waterway_parallel_render,
     )
 
     modules = {
@@ -3297,6 +3298,7 @@ def _render_code_identities() -> dict[str, object]:
         "source": source_module,
         "sourcedText": sourced_text,
         "store": __import__(__name__, fromlist=["*"]),
+        "waterwayParallelRender": waterway_parallel_render,
     }
     return {
         name: _stream_identity(Path(module.__file__).resolve(), f"{name} code")
@@ -3367,6 +3369,18 @@ def _record_envelope(record: object, tile: TileKey) -> bytes:
             sourced_bytes,
         )
     )
+
+
+_INSERT_RECORD_SQL = (
+    "INSERT INTO records("
+    "z,y,x,posting_key,draw_order,priority,layer_group,feature_kind,"
+    "variant_id,feature_id,sourced_sha,envelope,subtype,source_type"
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+_INSERT_RENDERED_FEATURE_SQL = (
+    "INSERT INTO rendered_features(ordinal,source_kind,source_id,source_type,feature_sha) "
+    "VALUES (?,?,?,?,?)"
+)
 
 
 def _stage_rendered_feature(
@@ -3462,6 +3476,48 @@ def _stage_rendered_feature(
             "duplicate exact waterway feature in render traversal"
         ) from error
     peaks["featurePostingBytes"] = max(peaks["featurePostingBytes"], posting_bytes)
+
+
+def _stage_feature_render_frame(
+    connection: sqlite3.Connection,
+    *,
+    ordinal: int,
+    exact: "ExactWaterwayFeature",
+    frame: "FeatureRenderFrame",
+    registry: "HotIdRegistry",
+    peaks: dict[str, int],
+) -> None:
+    from .waterway_parallel_render import (
+        replay_registry_claims,
+        validate_and_decode_record_rows,
+        validate_frame_against_exact_source,
+    )
+
+    validate_frame_against_exact_source(ordinal, exact, frame)
+    record_rows = validate_and_decode_record_rows(exact, frame)
+    replay_registry_claims(registry, frame.registry_claims)
+    for table, hot_id, full_sha256 in frame.identity_rows:
+        _insert_hot_identity(connection, table, hot_id, full_sha256)
+    for row in record_rows:
+        try:
+            connection.execute(_INSERT_RECORD_SQL, row)
+        except sqlite3.IntegrityError as error:
+            raise GlobalWaterwayPackageError(
+                "duplicate global waterway renderer posting"
+            ) from error
+    try:
+        connection.execute(
+            _INSERT_RENDERED_FEATURE_SQL,
+            frame.rendered_feature_row,
+        )
+    except sqlite3.IntegrityError as error:
+        raise GlobalWaterwayPackageError(
+            "duplicate exact waterway feature in render traversal"
+        ) from error
+    peaks["featurePostingBytes"] = max(
+        peaks["featurePostingBytes"],
+        frame.posting_bytes,
+    )
 
 
 def _expected_rendered_feature_rows(exact: object, rendered: object) -> tuple[tuple[object, ...], ...]:
@@ -3758,6 +3814,37 @@ def _resume_renderer_write_reservation(
     return trusted_data_version
 
 
+def _default_parallel_render_limits():
+    from .waterway_parallel_render import ParallelRenderLimits
+
+    return ParallelRenderLimits(
+        workers=1,
+        max_in_flight_jobs=2,
+        max_in_flight_points=1_048_576,
+        max_points_per_job=524_288,
+        max_in_flight_input_bytes=256 * 1024 * 1024,
+        max_input_bytes_per_job=128 * 1024 * 1024,
+        max_spool_bytes=2 * 1024 * 1024 * 1024,
+        max_spool_bytes_per_job=1024 * 1024 * 1024,
+    )
+
+
+def _canonical_render_run_sha256(run_identity: Mapping[str, object]) -> str:
+    return hashlib.sha256(_canonical_json_bytes(dict(run_identity))).hexdigest()
+
+
+def _default_render_spool_directory(
+    database_path: Path,
+    render_run_identity_sha256: str,
+) -> Path:
+    return Path(
+        os.path.abspath(
+            database_path.parent
+            / ("waterway-render-spool-" + render_run_identity_sha256[:16])
+        )
+    )
+
+
 def _stage_renderer_records(
     connection: sqlite3.Connection,
     database_path: Path,
@@ -3768,109 +3855,202 @@ def _stage_renderer_records(
     pause_after_features: int | None,
     run_identity: Mapping[str, object],
     trusted_data_version: int | None = None,
+    parallel_limits: "ParallelRenderLimits | None" = None,
+    spool_directory: str | os.PathLike[str] | None = None,
 ) -> bool:
-    from .osm_global_waterway_renderer import (
-        build_adaptive_waterway_feature,
+    from .waterway_parallel_render import (
+        ParallelFeatureRenderer,
+        ParallelRenderLimits,
+        finish_spool_directory,
+        prepare_spool_directory,
     )
 
-    admission = _meta_get(connection, "admissionReceipt")
-    if (
-        not isinstance(admission, dict)
-        or admission.get("fatalCount") != 0
-        or admission.get("aggregateSha256")
-        != run_identity.get("admissionAggregateSha256")
-        or admission.get("policy", {}).get("sha256")
-        != run_identity.get("admissionPolicySha256")
-    ):
-        raise GlobalWaterwayPackageError(
-            "renderer requires complete matching v2 waterway admission"
+    if parallel_limits is None:
+        parallel_limits = _default_parallel_render_limits()
+    if type(parallel_limits) is not ParallelRenderLimits:
+        raise GlobalWaterwayPackageError("parallel render limits are invalid")
+    render_run_sha256 = _canonical_render_run_sha256(run_identity)
+    if spool_directory is None:
+        spool_directory = _default_render_spool_directory(
+            database_path,
+            render_run_sha256,
         )
-    if (
-        trusted_data_version is not None
-        and (type(trusted_data_version) is not int or trusted_data_version < 0)
-    ):
-        raise GlobalWaterwayPackageError(
-            "renderer trusted database version is malformed"
-        )
-    trusted_data_version = _resume_renderer_write_reservation(
-        connection,
-        trusted_data_version,
-    )
-    stored_identity = _meta_get(connection, "renderRunIdentity")
-    if stored_identity is None:
-        _meta_set(connection, "renderRunIdentity", dict(run_identity))
-        _meta_set(
+    package_id = run_identity.get("packageId")
+    if type(package_id) is not str:
+        raise GlobalWaterwayPackageError("renderer run identity package ID is malformed")
+
+    try:
+        admission = _meta_get(connection, "admissionReceipt")
+        if (
+            not isinstance(admission, dict)
+            or admission.get("fatalCount") != 0
+            or admission.get("aggregateSha256")
+            != run_identity.get("admissionAggregateSha256")
+            or admission.get("policy", {}).get("sha256")
+            != run_identity.get("admissionPolicySha256")
+        ):
+            raise GlobalWaterwayPackageError(
+                "renderer requires complete matching v2 waterway admission"
+            )
+        if (
+            trusted_data_version is not None
+            and (type(trusted_data_version) is not int or trusted_data_version < 0)
+        ):
+            raise GlobalWaterwayPackageError(
+                "renderer trusted database version is malformed"
+            )
+        trusted_data_version = _resume_renderer_write_reservation(
             connection,
-            "renderCheckpoint",
-            {"renderComplete": False, "renderedFeatures": 0},
+            trusted_data_version,
         )
-        connection.commit()
-        _resume_renderer_write_reservation(connection, trusted_data_version)
-    elif stored_identity != dict(run_identity):
-        raise GlobalWaterwayPackageError(
-            "renderer checkpoint identity differs from exact source/config/code identity"
+        stored_identity = _meta_get(connection, "renderRunIdentity")
+        if stored_identity is None:
+            _meta_set(connection, "renderRunIdentity", dict(run_identity))
+            _meta_set(
+                connection,
+                "renderCheckpoint",
+                {"renderComplete": False, "renderedFeatures": 0},
+            )
+            connection.commit()
+            _resume_renderer_write_reservation(connection, trusted_data_version)
+        elif stored_identity != dict(run_identity):
+            raise GlobalWaterwayPackageError(
+                "renderer checkpoint identity differs from exact source/config/code identity"
+            )
+        checkpoint = dict(_meta_get(connection, "renderCheckpoint") or {})
+        rendered_prefix = int(checkpoint.get("renderedFeatures", 0))
+        source, registry = _validated_renderer_prefix_stream(
+            connection,
+            source_binding=source_binding,
+            zooms=zooms,
+            run_identity=run_identity,
+            rendered_prefix=rendered_prefix,
         )
-    checkpoint = dict(_meta_get(connection, "renderCheckpoint") or {})
-    rendered_prefix = int(checkpoint.get("renderedFeatures", 0))
-    source, registry = _validated_renderer_prefix_stream(
-        connection,
-        source_binding=source_binding,
-        zooms=zooms,
-        run_identity=run_identity,
-        rendered_prefix=rendered_prefix,
-    )
-    peaks = dict(_meta_get(connection, "peaks") or {})
-    for key in (
-        "compressedTileBytes",
-        "featurePostingBytes",
-        "inputLineBytes",
-        "observedPersistentSqliteBytesAtCheckpoints",
-        "rawTileBytes",
-        "recordsPerTile",
-    ):
-        peaks.setdefault(key, 0)
-    since_commit = 0
-    seen = rendered_prefix
-    for ordinal, exact in enumerate(source, start=rendered_prefix):
-        seen = ordinal + 1
-        rendered = build_adaptive_waterway_feature(
-            feature=exact,
+        if (
+            pause_after_features is not None
+            and pause_after_features <= rendered_prefix
+        ):
+            connection.rollback()
+            return False
+        peaks = dict(_meta_get(connection, "peaks") or {})
+        for key in (
+            "compressedTileBytes",
+            "featurePostingBytes",
+            "inputLineBytes",
+            "observedPersistentSqliteBytesAtCheckpoints",
+            "rawTileBytes",
+            "recordsPerTile",
+        ):
+            peaks.setdefault(key, 0)
+        owned_spool_directory = prepare_spool_directory(
+            spool_directory,
+            package_id=package_id,
+            render_run_identity_sha256=render_run_sha256,
+            source_document_sha256=source_binding.planet_sha256,
+        )
+        since_commit = 0
+        seen = rendered_prefix
+        pending_descriptors = []
+        with ParallelFeatureRenderer(
+            source,
+            start_ordinal=rendered_prefix,
+            package_id=package_id,
             source_generation_sha256=source_binding.planet_sha256,
             classifier_sha256=str(run_identity["classifierSha256"]),
             zooms=zooms,
-            identity_registry=registry,
-        )
-        _stage_rendered_feature(
-            connection,
-            ordinal=ordinal,
-            exact=exact,
-            rendered=rendered,
-            peaks=peaks,
-        )
-        checkpoint = {"renderComplete": False, "renderedFeatures": ordinal + 1}
-        since_commit += 1
-        checkpoint_committed = False
-        if since_commit >= checkpoint_features:
-            _commit_render_checkpoint(
-                connection, database_path, checkpoint, peaks
+            render_run_identity_sha256=render_run_sha256,
+            spool_directory=owned_spool_directory,
+            limits=parallel_limits,
+            pause_after_features=pause_after_features,
+        ) as renderer:
+            while True:
+                batch = renderer.next_batch()
+                if batch is None:
+                    break
+                descriptor, exact_features, frames = batch
+                if (
+                    descriptor.start_ordinal != seen
+                    or descriptor.end_ordinal_exclusive
+                    != seen + len(exact_features)
+                    or len(exact_features) != len(frames)
+                ):
+                    raise GlobalWaterwayPackageError(
+                        "parallel renderer yielded a noncontiguous exact source range"
+                    )
+                pending_descriptors.append(descriptor)
+                for exact, frame in zip(exact_features, frames):
+                    ordinal = seen
+                    _stage_feature_render_frame(
+                        connection,
+                        ordinal=ordinal,
+                        exact=exact,
+                        frame=frame,
+                        registry=registry,
+                        peaks=peaks,
+                    )
+                    seen = ordinal + 1
+                    checkpoint = {
+                        "renderComplete": False,
+                        "renderedFeatures": seen,
+                    }
+                    since_commit += 1
+                    checkpoint_committed = False
+                    if since_commit >= checkpoint_features:
+                        _commit_render_checkpoint(
+                            connection, database_path, checkpoint, peaks
+                        )
+                        since_commit = 0
+                        checkpoint_committed = True
+                        releasable = [
+                            value
+                            for value in pending_descriptors
+                            if value.end_ordinal_exclusive <= seen
+                        ]
+                        for committed_descriptor in releasable:
+                            renderer.release_batch(committed_descriptor)
+                            pending_descriptors.remove(committed_descriptor)
+                    if pause_after_features is not None and seen >= pause_after_features:
+                        if not checkpoint_committed:
+                            _commit_render_checkpoint(
+                                connection, database_path, checkpoint, peaks
+                            )
+                            releasable = [
+                                value
+                                for value in pending_descriptors
+                                if value.end_ordinal_exclusive <= seen
+                            ]
+                            for committed_descriptor in releasable:
+                                renderer.release_batch(committed_descriptor)
+                                pending_descriptors.remove(committed_descriptor)
+                        return False
+                    if checkpoint_committed:
+                        _resume_renderer_write_reservation(
+                            connection,
+                            trusted_data_version,
+                        )
+            checkpoint = {"renderComplete": True, "renderedFeatures": seen}
+            _commit_render_checkpoint(connection, database_path, checkpoint, peaks)
+            for descriptor in tuple(pending_descriptors):
+                if descriptor.end_ordinal_exclusive > seen:
+                    raise GlobalWaterwayPackageError(
+                        "parallel renderer retained an uncommitted ordinal range"
+                    )
+                renderer.release_batch(descriptor)
+                pending_descriptors.remove(descriptor)
+            finish_spool_directory(
+                owned_spool_directory,
+                package_id=package_id,
+                render_run_identity_sha256=render_run_sha256,
+                source_document_sha256=source_binding.planet_sha256,
             )
-            since_commit = 0
-            checkpoint_committed = True
-        if pause_after_features is not None and ordinal + 1 >= pause_after_features:
-            if not checkpoint_committed:
-                _commit_render_checkpoint(
-                    connection, database_path, checkpoint, peaks
-                )
-            return False
-        if checkpoint_committed:
-            _resume_renderer_write_reservation(
-                connection,
-                trusted_data_version,
-            )
-    checkpoint = {"renderComplete": True, "renderedFeatures": seen}
-    _commit_render_checkpoint(connection, database_path, checkpoint, peaks)
-    _resume_renderer_write_reservation(connection, trusted_data_version)
-    return True
+        _resume_renderer_write_reservation(connection, trusted_data_version)
+        return True
+    except BaseException as error:
+        try:
+            connection.rollback()
+        except BaseException as rollback_error:
+            error.add_note(f"renderer checkpoint rollback failed: {rollback_error}")
+        raise
 
 
 def _windows(connection: sqlite3.Connection) -> tuple[_Window, ...]:
@@ -4999,9 +5179,7 @@ def _render_bound_global_waterway_package(
         ingest_semantic_sha256=str(ingest.receipt["semanticSha256"]),
         size_policy_binding=size_policy_binding,
     )
-    render_sha256 = hashlib.sha256(
-        _canonical_json_bytes(render_identity)
-    ).hexdigest()
+    render_sha256 = _canonical_render_run_sha256(render_identity)
     partial_directory = output_directory.with_name(
         output_directory.name + ".partial-" + render_sha256[:16]
     )

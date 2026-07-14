@@ -1035,6 +1035,20 @@ class GlobalWaterwayStoreTests(unittest.TestCase):
 
 
 class GlobalWaterwayRendererTests(unittest.TestCase):
+    def test_complete_renderer_code_identity_includes_parallel_renderer(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        identities = store._render_code_identities()
+        self.assertIn("waterwayParallelRender", identities)
+        self.assertEqual(
+            store._stream_identity(
+                Path(parallel.__file__).resolve(),
+                "waterwayParallelRender code",
+            ),
+            identities["waterwayParallelRender"],
+        )
+
     def test_complete_renderer_code_identity_includes_tile_key_model(self) -> None:
         from tools.experiment8 import model
         from tools.experiment8 import osm_global_waterway_store as store
@@ -1647,6 +1661,121 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             size_policy_mode=size_policy_mode,
         )
 
+    @staticmethod
+    def _parallel_limits(workers: int, *, max_in_flight_jobs: int | None = None):
+        from tools.experiment8.waterway_parallel_render import ParallelRenderLimits
+
+        jobs = max_in_flight_jobs or workers * 2
+        return ParallelRenderLimits(
+            workers=workers,
+            max_in_flight_jobs=jobs,
+            max_in_flight_points=100_000_000,
+            max_points_per_job=1,
+            max_in_flight_input_bytes=jobs * 128 * 1024 * 1024,
+            max_input_bytes_per_job=128 * 1024 * 1024,
+            max_spool_bytes=(jobs + 1) * 64 * 1024 * 1024,
+            max_spool_bytes_per_job=64 * 1024 * 1024,
+        )
+
+    @staticmethod
+    def _renderer_snapshot(database: Path):
+        import sqlite3
+
+        connection = sqlite3.connect(database)
+        try:
+            records = tuple(
+                connection.execute(
+                    "SELECT z,y,x,posting_key,draw_order,priority,layer_group,"
+                    "feature_kind,variant_id,feature_id,sourced_sha,envelope,subtype,"
+                    "source_type FROM records ORDER BY z,y,x,posting_key"
+                )
+            )
+            rendered = tuple(
+                connection.execute(
+                    "SELECT ordinal,source_kind,source_id,source_type,feature_sha "
+                    "FROM rendered_features ORDER BY ordinal"
+                )
+            )
+            identities = {
+                table: tuple(
+                    connection.execute(
+                        f"SELECT hot_id,full_sha FROM {table} ORDER BY hot_id"
+                    )
+                )
+                for table in (
+                    "feature_ids",
+                    "geometry_ids",
+                    "label_ids",
+                    "variant_ids",
+                    "sourced_ids",
+                )
+            }
+            return records, rendered, identities
+        finally:
+            connection.close()
+
+    def _build_with_parallel(
+        self,
+        root: Path,
+        name: str,
+        *,
+        limits,
+        executor_factory=None,
+        staged_ordinals: list[int] | None = None,
+    ):
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        contexts = [
+            patch.object(
+                store,
+                "_default_parallel_render_limits",
+                return_value=limits,
+                create=True,
+            )
+        ]
+        if executor_factory is not None:
+            real_renderer = parallel.ParallelFeatureRenderer
+
+            def reverse_renderer(*args, **kwargs):
+                kwargs["executor_factory"] = executor_factory
+                kwargs["wait_for_futures"] = executor_factory.wait
+                kwargs["disk_usage"] = lambda _path: type(
+                    "Usage", (), {"free": 100_000_000_000}
+                )()
+                return real_renderer(*args, **kwargs)
+
+            contexts.append(
+                patch.object(
+                    parallel,
+                    "ParallelFeatureRenderer",
+                    side_effect=reverse_renderer,
+                )
+            )
+        if staged_ordinals is not None:
+            real_stage = getattr(store, "_stage_feature_render_frame", None)
+
+            def record_stage(*args, **kwargs):
+                staged_ordinals.append(kwargs["ordinal"])
+                return real_stage(*args, **kwargs)
+
+            contexts.append(
+                patch.object(
+                    store,
+                    "_stage_feature_render_frame",
+                    side_effect=record_stage,
+                    create=True,
+                )
+            )
+        with contexts[0]:
+            if len(contexts) == 1:
+                return self._build(root, name)
+            with contexts[1]:
+                if len(contexts) == 2:
+                    return self._build(root, name)
+                with contexts[2]:
+                    return self._build(root, name)
+
     def test_renderer_staging_uses_one_connection_across_dirty_cache_spill(self) -> None:
         import sqlite3
 
@@ -1750,6 +1879,7 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
         import sqlite3
 
         from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
 
         render_connections = []
 
@@ -1800,6 +1930,270 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             ],
             render_connections,
         )
+        self.assertEqual(1, len(render_connections))
+        self.assertNotIn("sqlite3", parallel.__dict__)
+
+    def test_workers_one_two_and_reverse_completion_are_byte_and_table_identical(self) -> None:
+        from tools.experiment8.tests.test_waterway_parallel_render import (
+            _ReverseExecutorFactory,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            one = self._build_with_parallel(
+                root,
+                "workers-one",
+                limits=self._parallel_limits(1),
+            )
+            two = self._build_with_parallel(
+                root,
+                "workers-two",
+                limits=self._parallel_limits(2),
+            )
+            staged_ordinals: list[int] = []
+            reverse = self._build_with_parallel(
+                root,
+                "workers-reverse",
+                limits=self._parallel_limits(2),
+                executor_factory=_ReverseExecutorFactory(),
+                staged_ordinals=staged_ordinals,
+            )
+
+            self.assertEqual(
+                list(range(len(staged_ordinals))),
+                staged_ordinals,
+            )
+            self.assertTrue(staged_ordinals)
+            self.assertEqual(
+                one.receipt["rendererSemanticStreamSha256"],
+                two.receipt["rendererSemanticStreamSha256"],
+            )
+            self.assertEqual(
+                one.receipt["rendererSemanticStreamSha256"],
+                reverse.receipt["rendererSemanticStreamSha256"],
+            )
+            for filename in (
+                "manifest.json",
+                "records.fadictpack",
+                "tile-index.bin",
+                "build-receipt.json",
+            ):
+                expected = (root / "workers-one" / filename).read_bytes()
+                self.assertEqual(
+                    expected,
+                    (root / "workers-two" / filename).read_bytes(),
+                    filename,
+                )
+                self.assertEqual(
+                    expected,
+                    (root / "workers-reverse" / filename).read_bytes(),
+                    filename,
+                )
+            expected_snapshot = self._renderer_snapshot(
+                root / "workers-one-work" / "waterway-state.sqlite"
+            )
+            self.assertEqual(
+                expected_snapshot,
+                self._renderer_snapshot(
+                    root / "workers-two-work" / "waterway-state.sqlite"
+                ),
+            )
+            self.assertEqual(
+                expected_snapshot,
+                self._renderer_snapshot(
+                    root / "workers-reverse-work" / "waterway-state.sqlite"
+                ),
+            )
+
+    def test_failure_before_checkpoint_rolls_back_every_staged_feature(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+        from tools.experiment8.osm_global_waterway_renderer import (
+            classifier_identity_sha256,
+        )
+
+        source_binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        zooms = tuple(range(4, 12))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ingest = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=root / "work",
+                source_binding=source_binding,
+                checkpoint_objects=4,
+            )
+            exact_features = tuple(
+                store.iter_exact_waterway_features(
+                    ingest.database_path,
+                    source_binding=source_binding,
+                )
+            )
+            checkpoint_features = len(exact_features) + 1
+            identity = store._render_run_identity(
+                package_id="fixture-global-waterways-v3",
+                source_binding=source_binding,
+                zooms=zooms,
+                checkpoint_features=checkpoint_features,
+                code_identities=store._render_code_identities(),
+                classifier_sha256=classifier_identity_sha256(),
+                admission_receipt=ingest.receipt["admission"],
+                ingest_semantic_sha256=ingest.receipt["semanticSha256"],
+            )
+            real_stage = store._stage_feature_render_frame
+
+            def fail_final_feature(*args, **kwargs):
+                if kwargs["ordinal"] == len(exact_features) - 1:
+                    raise GlobalWaterwayPackageError("forced final feature failure")
+                return real_stage(*args, **kwargs)
+
+            connection = sqlite3.connect(ingest.database_path)
+            try:
+                store._configure_render_connection(connection)
+                with patch.object(
+                    store,
+                    "_stage_feature_render_frame",
+                    side_effect=fail_final_feature,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "forced final feature failure",
+                ):
+                    store._stage_renderer_records(
+                        connection,
+                        ingest.database_path,
+                        source_binding=source_binding,
+                        zooms=zooms,
+                        checkpoint_features=checkpoint_features,
+                        pause_after_features=None,
+                        run_identity=identity,
+                        parallel_limits=self._parallel_limits(1),
+                        spool_directory=root / "spool",
+                    )
+                self.assertFalse(connection.in_transaction)
+                self.assertEqual(
+                    0,
+                    connection.execute(
+                        "SELECT COUNT(*) FROM rendered_features"
+                    ).fetchone()[0],
+                )
+                self.assertEqual(
+                    0,
+                    connection.execute("SELECT COUNT(*) FROM records").fetchone()[0],
+                )
+                self.assertEqual(
+                    0,
+                    store._meta_get(connection, "renderCheckpoint")[
+                        "renderedFeatures"
+                    ],
+                )
+                self.assertTrue((root / "spool" / "owner.json").is_file())
+            finally:
+                connection.close()
+
+    def test_corrupt_later_spool_keeps_prior_checkpoint_and_resume_matches_clean(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+        from tools.experiment8.tests.test_waterway_parallel_render import (
+            _ReverseExecutorFactory,
+        )
+
+        corrupted = False
+
+        def corrupt_after_first_checkpoint(job, descriptor):
+            nonlocal corrupted
+            if corrupted or job.start_ordinal < 2:
+                return
+            corrupted = True
+            spool = Path(job.spool_directory) / descriptor.file_name
+            with spool.open("r+b") as handle:
+                handle.seek(-1, 2)
+                last = handle.read(1)
+                handle.seek(-1, 2)
+                handle.write(bytes((last[0] ^ 0x01,)))
+                handle.flush()
+
+        factory = _ReverseExecutorFactory(completion_hook=corrupt_after_first_checkpoint)
+        limits = self._parallel_limits(1, max_in_flight_jobs=1)
+        real_renderer = parallel.ParallelFeatureRenderer
+
+        def corrupting_renderer(*args, **kwargs):
+            kwargs["executor_factory"] = factory
+            kwargs["wait_for_futures"] = factory.wait
+            kwargs["disk_usage"] = lambda _path: type(
+                "Usage", (), {"free": 100_000_000_000}
+            )()
+            return real_renderer(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            observed_error = None
+            with patch.object(
+                store,
+                "_default_parallel_render_limits",
+                return_value=limits,
+                create=True,
+            ), patch.object(
+                parallel,
+                "ParallelFeatureRenderer",
+                side_effect=corrupting_renderer,
+            ):
+                try:
+                    self._build(root, "resumed")
+                except GlobalWaterwayPackageError as error:
+                    observed_error = error
+
+            self.assertIsNotNone(observed_error)
+            self.assertRegex(
+                str(observed_error),
+                "SHA-256|identity|spool|feature frame|posting-byte",
+            )
+            self.assertTrue(corrupted, repr(observed_error))
+            database = root / "resumed-work" / "waterway-state.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                checkpoint = store._meta_get(connection, "renderCheckpoint")
+                self.assertEqual(2, checkpoint["renderedFeatures"])
+                self.assertEqual(
+                    2,
+                    connection.execute(
+                        "SELECT COUNT(*) FROM rendered_features"
+                    ).fetchone()[0],
+                )
+            finally:
+                connection.close()
+
+            resumed = self._build_with_parallel(
+                root,
+                "resumed",
+                limits=self._parallel_limits(1),
+            )
+            clean = self._build_with_parallel(
+                root,
+                "clean",
+                limits=self._parallel_limits(1),
+            )
+            self.assertEqual("complete", resumed.state)
+            self.assertEqual("complete", clean.state)
+            for filename in (
+                "manifest.json",
+                "records.fadictpack",
+                "tile-index.bin",
+                "build-receipt.json",
+            ):
+                self.assertEqual(
+                    (root / "clean" / filename).read_bytes(),
+                    (root / "resumed" / filename).read_bytes(),
+                    filename,
+                )
 
     def test_fixture_publication_is_real_v3_typed_source_honest_and_deterministic(self) -> None:
         from tools.experiment8.reference_presentation_policy import SemanticSubtype
@@ -1934,6 +2328,31 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                 self.assertEqual(
                     (root / "resumed" / filename).read_bytes(),
                     (root / "clean" / filename).read_bytes(),
+                    filename,
+                )
+
+    def test_reached_pause_target_stays_paused_instead_of_publishing_a_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self._build(root, "resumed", pause_after_features=2)
+            self.assertEqual("paused", first.state)
+            second = self._build(root, "resumed", pause_after_features=2)
+            self.assertEqual("paused", second.state)
+            self.assertEqual(2, second.receipt["checkpoint"]["renderedFeatures"])
+            self.assertFalse((root / "resumed").exists())
+
+            resumed = self._build(root, "resumed")
+            clean = self._build(root, "clean")
+            self.assertEqual("complete", resumed.state)
+            for filename in (
+                "manifest.json",
+                "records.fadictpack",
+                "tile-index.bin",
+                "build-receipt.json",
+            ):
+                self.assertEqual(
+                    (root / "clean" / filename).read_bytes(),
+                    (root / "resumed" / filename).read_bytes(),
                     filename,
                 )
 
@@ -2178,6 +2597,32 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                 connection, "identities", b"12345678", b"b" * 32
             )
         connection.close()
+        for table in (
+            "feature_ids",
+            "geometry_ids",
+            "label_ids",
+            "variant_ids",
+            "sourced_ids",
+        ):
+            with self.subTest(table=table):
+                connection = sqlite3.connect(":memory:")
+                connection.execute(
+                    f"CREATE TABLE {table}(hot_id BLOB PRIMARY KEY,full_sha BLOB NOT NULL)"
+                )
+                store._insert_hot_identity(
+                    connection,
+                    table,
+                    b"12345678",
+                    b"a" * 32,
+                )
+                with self.assertRaisesRegex(GlobalWaterwayPackageError, "collision"):
+                    store._insert_hot_identity(
+                        connection,
+                        table,
+                        b"12345678",
+                        b"b" * 32,
+                    )
+                connection.close()
         with self.assertRaisesRegex(GlobalWaterwayPackageError, "NFC"):
             store._validated_package_id("Cafe\u0301-waterways")
         store.enforce_global_waterway_storage_ceiling(38_499_999_999)
@@ -3319,7 +3764,7 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             GlobalWaterwayPackageError,
         )
 
-        for drifted_module in ("store", "model"):
+        for drifted_module in ("store", "model", "waterwayParallelRender"):
             with self.subTest(
                 drifted_module=drifted_module
             ), tempfile.TemporaryDirectory() as temporary:
