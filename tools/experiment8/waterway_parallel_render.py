@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import multiprocessing
 import os
+import re
+import shutil
 import stat
 import struct
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterable, Sequence
+from typing import BinaryIO, Callable, Iterable, Sequence
 
 from .model import TileKey
 from .osm_global_waterway_package import GlobalWaterwayPackageError
@@ -30,6 +35,11 @@ _JOB_MAGIC = b"FAE8WRJOB"
 _JOB_VERSION = 1
 _BATCH_MAGIC = b"FAE8WRBATCH"
 _BATCH_VERSION = 1
+_BATCH_SCHEMA = "flightalert.experiment8.waterway-render-batch.v1"
+_SPOOL_OWNER_SCHEMA = "flightalert.experiment8.waterway-parallel-spool.v1"
+_SPOOL_OWNER_FILE = "owner.json"
+_SPOOL_OWNER_MAX_BYTES = 16 * 1024
+_DESTINATION_FREE_SPACE_RESERVE = 1_500_000_000
 _SOURCE_RANGE_DOMAIN = b"FAE8WRSOURCERANGE1\0"
 _SOURCE_FRAME_DOMAIN = b"FAE8WRSOURCEFRAME1\0"
 _RENDER_CHECKPOINT_FEATURES = 100
@@ -52,6 +62,10 @@ _MAX_RECORD_ENVELOPE_BYTES = (
     4 + MAX_RENDERER_RECORD_BYTES + 4 + 32 + MAX_SOURCED_TEXT_RECORD_BYTES
 )
 _MAX_FILE_ORDINAL = 999_999_999_999
+_SPOOL_CHILD_PATTERN = re.compile(
+    r"^(?P<start>[0-9]{12})-(?P<end>[0-9]{12})\.batch"
+    r"(?P<temporary>\.tmp-[0-9]+)?$"
+)
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_GENERIC_WRITE = 0x40000000
@@ -129,6 +143,43 @@ def _utf8(value: object, maximum_bytes: int, label: str) -> bytes:
 
 def _feature_point_count(feature: ExactWaterwayFeature) -> int:
     return sum(len(part) for part in feature.parts)
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelRenderLimits:
+    workers: int
+    max_in_flight_jobs: int
+    max_in_flight_points: int
+    max_points_per_job: int
+    max_in_flight_input_bytes: int
+    max_input_bytes_per_job: int
+    max_spool_bytes: int
+    max_spool_bytes_per_job: int
+
+    def __post_init__(self) -> None:
+        maximum_workers = 61 if os.name == "nt" else 64
+        if (
+            type(self.workers) is not int
+            or not 1 <= self.workers <= maximum_workers
+        ):
+            raise _error("parallel render worker count is invalid")
+        if (
+            type(self.max_in_flight_jobs) is not int
+            or not self.workers
+            <= self.max_in_flight_jobs
+            <= self.workers * 2
+        ):
+            raise _error("parallel render in-flight job bound is invalid")
+        resource_values = (
+            self.max_in_flight_points,
+            self.max_points_per_job,
+            self.max_in_flight_input_bytes,
+            self.max_input_bytes_per_job,
+            self.max_spool_bytes,
+            self.max_spool_bytes_per_job,
+        )
+        if any(type(value) is not int or value <= 0 for value in resource_values):
+            raise _error("parallel render resource bound is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1483,6 +1534,59 @@ def _create_windows_owned_temp(path: Path) -> BinaryIO:
         raise
 
 
+def _open_windows_owned_existing(path: Path, *, delete_access: bool) -> BinaryIO:
+    """Open one exact existing leaf while denying write, rename, and replacement."""
+
+    if os.name != "nt" or not path.is_absolute():
+        raise _error("Windows owned existing-file open requires an absolute path")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    access = _WINDOWS_GENERIC_READ | _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_SYNCHRONIZE_ACCESS
+    if delete_access:
+        access |= _WINDOWS_DELETE_ACCESS
+    handle = create_file(
+        str(path),
+        access,
+        _WINDOWS_FILE_SHARE_READ,
+        None,
+        _WINDOWS_OPEN_EXISTING,
+        _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, ctypes.FormatError(error_code), str(path))
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            int(handle), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+    except BaseException:
+        close_handle(handle)
+        raise
+    try:
+        return os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _windows_file_rename_info_buffer(destination: Path) -> object:
     if os.name != "nt" or not destination.is_absolute():
         raise _error("Windows handle publication requires an absolute destination")
@@ -1720,6 +1824,43 @@ class _AnchoredSpoolDirectory:
             handle.close()
             raise
 
+    def open_existing(
+        self,
+        name: str,
+        *,
+        label: str,
+        delete_access: bool,
+    ) -> tuple[BinaryIO, tuple[int, int]]:
+        leaf_name = self._require_leaf_name(name)
+        if os.name != "nt" or not self._windows_handles:
+            raise _error(f"{self._label} is not safely anchored")
+        try:
+            before = self.lstat(leaf_name)
+        except OSError as error:
+            raise _error(f"{label} is unavailable") from error
+        _require_plain_file_stat(before, label)
+        try:
+            handle = _open_windows_owned_existing(
+                self.root / leaf_name,
+                delete_access=delete_access,
+            )
+        except OSError as error:
+            raise _error(f"{label} could not be opened safely") from error
+        try:
+            opened = os.fstat(handle.fileno())
+            _require_plain_file_stat(opened, label)
+            expected_identity = _owned_file_identity(before)
+            if _owned_file_identity(opened) != expected_identity:
+                raise _error(f"{label} changed while opening")
+            after = self.lstat(leaf_name)
+            _require_plain_file_stat(after, label)
+            if _owned_file_identity(after) != expected_identity:
+                raise _error(f"{label} name identity changed while opening")
+            return handle, expected_identity
+        except BaseException:
+            handle.close()
+            raise
+
     def lstat(self, name: str) -> os.stat_result:
         leaf_name = self._require_leaf_name(name)
         if os.name != "nt" or not self._windows_handles:
@@ -1776,6 +1917,34 @@ class _AnchoredSpoolDirectory:
                 continue
             if _owned_file_identity(remaining) == expected_identity:
                 raise _error("feature batch owned temporary spool survived cleanup")
+
+    def dispose_existing_open_file(
+        self,
+        name: str,
+        handle: BinaryIO,
+        expected_identity: tuple[int, int],
+        *,
+        label: str,
+    ) -> None:
+        leaf_name = self._require_leaf_name(name)
+        try:
+            observed = os.fstat(handle.fileno())
+            _require_plain_file_stat(observed, label)
+            if _owned_file_identity(observed) != expected_identity:
+                raise _error(f"{label} handle identity changed before removal")
+            named = self.lstat(leaf_name)
+            _require_plain_file_stat(named, label)
+            if _owned_file_identity(named) != expected_identity:
+                raise _error(f"{label} name identity changed before removal")
+            _mark_windows_owned_temp_for_delete(handle)
+        finally:
+            handle.close()
+        try:
+            remaining = self.lstat(leaf_name)
+        except FileNotFoundError:
+            return
+        if _owned_file_identity(remaining) == expected_identity:
+            raise _error(f"{label} survived exact-handle removal")
 
 
 def _require_plain_file_stat(observed: os.stat_result, label: str) -> None:
@@ -2182,14 +2351,1124 @@ def read_feature_batch(
     return tuple(frames)
 
 
+def _canonical_json_bytes(document: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8", "strict")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise _error("parallel spool owner is not canonical JSON") from error
+
+
+def _spool_owner_bytes(
+    *,
+    package_id: str,
+    render_run_identity_sha256: str,
+    source_document_sha256: str,
+) -> bytes:
+    package_bytes = _utf8(package_id, 1_024, "parallel spool package ID")
+    if not package_bytes or "\x00" in package_id:
+        raise _error("parallel spool package ID is invalid")
+    render_run = _require_sha256_text(
+        render_run_identity_sha256, "parallel spool render run identity"
+    )
+    source_document = _require_sha256_text(
+        source_document_sha256, "parallel spool source document identity"
+    )
+    encoded = _canonical_json_bytes(
+        {
+            "batchSchema": _BATCH_SCHEMA,
+            "packageId": package_id,
+            "renderRunIdentitySha256": render_run,
+            "schema": _SPOOL_OWNER_SCHEMA,
+            "sourceDocumentSha256": source_document,
+        }
+    )
+    if len(encoded) > _SPOOL_OWNER_MAX_BYTES:
+        raise _error("parallel spool owner exceeds its byte bound")
+    return encoded
+
+
+def _absolute_spool_directory(value: str | os.PathLike[str]) -> Path:
+    try:
+        supplied = Path(value)
+    except (TypeError, ValueError) as error:
+        raise _error("parallel spool directory path is invalid") from error
+    if not supplied.is_absolute():
+        raise _error("parallel spool directory must be one absolute path")
+    try:
+        return Path(os.path.abspath(supplied))
+    except (OSError, ValueError) as error:
+        raise _error("parallel spool directory path is invalid") from error
+
+
+def _read_exact_handle_bytes(
+    handle: BinaryIO,
+    expected_size: int,
+    *,
+    label: str,
+) -> bytes:
+    observed = os.fstat(handle.fileno())
+    _require_plain_file_stat(observed, label)
+    if observed.st_size != expected_size:
+        raise _error(f"{label} byte count differs")
+    chunks: list[bytes] = []
+    remaining = expected_size
+    while remaining:
+        chunk = handle.read(remaining)
+        if not chunk:
+            raise _error(f"{label} is truncated")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if handle.read(1):
+        raise _error(f"{label} has trailing bytes")
+    return b"".join(chunks)
+
+
+def _open_matching_spool_owner(
+    anchored: _AnchoredSpoolDirectory,
+    expected_owner: bytes,
+    *,
+    delete_access: bool,
+) -> tuple[BinaryIO, tuple[int, int]]:
+    handle, identity = anchored.open_existing(
+        _SPOOL_OWNER_FILE,
+        label="parallel spool owner",
+        delete_access=delete_access,
+    )
+    try:
+        if _read_exact_handle_bytes(
+            handle,
+            len(expected_owner),
+            label="parallel spool owner",
+        ) != expected_owner:
+            raise _error("parallel spool owner differs from the active render run")
+        anchored.require_unchanged()
+        return handle, identity
+    except BaseException:
+        handle.close()
+        raise
+
+
+def _publish_spool_owner(
+    anchored: _AnchoredSpoolDirectory,
+    owner_bytes: bytes,
+) -> None:
+    temporary_name = f"{_SPOOL_OWNER_FILE}.tmp-{os.getpid()}"
+    handle: BinaryIO | None = None
+    identity: tuple[int, int] | None = None
+    try:
+        handle, identity = anchored.open_exclusive(temporary_name)
+        offset = 0
+        while offset < len(owner_bytes):
+            written = handle.write(owner_bytes[offset:])
+            if written is None or written <= 0:
+                raise _error("parallel spool owner write made no progress")
+            offset += written
+        handle.flush()
+        os.fsync(handle.fileno())
+        anchored.require_unchanged()
+        temporary = anchored.lstat(temporary_name)
+        _require_plain_file_stat(temporary, "parallel spool owner temporary file")
+        if _owned_file_identity(temporary) != identity:
+            raise _error("parallel spool owner temporary identity changed")
+        if temporary.st_size != len(owner_bytes):
+            raise _error("parallel spool owner temporary byte count differs")
+        anchored.publish_owned_no_replace(
+            temporary_name,
+            _SPOOL_OWNER_FILE,
+            handle,
+            identity,
+        )
+        anchored.require_unchanged()
+        published = anchored.lstat(_SPOOL_OWNER_FILE)
+        _require_plain_file_stat(published, "parallel spool owner")
+        if _owned_file_identity(published) != identity:
+            raise _error("parallel spool owner published identity changed")
+        if published.st_size != len(owner_bytes):
+            raise _error("parallel spool owner published byte count differs")
+        handle.close()
+        handle = None
+    except BaseException as operation_error:
+        if handle is not None and identity is not None:
+            try:
+                anchored.dispose_owned_open_file(
+                    (temporary_name, _SPOOL_OWNER_FILE),
+                    handle,
+                    identity,
+                )
+            except BaseException as cleanup_error:
+                operation_error.add_note(
+                    f"owned parallel spool owner cleanup failed: {cleanup_error}"
+                )
+            finally:
+                handle = None
+        raise
+    finally:
+        if handle is not None:
+            handle.close()
+    owner_handle, _owner_identity = _open_matching_spool_owner(
+        anchored,
+        owner_bytes,
+        delete_access=False,
+    )
+    owner_handle.close()
+
+
+def _validated_spool_children(
+    anchored: _AnchoredSpoolDirectory,
+    *,
+    allow_batch_children: bool,
+) -> tuple[tuple[str, tuple[int, int]], ...]:
+    try:
+        names = tuple(sorted(entry.name for entry in os.scandir(anchored.root)))
+    except OSError as error:
+        raise _error("parallel spool children could not be enumerated") from error
+    removable: list[tuple[str, tuple[int, int]]] = []
+    for name in names:
+        if name == _SPOOL_OWNER_FILE:
+            continue
+        if not allow_batch_children or _SPOOL_CHILD_PATTERN.fullmatch(name) is None:
+            raise _error("parallel spool directory contains an unknown child")
+        try:
+            observed = anchored.lstat(name)
+        except OSError as error:
+            raise _error("parallel spool child is unavailable") from error
+        _require_plain_file_stat(observed, "parallel spool child")
+        removable.append((name, _owned_file_identity(observed)))
+    anchored.require_unchanged()
+    return tuple(removable)
+
+
+def _remove_validated_spool_child(
+    anchored: _AnchoredSpoolDirectory,
+    name: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    handle, identity = anchored.open_existing(
+        name,
+        label="parallel spool child",
+        delete_access=True,
+    )
+    if identity != expected_identity:
+        handle.close()
+        raise _error("parallel spool child identity changed before removal")
+    anchored.dispose_existing_open_file(
+        name,
+        handle,
+        identity,
+        label="parallel spool child",
+    )
+    anchored.require_unchanged()
+
+
+def _remove_exact_empty_directory(
+    path: Path,
+    expected_identity: tuple[int, int, int, int],
+) -> None:
+    if os.name != "nt":
+        raise _error("parallel spool removal requires Windows retained-handle safety")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(
+        str(path),
+        _WINDOWS_DELETE_ACCESS | _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_SYNCHRONIZE_ACCESS,
+        _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+        None,
+        _WINDOWS_OPEN_EXISTING,
+        _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT | _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        error_code = ctypes.get_last_error()
+        raise _error("parallel spool directory could not be opened for removal") from OSError(
+            error_code, ctypes.FormatError(error_code), str(path)
+        )
+    try:
+        observed = os.lstat(path)
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISDIR(observed.st_mode)
+            or _is_reparse(observed)
+            or _directory_identity(observed) != expected_identity
+        ):
+            raise _error("parallel spool directory identity changed before removal")
+        _mark_windows_native_handle_for_delete(int(handle))
+    finally:
+        if not close_handle(handle):
+            error_code = ctypes.get_last_error()
+            raise _error("parallel spool directory handle could not be closed") from OSError(
+                error_code, ctypes.FormatError(error_code), str(path)
+            )
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise _error("parallel spool directory removal could not be verified") from error
+    raise _error("parallel spool directory survived exact-handle removal")
+
+
+def prepare_spool_directory(
+    spool_directory: str | os.PathLike[str],
+    *,
+    package_id: str,
+    render_run_identity_sha256: str,
+    source_document_sha256: str,
+) -> Path:
+    root = _absolute_spool_directory(spool_directory)
+    owner_bytes = _spool_owner_bytes(
+        package_id=package_id,
+        render_run_identity_sha256=render_run_identity_sha256,
+        source_document_sha256=source_document_sha256,
+    )
+    try:
+        existing = os.lstat(root)
+    except FileNotFoundError:
+        parent = root.parent
+        try:
+            with _AnchoredSpoolDirectory(
+                parent, "parallel spool parent directory"
+            ) as anchored_parent:
+                anchored_parent.require_unchanged()
+                try:
+                    os.mkdir(root)
+                except OSError as error:
+                    raise _error("parallel spool directory could not be created exclusively") from error
+                created = os.lstat(root)
+                if (
+                    stat.S_ISLNK(created.st_mode)
+                    or not stat.S_ISDIR(created.st_mode)
+                    or _is_reparse(created)
+                ):
+                    raise _error("parallel spool directory creation produced a link/reparse point")
+                created_identity = _directory_identity(created)
+                with _AnchoredSpoolDirectory(
+                    root, "parallel spool directory"
+                ) as anchored:
+                    if anchored._chain[-1][1] != created_identity:
+                        raise _error("parallel spool directory identity changed after creation")
+                    _publish_spool_owner(anchored, owner_bytes)
+                anchored_parent.require_unchanged()
+        except GlobalWaterwayPackageError:
+            raise
+        except OSError as error:
+            raise _error("parallel spool directory could not be prepared") from error
+        return root
+    except OSError as error:
+        raise _error("parallel spool directory could not be inspected") from error
+    if (
+        stat.S_ISLNK(existing.st_mode)
+        or not stat.S_ISDIR(existing.st_mode)
+        or _is_reparse(existing)
+    ):
+        raise _error("parallel spool directory must be a plain non-link directory")
+    try:
+        with _AnchoredSpoolDirectory(root, "parallel spool directory") as anchored:
+            owner_handle, _owner_identity = _open_matching_spool_owner(
+                anchored,
+                owner_bytes,
+                delete_access=False,
+            )
+            try:
+                removable = _validated_spool_children(
+                    anchored,
+                    allow_batch_children=True,
+                )
+                for name, identity in removable:
+                    _remove_validated_spool_child(anchored, name, identity)
+                if _validated_spool_children(
+                    anchored,
+                    allow_batch_children=False,
+                ):
+                    raise _error("parallel spool cleanup left a child behind")
+            finally:
+                owner_handle.close()
+    except GlobalWaterwayPackageError:
+        raise
+    except OSError as error:
+        raise _error("parallel spool directory could not be resumed safely") from error
+    return root
+
+
+def finish_spool_directory(
+    spool_directory: str | os.PathLike[str],
+    *,
+    package_id: str,
+    render_run_identity_sha256: str,
+    source_document_sha256: str,
+) -> None:
+    root = _absolute_spool_directory(spool_directory)
+    owner_bytes = _spool_owner_bytes(
+        package_id=package_id,
+        render_run_identity_sha256=render_run_identity_sha256,
+        source_document_sha256=source_document_sha256,
+    )
+    try:
+        with _AnchoredSpoolDirectory(root, "parallel spool directory") as anchored:
+            root_identity = anchored._chain[-1][1]
+            owner_handle, owner_identity = _open_matching_spool_owner(
+                anchored,
+                owner_bytes,
+                delete_access=True,
+            )
+            try:
+                children = _validated_spool_children(
+                    anchored,
+                    allow_batch_children=False,
+                )
+                if children:
+                    raise _error("parallel spool directory is not empty")
+                anchored.dispose_existing_open_file(
+                    _SPOOL_OWNER_FILE,
+                    owner_handle,
+                    owner_identity,
+                    label="parallel spool owner",
+                )
+                owner_handle = None
+            finally:
+                if owner_handle is not None:
+                    owner_handle.close()
+        _remove_exact_empty_directory(root, root_identity)
+    except GlobalWaterwayPackageError:
+        raise
+    except OSError as error:
+        raise _error("parallel spool directory could not be finished safely") from error
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadyRenderJob:
+    start_ordinal: int
+    end_ordinal_exclusive: int
+    features: tuple[ExactWaterwayFeature, ...]
+    point_count: int
+    input_bytes: bytes
+    source_range_sha256: str
+    spool_byte_quota: int
+
+
+@dataclass(slots=True)
+class _RenderReservation:
+    start_ordinal: int
+    end_ordinal_exclusive: int
+    features: tuple[ExactWaterwayFeature, ...]
+    point_count: int
+    input_byte_count: int
+    source_range_sha256: str
+    spool_byte_quota: int
+    spool_reserved: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class _CompletedRenderBatch:
+    descriptor: SpoolDescriptor
+    frames: tuple[FeatureRenderFrame, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _YieldedSpool:
+    descriptor: SpoolDescriptor
+    file_identity: tuple[int, int]
+
+
+class ParallelFeatureRenderer:
+    """Bounded parent scheduler that returns authenticated batches by ordinal."""
+
+    def __init__(
+        self,
+        features: Iterable[ExactWaterwayFeature],
+        *,
+        start_ordinal: int,
+        package_id: str,
+        source_generation_sha256: str,
+        classifier_sha256: str,
+        zooms: Sequence[int],
+        render_run_identity_sha256: str,
+        spool_directory: str | os.PathLike[str],
+        limits: ParallelRenderLimits,
+        pause_after_features: int | None = None,
+        executor_factory: Callable[..., object] = ProcessPoolExecutor,
+        wait_for_futures: Callable[..., object] = wait,
+        disk_usage: Callable[[Path], object] = shutil.disk_usage,
+    ) -> None:
+        _require_int(
+            start_ordinal,
+            0,
+            _MAX_FILE_ORDINAL,
+            "parallel render start ordinal",
+        )
+        if type(limits) is not ParallelRenderLimits:
+            raise _error("parallel render limits are invalid")
+        self._limits = limits
+        self._source_generation_sha256 = _require_sha256_text(
+            source_generation_sha256, "parallel render source generation identity"
+        )
+        self._classifier_sha256 = _require_sha256_text(
+            classifier_sha256, "parallel render classifier identity"
+        )
+        self._render_run_identity_sha256 = _require_sha256_text(
+            render_run_identity_sha256, "parallel render run identity"
+        )
+        expected_owner_bytes = _spool_owner_bytes(
+            package_id=package_id,
+            render_run_identity_sha256=self._render_run_identity_sha256,
+            source_document_sha256=self._source_generation_sha256,
+        )
+        try:
+            self._zooms = tuple(zooms)
+        except TypeError as error:
+            raise _error("parallel render zooms are invalid") from error
+        if (
+            not self._zooms
+            or len(self._zooms) > 30
+            or len(set(self._zooms)) != len(self._zooms)
+            or any(
+                type(zoom) is not int or not 0 <= zoom <= 29
+                for zoom in self._zooms
+            )
+        ):
+            raise _error("parallel render zooms are invalid")
+        if pause_after_features is not None:
+            _require_int(
+                pause_after_features,
+                1,
+                _MAX_FILE_ORDINAL,
+                "parallel render pause feature count",
+            )
+            if pause_after_features < start_ordinal:
+                raise _error("parallel render pause target precedes its start ordinal")
+        self._pause_after_features = pause_after_features
+        self._root = _absolute_spool_directory(spool_directory)
+        root_chain = _require_plain_directory(
+            self._root, "parallel render spool directory"
+        )
+        self._root_identity = root_chain[-1][1]
+        try:
+            owner_stat = os.lstat(self._root / _SPOOL_OWNER_FILE)
+        except OSError as error:
+            raise _error("parallel render spool owner is unavailable") from error
+        _require_plain_file_stat(owner_stat, "parallel render spool owner")
+        if not 0 < owner_stat.st_size <= _SPOOL_OWNER_MAX_BYTES:
+            raise _error("parallel render spool owner byte count is invalid")
+        owner_handle = _open_verified_spool(
+            self._root / _SPOOL_OWNER_FILE,
+            owner_stat,
+        )
+        try:
+            self._owner_bytes = _read_exact_handle_bytes(
+                owner_handle,
+                owner_stat.st_size,
+                label="parallel render spool owner",
+            )
+        finally:
+            owner_handle.close()
+        _require_directory_chain_unchanged(
+            root_chain, "parallel render spool directory"
+        )
+        if self._owner_bytes != expected_owner_bytes:
+            raise _error("parallel render spool owner differs from the active render run")
+        self._owner_identity = _owned_file_identity(owner_stat)
+        if limits.max_spool_bytes_per_job > _MAX_SPOOL_BYTES:
+            raise _error("parallel render per-job spool quota exceeds the batch codec")
+        try:
+            self._feature_iterator = iter(features)
+        except TypeError as error:
+            raise _error("parallel render features must be one iterable") from error
+        if not callable(executor_factory) or not callable(wait_for_futures) or not callable(disk_usage):
+            raise _error("parallel render scheduler dependency is invalid")
+        self._wait_for_futures = wait_for_futures
+        self._disk_usage = disk_usage
+        self._next_input_ordinal = start_ordinal
+        self._next_yield_ordinal = start_ordinal
+        self._pending_feature: tuple[ExactWaterwayFeature, bytes, int] | None = None
+        self._ready_job: _ReadyRenderJob | None = None
+        self._input_exhausted = pause_after_features == start_ordinal
+        self._reservations: dict[int, _RenderReservation] = {}
+        self._future_to_start: dict[object, int] = {}
+        self._completed: dict[int, _CompletedRenderBatch] = {}
+        self._known_ranges: dict[tuple[int, int], int] = {}
+        self._yielded_spools: dict[str, _YieldedSpool] = {}
+        self._closed = False
+        self._failed = False
+        try:
+            spawn_context = multiprocessing.get_context("spawn")
+            self._executor = executor_factory(
+                max_workers=limits.workers,
+                mp_context=spawn_context,
+            )
+        except BaseException as error:
+            raise _error("parallel render executor could not be created") from error
+
+    def __enter__(self) -> ParallelFeatureRenderer:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        if not self._closed:
+            self._abort(exception)
+        return False
+
+    def _take_input_feature(self) -> tuple[ExactWaterwayFeature, bytes, int] | None:
+        if self._pending_feature is not None:
+            pending = self._pending_feature
+            self._pending_feature = None
+            return pending
+        try:
+            feature = next(self._feature_iterator)
+        except StopIteration:
+            self._input_exhausted = True
+            return None
+        if type(feature) is not ExactWaterwayFeature:
+            raise _error("parallel render input contains a non-exact feature")
+        encoded = _encode_exact_feature(feature)
+        return feature, encoded, _feature_point_count(feature)
+
+    def _fixed_job_byte_count(self) -> int:
+        spool_path_bytes = _utf8(
+            str(self._root), _MAX_PATH_BYTES, "parallel render spool directory"
+        )
+        return (
+            len(_JOB_MAGIC)
+            + 1
+            + 8
+            + 4
+            + 32
+            + 32
+            + 1
+            + len(self._zooms)
+            + 32
+            + 4
+            + len(spool_path_bytes)
+            + 8
+        )
+
+    def _source_range_from_encoded_features(
+        self, encoded_features: Sequence[bytes]
+    ) -> str:
+        digest = hashlib.sha256(_SOURCE_RANGE_DOMAIN)
+        for encoded in encoded_features:
+            digest.update(struct.pack("<Q", len(encoded)))
+            digest.update(encoded)
+        return digest.hexdigest()
+
+    def _build_ready_job(self) -> _ReadyRenderJob | None:
+        if self._ready_job is not None:
+            return self._ready_job
+        if self._input_exhausted:
+            return None
+        if (
+            self._pause_after_features is not None
+            and self._next_input_ordinal >= self._pause_after_features
+        ):
+            self._input_exhausted = True
+            return None
+        start = self._next_input_ordinal
+        checkpoint_end = ((start // _RENDER_CHECKPOINT_FEATURES) + 1) * _RENDER_CHECKPOINT_FEATURES
+        boundary = min(start + _MAX_BATCH_FEATURES, checkpoint_end)
+        if self._pause_after_features is not None:
+            boundary = min(boundary, self._pause_after_features)
+        features: list[ExactWaterwayFeature] = []
+        encoded_features: list[bytes] = []
+        point_count = 0
+        encoded_byte_count = self._fixed_job_byte_count()
+        while start + len(features) < boundary:
+            next_feature = self._take_input_feature()
+            if next_feature is None:
+                break
+            feature, encoded, points = next_feature
+            candidate_points = point_count + points
+            candidate_bytes = encoded_byte_count + 4 + len(encoded)
+            exceeds_batching_bound = (
+                candidate_points > self._limits.max_points_per_job
+                or candidate_bytes > self._limits.max_input_bytes_per_job
+            )
+            if features and exceeds_batching_bound:
+                self._pending_feature = next_feature
+                break
+            features.append(feature)
+            encoded_features.append(encoded)
+            point_count = candidate_points
+            encoded_byte_count = candidate_bytes
+            if exceeds_batching_bound:
+                break
+        if not features:
+            return None
+        job = FeatureRenderBatchJob(
+            start_ordinal=start,
+            features=tuple(features),
+            source_generation_sha256=self._source_generation_sha256,
+            classifier_sha256=self._classifier_sha256,
+            zooms=self._zooms,
+            render_run_identity_sha256=self._render_run_identity_sha256,
+            spool_directory=str(self._root),
+            spool_byte_quota=self._limits.max_spool_bytes_per_job,
+        )
+        job_bytes = encode_feature_batch_job(job)
+        if len(job_bytes) != encoded_byte_count:
+            raise _error("parallel render exact input byte accounting differs")
+        end = start + len(features)
+        self._next_input_ordinal = end
+        self._ready_job = _ReadyRenderJob(
+            start_ordinal=start,
+            end_ordinal_exclusive=end,
+            features=tuple(features),
+            point_count=point_count,
+            input_bytes=job_bytes,
+            source_range_sha256=self._source_range_from_encoded_features(
+                encoded_features
+            ),
+            spool_byte_quota=self._limits.max_spool_bytes_per_job,
+        )
+        return self._ready_job
+
+    def _reservation_totals(self) -> tuple[int, int]:
+        return (
+            sum(value.point_count for value in self._reservations.values()),
+            sum(value.input_byte_count for value in self._reservations.values()),
+        )
+
+    def _inspect_spool_inventory(self) -> tuple[int, int, int]:
+        actual_by_range: dict[tuple[int, int], int] = {}
+        names_by_range: dict[tuple[int, int], int] = {}
+        try:
+            with _AnchoredSpoolDirectory(
+                self._root, "parallel render spool directory"
+            ) as anchored:
+                if anchored._chain[-1][1] != self._root_identity:
+                    raise _error("parallel render spool directory identity changed")
+                owner_handle, owner_identity = _open_matching_spool_owner(
+                    anchored,
+                    self._owner_bytes,
+                    delete_access=False,
+                )
+                try:
+                    if owner_identity != self._owner_identity:
+                        raise _error("parallel render spool owner identity changed")
+                    try:
+                        names = tuple(
+                            sorted(entry.name for entry in os.scandir(self._root))
+                        )
+                    except OSError as error:
+                        raise _error(
+                            "parallel render spool inventory is unavailable"
+                        ) from error
+                    for name in names:
+                        if name == _SPOOL_OWNER_FILE:
+                            continue
+                        matched = _SPOOL_CHILD_PATTERN.fullmatch(name)
+                        if matched is None:
+                            raise _error(
+                                "parallel render spool contains an unknown child"
+                            )
+                        key = (
+                            int(matched.group("start")),
+                            int(matched.group("end")),
+                        )
+                        quota = self._known_ranges.get(key)
+                        if quota is None:
+                            raise _error(
+                                "parallel render spool contains an unknown range child"
+                            )
+                        reservation = self._reservations.get(key[0])
+                        if matched.group("temporary") is not None and (
+                            reservation is None or not reservation.spool_reserved
+                        ):
+                            raise _error(
+                                "parallel render spool contains a stale temporary child"
+                            )
+                        observed = anchored.lstat(name)
+                        _require_plain_file_stat(
+                            observed, "parallel render spool child"
+                        )
+                        if observed.st_size > quota:
+                            raise _error(
+                                "parallel render spool child exceeds its byte quota"
+                            )
+                        actual_by_range[key] = (
+                            actual_by_range.get(key, 0) + observed.st_size
+                        )
+                        names_by_range[key] = names_by_range.get(key, 0) + 1
+                        if actual_by_range[key] > quota:
+                            raise _error(
+                                "parallel render spool range exceeds its byte quota"
+                            )
+                        if names_by_range[key] > 1:
+                            raise _error(
+                                "parallel render spool range has multiple children"
+                            )
+                    anchored.require_unchanged()
+                finally:
+                    owner_handle.close()
+        except GlobalWaterwayPackageError:
+            raise
+        except OSError as error:
+            raise _error("parallel render spool inventory could not be verified") from error
+        actual_bytes = sum(actual_by_range.values())
+        reserved_growth = 0
+        for reservation in self._reservations.values():
+            if reservation.spool_reserved:
+                key = (reservation.start_ordinal, reservation.end_ordinal_exclusive)
+                reserved_growth += reservation.spool_byte_quota - actual_by_range.get(key, 0)
+        accounted_bytes = actual_bytes + reserved_growth
+        if actual_bytes > self._limits.max_spool_bytes:
+            raise _error("parallel render actual spool bytes exceed their bound")
+        if accounted_bytes > self._limits.max_spool_bytes:
+            raise _error("parallel render actual and reserved spool bytes exceed their bound")
+        return actual_bytes, reserved_growth, accounted_bytes
+
+    def _ready_job_fits(self, ready: _ReadyRenderJob) -> bool:
+        if ready.point_count > self._limits.max_in_flight_points:
+            raise _error("parallel render job points exceed the aggregate bound")
+        if len(ready.input_bytes) > self._limits.max_in_flight_input_bytes:
+            raise _error("parallel render job input bytes exceed the aggregate bound")
+        if ready.spool_byte_quota > self._limits.max_spool_bytes:
+            raise _error("parallel render job spool reservation exceeds the aggregate bound")
+        points, input_bytes = self._reservation_totals()
+        aggregate_blocked = (
+            len(self._reservations) >= self._limits.max_in_flight_jobs
+            or points + ready.point_count > self._limits.max_in_flight_points
+            or input_bytes + len(ready.input_bytes)
+            > self._limits.max_in_flight_input_bytes
+        )
+        if aggregate_blocked:
+            if not self._reservations:
+                raise _error("parallel render job cannot fit its aggregate bounds")
+            return False
+        _actual, reserved_growth, accounted = self._inspect_spool_inventory()
+        if accounted + ready.spool_byte_quota > self._limits.max_spool_bytes:
+            if self._reservations:
+                return False
+            raise _error("parallel render spool reservation exceeds its bound")
+        try:
+            free_bytes = self._disk_usage(self._root).free
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise _error("parallel render spool capacity could not be measured") from error
+        if type(free_bytes) is not int or free_bytes < 0:
+            raise _error("parallel render spool capacity is invalid")
+        required_free = (
+            _DESTINATION_FREE_SPACE_RESERVE
+            + reserved_growth
+            + ready.spool_byte_quota
+        )
+        if free_bytes < required_free:
+            if self._reservations:
+                return False
+            raise _error("parallel render spool capacity cannot retain the destination reserve")
+        return True
+
+    def _submit_ready_job(self, ready: _ReadyRenderJob) -> None:
+        key = (ready.start_ordinal, ready.end_ordinal_exclusive)
+        if ready.start_ordinal in self._reservations or key in self._known_ranges:
+            raise _error("parallel render attempted to reserve a duplicate ordinal range")
+        reservation = _RenderReservation(
+            start_ordinal=ready.start_ordinal,
+            end_ordinal_exclusive=ready.end_ordinal_exclusive,
+            features=ready.features,
+            point_count=ready.point_count,
+            input_byte_count=len(ready.input_bytes),
+            source_range_sha256=ready.source_range_sha256,
+            spool_byte_quota=ready.spool_byte_quota,
+        )
+        self._reservations[ready.start_ordinal] = reservation
+        self._known_ranges[key] = ready.spool_byte_quota
+        future = self._executor.submit(render_feature_batch_job, ready.input_bytes)
+        if future in self._future_to_start:
+            raise _error("parallel render executor returned a duplicate future")
+        self._future_to_start[future] = ready.start_ordinal
+        self._ready_job = None
+
+    def _submit_until_blocked(self) -> None:
+        while len(self._reservations) < self._limits.max_in_flight_jobs:
+            ready = self._build_ready_job()
+            if ready is None:
+                return
+            if not self._ready_job_fits(ready):
+                return
+            self._submit_ready_job(ready)
+
+    def _accept_completed_future(self, future: object) -> None:
+        try:
+            start = self._future_to_start[future]
+        except KeyError as error:
+            raise _error("parallel render waiter returned an unknown child future") from error
+        reservation = self._reservations[start]
+        descriptor = future.result()
+        if type(descriptor) is not SpoolDescriptor:
+            raise _error("parallel render worker returned a malformed descriptor")
+        expected_range = (
+            reservation.start_ordinal,
+            reservation.end_ordinal_exclusive,
+        )
+        if (descriptor.start_ordinal, descriptor.end_ordinal_exclusive) != expected_range:
+            raise _error("parallel render descriptor ordinal range differs")
+        if descriptor.file_name != _expected_batch_file_name(*expected_range):
+            raise _error("parallel render descriptor name lies outside its owned range")
+        if descriptor.point_count != reservation.point_count:
+            raise _error("parallel render descriptor point count differs")
+        if descriptor.source_range_sha256 != reservation.source_range_sha256:
+            raise _error("parallel render descriptor source-range SHA-256 differs")
+        if descriptor.byte_count > reservation.spool_byte_quota:
+            raise _error("parallel render descriptor exceeds its reserved spool bytes")
+        frames = read_feature_batch(
+            self._root,
+            descriptor,
+            expected_render_run_identity_sha256=self._render_run_identity_sha256,
+            expected_source_range_sha256=reservation.source_range_sha256,
+        )
+        if tuple(frame.ordinal for frame in frames) != tuple(
+            range(reservation.start_ordinal, reservation.end_ordinal_exclusive)
+        ):
+            raise _error("parallel render frames are not the reserved contiguous range")
+        self._inspect_spool_inventory()
+        reservation.spool_reserved = False
+        self._completed[start] = _CompletedRenderBatch(descriptor, frames)
+        del self._future_to_start[future]
+
+    def _collect_completed(self) -> None:
+        done = []
+        for future, start in self._future_to_start.items():
+            if future.done():
+                done.append((start, future))
+        for _start, future in sorted(done, key=lambda row: row[0]):
+            self._accept_completed_future(future)
+
+    def _wait_for_one_completion(self) -> None:
+        futures = tuple(self._future_to_start)
+        if not futures:
+            raise _error("parallel render has no future for its ordinal gap")
+        waited = self._wait_for_futures(
+            futures,
+            return_when=FIRST_COMPLETED,
+        )
+        try:
+            completed_values, _pending_values = waited
+            done = tuple(completed_values)
+        except (TypeError, ValueError) as error:
+            raise _error("parallel render waiter returned malformed completed futures") from error
+        if not done:
+            raise _error("parallel render waiter returned no completed future")
+        known = set(futures)
+        if any(future not in known or not future.done() for future in done):
+            raise _error("parallel render waiter returned an unknown or incomplete future")
+        for future in sorted(done, key=lambda value: self._future_to_start[value]):
+            self._accept_completed_future(future)
+        self._collect_completed()
+
+    def _take_next_completed(
+        self,
+    ) -> tuple[
+        SpoolDescriptor,
+        tuple[ExactWaterwayFeature, ...],
+        tuple[FeatureRenderFrame, ...],
+    ]:
+        start = self._next_yield_ordinal
+        completed = self._completed[start]
+        reservation = self._reservations[start]
+        if reservation.spool_reserved:
+            raise _error("parallel render attempted to yield an unverified spool")
+        if completed.descriptor.end_ordinal_exclusive != reservation.end_ordinal_exclusive:
+            raise _error("parallel render completed range differs from its reservation")
+        self._inspect_spool_inventory()
+        self._remember_yielded_spool(completed.descriptor)
+        del self._completed[start]
+        del self._reservations[start]
+        self._next_yield_ordinal = reservation.end_ordinal_exclusive
+        return completed.descriptor, reservation.features, completed.frames
+
+    def _remember_yielded_spool(self, descriptor: SpoolDescriptor) -> None:
+        if descriptor.file_name in self._yielded_spools:
+            raise _error("parallel render yielded the same spool more than once")
+        with _AnchoredSpoolDirectory(
+            self._root, "parallel render spool directory"
+        ) as anchored:
+            if anchored._chain[-1][1] != self._root_identity:
+                raise _error("parallel render spool directory identity changed")
+            owner_handle, owner_identity = _open_matching_spool_owner(
+                anchored,
+                self._owner_bytes,
+                delete_access=False,
+            )
+            try:
+                if owner_identity != self._owner_identity:
+                    raise _error("parallel render spool owner identity changed")
+                spool_handle, file_identity = anchored.open_existing(
+                    descriptor.file_name,
+                    label="parallel render yielded spool",
+                    delete_access=False,
+                )
+                try:
+                    observed = os.fstat(spool_handle.fileno())
+                    if observed.st_size != descriptor.byte_count:
+                        raise _error(
+                            "parallel render yielded spool byte count changed"
+                        )
+                finally:
+                    spool_handle.close()
+            finally:
+                owner_handle.close()
+        self._yielded_spools[descriptor.file_name] = _YieldedSpool(
+            descriptor=descriptor,
+            file_identity=file_identity,
+        )
+
+    def release_batch(self, descriptor: SpoolDescriptor) -> None:
+        """Delete one yielded spool after its parent checkpoint is committed."""
+
+        if self._failed:
+            raise _error("parallel render preserves yielded spools after failure")
+        if type(descriptor) is not SpoolDescriptor:
+            raise _error("parallel render release requires a yielded descriptor")
+        yielded = self._yielded_spools.get(descriptor.file_name)
+        if yielded is None or yielded.descriptor != descriptor:
+            raise _error("parallel render release requires an exact yielded spool")
+        key = (descriptor.start_ordinal, descriptor.end_ordinal_exclusive)
+        removed = False
+        try:
+            with _AnchoredSpoolDirectory(
+                self._root, "parallel render spool directory"
+            ) as anchored:
+                if anchored._chain[-1][1] != self._root_identity:
+                    raise _error("parallel render spool directory identity changed")
+                owner_handle, owner_identity = _open_matching_spool_owner(
+                    anchored,
+                    self._owner_bytes,
+                    delete_access=False,
+                )
+                try:
+                    if owner_identity != self._owner_identity:
+                        raise _error("parallel render spool owner identity changed")
+                    spool_handle, file_identity = anchored.open_existing(
+                        descriptor.file_name,
+                        label="parallel render yielded spool",
+                        delete_access=True,
+                    )
+                    try:
+                        if file_identity != yielded.file_identity:
+                            raise _error(
+                                "parallel render yielded spool identity changed before release"
+                            )
+                        observed = os.fstat(spool_handle.fileno())
+                        if observed.st_size != descriptor.byte_count:
+                            raise _error(
+                                "parallel render yielded spool byte count changed before release"
+                            )
+                        anchored.dispose_existing_open_file(
+                            descriptor.file_name,
+                            spool_handle,
+                            file_identity,
+                            label="parallel render yielded spool",
+                        )
+                        spool_handle = None
+                        removed = True
+                    finally:
+                        if spool_handle is not None:
+                            spool_handle.close()
+                finally:
+                    owner_handle.close()
+        finally:
+            if removed:
+                del self._yielded_spools[descriptor.file_name]
+                removed_quota = self._known_ranges.pop(key, None)
+                if removed_quota is None:
+                    raise _error(
+                        "parallel render released range lacked its reservation"
+                    )
+        self._inspect_spool_inventory()
+
+    def _shutdown(self, *, cancel_futures: bool) -> None:
+        if self._closed:
+            return
+        if cancel_futures:
+            for future in tuple(self._future_to_start):
+                future.cancel()
+        self._executor.shutdown(
+            wait=True,
+            cancel_futures=cancel_futures,
+        )
+        self._closed = True
+
+    def _abort(self, exception: BaseException | None = None) -> None:
+        self._failed = True
+        try:
+            self._shutdown(cancel_futures=True)
+        except BaseException as shutdown_error:
+            if exception is None:
+                raise
+            exception.add_note(f"parallel render executor shutdown failed: {shutdown_error}")
+
+    def close(self) -> None:
+        if not self._closed:
+            self._abort()
+
+    def next_batch(
+        self,
+    ) -> tuple[
+        SpoolDescriptor,
+        tuple[ExactWaterwayFeature, ...],
+        tuple[FeatureRenderFrame, ...],
+    ] | None:
+        if self._failed:
+            raise _error("parallel render scheduler cannot continue after failure")
+        if self._closed:
+            return None
+        try:
+            while True:
+                self._collect_completed()
+                if self._next_yield_ordinal in self._completed:
+                    return self._take_next_completed()
+                self._submit_until_blocked()
+                self._collect_completed()
+                if self._next_yield_ordinal in self._completed:
+                    return self._take_next_completed()
+                if not self._reservations and self._input_exhausted:
+                    self._inspect_spool_inventory()
+                    self._shutdown(cancel_futures=False)
+                    return None
+                self._wait_for_one_completion()
+        except BaseException as error:
+            self._abort(error)
+            raise
+
+
 __all__ = [
     "FeatureRenderBatchJob",
     "FeatureRenderFrame",
+    "ParallelFeatureRenderer",
+    "ParallelRenderLimits",
     "RecordingHotIdRegistry",
     "RegistryClaim",
     "SpoolDescriptor",
     "decode_feature_batch_job",
     "encode_feature_batch_job",
+    "finish_spool_directory",
+    "prepare_spool_directory",
     "read_feature_batch",
     "render_feature_batch_job",
     "replay_registry_claims",

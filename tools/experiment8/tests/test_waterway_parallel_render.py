@@ -4,8 +4,10 @@ import hashlib
 import os
 import tempfile
 import unittest
+from concurrent.futures import FIRST_COMPLETED, Future
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tools.experiment8.osm_global_waterway_package import GlobalWaterwayPackageError
@@ -16,10 +18,14 @@ from tools.experiment8.osm_global_waterway_renderer import (
 from tools.experiment8.semantic_model import HotIdRegistry
 from tools.experiment8.waterway_parallel_render import (
     FeatureRenderBatchJob,
+    ParallelFeatureRenderer,
+    ParallelRenderLimits,
     RecordingHotIdRegistry,
     SpoolDescriptor,
     decode_feature_batch_job,
     encode_feature_batch_job,
+    finish_spool_directory,
+    prepare_spool_directory,
     read_feature_batch,
     render_feature_batch_job,
     replay_registry_claims,
@@ -29,6 +35,7 @@ from tools.experiment8.waterway_parallel_render import (
 _SOURCE_SHA256 = hashlib.sha256(b"parallel source fixture").hexdigest()
 _CLASSIFIER_SHA256 = hashlib.sha256(b"parallel classifier fixture").hexdigest()
 _RUN_SHA256 = hashlib.sha256(b"parallel render run fixture").hexdigest()
+_PACKAGE_ID = "world-osm-named-waterways-test"
 
 
 def _feature(source_id: int = 7) -> ExactWaterwayFeature:
@@ -77,6 +84,133 @@ def _render(root: Path) -> tuple[SpoolDescriptor, tuple[object, ...]]:
         expected_source_range_sha256=descriptor.source_range_sha256,
     )
     return descriptor, frames
+
+
+def _limits(**changes: int) -> ParallelRenderLimits:
+    values = {
+        "workers": 2,
+        "max_in_flight_jobs": 4,
+        "max_in_flight_points": 24,
+        "max_points_per_job": 6,
+        "max_in_flight_input_bytes": 16 * 1024 * 1024,
+        "max_input_bytes_per_job": 4 * 1024 * 1024,
+        "max_spool_bytes": 32 * 1024 * 1024,
+        "max_spool_bytes_per_job": 8 * 1024 * 1024,
+    }
+    values.update(changes)
+    return ParallelRenderLimits(**values)
+
+
+def _prepare(root: Path) -> Path:
+    return prepare_spool_directory(
+        root,
+        package_id=_PACKAGE_ID,
+        render_run_identity_sha256=_RUN_SHA256,
+        source_document_sha256=_SOURCE_SHA256,
+    )
+
+
+class _ReverseExecutor:
+    def __init__(self, *, result_mutator=None, completion_hook=None, **kwargs) -> None:
+        self.creation_arguments = kwargs
+        self.result_mutator = result_mutator
+        self.completion_hook = completion_hook
+        self.submissions: list[tuple[Future, object, tuple[object, ...]]] = []
+        self.shutdown_calls: list[tuple[bool, bool]] = []
+        self.peak_jobs = 0
+        self.peak_points = 0
+        self.peak_input_bytes = 0
+        self.peak_spool_bytes = 0
+
+    def submit(self, function, *arguments):
+        future: Future = Future()
+        self.submissions.append((future, function, arguments))
+        pending = [row for row in self.submissions if not row[0].done()]
+        jobs = [decode_feature_batch_job(row[2][0]) for row in pending]
+        self.peak_jobs = max(self.peak_jobs, len(pending))
+        self.peak_points = max(
+            self.peak_points,
+            sum(sum(len(part) for part in feature.parts) for job in jobs for feature in job.features),
+        )
+        self.peak_input_bytes = max(
+            self.peak_input_bytes,
+            sum(len(row[2][0]) for row in pending),
+        )
+        self.peak_spool_bytes = max(
+            self.peak_spool_bytes,
+            sum(job.spool_byte_quota for job in jobs),
+        )
+        return future
+
+    def wait(self, futures, *, return_when):
+        self.assert_wait_contract(futures, return_when)
+        unfinished = [row for row in self.submissions if row[0] in futures and not row[0].done()]
+        if not unfinished:
+            return ({future for future in futures if future.done()}, set())
+        future, function, arguments = unfinished[-1]
+        try:
+            result = function(*arguments)
+            if self.result_mutator is not None:
+                result = self.result_mutator(result)
+            if self.completion_hook is not None:
+                self.completion_hook(decode_feature_batch_job(arguments[0]), result)
+        except BaseException as error:
+            future.set_exception(error)
+        else:
+            future.set_result(result)
+        return ({future}, set(futures) - {future})
+
+    def assert_wait_contract(self, futures, return_when) -> None:
+        if return_when is not FIRST_COMPLETED:
+            raise AssertionError("scheduler did not request FIRST_COMPLETED")
+        if not futures:
+            raise AssertionError("scheduler waited without submitted work")
+
+    def shutdown(self, *, wait=True, cancel_futures=False) -> None:
+        self.shutdown_calls.append((wait, cancel_futures))
+
+
+class _ReverseExecutorFactory:
+    def __init__(self, **executor_options) -> None:
+        self.executor_options = executor_options
+        self.instances: list[_ReverseExecutor] = []
+
+    def __call__(self, **kwargs) -> _ReverseExecutor:
+        executor = _ReverseExecutor(**self.executor_options, **kwargs)
+        self.instances.append(executor)
+        return executor
+
+    def wait(self, futures, *, return_when):
+        if not self.instances:
+            raise AssertionError("scheduler waited before creating its executor")
+        return self.instances[0].wait(futures, return_when=return_when)
+
+
+def _parallel_renderer(
+    root: Path,
+    features: tuple[ExactWaterwayFeature, ...],
+    factory: _ReverseExecutorFactory,
+    *,
+    start_ordinal: int = 0,
+    pause_after_features: int | None = None,
+    limits: ParallelRenderLimits | None = None,
+    free_bytes: int = 100_000_000_000,
+) -> ParallelFeatureRenderer:
+    return ParallelFeatureRenderer(
+        features,
+        start_ordinal=start_ordinal,
+        package_id=_PACKAGE_ID,
+        source_generation_sha256=_SOURCE_SHA256,
+        classifier_sha256=_CLASSIFIER_SHA256,
+        zooms=(10, 11),
+        render_run_identity_sha256=_RUN_SHA256,
+        spool_directory=root,
+        pause_after_features=pause_after_features,
+        limits=limits or _limits(),
+        executor_factory=factory,
+        wait_for_futures=factory.wait,
+        disk_usage=lambda _path: SimpleNamespace(free=free_bytes),
+    )
 
 
 class RecordingRegistryTests(unittest.TestCase):
@@ -151,6 +285,385 @@ class FeatureBatchJobCodecTests(unittest.TestCase):
             ).to_bytes(4, "little")
             with self.assertRaisesRegex(GlobalWaterwayPackageError, "feature count"):
                 decode_feature_batch_job(bytes(encoded))
+
+
+class ParallelRenderLimitTests(unittest.TestCase):
+    def test_limits_reject_invalid_workers_jobs_and_resources(self) -> None:
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "worker count"):
+            _limits(workers=0)
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "in-flight job"):
+            _limits(workers=3, max_in_flight_jobs=2)
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "resource bound"):
+            _limits(max_in_flight_points=0)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ProcessPool worker ceiling")
+    def test_limits_reject_workers_above_the_windows_process_pool_ceiling(self) -> None:
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "worker count"):
+            _limits(workers=62, max_in_flight_jobs=62)
+
+
+class ParallelSpoolOwnershipTests(unittest.TestCase):
+    def test_prepare_publishes_exact_owner_and_matching_resume_removes_only_batch_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "spool"
+            self.assertEqual(root, _prepare(root))
+            owner_before = (root / "owner.json").read_bytes()
+            batch = root / "000000000000-000000000001.batch"
+            temporary_batch = root / "000000000001-000000000002.batch.tmp-123"
+            batch.write_bytes(b"non-authoritative batch")
+            temporary_batch.write_bytes(b"non-authoritative temp")
+
+            self.assertEqual(root, _prepare(root))
+
+            self.assertEqual(owner_before, (root / "owner.json").read_bytes())
+            self.assertFalse(batch.exists())
+            self.assertFalse(temporary_batch.exists())
+
+    def test_prepare_rejects_wrong_owner_without_removing_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "spool"
+            _prepare(root)
+            batch = root / "000000000000-000000000001.batch"
+            batch.write_bytes(b"preserve me")
+
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "owner"):
+                prepare_spool_directory(
+                    root,
+                    package_id=_PACKAGE_ID,
+                    render_run_identity_sha256="0" * 64,
+                    source_document_sha256=_SOURCE_SHA256,
+                )
+
+            self.assertEqual(b"preserve me", batch.read_bytes())
+
+    def test_prepare_rejects_unknown_child_before_removing_known_children(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "spool"
+            _prepare(root)
+            batch = root / "000000000000-000000000001.batch"
+            batch.write_bytes(b"preserve known evidence too")
+            unknown = root / "notes.txt"
+            unknown.write_bytes(b"unknown")
+
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "unknown|child"):
+                _prepare(root)
+
+            self.assertTrue(batch.exists())
+            self.assertTrue(unknown.exists())
+
+    def test_prepare_rejects_stale_noncanonical_temp_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "spool"
+            _prepare(root)
+            stale = root / "000000000000-000000000001.batch.tmp-stale"
+            stale.write_bytes(b"unknown")
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "unknown|child|temp"):
+                _prepare(root)
+            self.assertTrue(stale.exists())
+
+    def test_prepare_rejects_link_or_reparse_directory_and_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real = base / "real"
+            real.mkdir()
+            linked = base / "linked"
+            try:
+                os.symlink(real, linked, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks are unavailable: {error}")
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "link|reparse"):
+                _prepare(linked)
+
+            root = base / "spool"
+            _prepare(root)
+            owner = root / "owner.json"
+            owner_bytes = owner.read_bytes()
+            target = base / "owner-target.json"
+            target.write_bytes(owner_bytes)
+            owner.unlink()
+            os.symlink(target, owner)
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "owner|link|reparse"):
+                _prepare(root)
+
+    def test_finish_requires_an_exact_empty_owned_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "spool"
+            _prepare(root)
+            remaining = root / "000000000000-000000000001.batch"
+            remaining.write_bytes(b"not yet committed")
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "empty|child|batch"):
+                finish_spool_directory(
+                    root,
+                    package_id=_PACKAGE_ID,
+                    render_run_identity_sha256=_RUN_SHA256,
+                    source_document_sha256=_SOURCE_SHA256,
+                )
+            self.assertTrue(remaining.exists())
+            remaining.unlink()
+            finish_spool_directory(
+                root,
+                package_id=_PACKAGE_ID,
+                render_run_identity_sha256=_RUN_SHA256,
+                source_document_sha256=_SOURCE_SHA256,
+            )
+            self.assertFalse(root.exists())
+
+
+class ParallelFeatureRendererTests(unittest.TestCase):
+    def test_renderer_rejects_owner_for_another_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "owner|package"):
+                ParallelFeatureRenderer(
+                    (_feature(100),),
+                    start_ordinal=0,
+                    package_id="another-package",
+                    source_generation_sha256=_SOURCE_SHA256,
+                    classifier_sha256=_CLASSIFIER_SHA256,
+                    zooms=(10, 11),
+                    render_run_identity_sha256=_RUN_SHA256,
+                    spool_directory=root,
+                    limits=_limits(),
+                    executor_factory=factory,
+                    wait_for_futures=factory.wait,
+                    disk_usage=lambda _path: SimpleNamespace(
+                        free=100_000_000_000
+                    ),
+                )
+            self.assertEqual([], factory.instances)
+
+    def test_release_batch_deletes_only_yielded_spools_and_prunes_range_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            limits = _limits()
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                tuple(_feature(source_id) for source_id in range(110, 130)),
+                factory,
+                limits=limits,
+            )
+            peak_known_ranges = 0
+            descriptors = []
+            while (batch := renderer.next_batch()) is not None:
+                descriptor = batch[0]
+                descriptors.append(descriptor)
+                renderer.release_batch(descriptor)
+                self.assertFalse((root / descriptor.file_name).exists())
+                peak_known_ranges = max(
+                    peak_known_ranges,
+                    len(renderer._known_ranges),
+                )
+
+            self.assertGreater(len(descriptors), limits.max_in_flight_jobs)
+            self.assertLessEqual(peak_known_ranges, limits.max_in_flight_jobs)
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "yielded|release"):
+                renderer.release_batch(descriptors[0])
+
+    def test_default_spawn_executor_renders_one_canonical_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            limits = _limits(
+                workers=1,
+                max_in_flight_jobs=1,
+                max_in_flight_points=3,
+                max_points_per_job=3,
+                max_in_flight_input_bytes=4 * 1024 * 1024,
+                max_spool_bytes=8 * 1024 * 1024,
+            )
+            renderer = ParallelFeatureRenderer(
+                (_feature(101),),
+                start_ordinal=0,
+                package_id=_PACKAGE_ID,
+                source_generation_sha256=_SOURCE_SHA256,
+                classifier_sha256=_CLASSIFIER_SHA256,
+                zooms=(10, 11),
+                render_run_identity_sha256=_RUN_SHA256,
+                spool_directory=root,
+                limits=limits,
+                disk_usage=lambda _path: SimpleNamespace(free=100_000_000_000),
+            )
+
+            descriptor, exact, frames = renderer.next_batch()
+
+            self.assertEqual((0, 1), (descriptor.start_ordinal, descriptor.end_ordinal_exclusive))
+            self.assertEqual((101,), tuple(feature.source_id for feature in exact))
+            self.assertEqual((0,), tuple(frame.ordinal for frame in frames))
+            self.assertIsNone(renderer.next_batch())
+
+    def test_reverse_completion_still_yields_checkpoint_and_pause_aligned_ranges_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            features = tuple(_feature(source_id) for source_id in range(1, 8))
+            limits = _limits()
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                features,
+                factory,
+                start_ordinal=98,
+                pause_after_features=103,
+                limits=limits,
+            )
+            batches = []
+            while True:
+                batch = renderer.next_batch()
+                if batch is None:
+                    break
+                batches.append(batch)
+
+            descriptors = [batch[0] for batch in batches]
+            self.assertEqual(
+                [(98, 100), (100, 102), (102, 103)],
+                [(value.start_ordinal, value.end_ordinal_exclusive) for value in descriptors],
+            )
+            self.assertEqual(
+                list(range(98, 103)),
+                [frame.ordinal for _descriptor, _features, frames in batches for frame in frames],
+            )
+            self.assertEqual(
+                [1, 2, 3, 4, 5],
+                [feature.source_id for _descriptor, exact, _frames in batches for feature in exact],
+            )
+            executor = factory.instances[0]
+            self.assertEqual("spawn", executor.creation_arguments["mp_context"].get_start_method())
+            self.assertLessEqual(executor.peak_jobs, limits.max_in_flight_jobs)
+            self.assertLessEqual(executor.peak_points, limits.max_in_flight_points)
+            self.assertLessEqual(executor.peak_input_bytes, limits.max_in_flight_input_bytes)
+            self.assertLessEqual(executor.peak_spool_bytes, limits.max_spool_bytes)
+            self.assertEqual([(True, False)], executor.shutdown_calls)
+            for _future, function, arguments in executor.submissions:
+                self.assertIs(render_feature_batch_job, function)
+                self.assertEqual(1, len(arguments))
+                self.assertIs(bytes, type(arguments[0]))
+                decoded = decode_feature_batch_job(arguments[0])
+                self.assertEqual(arguments[0], encode_feature_batch_job(decoded))
+
+    def test_jobs_split_at_exact_encoded_input_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            first = _feature(41)
+            second = _feature(42)
+            one = replace(_job(root, first), start_ordinal=0)
+            two = replace(_job(root, first, second), start_ordinal=0)
+            one_size = len(encode_feature_batch_job(one))
+            two_size = len(encode_feature_batch_job(two))
+            self.assertLess(one_size, two_size)
+            limits = _limits(
+                max_points_per_job=100,
+                max_input_bytes_per_job=two_size - 1,
+                max_in_flight_input_bytes=4 * two_size,
+            )
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(root, (first, second), factory, limits=limits)
+            ranges = []
+            while (batch := renderer.next_batch()) is not None:
+                ranges.append((batch[0].start_ordinal, batch[0].end_ordinal_exclusive))
+            self.assertEqual([(0, 1), (1, 2)], ranges)
+            self.assertTrue(
+                all(
+                    len(arguments[0]) <= limits.max_input_bytes_per_job
+                    for _future, _function, arguments in factory.instances[0].submissions
+                )
+            )
+
+    def test_one_feature_over_a_per_job_batching_bound_runs_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                (_feature(51), _feature(52)),
+                factory,
+                limits=_limits(max_points_per_job=2),
+            )
+            ranges = []
+            while (batch := renderer.next_batch()) is not None:
+                ranges.append((batch[0].start_ordinal, batch[0].end_ordinal_exclusive))
+            self.assertEqual([(0, 1), (1, 2)], ranges)
+
+    def test_wrong_source_range_or_out_of_root_descriptor_fails_and_preserves_spool(self) -> None:
+        corruptions = (
+            (lambda descriptor: replace(descriptor, source_range_sha256="0" * 64), "source-range"),
+            (lambda descriptor: replace(descriptor, file_name="../outside.batch"), "name|root|range"),
+        )
+        for corrupt, message in corruptions:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary:
+                root = _prepare(Path(temporary) / "spool")
+                factory = _ReverseExecutorFactory(result_mutator=corrupt)
+                renderer = _parallel_renderer(root, (_feature(61),), factory)
+                with self.assertRaisesRegex(GlobalWaterwayPackageError, message):
+                    renderer.next_batch()
+                self.assertEqual(1, len(tuple(root.glob("*.batch"))))
+                self.assertEqual((True, True), factory.instances[0].shutdown_calls[-1])
+
+    def test_submission_rejects_reserved_spool_or_low_free_space_before_executor_use(self) -> None:
+        cases = (
+            (
+                _limits(max_spool_bytes=4 * 1024 * 1024),
+                100_000_000_000,
+                "spool",
+            ),
+            (
+                _limits(),
+                1_500_000_000 + 8 * 1024 * 1024 - 1,
+                "capacity|space|reserve",
+            ),
+        )
+        for limits, free_bytes, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary:
+                root = _prepare(Path(temporary) / "spool")
+                factory = _ReverseExecutorFactory()
+                renderer = _parallel_renderer(
+                    root,
+                    (_feature(71),),
+                    factory,
+                    limits=limits,
+                    free_bytes=free_bytes,
+                )
+                with self.assertRaisesRegex(GlobalWaterwayPackageError, message):
+                    renderer.next_batch()
+                self.assertEqual([], factory.instances[0].submissions)
+
+    def test_excess_actual_spool_bytes_are_rejected_after_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            limits = _limits()
+
+            def add_excess_temp(job: FeatureRenderBatchJob, _descriptor: SpoolDescriptor) -> None:
+                name = f"{job.start_ordinal:012d}-{job.start_ordinal + len(job.features):012d}.batch.tmp-999999"
+                (root / name).write_bytes(b"x" * (limits.max_spool_bytes_per_job + 1))
+
+            factory = _ReverseExecutorFactory(completion_hook=add_excess_temp)
+            renderer = _parallel_renderer(root, (_feature(81),), factory, limits=limits)
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "spool.*byte|quota"):
+                renderer.next_batch()
+            self.assertTrue(tuple(root.glob("*.batch*")))
+
+    def test_active_scheduler_rejects_an_unknown_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            (root / "unowned.txt").write_text("unknown", encoding="utf-8")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(root, (_feature(91),), factory)
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "unknown|child"):
+                renderer.next_batch()
+            self.assertEqual([], factory.instances[0].submissions)
+
+    def test_active_scheduler_rejects_same_inode_owner_content_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(root, (_feature(92),), factory)
+            owner = root / "owner.json"
+            original = owner.read_bytes()
+            owner.write_bytes(b"x" * len(original))
+
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "owner"):
+                renderer.next_batch()
+
+            self.assertEqual([], factory.instances[0].submissions)
 
 
 class AuthenticatedFeatureBatchTests(unittest.TestCase):
