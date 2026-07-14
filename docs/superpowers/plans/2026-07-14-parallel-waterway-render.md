@@ -139,7 +139,8 @@ class ParallelRenderLimits:
     max_spool_bytes_per_job: int
 
     def __post_init__(self) -> None:
-        if not 1 <= self.workers <= 64:
+        platform_maximum = 61 if os.name == "nt" else 64
+        if not 1 <= self.workers <= platform_maximum:
             raise GlobalWaterwayPackageError("parallel render worker count is invalid")
         if not self.workers <= self.max_in_flight_jobs <= self.workers * 2:
             raise GlobalWaterwayPackageError("parallel render in-flight job bound is invalid")
@@ -250,7 +251,7 @@ git commit -m "Parallelize deterministic waterway feature staging"
 
 - [ ] **Step 1: Write failing CLI/progress tests**
 
-Require workers 1..64, positive pause count, and a fresh real progress parent. Reject existing unknown progress, link/reparse, or output-contained progress. After a checkpoint require schema, render-run SHA, checkpoint count 100, committed count, total admitted count, worker count, UTC/monotonic elapsed, throughput, and hard bounds. Cover a crash after SQLite commit but before progress replacement: authenticated same-run progress behind the checkpoint advances; progress ahead or bound to another run fails.
+Require workers 1..61 on Windows (Python 3.11's honest `ProcessPoolExecutor` ceiling) and 1..64 elsewhere, positive pause count, and a fresh real progress parent. Reject existing unknown progress, link/reparse, or output-contained progress. After a checkpoint require schema, render-run SHA, checkpoint count 100, committed count, total admitted count, worker count, UTC/monotonic elapsed, throughput, and hard bounds. Cover a crash after SQLite commit but before progress replacement: authenticated same-run progress behind the checkpoint advances; progress ahead or bound to another run fails.
 
 - [ ] **Step 2: Thread execution-only controls**
 

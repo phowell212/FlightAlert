@@ -128,7 +128,8 @@ subject to the hard output ceiling. Capacity checks include all outstanding
 spool reservations and retain the full-fidelity policy's 1,500,000,000-byte
 destination reserve. The worker count and batch partition are execution
 scheduling only; changing them cannot change the render identity or package
-bytes.
+bytes. Python 3.11's Windows `ProcessPoolExecutor` supports at most 61 workers
+(64 elsewhere); production remains explicitly capped at 10 on this host.
 
 ## Determinism And Provenance
 
