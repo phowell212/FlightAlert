@@ -2170,5 +2170,666 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             )
 
 
+class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
+    _SOURCE_TABLES = (
+        "roots",
+        "nodes",
+        "ways",
+        "way_nodes",
+        "relations",
+        "relation_members",
+        "admission_roots",
+        "admission_candidates",
+    )
+    _RENDERER_TABLES = (
+        "records",
+        "rendered_features",
+        "feature_ids",
+        "variant_ids",
+        "geometry_ids",
+        "label_ids",
+        "sourced_ids",
+    )
+    _PINNED_META = (
+        "runIdentity",
+        "checkpoint",
+        "admissionRunIdentity",
+        "admissionCheckpoint",
+        "admissionReceipt",
+        "ingestReceipt",
+        "renderRunIdentity",
+        "renderCheckpoint",
+    )
+
+    @staticmethod
+    def _fact(raw: bytes) -> tuple[int, str]:
+        return len(raw), hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _canonical(document: object) -> bytes:
+        return (
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    def _prepare_recovery(self, root: Path):
+        import shutil
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_recovery import (
+            WaterwayRenderRecoveryAuthority,
+        )
+
+        extraction = root / "extraction"
+        extraction.mkdir(parents=True)
+        opl = extraction / "waterway-closure.opl"
+        roots = extraction / "root-ids.txt"
+        shutil.copyfile(CLOSURE_FIXTURE, opl)
+        shutil.copyfile(ROOT_FIXTURE, roots)
+        binding = _source_binding(opl, roots)
+        output = root / "recovered"
+        work = root / "work"
+        paused = pipeline.render_fixture_global_waterway_package(
+            opl_path=opl,
+            root_ids_path=roots,
+            output_directory=output,
+            work_directory=work,
+            package_id="fixture-global-waterways-v3",
+            source_binding=binding,
+            checkpoint_objects=4,
+            checkpoint_features=2,
+            pause_after_features=3,
+        )
+        self.assertEqual("paused", paused.state)
+        database = work / "waterway-state.sqlite"
+        connection = sqlite3.connect(database)
+        try:
+            old_run = store._meta_get(connection, "runIdentity")
+            old_run["code"]["store"]["sha256"] = "0" * 64
+            old_run_sha256 = hashlib.sha256(self._canonical(old_run)).hexdigest()
+            ingest = store._meta_get(connection, "ingestReceipt")
+            ingest["runIdentity"] = old_run
+            ingest["runIdentitySha256"] = old_run_sha256
+            old_render = store._meta_get(connection, "renderRunIdentity")
+            old_render["code"]["store"]["sha256"] = "0" * 64
+            store._meta_set(connection, "runIdentity", old_run)
+            store._meta_set(connection, "ingestReceipt", ingest)
+            store._meta_set(connection, "renderRunIdentity", old_render)
+            connection.commit()
+            meta_facts = []
+            for key in self._PINNED_META:
+                raw = bytes(
+                    connection.execute(
+                        "SELECT value FROM meta WHERE key=?", (key,)
+                    ).fetchone()[0]
+                )
+                byte_count, sha256 = self._fact(raw)
+                meta_facts.append((key, byte_count, sha256))
+            source_counts = tuple(
+                (table, int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]))
+                for table in self._SOURCE_TABLES
+            )
+            renderer_counts = tuple(
+                (table, int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]))
+                for table in self._RENDERER_TABLES
+            )
+        finally:
+            connection.close()
+
+        database_raw = database.read_bytes()
+        failure_log = root / "stderr.log"
+        failure_log.write_bytes(
+            b"Traceback (most recent call last):\n"
+            b"sqlite3.OperationalError: database is locked\n"
+        )
+        failure_raw = failure_log.read_bytes()
+        authority = WaterwayRenderRecoveryAuthority(
+            package_id="fixture-global-waterways-v3",
+            checkpoint_features=2,
+            rendered_features=3,
+            database_bytes=len(database_raw),
+            database_sha256=hashlib.sha256(database_raw).hexdigest(),
+            failure_log_bytes=len(failure_raw),
+            failure_log_sha256=hashlib.sha256(failure_raw).hexdigest(),
+            meta_identities=tuple(meta_facts),
+            source_table_counts=source_counts,
+            renderer_table_counts=renderer_counts,
+        )
+        database_fact = {
+            "bytes": authority.database_bytes,
+            "sha256": authority.database_sha256,
+        }
+        failure_fact = {
+            "bytes": authority.failure_log_bytes,
+            "sha256": authority.failure_log_sha256,
+        }
+        backup_receipt = root / "backup-receipt.json"
+        backup_receipt.write_bytes(
+            self._canonical(
+                {
+                    "backupDatabase": database_fact,
+                    "failureLog": failure_fact,
+                    "schema": (
+                        "flightalert.experiment8.osm-global-waterway-"
+                        "render-recovery-backup.v1"
+                    ),
+                    "sourceDatabase": database_fact,
+                    "state": "complete",
+                }
+            )
+        )
+        return {
+            "authority": authority,
+            "backup_receipt": backup_receipt,
+            "binding": binding,
+            "database": database,
+            "extraction": extraction,
+            "failure_log": failure_log,
+            "opl": opl,
+            "output": output,
+            "roots": roots,
+            "work": work,
+        }
+
+    def _snapshot_database(self, database: Path):
+        import sqlite3
+
+        connection = sqlite3.connect(database)
+        try:
+            counts = {
+                table: int(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                )
+                for table in self._SOURCE_TABLES + self._RENDERER_TABLES
+            }
+            meta = {
+                key: bytes(value)
+                for key, value in connection.execute(
+                    "SELECT key,value FROM meta ORDER BY key"
+                )
+            }
+        finally:
+            connection.close()
+        return database.read_bytes(), counts, meta
+
+    def test_recovery_extraction_reader_binds_receipt_without_reparsing_opl(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as source
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            extraction = Path(temporary) / "extraction"
+            extraction.mkdir()
+            for name in source._extraction_inventory_names():
+                (extraction / name).write_bytes((name + "\n").encode("utf-8"))
+            artifact_names = {
+                "checkpoint": "extraction-checkpoint.json",
+                "closureOpl": "waterway-closure.opl",
+                "closurePbf": "waterway-closure.pbf",
+                "rootIds": "root-ids.txt",
+                "selectionManifest": "selection-final-manifest.json",
+            }
+            artifacts = {}
+            for key, name in artifact_names.items():
+                raw = (extraction / name).read_bytes()
+                artifacts[key] = {
+                    "bytes": len(raw),
+                    "name": name,
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+            planet_path = Path(temporary) / "planet-260629.osm.pbf"
+            planet_fact = {
+                "bytes": 123,
+                "path": str(planet_path),
+                "sha256": hashlib.sha256(b"planet").hexdigest(),
+            }
+            receipt = {
+                "artifacts": artifacts,
+                "schema": "flightalert.experiment8.osm-global-waterway-extraction.v1",
+                "source": planet_fact,
+            }
+            receipt_raw = self._canonical(receipt)
+            (extraction / "extraction-receipt.json").write_bytes(receipt_raw)
+            with patch.object(source, "EXPECTED_PLANET_PATH", planet_path), patch.object(
+                source, "EXPECTED_PLANET_BYTES", planet_fact["bytes"]
+            ), patch.object(
+                source, "EXPECTED_PLANET_SHA256", planet_fact["sha256"]
+            ):
+                binding = recovery._source_binding_from_recovery_extraction(
+                    extraction
+                )
+                self.assertEqual(str(planet_path), binding.planet_path)
+                self.assertEqual(
+                    artifacts["closureOpl"]["sha256"], binding.closure_opl_sha256
+                )
+                self.assertEqual(
+                    hashlib.sha256(receipt_raw).hexdigest(),
+                    binding.extraction_receipt_sha256,
+                )
+
+                manifest = extraction / "selection-final-manifest.json"
+                manifest.write_bytes(b"drifted-selection-manifest\n")
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "selectionManifest identity differs",
+                ):
+                    recovery._source_binding_from_recovery_extraction(extraction)
+
+    def _recover(self, prepared, *, pause_after_features: int | None = None):
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        patches = [
+            patch.object(
+                pipeline,
+                "_PRODUCTION_WATERWAY_RENDER_RECOVERY_AUTHORITY",
+                prepared["authority"],
+            ),
+            patch.object(
+                pipeline,
+                "_source_binding_from_recovery_extraction",
+                return_value=prepared["binding"],
+            ),
+        ]
+        stage_patch = None
+        if pause_after_features is not None:
+            real_stage = store._stage_renderer_records
+
+            def pause_stage(*args, **kwargs):
+                kwargs["pause_after_features"] = pause_after_features
+                return real_stage(*args, **kwargs)
+
+            stage_patch = patch.object(
+                store, "_stage_renderer_records", side_effect=pause_stage
+            )
+            patches.append(stage_patch)
+        with patches[0], patches[1]:
+            if stage_patch is None:
+                return pipeline.recover_global_waterway_package(
+                    extraction_directory=prepared["extraction"],
+                    output_directory=prepared["output"],
+                    work_directory=prepared["work"],
+                    package_id="fixture-global-waterways-v3",
+                    failure_log=prepared["failure_log"],
+                    backup_receipt=prepared["backup_receipt"],
+                    checkpoint_features=2,
+                )
+            with stage_patch:
+                return pipeline.recover_global_waterway_package(
+                    extraction_directory=prepared["extraction"],
+                    output_directory=prepared["output"],
+                    work_directory=prepared["work"],
+                    package_id="fixture-global-waterways-v3",
+                    failure_log=prepared["failure_log"],
+                    backup_receipt=prepared["backup_receipt"],
+                    checkpoint_features=2,
+                )
+
+    def test_recovery_rejects_every_independent_drift_before_mutation(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        mutations = (
+            "ingest-incomplete",
+            "admission-incomplete",
+            "fatal-nonzero",
+            "old-run-identity",
+            "old-render-identity",
+            "checkpoint",
+            "render-row-count",
+            "source-hash",
+            "failure-log-hash",
+            "backup-receipt",
+            "sqlite-sidecar",
+            "output-exists",
+            "partial-exists",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                connection = sqlite3.connect(prepared["database"])
+                try:
+                    if mutation == "ingest-incomplete":
+                        document = store._meta_get(connection, "checkpoint")
+                        document["ingestComplete"] = False
+                        store._meta_set(connection, "checkpoint", document)
+                    elif mutation == "admission-incomplete":
+                        document = store._meta_get(connection, "admissionCheckpoint")
+                        document["admissionComplete"] = False
+                        store._meta_set(connection, "admissionCheckpoint", document)
+                    elif mutation == "fatal-nonzero":
+                        document = store._meta_get(connection, "admissionReceipt")
+                        document["fatalCount"] = 1
+                        store._meta_set(connection, "admissionReceipt", document)
+                    elif mutation == "old-run-identity":
+                        document = store._meta_get(connection, "runIdentity")
+                        document["checkpointObjects"] += 1
+                        store._meta_set(connection, "runIdentity", document)
+                    elif mutation == "old-render-identity":
+                        document = store._meta_get(connection, "renderRunIdentity")
+                        document["checkpointFeatures"] += 1
+                        store._meta_set(connection, "renderRunIdentity", document)
+                    elif mutation == "checkpoint":
+                        document = store._meta_get(connection, "renderCheckpoint")
+                        document["renderedFeatures"] += 1
+                        store._meta_set(connection, "renderCheckpoint", document)
+                    elif mutation == "render-row-count":
+                        connection.execute(
+                            "DELETE FROM records WHERE rowid=(SELECT MIN(rowid) FROM records)"
+                        )
+                    connection.commit()
+                finally:
+                    connection.close()
+                if mutation == "source-hash":
+                    prepared["roots"].write_bytes(
+                        prepared["roots"].read_bytes() + b"w999\n"
+                    )
+                elif mutation == "failure-log-hash":
+                    prepared["failure_log"].write_bytes(b"different failure\n")
+                elif mutation == "backup-receipt":
+                    document = json.loads(prepared["backup_receipt"].read_text("utf-8"))
+                    document["state"] = "failed"
+                    prepared["backup_receipt"].write_bytes(self._canonical(document))
+                elif mutation == "output-exists":
+                    prepared["output"].mkdir()
+                elif mutation == "partial-exists":
+                    prepared["output"].with_name(
+                        prepared["output"].name + ".partial-unowned"
+                    ).mkdir()
+                before = self._snapshot_database(prepared["database"])
+                if mutation == "sqlite-sidecar":
+                    Path(str(prepared["database"]) + "-journal").write_bytes(
+                        b"sidecar"
+                    )
+                with self.assertRaises(GlobalWaterwayPackageError):
+                    self._recover(prepared)
+                self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
+    def test_recovered_publication_matches_clean_except_recovery_evidence(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepare_recovery(root / "recovery")
+            result = self._recover(prepared)
+            clean_output = root / "clean"
+            clean = pipeline.render_fixture_global_waterway_package(
+                opl_path=prepared["opl"],
+                root_ids_path=prepared["roots"],
+                output_directory=clean_output,
+                work_directory=root / "clean-work",
+                package_id="fixture-global-waterways-v3",
+                source_binding=prepared["binding"],
+                checkpoint_objects=4,
+                checkpoint_features=2,
+            )
+            self.assertEqual("complete", result.state)
+            self.assertEqual("complete", clean.state)
+            for name in ("manifest.json", "records.fadictpack", "tile-index.bin"):
+                self.assertEqual(
+                    (prepared["output"] / name).read_bytes(),
+                    (clean_output / name).read_bytes(),
+                    name,
+                )
+            recovered_receipt = json.loads(
+                (prepared["output"] / "build-receipt.json").read_text("utf-8")
+            )
+            clean_receipt = json.loads(
+                (clean_output / "build-receipt.json").read_text("utf-8")
+            )
+            recovery = recovered_receipt["build"].pop("recovery")
+            self.assertEqual(1, recovery["resetCount"])
+            self.assertTrue(recovery["transactionComplete"])
+            self.assertEqual(clean_receipt, recovered_receipt)
+
+    def test_recovery_interruption_resumes_without_second_reset(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_package as pipeline
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepare_recovery(root / "recovery")
+            paused = self._recover(prepared, pause_after_features=4)
+            self.assertEqual("paused", paused.state)
+            connection = sqlite3.connect(prepared["database"])
+            try:
+                first_receipt = bytes(
+                    connection.execute(
+                        "SELECT value FROM meta WHERE key='renderRecoveryReceipt'"
+                    ).fetchone()[0]
+                )
+                self.assertEqual(
+                    1, store._meta_get(connection, "renderRecoveryReceipt")["resetCount"]
+                )
+            finally:
+                connection.close()
+            resumed = self._recover(prepared)
+            self.assertEqual("complete", resumed.state)
+            connection = sqlite3.connect(prepared["database"])
+            try:
+                second_receipt = bytes(
+                    connection.execute(
+                        "SELECT value FROM meta WHERE key='renderRecoveryReceipt'"
+                    ).fetchone()[0]
+                )
+            finally:
+                connection.close()
+            first_document = json.loads(first_receipt)
+            second_document = json.loads(second_receipt)
+            self.assertGreater(second_document.pop("publishedDirectoryBytes"), 0)
+            self.assertEqual(1, second_document["resetCount"])
+            self.assertEqual(first_document, second_document)
+
+            clean_output = root / "clean"
+            clean = pipeline.render_fixture_global_waterway_package(
+                opl_path=prepared["opl"],
+                root_ids_path=prepared["roots"],
+                output_directory=clean_output,
+                work_directory=root / "clean-work",
+                package_id="fixture-global-waterways-v3",
+                source_binding=prepared["binding"],
+                checkpoint_objects=4,
+                checkpoint_features=2,
+            )
+            self.assertEqual("complete", clean.state)
+            for name in ("manifest.json", "records.fadictpack", "tile-index.bin"):
+                self.assertEqual(
+                    (prepared["output"] / name).read_bytes(),
+                    (clean_output / name).read_bytes(),
+                    name,
+                )
+
+    def test_recovery_resume_rejects_malformed_sqlite_overhead_canonically(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        for malformed in (None, "0", True, -1):
+            with self.subTest(malformed=malformed), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                paused = self._recover(prepared, pause_after_features=4)
+                self.assertEqual("paused", paused.state)
+                connection = sqlite3.connect(prepared["database"])
+                try:
+                    receipt = store._meta_get(connection, "renderRecoveryReceipt")
+                    receipt["sqliteEvidenceOverheadBytes"] = malformed
+                    store._meta_set(connection, "renderRecoveryReceipt", receipt)
+                    connection.commit()
+                finally:
+                    connection.close()
+                before = self._snapshot_database(prepared["database"])
+                with self.assertRaises(GlobalWaterwayPackageError):
+                    self._recover(prepared)
+                self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
+    def test_recovery_rechecks_exact_incident_under_write_reservation(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_validate = recovery._validate_first_recovery
+            drifted_snapshot = None
+
+            def drift_after_validation(*args, **kwargs):
+                nonlocal drifted_snapshot
+                plan = real_validate(*args, **kwargs)
+                connection = sqlite3.connect(prepared["database"])
+                try:
+                    checkpoint = store._meta_get(connection, "renderCheckpoint")
+                    checkpoint["renderedFeatures"] += 1
+                    store._meta_set(connection, "renderCheckpoint", checkpoint)
+                    connection.commit()
+                finally:
+                    connection.close()
+                drifted_snapshot = self._snapshot_database(prepared["database"])
+                return plan
+
+            with patch.object(
+                recovery,
+                "_validate_first_recovery",
+                side_effect=drift_after_validation,
+            ):
+                with self.assertRaises(GlobalWaterwayPackageError):
+                    self._recover(prepared)
+            self.assertIsNotNone(drifted_snapshot)
+            self.assertEqual(
+                drifted_snapshot,
+                self._snapshot_database(prepared["database"]),
+            )
+
+    def test_recovery_rechecks_output_paths_under_write_reservation(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        for mutation in ("output", "partial"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                real_validate = recovery._validate_first_recovery
+                validated_snapshot = None
+
+                def create_path_after_validation(*args, **kwargs):
+                    nonlocal validated_snapshot
+                    plan = real_validate(*args, **kwargs)
+                    if mutation == "output":
+                        prepared["output"].mkdir()
+                    else:
+                        prepared["output"].with_name(
+                            prepared["output"].name + ".partial-raced"
+                        ).mkdir()
+                    validated_snapshot = self._snapshot_database(
+                        prepared["database"]
+                    )
+                    return plan
+
+                with patch.object(
+                    recovery,
+                    "_validate_first_recovery",
+                    side_effect=create_path_after_validation,
+                ):
+                    with self.assertRaises(GlobalWaterwayPackageError):
+                        self._recover(prepared)
+                self.assertIsNotNone(validated_snapshot)
+                self.assertEqual(
+                    validated_snapshot,
+                    self._snapshot_database(prepared["database"]),
+                )
+
+    def test_recovery_rechecks_output_paths_after_database_hash(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        for mutation in ("output", "partial"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                real_identity = recovery.source_module._stream_identity
+                hashed_snapshot = None
+
+                def create_path_after_database_hash(path, label):
+                    nonlocal hashed_snapshot
+                    identity = real_identity(path, label)
+                    if label == "waterway recovery source database":
+                        if mutation == "output":
+                            prepared["output"].mkdir()
+                        else:
+                            prepared["output"].with_name(
+                                prepared["output"].name + ".partial-raced"
+                            ).mkdir()
+                        hashed_snapshot = self._snapshot_database(
+                            prepared["database"]
+                        )
+                    return identity
+
+                with patch.object(
+                    recovery.source_module,
+                    "_stream_identity",
+                    side_effect=create_path_after_database_hash,
+                ):
+                    with self.assertRaises(GlobalWaterwayPackageError):
+                        self._recover(prepared)
+                self.assertIsNotNone(hashed_snapshot)
+                self.assertEqual(
+                    hashed_snapshot,
+                    self._snapshot_database(prepared["database"]),
+                )
+
+    def test_recovery_code_identity_is_rechecked_before_publication(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            current = recovery._recovery_code_identity()
+            drifted = dict(current)
+            drifted["sha256"] = "f" * 64
+            with patch.object(
+                recovery,
+                "_recovery_code_identity",
+                side_effect=(current, current, current, drifted),
+            ) as identity:
+                with self.assertRaises(GlobalWaterwayPackageError):
+                    self._recover(prepared)
+            self.assertEqual(4, identity.call_count)
+            self.assertFalse(prepared["output"].exists())
+            self.assertFalse(prepared["output"].is_symlink())
+
+    def test_store_cannot_mint_recovery_authority(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        self.assertNotIn("recover_global_waterway_package", store.__all__)
+        self.assertFalse(hasattr(store, "recover_global_waterway_package"))
+        self.assertFalse(hasattr(store, "WaterwayRenderRecoveryAuthority"))
+
+
 if __name__ == "__main__":
     unittest.main()

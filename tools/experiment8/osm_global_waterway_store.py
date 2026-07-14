@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO, Iterator, Mapping, Sequence
+from typing import BinaryIO, Callable, Iterator, Mapping, Sequence
 
 from . import osm_global_waterway_package as source_module
 from .osm_global_waterway_package import (
@@ -3336,12 +3336,28 @@ def _commit_render_checkpoint(
     _meta_set(connection, "renderCheckpoint", dict(checkpoint))
     _meta_set(connection, "peaks", peaks)
     connection.commit()
+    observed_bytes = _recovery_adjusted_database_bytes(connection, database_path)
     peaks["observedPersistentSqliteBytesAtCheckpoints"] = max(
         peaks["observedPersistentSqliteBytesAtCheckpoints"],
-        _database_bytes(database_path),
+        observed_bytes,
     )
     _meta_set(connection, "peaks", peaks)
     connection.commit()
+
+
+def _recovery_adjusted_database_bytes(
+    connection: sqlite3.Connection, database_path: Path
+) -> int:
+    recovery = _meta_get(connection, "renderRecoveryReceipt")
+    recovery_overhead = 0
+    if isinstance(recovery, dict):
+        value = recovery.get("sqliteEvidenceOverheadBytes")
+        if type(value) is not int or value < 0:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery SQLite evidence overhead is malformed"
+            )
+        recovery_overhead = value
+    return max(0, _database_bytes(database_path) - recovery_overhead)
 
 
 def _configure_render_connection(connection: sqlite3.Connection) -> None:
@@ -3860,7 +3876,7 @@ def _build_runtime_files(
         raise GlobalWaterwayPackageError("waterway runtime file length differs after flush")
     peaks["observedPersistentSqliteBytesAtCheckpoints"] = max(
         peaks["observedPersistentSqliteBytesAtCheckpoints"],
-        _database_bytes(database_path),
+        _recovery_adjusted_database_bytes(connection, database_path),
     )
     _meta_set(
         connection,
@@ -4029,6 +4045,8 @@ def _publish(
     render_run_identity: Mapping[str, object],
     render_run_sha256: str,
     code_identities: Mapping[str, object],
+    recovery_receipt: Mapping[str, object] | None = None,
+    immediate_pre_publish_validator: Callable[[], None] | None = None,
 ) -> Mapping[str, object]:
     if _render_code_identities() != dict(code_identities):
         raise GlobalWaterwayPackageError("waterway renderer code identity drifted")
@@ -4037,6 +4055,23 @@ def _publish(
     _, present_tiles, peaks = _build_runtime_files(
         connection, database_path, partial_directory, windows
     )
+    if recovery_receipt is not None:
+        ingest_for_peak = _meta_get(connection, "ingestReceipt")
+        ingest_peak = (
+            ingest_for_peak.get("peakResources", {}).get(
+                "observedPersistentSqliteBytesAtCheckpoints"
+            )
+            if isinstance(ingest_for_peak, dict)
+            else None
+        )
+        if type(ingest_peak) is not int or ingest_peak < 0:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery ingest SQLite peak evidence is malformed"
+            )
+        peaks["observedPersistentSqliteBytesAtCheckpoints"] = max(
+            ingest_peak,
+            _recovery_adjusted_database_bytes(connection, database_path),
+        )
     records_identity = _stream_identity(
         partial_directory / "records.fadictpack", "waterway records"
     )
@@ -4147,6 +4182,8 @@ def _publish(
         "schema": _BUILD_SCHEMA,
         "source": source_binding.document(),
     }
+    if recovery_receipt is not None:
+        receipt["build"]["recovery"] = dict(recovery_receipt)
     final_semantic_document = {
         "admissionAggregateSha256": render_run_identity[
             "admissionAggregateSha256"
@@ -4163,16 +4200,49 @@ def _publish(
         b"FAE8WATERFINAL2\0" + _canonical_json_bytes(final_semantic_document)
     ).hexdigest()
     projection["publishedDirectoryBytes"] = 0
-    for _ in range(8):
-        receipt_bytes = _canonical_json_bytes(receipt)
-        published_bytes = runtime_bytes + len(receipt_bytes)
-        if projection["publishedDirectoryBytes"] == published_bytes:
-            break
-        projection["publishedDirectoryBytes"] = published_bytes
+    if recovery_receipt is None:
+        for _ in range(8):
+            receipt_bytes = _canonical_json_bytes(receipt)
+            published_bytes = runtime_bytes + len(receipt_bytes)
+            if projection["publishedDirectoryBytes"] == published_bytes:
+                break
+            projection["publishedDirectoryBytes"] = published_bytes
+        else:
+            raise GlobalWaterwayPackageError(
+                "published waterway directory byte accounting did not converge"
+            )
     else:
-        raise GlobalWaterwayPackageError(
-            "published waterway directory byte accounting did not converge"
+        normalized = json.loads(
+            _canonical_json_bytes(receipt).decode("utf-8", "strict")
         )
+        normalized["build"].pop("recovery")
+        normalized_projection = normalized["projection"]
+        for _ in range(8):
+            normalized_bytes = _canonical_json_bytes(normalized)
+            normalized_total = runtime_bytes + len(normalized_bytes)
+            if normalized_projection["publishedDirectoryBytes"] == normalized_total:
+                break
+            normalized_projection["publishedDirectoryBytes"] = normalized_total
+        else:
+            raise GlobalWaterwayPackageError(
+                "recovered waterway normalized byte accounting did not converge"
+            )
+        projection["publishedDirectoryBytes"] = normalized_total
+        final_recovery = dict(recovery_receipt)
+        final_recovery["publishedDirectoryBytes"] = 0
+        receipt["build"]["recovery"] = final_recovery
+        for _ in range(8):
+            receipt_bytes = _canonical_json_bytes(receipt)
+            published_bytes = runtime_bytes + len(receipt_bytes)
+            if final_recovery["publishedDirectoryBytes"] == published_bytes:
+                break
+            final_recovery["publishedDirectoryBytes"] = published_bytes
+        else:
+            raise GlobalWaterwayPackageError(
+                "recovered waterway actual byte accounting did not converge"
+            )
+        _meta_set(connection, "renderRecoveryReceipt", final_recovery)
+        connection.commit()
     enforce_global_waterway_storage_ceiling(published_bytes)
     receipt_path = partial_directory / "build-receipt.json"
     _write_synced(receipt_path, receipt_bytes)
@@ -4261,6 +4331,8 @@ def _publish(
         expected_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
         label="immediate pre-rename build receipt",
     )
+    if immediate_pre_publish_validator is not None:
+        immediate_pre_publish_validator()
     _publish_directory_no_replace(
         partial_directory,
         output_directory,

@@ -82,6 +82,7 @@ class GlobalWaterwayPackageError(ValueError):
 
 
 _PRODUCTION_RENDER_AUTHORITY = object()
+_PRODUCTION_WATERWAY_RENDER_RECOVERY_AUTHORITY = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2376,6 +2377,146 @@ def render_global_waterway_package(
     )
 
 
+def _production_waterway_render_recovery_authority():
+    global _PRODUCTION_WATERWAY_RENDER_RECOVERY_AUTHORITY
+
+    if _PRODUCTION_WATERWAY_RENDER_RECOVERY_AUTHORITY is None:
+        from .osm_global_waterway_recovery import WaterwayRenderRecoveryAuthority
+
+        _PRODUCTION_WATERWAY_RENDER_RECOVERY_AUTHORITY = (
+            WaterwayRenderRecoveryAuthority(
+                package_id="world-osm-named-waterways-260629-v4",
+                checkpoint_features=100,
+                rendered_features=1_200,
+                database_bytes=61_499_113_472,
+                database_sha256=(
+                    "3cfcc52b4e9515f3edff17d3a2862f6b01586ef951eeee3ad9a4f4bb94aaa2ec"
+                ),
+                failure_log_bytes=1_691,
+                failure_log_sha256=(
+                    "b2865741677120135e652b00036b709b60d3275540bca3e89e319d9da3789b0a"
+                ),
+                meta_identities=(
+                    (
+                        "runIdentity",
+                        8_731,
+                        "0bc5867c94122016c93c12857488eca1aea1d546288fcac4d0a59b0685318ced",
+                    ),
+                    (
+                        "checkpoint",
+                        140,
+                        "6193c3605337bbcdd75a1e779e4a5f2064ca197b463663a93e91a12899c71871",
+                    ),
+                    (
+                        "admissionRunIdentity",
+                        1_062,
+                        "47eaaf3357febac558667d3a9731a63e5c5850070a7917af4b975fa92199db0f",
+                    ),
+                    (
+                        "admissionCheckpoint",
+                        799,
+                        "0564c5fbcc61f49a003d6a297fbd294bca1d61f2fc3b19f370ab80f46c272713",
+                    ),
+                    (
+                        "admissionReceipt",
+                        6_357,
+                        "34c8adfaeb1fecb7ea7bc186b3e53fcc098e6e5b90eb0d633c08a34f8a67ac3f",
+                    ),
+                    (
+                        "ingestReceipt",
+                        16_959,
+                        "d08ac5afd74f5497b0c6486e6f7a8053bd4b349e6b7e9ae9ba10284e0c53b55c",
+                    ),
+                    (
+                        "renderRunIdentity",
+                        5_641,
+                        "57a84929898a043d7c93c5289e4569743fa1c9d56434adeea27c86b4fe6b98e4",
+                    ),
+                    (
+                        "renderCheckpoint",
+                        49,
+                        "26366097b684c800aed95805e4ced5b754d9213ddf18e716562f1f1974e4bca2",
+                    ),
+                ),
+                source_table_counts=(
+                    ("roots", 5_433_355),
+                    ("nodes", 276_281_046),
+                    ("ways", 5_565_077),
+                    ("way_nodes", 281_625_420),
+                    ("relations", 137_944),
+                    ("relation_members", 1_621_697),
+                    ("admission_roots", 5_433_355),
+                    ("admission_candidates", 5_426_707),
+                ),
+                renderer_table_counts=(
+                    ("records", 5_605),
+                    ("rendered_features", 1_200),
+                    ("feature_ids", 1_200),
+                    ("variant_ids", 5_008),
+                    ("geometry_ids", 3_356),
+                    ("label_ids", 5_008),
+                    ("sourced_ids", 561),
+                ),
+            )
+        )
+    return _PRODUCTION_WATERWAY_RENDER_RECOVERY_AUTHORITY
+
+
+def _source_binding_from_recovery_extraction(extraction_directory: Path):
+    from .osm_global_waterway_recovery import (
+        _source_binding_from_recovery_extraction as implementation,
+    )
+
+    return implementation(extraction_directory)
+
+
+def recover_global_waterway_package(
+    *,
+    extraction_directory: Path,
+    output_directory: Path,
+    work_directory: Path,
+    package_id: str,
+    failure_log: Path,
+    backup_receipt: Path,
+    checkpoint_features: int = 100,
+) -> GlobalWaterwayBuildResult:
+    """Resume only the exact authenticated 260629 renderer-lock incident."""
+
+    if not all(
+        isinstance(path, Path)
+        for path in (
+            extraction_directory,
+            output_directory,
+            work_directory,
+            failure_log,
+            backup_receipt,
+        )
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery paths must be pathlib.Path values"
+        )
+    source_binding = _source_binding_from_recovery_extraction(
+        extraction_directory
+    )
+    from .osm_global_waterway_recovery import (
+        _recover_bound_global_waterway_package as implementation,
+    )
+
+    return implementation(
+        opl_path=extraction_directory / "waterway-closure.opl",
+        root_ids_path=extraction_directory / "root-ids.txt",
+        output_directory=output_directory,
+        work_directory=work_directory,
+        package_id=package_id,
+        source_binding=source_binding,
+        failure_log=failure_log,
+        backup_receipt=backup_receipt,
+        authority=_production_waterway_render_recovery_authority(),
+        checkpoint_features=checkpoint_features,
+        production_authority=_PRODUCTION_RENDER_AUTHORITY,
+    )
+
+
 def render_fixture_global_waterway_package(
     *,
     opl_path: Path,
@@ -2442,6 +2583,17 @@ def _argument_parser() -> argparse.ArgumentParser:
     )
     render.add_argument("--checkpoint-objects", type=int, default=10_000)
     render.add_argument("--checkpoint-features", type=int, default=100)
+    recover = commands.add_parser(
+        "recover-render",
+        help="resume the one exact authenticated 260629 render-lock incident",
+    )
+    recover.add_argument("--extraction", type=Path, required=True)
+    recover.add_argument("--output", type=Path, required=True)
+    recover.add_argument("--work", type=Path, required=True)
+    recover.add_argument("--package-id", required=True)
+    recover.add_argument("--failure-log", type=Path, required=True)
+    recover.add_argument("--backup-receipt", type=Path, required=True)
+    recover.add_argument("--checkpoint-features", type=int, default=100)
     return parser
 
 
@@ -2468,7 +2620,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selection_run_directory=arguments.selection_run,
                 output_directory=arguments.output,
             )
-        else:
+        elif arguments.command == "render":
             result = render_global_waterway_package(
                 extraction_directory=arguments.extraction,
                 output_directory=arguments.output,
@@ -2476,6 +2628,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 package_id=arguments.package_id,
                 zooms=tuple(range(4, 12)),
                 checkpoint_objects=arguments.checkpoint_objects,
+                checkpoint_features=arguments.checkpoint_features,
+            )
+        else:
+            result = recover_global_waterway_package(
+                extraction_directory=arguments.extraction,
+                output_directory=arguments.output,
+                work_directory=arguments.work,
+                package_id=arguments.package_id,
+                failure_log=arguments.failure_log,
+                backup_receipt=arguments.backup_receipt,
                 checkpoint_features=arguments.checkpoint_features,
             )
         _write_json(
@@ -2521,6 +2683,7 @@ __all__ = [
     "validate_completed_global_selection_run",
     "main",
     "pinned_runtime_document",
+    "recover_global_waterway_package",
     "render_global_waterway_package",
     "render_fixture_global_waterway_package",
     "source_binding_from_extraction_receipt",
