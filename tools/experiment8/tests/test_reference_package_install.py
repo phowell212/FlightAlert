@@ -1508,6 +1508,27 @@ class DurableTransactionTest(unittest.TestCase):
         self.assertIsNotNone(self.device.entry_identity(backup))
         self.assertFalse((self.evidence / "final-success.json").exists())
 
+    def test_visual_evaluation_cannot_be_finalized_as_release_acceptance(self) -> None:
+        policy = installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+        self.plan = replace(self.plan, install_policy=policy)
+        self.device.seed_package(self.final)
+        self.installer().install()
+        journal = json.loads(
+            (self.evidence / "transaction-journal.json").read_text("utf-8")
+        )
+        backup = journal["paths"]["backup"]
+        event_count = len(self.events)
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "must remain pending acceptance"
+        ):
+            self.installer().finalize_acceptance()
+
+        self.assertEqual(event_count, len(self.events))
+        self.assertIsNotNone(self.device.entry_identity(backup))
+        self.assertTrue((self.evidence / "pending-acceptance.json").is_file())
+        self.assertFalse((self.evidence / "final-success.json").exists())
+
     def test_finalize_receipt_failure_is_retryable_after_committed_cleanup(self) -> None:
         self.device.seed_package(self.final)
         self.installer().install()
@@ -2827,6 +2848,8 @@ class ProductionBoundaryTest(unittest.TestCase):
         self.assertEqual(PACKAGE_ID, document["packageId"])
         self.assertEqual(6, len(document["files"]))
         self.assertTrue(document["hardStrictlyBelow"])
+        self.assertNotIn("installPolicy", document)
+        self.assertNotIn("wholeEarthComplete", document)
 
     def test_powershell_wrapper_runs_the_real_validate_only_cli(self) -> None:
         wrapper = Path(__file__).parents[2] / "install-reference-dictionary-experiment8.ps1"
@@ -2856,6 +2879,49 @@ class ProductionBoundaryTest(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr.decode("utf-8", "replace"))
         document = json.loads(completed.stdout.decode("utf-8", "strict"))
         self.assertEqual(PACKAGE_ID, document["packageId"])
+
+    def test_powershell_wrapper_forwards_visual_evaluation_policy(self) -> None:
+        wrapper = Path(__file__).parents[2] / "install-reference-dictionary-experiment8.ps1"
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ValidInstallFixture(Path(temporary))
+            result = json.loads(fixture.result.read_text("utf-8"))
+            result["rebind"] = {
+                "installPolicy": "full-fidelity-visual-evaluation",
+                "originalResultSha256": "0" * 64,
+                "sourceCommit": "a" * 40,
+            }
+            fixture.result.write_bytes(_canonical(result))
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-File",
+                    str(wrapper),
+                    "-PackageRoot",
+                    str(fixture.package),
+                    "-ApkPath",
+                    str(fixture.apk),
+                    "-FinalResult",
+                    str(fixture.result),
+                    "-ValidateOnly",
+                    "-InstallPolicy",
+                    "full-fidelity-visual-evaluation",
+                ],
+                cwd=Path(__file__).parents[3],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertEqual(
+            0, completed.returncode, completed.stderr.decode("utf-8", "replace")
+        )
+        document = json.loads(completed.stdout.decode("utf-8", "strict"))
+        self.assertEqual(
+            "full-fidelity-visual-evaluation", document["installPolicy"]
+        )
+        self.assertTrue(document["wholeEarthComplete"])
 
     def test_cli_dispatches_finalize_and_rollback_modes(self) -> None:
         class FakeTransaction:
@@ -2929,12 +2995,168 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.fixture = _ValidInstallFixture(Path(self.temporary.name))
 
-    def validate(self) -> HostInstallPlan:
-        return HostInstallPlan.validate(
-            package_directory=self.fixture.package,
-            apk_path=self.fixture.apk,
-            final_result_path=self.fixture.result,
+    def validate(
+        self,
+        *,
+        install_policy: str = "release",
+        require_install_policy_binding: bool | None = None,
+    ) -> HostInstallPlan:
+        arguments: dict[str, object] = {
+            "package_directory": self.fixture.package,
+            "apk_path": self.fixture.apk,
+            "final_result_path": self.fixture.result,
+            "install_policy": install_policy,
+        }
+        if require_install_policy_binding is not None:
+            arguments["require_install_policy_binding"] = (
+                require_install_policy_binding
+            )
+        return HostInstallPlan.validate(**arguments)  # type: ignore[arg-type]
+
+    def _set_honest_incomplete_whole_earth_claim(self) -> None:
+        self._rewrite_package_json(
+            "manifest.json",
+            lambda document: document["coverage"].__setitem__(
+                "completeWholeEarthDictionary", False
+            ),
         )
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document["coverage"].update(
+                {
+                    "completeWholeEarthDictionary": False,
+                    "primaryWholeEarthPreserved": False,
+                }
+            ),
+        )
+        self._refresh_manifest_and_result_bindings()
+
+    def test_visual_evaluation_policy_preserves_honest_incomplete_claim(self) -> None:
+        policy = getattr(
+            installer_module, "INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION", None
+        )
+        self.assertEqual("full-fidelity-visual-evaluation", policy)
+        self._set_honest_incomplete_whole_earth_claim()
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "not whole-earth complete"
+        ):
+            self.validate()
+
+        plan = self.validate(
+            install_policy=policy, require_install_policy_binding=False
+        )
+
+        self.assertEqual(policy, plan.install_policy)
+        self.assertFalse(plan.whole_earth_complete)
+
+    def test_visual_evaluation_policy_records_but_does_not_enforce_size_ceiling(
+        self,
+    ) -> None:
+        policy = getattr(
+            installer_module, "INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION", None
+        )
+        self.assertEqual("full-fidelity-visual-evaluation", policy)
+        package_bytes = sum(
+            path.stat().st_size for path in self.fixture.package.iterdir()
+        )
+        total_bytes = (
+            package_bytes + self.fixture.apk.stat().st_size + MANDATORY_RESERVE_BYTES
+        )
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["footprint"]["hardCeilingBytes"] = total_bytes
+        result["footprint"]["hardStrictlyBelow"] = False
+        result["state"] = "failed-hard-ceiling"
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with (
+            mock.patch.object(
+                installer_module, "HARD_PACKAGE_CEILING_BYTES", package_bytes
+            ),
+            mock.patch.object(
+                installer_module, "HARD_FOOTPRINT_CEILING_BYTES", total_bytes
+            ),
+        ):
+            with self.assertRaises(ReferencePackageInstallError):
+                self.validate()
+            plan = self.validate(
+                install_policy=policy, require_install_policy_binding=False
+            )
+
+        self.assertEqual(policy, plan.install_policy)
+        self.assertFalse(plan.hard_strictly_below)
+
+    def test_visual_policy_requires_primary_preservation_for_true_whole_claim(
+        self,
+    ) -> None:
+        policy = installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document["coverage"].__setitem__(
+                "primaryWholeEarthPreserved", False
+            ),
+        )
+        self._refresh_manifest_and_result_bindings()
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "did not preserve the primary"
+        ):
+            self.validate(
+                install_policy=policy, require_install_policy_binding=False
+            )
+
+    def test_visual_policy_binding_is_required_and_cannot_cross_into_release(
+        self,
+    ) -> None:
+        policy = installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "policy binding is missing"
+        ):
+            self.validate(install_policy=policy)
+
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "installPolicy": policy,
+            "originalResultSha256": "0" * 64,
+            "sourceCommit": "a" * 40,
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+
+        plan = self.validate(install_policy=policy)
+        self.assertEqual(policy, plan.install_policy)
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "policy binding differs"
+        ):
+            self.validate()
+
+    def test_visual_policy_rejects_result_state_footprint_contradictions(self) -> None:
+        policy = installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+        original = json.loads(self.fixture.result.read_text("utf-8"))
+
+        failed_below_ceiling = json.loads(json.dumps(original))
+        failed_below_ceiling["state"] = "failed-hard-ceiling"
+        self.fixture.result.write_bytes(_canonical(failed_below_ceiling))
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "state contradicts its footprint"
+        ):
+            self.validate(
+                install_policy=policy, require_install_policy_binding=False
+            )
+
+        total_bytes = original["footprint"]["totalBytes"]
+        complete_at_ceiling = json.loads(json.dumps(original))
+        complete_at_ceiling["footprint"]["hardCeilingBytes"] = total_bytes
+        complete_at_ceiling["footprint"]["hardStrictlyBelow"] = False
+        self.fixture.result.write_bytes(_canonical(complete_at_ceiling))
+        with mock.patch.object(
+            installer_module, "HARD_FOOTPRINT_CEILING_BYTES", total_bytes
+        ):
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError, "state contradicts its footprint"
+            ):
+                self.validate(
+                    install_policy=policy, require_install_policy_binding=False
+                )
 
     def test_final_result_must_bind_the_exact_apk_hash(self) -> None:
         document = json.loads(self.fixture.result.read_text("utf-8"))

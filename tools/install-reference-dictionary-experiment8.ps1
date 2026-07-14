@@ -9,6 +9,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$FinalResult,
 
+    [ValidateSet('release', 'full-fidelity-visual-evaluation')]
+    [string]$InstallPolicy = 'release',
+
     [switch]$ValidateOnly,
     [switch]$Execute,
     [switch]$FinalizeAcceptance,
@@ -56,7 +59,9 @@ foreach ($value in @(
         '--apk',
         $ApkPath,
         '--final-result',
-        $FinalResult
+        $FinalResult,
+        '--install-policy',
+        $InstallPolicy
     )) {
     $arguments.Add([string]$value)
 }

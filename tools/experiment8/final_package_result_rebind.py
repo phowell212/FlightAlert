@@ -341,9 +341,12 @@ def rebind_final_package_result(
     source_repository: Path,
     planning_result_path: Path,
     output_path: Path,
+    install_policy: str = installer.INSTALL_POLICY_RELEASE,
 ) -> Path:
     """Validate the planning result and atomically publish its final APK binding."""
 
+    install_policy = installer._validated_install_policy(install_policy)
+    release_policy = install_policy == installer.INSTALL_POLICY_RELEASE
     output = _fresh_output_path(Path(output_path))
     stage: Path | None = None
     stage_identity: tuple[int, int] | None = None
@@ -370,6 +373,8 @@ def rebind_final_package_result(
             package_directory=Path(package_directory),
             apk_path=original_apk,
             final_result_path=planning_result_path,
+            install_policy=install_policy,
+            require_install_policy_binding=False,
         )
         if not _same_install_file(
             original_result_file,
@@ -419,16 +424,24 @@ def rebind_final_package_result(
         footprint["totalBytes"] = total
         footprint["preferredStrictlyBelow"] = preferred
         footprint["hardStrictlyBelow"] = hard
-        if not hard:
+        if release_policy and not hard:
             raise ReferencePackageInstallError(
                 "rebound footprint is not strictly below the hard ceiling"
             )
 
         rebound["completedUtc"] = _completed_utc()
+        if not release_policy:
+            rebound["state"] = (
+                installer.FINAL_RESULT_STATE_COMPLETE
+                if hard
+                else installer.FINAL_RESULT_STATE_FAILED_HARD_CEILING
+            )
         rebound["rebind"] = {
             "originalResultSha256": original_result_file.sha256,
             "sourceCommit": source_commit,
         }
+        if not release_policy:
+            rebound["rebind"]["installPolicy"] = install_policy
         rebound_raw = installer._canonical_json_bytes(rebound)
         stage, stage_identity = _write_stage(output, rebound_raw)
 
@@ -436,6 +449,8 @@ def rebind_final_package_result(
             package_directory=Path(package_directory),
             apk_path=final_apk,
             final_result_path=stage,
+            install_policy=install_policy,
+            require_install_policy_binding=not release_policy,
         )
         _assert_exact_stage(stage, rebound_raw)
         if not _same_install_file(
@@ -475,6 +490,11 @@ def _main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-repository", required=True, type=Path)
     parser.add_argument("--planning-result", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--install-policy",
+        choices=installer.INSTALL_POLICIES,
+        default=installer.INSTALL_POLICY_RELEASE,
+    )
     parsed = parser.parse_args(arguments)
     try:
         rebind_final_package_result(
@@ -483,6 +503,7 @@ def _main(arguments: Sequence[str] | None = None) -> int:
             source_repository=parsed.source_repository,
             planning_result_path=parsed.planning_result,
             output_path=parsed.output,
+            install_policy=parsed.install_policy,
         )
     except ReferencePackageInstallError as error:
         parser.exit(1, f"error: {error}\n")

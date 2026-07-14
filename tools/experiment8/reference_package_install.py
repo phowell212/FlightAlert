@@ -53,6 +53,16 @@ MANDATORY_RESERVE_BYTES = 1_500_000_000
 PREFERRED_FOOTPRINT_CEILING_BYTES = 25_000_000_000
 HARD_FOOTPRINT_CEILING_BYTES = 40_000_000_000
 HARD_PACKAGE_CEILING_BYTES = 38_500_000_000
+INSTALL_POLICY_RELEASE = "release"
+INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION = (
+    "full-fidelity-visual-evaluation"
+)
+INSTALL_POLICIES = (
+    INSTALL_POLICY_RELEASE,
+    INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION,
+)
+FINAL_RESULT_STATE_COMPLETE = "complete"
+FINAL_RESULT_STATE_FAILED_HARD_CEILING = "failed-hard-ceiling"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 HASH_CHUNK_BYTES = 4 * 1024 * 1024
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -139,6 +149,8 @@ class HostInstallPlan:
     total_footprint_bytes: int
     preferred_strictly_below: bool
     hard_strictly_below: bool
+    install_policy: str
+    whole_earth_complete: bool
 
     @classmethod
     def validate(
@@ -147,7 +159,20 @@ class HostInstallPlan:
         package_directory: Path,
         apk_path: Path,
         final_result_path: Path,
+        install_policy: str = INSTALL_POLICY_RELEASE,
+        require_install_policy_binding: bool | None = None,
     ) -> "HostInstallPlan":
+        install_policy = _validated_install_policy(install_policy)
+        if require_install_policy_binding is None:
+            require_install_policy_binding = (
+                install_policy
+                == INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+            )
+        elif type(require_install_policy_binding) is not bool:
+            raise ReferencePackageInstallError(
+                "install policy binding requirement has the wrong exact type"
+            )
+        release_policy = install_policy == INSTALL_POLICY_RELEASE
         package_directory = _real_directory(
             Path(package_directory), "package directory"
         )
@@ -172,7 +197,7 @@ class HostInstallPlan:
         )
         file_by_name = {item.name: item for item in package_files}
         package_bytes = sum(item.byte_length for item in package_files)
-        if package_bytes >= HARD_PACKAGE_CEILING_BYTES:
+        if release_policy and package_bytes >= HARD_PACKAGE_CEILING_BYTES:
             raise ReferencePackageInstallError(
                 "package is not strictly below the 38,500,000,000-byte ceiling"
             )
@@ -228,10 +253,11 @@ class HostInstallPlan:
             "manifest complete-declared-scope claim",
         ):
             raise ReferencePackageInstallError("package declared scope is incomplete")
-        if not _exact_bool(
+        whole_earth_complete = _exact_bool(
             coverage.get("completeWholeEarthDictionary"),
             "manifest whole-earth claim",
-        ):
+        )
+        if release_policy and not whole_earth_complete:
             raise ReferencePackageInstallError("package is not whole-earth complete")
 
         merge_receipt = _read_strict_json(
@@ -249,15 +275,18 @@ class HostInstallPlan:
             merge_receipt=merge_receipt,
             finalization_receipt=finalization_receipt,
             file_by_name=file_by_name,
+            require_primary_whole_earth=(release_policy or whole_earth_complete),
         )
 
         apk = _hash_regular_file(apk_path, "APK")
         result = _read_strict_json(final_result_path, "final result", canonical=False)
-        _validate_result_identity(
+        result_state = _validate_result_identity(
             result=result,
             package_directory=package_directory,
             package_bytes=package_bytes,
             apk=apk,
+            install_policy=install_policy,
+            require_install_policy_binding=require_install_policy_binding,
         )
         total = package_bytes + apk.byte_length + MANDATORY_RESERVE_BYTES
         if _exact_integer(
@@ -278,7 +307,15 @@ class HostInstallPlan:
             footprint.get("hardStrictlyBelow"), "hard footprint result"
         ) is not hard:
             raise ReferencePackageInstallError("hard footprint result differs")
-        if not hard:
+        if hard and result_state != FINAL_RESULT_STATE_COMPLETE:
+            raise ReferencePackageInstallError(
+                "final result hard-ceiling state contradicts its footprint"
+            )
+        if not hard and result_state != FINAL_RESULT_STATE_FAILED_HARD_CEILING:
+            raise ReferencePackageInstallError(
+                "final result hard-ceiling state contradicts its footprint"
+            )
+        if release_policy and not hard:
             raise ReferencePackageInstallError(
                 "complete footprint is not strictly below 40,000,000,000 bytes"
             )
@@ -309,6 +346,8 @@ class HostInstallPlan:
             total_footprint_bytes=total,
             preferred_strictly_below=preferred,
             hard_strictly_below=hard,
+            install_policy=install_policy,
+            whole_earth_complete=whole_earth_complete,
         )
 
 
@@ -646,6 +685,10 @@ class ReferencePackageInstaller:
         )
 
     def finalize_acceptance(self) -> None:
+        if self.plan.install_policy != INSTALL_POLICY_RELEASE:
+            raise ReferencePackageInstallError(
+                "full-fidelity visual evaluation must remain pending acceptance"
+            )
         with _EvidenceInvocationLock(self._invocation_lock_path()):
             self._finalize_under_invocation_lock()
 
@@ -3080,6 +3123,11 @@ def _main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--package", required=True, type=Path)
     parser.add_argument("--apk", required=True, type=Path)
     parser.add_argument("--final-result", required=True, type=Path)
+    parser.add_argument(
+        "--install-policy",
+        choices=INSTALL_POLICIES,
+        default=INSTALL_POLICY_RELEASE,
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--validate-only", action="store_true")
     mode.add_argument("--execute", action="store_true")
@@ -3095,6 +3143,11 @@ def _main(arguments: Sequence[str] | None = None) -> int:
         package_directory=parsed.package,
         apk_path=parsed.apk,
         final_result_path=parsed.final_result,
+        install_policy=parsed.install_policy,
+        require_install_policy_binding=(
+            parsed.install_policy
+            == INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+        ),
     )
     if parsed.validate_only:
         print(_canonical_json_bytes(_plan_document(plan)).decode("utf-8"), end="")
@@ -3371,7 +3424,7 @@ def _windows_replace_write_through(source: Path, destination: Path) -> None:
 
 
 def _plan_document(plan: HostInstallPlan) -> dict[str, object]:
-    return {
+    document: dict[str, object] = {
         "apk": {
             "bytes": plan.apk_bytes,
             "path": str(plan.apk_path),
@@ -3400,6 +3453,10 @@ def _plan_document(plan: HostInstallPlan) -> dict[str, object]:
         "schema": "flightalert.experiment8.reference-install-plan.v1",
         "totalFootprintBytes": plan.total_footprint_bytes,
     }
+    if plan.install_policy != INSTALL_POLICY_RELEASE:
+        document["installPolicy"] = plan.install_policy
+        document["wholeEarthComplete"] = plan.whole_earth_complete
+    return document
 
 
 def _validate_receipts(
@@ -3408,6 +3465,7 @@ def _validate_receipts(
     merge_receipt: Mapping[str, object],
     finalization_receipt: Mapping[str, object],
     file_by_name: Mapping[str, InstallFile],
+    require_primary_whole_earth: bool = True,
 ) -> None:
     _exact_fields(
         merge_receipt,
@@ -3532,10 +3590,11 @@ def _validate_receipts(
         merge_coverage.get("presentTileCount"), "merge present tile count"
     ) != tile_count:
         raise ReferencePackageInstallError("merge coverage does not contain every tile")
-    if not _exact_bool(
+    primary_whole_earth_preserved = _exact_bool(
         merge_coverage.get("primaryWholeEarthPreserved"),
         "merge primary whole-earth preservation",
-    ):
+    )
+    if require_primary_whole_earth and not primary_whole_earth_preserved:
         raise ReferencePackageInstallError("merge coverage did not preserve the primary")
     if type(manifest_coverage.get("zoomRanges")) is not list:
         raise ReferencePackageInstallError("merge coverage zoom ranges have the wrong type")
@@ -3674,11 +3733,42 @@ def _validate_result_identity(
     package_directory: Path,
     package_bytes: int,
     apk: InstallFile,
-) -> None:
+    install_policy: str = INSTALL_POLICY_RELEASE,
+    require_install_policy_binding: bool = False,
+) -> str:
     if result.get("schema") != "flightalert.experiment8.final-package-monitor-result.v1":
         raise ReferencePackageInstallError("final result schema differs")
-    if result.get("state") != "complete":
-        raise ReferencePackageInstallError("final result is not complete")
+    state = _exact_string(result.get("state"), "final result state")
+    allowed_states = (
+        {FINAL_RESULT_STATE_COMPLETE}
+        if install_policy == INSTALL_POLICY_RELEASE
+        else {
+            FINAL_RESULT_STATE_COMPLETE,
+            FINAL_RESULT_STATE_FAILED_HARD_CEILING,
+        }
+    )
+    if state not in allowed_states:
+        raise ReferencePackageInstallError(
+            "final result state is not eligible for the install policy"
+        )
+    rebind = result.get("rebind")
+    if rebind is None:
+        if require_install_policy_binding:
+            raise ReferencePackageInstallError(
+                "final result install policy binding is missing"
+            )
+    else:
+        rebind_document = _exact_mapping(rebind, "final result rebind")
+        bound_policy = rebind_document.get("installPolicy")
+        if bound_policy is None:
+            if require_install_policy_binding:
+                raise ReferencePackageInstallError(
+                    "final result install policy binding is missing"
+                )
+        elif _validated_install_policy(bound_policy) != install_policy:
+            raise ReferencePackageInstallError(
+                "final result install policy binding differs"
+            )
     package = _exact_mapping(result.get("package"), "final result package")
     if _exact_string(package.get("packageId"), "final result package ID") != PACKAGE_ID:
         raise ReferencePackageInstallError("final result package ID differs")
@@ -3711,6 +3801,7 @@ def _validate_result_identity(
     for key, expected in expected_scalars:
         if _exact_integer(footprint.get(key), f"final result {key}") != expected:
             raise ReferencePackageInstallError(f"final result {key} differs")
+    return state
 
 
 def _binding_map(
@@ -4090,6 +4181,13 @@ def _exact_string(value: object, label: str) -> str:
     if type(value) is not str or not value:
         raise ReferencePackageInstallError(f"{label} has the wrong exact type")
     return value
+
+
+def _validated_install_policy(value: object) -> str:
+    policy = _exact_string(value, "install policy")
+    if policy not in INSTALL_POLICIES:
+        raise ReferencePackageInstallError("install policy is unsupported")
+    return policy
 
 
 def _exact_integer(value: object, label: str) -> int:

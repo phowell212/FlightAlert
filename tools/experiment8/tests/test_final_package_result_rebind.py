@@ -339,13 +339,20 @@ class FinalPackageResultRebindTest(unittest.TestCase):
             )
         return completed.stdout.strip()
 
-    def _rebind(self, *, apk: Path | None = None) -> None:
+    def _rebind(
+        self, *, apk: Path | None = None, install_policy: str | None = None
+    ) -> None:
+        arguments: dict[str, object] = {
+            "package_directory": self.fixture.package,
+            "apk_path": self.final_apk if apk is None else apk,
+            "source_repository": self.repository,
+            "planning_result_path": self.fixture.result,
+            "output_path": self.output,
+        }
+        if install_policy is not None:
+            arguments["install_policy"] = install_policy
         rebind_final_package_result(
-            package_directory=self.fixture.package,
-            apk_path=self.final_apk if apk is None else apk,
-            source_repository=self.repository,
-            planning_result_path=self.fixture.result,
-            output_path=self.output,
+            **arguments,  # type: ignore[arg-type]
         )
 
     def _assert_rejected_without_output(self) -> None:
@@ -766,6 +773,34 @@ class FinalPackageResultRebindTest(unittest.TestCase):
                 final_result_path=self.fixture.result,
             )
             self._assert_rejected_without_output()
+
+    def test_visual_evaluation_rebind_preserves_failed_hard_ceiling_claim(self) -> None:
+        policy = getattr(
+            installer_module, "INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION", None
+        )
+        self.assertEqual("full-fidelity-visual-evaluation", policy)
+        original = json.loads(self.fixture.result.read_text("utf-8"))
+        original_total = original["footprint"]["totalBytes"]
+        hard_ceiling = original_total + 1
+        original["footprint"]["hardCeilingBytes"] = hard_ceiling
+        self.fixture.result.write_bytes(_canonical(original))
+
+        with mock.patch.object(
+            installer_module, "HARD_FOOTPRINT_CEILING_BYTES", hard_ceiling
+        ):
+            self._rebind(install_policy=policy)
+            rebound = json.loads(self.output.read_text("utf-8"))
+            plan = HostInstallPlan.validate(
+                package_directory=self.fixture.package,
+                apk_path=self.final_apk,
+                final_result_path=self.output,
+                install_policy=policy,
+            )
+
+        self.assertFalse(rebound["footprint"]["hardStrictlyBelow"])
+        self.assertEqual("failed-hard-ceiling", rebound["state"])
+        self.assertEqual(policy, rebound["rebind"]["installPolicy"])
+        self.assertEqual(policy, plan.install_policy)
 
 
 if __name__ == "__main__":
