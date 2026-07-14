@@ -106,9 +106,6 @@ _MAX_COMPRESSED_TILE_BYTES = (
     + 13
 )
 _PARTIAL_OWNER_SCHEMA = "flightalert.experiment8.osm-global-waterway-partial-owner.v1"
-_SIZE_CAPACITY_SCHEMA = (
-    "flightalert.experiment8.osm-global-waterway-size-capacity.v1"
-)
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _ROOT_STATUS_ORDER = (
     "fatal",
@@ -1155,114 +1152,143 @@ def _bind_publication_boundary_capacity(
     return MappingProxyType(finalized)
 
 
-def _validated_visual_destination_capacity_evidence(
+def _filesystem_status_signature(status: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(status.st_dev),
+        int(status.st_ino),
+        int(status.st_mode),
+        int(status.st_size),
+        int(status.st_mtime_ns),
+    )
+
+
+def _owned_partial_entry_inventory(
     connection: sqlite3.Connection,
     *,
-    output_directory: Path,
-    render_run_sha256: str,
-    size_policy_mode: object,
-    required: bool,
-) -> int | None:
-    if (
-        size_policy_mode
-        != size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
-    ):
-        return None
-    expected = {
-        "mode": size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
-        "outputDirectory": os.path.abspath(output_directory),
-        "renderRunIdentitySha256": render_run_sha256,
-        "schema": _SIZE_CAPACITY_SCHEMA,
+    partial_directory: Path,
+) -> tuple[tuple[int, ...], tuple[tuple[object, ...], ...]]:
+    expected_owner = {
+        "path": os.path.abspath(partial_directory),
+        "schema": _PARTIAL_OWNER_SCHEMA,
     }
-    stored = _meta_get(connection, "sizePolicyCapacity")
-    if stored is None and not required:
-        return None
-    if not isinstance(stored, dict) or set(stored) != {
-        *expected,
-        "availableDestinationBytesBeforeStaging",
-    }:
+    if _meta_get(connection, "partialDirectoryOwner") != expected_owner:
         raise GlobalWaterwayPackageError(
-            "visual-evaluation initial destination capacity evidence is malformed"
+            "visual-evaluation partial capacity lacks exact ownership"
         )
-    available = stored.get("availableDestinationBytesBeforeStaging")
+    try:
+        directory_status_before = os.lstat(partial_directory)
+        entries = tuple(partial_directory.iterdir())
+    except OSError as error:
+        raise GlobalWaterwayPackageError(
+            "visual-evaluation owned partial inventory is unreadable"
+        ) from error
     if (
-        {key: stored.get(key) for key in expected} != expected
-        or type(available) is not int
-        or available < 0
+        not stat.S_ISDIR(directory_status_before.st_mode)
+        or getattr(directory_status_before, "st_file_attributes", 0)
+        & _REPARSE_POINT
     ):
         raise GlobalWaterwayPackageError(
-            "visual-evaluation initial destination capacity evidence differs"
+            "visual-evaluation owned partial directory is redirected"
         )
-    return available
+    allowed = {
+        "build-receipt.json",
+        "manifest.json",
+        "records.fadictpack",
+        "tile-index.bin",
+    }
+    inventory = []
+    for entry in entries:
+        try:
+            status = os.lstat(entry)
+        except OSError as error:
+            raise GlobalWaterwayPackageError(
+                "visual-evaluation owned partial inventory is unreadable"
+            ) from error
+        if (
+            entry.name not in allowed
+            or not stat.S_ISREG(status.st_mode)
+            or getattr(status, "st_file_attributes", 0) & _REPARSE_POINT
+        ):
+            raise GlobalWaterwayPackageError(
+                "visual-evaluation owned partial inventory differs"
+            )
+        inventory.append((entry.name, *_filesystem_status_signature(status)))
+    try:
+        directory_status_after = os.lstat(partial_directory)
+    except OSError as error:
+        raise GlobalWaterwayPackageError(
+            "visual-evaluation owned partial inventory is unreadable"
+        ) from error
+    if _filesystem_status_signature(
+        directory_status_before
+    ) != _filesystem_status_signature(directory_status_after):
+        raise GlobalWaterwayPackageError(
+            "visual-evaluation partial inventory changed while measuring capacity"
+        )
+    return (
+        _filesystem_status_signature(directory_status_after),
+        tuple(sorted(inventory)),
+    )
 
 
-def _initial_visual_destination_capacity(
+def _owned_partial_entry_bytes(
     connection: sqlite3.Connection,
     *,
+    partial_directory: Path,
+) -> int:
+    _, inventory = _owned_partial_entry_inventory(
+        connection,
+        partial_directory=partial_directory,
+    )
+    return sum(int(entry[4]) for entry in inventory)
+
+
+def _current_visual_staging_capacity_evidence(
+    connection: sqlite3.Connection,
+    *,
+    partial_directory: Path,
     output_directory: Path,
-    render_run_sha256: str,
     size_policy_mode: object,
-) -> int | None:
+) -> tuple[int, int] | None:
     if (
         size_policy_mode
         != size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
     ):
         return None
-    available = _validated_visual_destination_capacity_evidence(
+    before = _owned_partial_entry_inventory(
         connection,
-        output_directory=output_directory,
-        render_run_sha256=render_run_sha256,
-        size_policy_mode=size_policy_mode,
-        required=False,
+        partial_directory=partial_directory,
     )
-    created = available is None
-    if available is None:
-        try:
-            available = size_policy_module.destination_available_bytes(
-                output_directory
-            )
-        except size_policy_module.ReferenceSizePolicyError as error:
-            raise GlobalWaterwayPackageError(str(error)) from error
-        _meta_set(
-            connection,
-            "sizePolicyCapacity",
-            {
-                "availableDestinationBytesBeforeStaging": available,
-                "mode": size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
-                "outputDirectory": os.path.abspath(output_directory),
-                "renderRunIdentitySha256": render_run_sha256,
-                "schema": _SIZE_CAPACITY_SCHEMA,
-            },
+    try:
+        free_bytes = size_policy_module.destination_available_bytes(output_directory)
+    except size_policy_module.ReferenceSizePolicyError as error:
+        raise GlobalWaterwayPackageError(str(error)) from error
+    after = _owned_partial_entry_inventory(
+        connection,
+        partial_directory=partial_directory,
+    )
+    if after != before:
+        raise GlobalWaterwayPackageError(
+            "visual-evaluation partial inventory changed while measuring capacity"
         )
-    checked = _validated_visual_destination_capacity_evidence(
+    partial_bytes = sum(int(entry[4]) for entry in after[1])
+    return partial_bytes, free_bytes + partial_bytes
+
+
+def _current_visual_staging_capacity(
+    connection: sqlite3.Connection,
+    *,
+    partial_directory: Path,
+    output_directory: Path,
+    size_policy_mode: object,
+) -> int | None:
+    evidence = _current_visual_staging_capacity_evidence(
         connection,
+        partial_directory=partial_directory,
         output_directory=output_directory,
-        render_run_sha256=render_run_sha256,
         size_policy_mode=size_policy_mode,
-        required=True,
     )
-    recovery = _meta_get(connection, "renderRecoveryReceipt")
-    if recovery is not None:
-        if not isinstance(recovery, dict):
-            raise GlobalWaterwayPackageError(
-                "visual-evaluation recovery receipt is malformed"
-            )
-        transition = recovery.get("sizePolicyTransition")
-        intended = transition.get("intended") if isinstance(transition, dict) else None
-        if not isinstance(intended, dict) or intended.get("mode") != size_policy_mode:
-            raise GlobalWaterwayPackageError(
-                "visual-evaluation recovery capacity transition differs"
-            )
-        bound_available = recovery.get("initialAvailableDestinationBytes")
-        if bound_available is None and created:
-            recovery["initialAvailableDestinationBytes"] = checked
-            _meta_set(connection, "renderRecoveryReceipt", recovery)
-        elif bound_available != checked:
-            raise GlobalWaterwayPackageError(
-                "visual-evaluation recovery capacity evidence differs"
-            )
-    connection.commit()
-    return checked
+    return None if evidence is None else evidence[1]
 
 
 def _decode_tags(raw: object, label: str) -> tuple[tuple[str, str], ...]:
@@ -3253,6 +3279,7 @@ def ingest_global_waterway_closure(
 
 def _render_code_identities() -> dict[str, object]:
     from . import (
+        model,
         osm_global_waterway_renderer,
         reference_presentation_policy,
         renderer_tile_package,
@@ -3261,6 +3288,7 @@ def _render_code_identities() -> dict[str, object]:
     )
 
     modules = {
+        "model": model,
         "presentationPolicy": reference_presentation_policy,
         "renderer": osm_global_waterway_renderer,
         "rendererTilePackage": renderer_tile_package,
@@ -3516,6 +3544,160 @@ def _validate_rendered_feature_prefix(
         )
 
 
+def _remember_expected_hot_identity(
+    identities: dict[bytes, bytes],
+    hot_id: bytes,
+    full_sha256: bytes,
+) -> None:
+    previous = identities.setdefault(hot_id, full_sha256)
+    if previous != full_sha256:
+        raise GlobalWaterwayPackageError(
+            "checkpointed renderer prefix contains a fatal hot-ID collision"
+        )
+
+
+def _extend_expected_renderer_identities(
+    expected: dict[str, dict[bytes, bytes]],
+    exact: object,
+    rendered: object,
+) -> None:
+    feature_hot = exact.source_feature_sha256[:8]
+    _remember_expected_hot_identity(
+        expected["feature_ids"], feature_hot, exact.source_feature_sha256
+    )
+    for records in rendered.tiles.values():
+        for record in records:
+            renderer = record.renderer_record
+            variant = renderer.variant
+            sourced = record.sourced_text
+            if sourced is None:
+                raise GlobalWaterwayPackageError(
+                    "checkpointed renderer prefix lacks exact sourced text"
+                )
+            _remember_expected_hot_identity(
+                expected["geometry_ids"],
+                variant.geometry_id.to_bytes(8, "big"),
+                variant.placement.placement_geometry_sha256,
+            )
+            _remember_expected_hot_identity(
+                expected["label_ids"],
+                variant.placement.label_candidate_id.to_bytes(8, "big"),
+                variant.placement.label_candidate_sha256,
+            )
+            _remember_expected_hot_identity(
+                expected["variant_ids"],
+                variant.canonical_variant_id.to_bytes(8, "big"),
+                variant_fingerprint(variant).full_sha256,
+            )
+            _remember_expected_hot_identity(
+                expected["sourced_ids"],
+                sourced.hot_id.to_bytes(8, "big"),
+                sourced.full_sha256,
+            )
+
+
+def _validate_renderer_identity_tables(
+    connection: sqlite3.Connection,
+    expected: Mapping[str, Mapping[bytes, bytes]],
+) -> None:
+    for table in (
+        "feature_ids",
+        "variant_ids",
+        "geometry_ids",
+        "label_ids",
+        "sourced_ids",
+    ):
+        actual = tuple(
+            (bytes(row[0]), bytes(row[1]))
+            for row in connection.execute(
+                f"SELECT hot_id,full_sha FROM {table} ORDER BY hot_id"
+            )
+        )
+        wanted = tuple(sorted(expected[table].items()))
+        if actual != wanted:
+            raise GlobalWaterwayPackageError(
+                f"checkpointed renderer {table} identity prefix differs"
+            )
+
+
+def _validated_renderer_prefix_stream(
+    connection: sqlite3.Connection,
+    *,
+    source_binding: WaterwaySourceBinding,
+    zooms: tuple[int, ...],
+    run_identity: Mapping[str, object],
+    rendered_prefix: int,
+):
+    from .osm_global_waterway_renderer import build_adaptive_waterway_feature
+    from .semantic_model import HotIdRegistry
+
+    if type(rendered_prefix) is not int or rendered_prefix < 0:
+        raise GlobalWaterwayPackageError(
+            "renderer checkpointed feature prefix is malformed"
+        )
+    stored_feature_count = int(
+        connection.execute("SELECT COUNT(*) FROM rendered_features").fetchone()[0]
+    )
+    orphan_record = connection.execute(
+        "SELECT 1 FROM records r LEFT JOIN rendered_features f "
+        "ON r.feature_id=substr(f.feature_sha,1,8) "
+        "WHERE f.ordinal IS NULL LIMIT 1"
+    ).fetchone()
+    if stored_feature_count != rendered_prefix or orphan_record is not None:
+        raise GlobalWaterwayPackageError(
+            "renderer checkpointed feature inventory differs"
+        )
+    expected = {
+        table: {}
+        for table in (
+            "feature_ids",
+            "variant_ids",
+            "geometry_ids",
+            "label_ids",
+            "sourced_ids",
+        )
+    }
+    registry = HotIdRegistry()
+    source = iter(
+        _iter_exact_waterway_features(connection, source_binding=source_binding)
+    )
+    for ordinal in range(rendered_prefix):
+        try:
+            exact = next(source)
+        except StopIteration as error:
+            raise GlobalWaterwayPackageError(
+                "renderer feature traversal ended before checkpoint"
+            ) from error
+        rendered = build_adaptive_waterway_feature(
+            feature=exact,
+            source_generation_sha256=source_binding.planet_sha256,
+            classifier_sha256=str(run_identity["classifierSha256"]),
+            zooms=zooms,
+            identity_registry=registry,
+        )
+        row = connection.execute(
+            "SELECT source_kind,source_id,source_type,feature_sha "
+            "FROM rendered_features WHERE ordinal=?",
+            (ordinal,),
+        ).fetchone()
+        wanted = (
+            exact.source_kind,
+            exact.source_id,
+            exact.waterway_type,
+            exact.source_feature_sha256,
+        )
+        if row is None or (
+            str(row[0]), int(row[1]), str(row[2]), bytes(row[3])
+        ) != wanted:
+            raise GlobalWaterwayPackageError(
+                "renderer checkpointed feature prefix differs"
+            )
+        _validate_rendered_feature_prefix(connection, exact, rendered)
+        _extend_expected_renderer_identities(expected, exact, rendered)
+    _validate_renderer_identity_tables(connection, expected)
+    return source, registry
+
+
 def _commit_render_checkpoint(
     connection: sqlite3.Connection,
     database_path: Path,
@@ -3557,6 +3739,25 @@ def _configure_render_connection(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA cache_size=-65536")
 
 
+def _resume_renderer_write_reservation(
+    connection: sqlite3.Connection,
+    trusted_data_version: int | None,
+) -> int:
+    if connection.in_transaction:
+        raise GlobalWaterwayPackageError(
+            "renderer write reservation is already active"
+        )
+    connection.execute("BEGIN IMMEDIATE")
+    observed = int(connection.execute("PRAGMA data_version").fetchone()[0])
+    if trusted_data_version is None:
+        return observed
+    if observed != trusted_data_version:
+        raise GlobalWaterwayPackageError(
+            "renderer checkpoint database changed through another connection"
+        )
+    return trusted_data_version
+
+
 def _stage_renderer_records(
     connection: sqlite3.Connection,
     database_path: Path,
@@ -3566,11 +3767,11 @@ def _stage_renderer_records(
     checkpoint_features: int,
     pause_after_features: int | None,
     run_identity: Mapping[str, object],
+    trusted_data_version: int | None = None,
 ) -> bool:
     from .osm_global_waterway_renderer import (
         build_adaptive_waterway_feature,
     )
-    from .semantic_model import HotIdRegistry
 
     admission = _meta_get(connection, "admissionReceipt")
     if (
@@ -3584,6 +3785,17 @@ def _stage_renderer_records(
         raise GlobalWaterwayPackageError(
             "renderer requires complete matching v2 waterway admission"
         )
+    if (
+        trusted_data_version is not None
+        and (type(trusted_data_version) is not int or trusted_data_version < 0)
+    ):
+        raise GlobalWaterwayPackageError(
+            "renderer trusted database version is malformed"
+        )
+    trusted_data_version = _resume_renderer_write_reservation(
+        connection,
+        trusted_data_version,
+    )
     stored_identity = _meta_get(connection, "renderRunIdentity")
     if stored_identity is None:
         _meta_set(connection, "renderRunIdentity", dict(run_identity))
@@ -3593,24 +3805,20 @@ def _stage_renderer_records(
             {"renderComplete": False, "renderedFeatures": 0},
         )
         connection.commit()
+        _resume_renderer_write_reservation(connection, trusted_data_version)
     elif stored_identity != dict(run_identity):
         raise GlobalWaterwayPackageError(
             "renderer checkpoint identity differs from exact source/config/code identity"
         )
     checkpoint = dict(_meta_get(connection, "renderCheckpoint") or {})
     rendered_prefix = int(checkpoint.get("renderedFeatures", 0))
-    stored_feature_count = int(
-        connection.execute("SELECT COUNT(*) FROM rendered_features").fetchone()[0]
+    source, registry = _validated_renderer_prefix_stream(
+        connection,
+        source_binding=source_binding,
+        zooms=zooms,
+        run_identity=run_identity,
+        rendered_prefix=rendered_prefix,
     )
-    orphan_record = connection.execute(
-        "SELECT 1 FROM records r LEFT JOIN rendered_features f "
-        "ON r.feature_id=substr(f.feature_sha,1,8) "
-        "WHERE f.ordinal IS NULL LIMIT 1"
-    ).fetchone()
-    if stored_feature_count != rendered_prefix or orphan_record is not None:
-        raise GlobalWaterwayPackageError(
-            "renderer checkpointed feature inventory differs"
-        )
     peaks = dict(_meta_get(connection, "peaks") or {})
     for key in (
         "compressedTileBytes",
@@ -3621,12 +3829,9 @@ def _stage_renderer_records(
         "recordsPerTile",
     ):
         peaks.setdefault(key, 0)
-    registry = HotIdRegistry()
     since_commit = 0
-    seen = 0
-    for ordinal, exact in enumerate(
-        _iter_exact_waterway_features(connection, source_binding=source_binding)
-    ):
+    seen = rendered_prefix
+    for ordinal, exact in enumerate(source, start=rendered_prefix):
         seen = ordinal + 1
         rendered = build_adaptive_waterway_feature(
             feature=exact,
@@ -3635,26 +3840,6 @@ def _stage_renderer_records(
             zooms=zooms,
             identity_registry=registry,
         )
-        if ordinal < rendered_prefix:
-            row = connection.execute(
-                "SELECT source_kind,source_id,source_type,feature_sha "
-                "FROM rendered_features WHERE ordinal=?",
-                (ordinal,),
-            ).fetchone()
-            expected = (
-                exact.source_kind,
-                exact.source_id,
-                exact.waterway_type,
-                exact.source_feature_sha256,
-            )
-            if row is None or (
-                str(row[0]), int(row[1]), str(row[2]), bytes(row[3])
-            ) != expected:
-                raise GlobalWaterwayPackageError(
-                    "renderer checkpointed feature prefix differs"
-                )
-            _validate_rendered_feature_prefix(connection, exact, rendered)
-            continue
         _stage_rendered_feature(
             connection,
             ordinal=ordinal,
@@ -3664,20 +3849,27 @@ def _stage_renderer_records(
         )
         checkpoint = {"renderComplete": False, "renderedFeatures": ordinal + 1}
         since_commit += 1
+        checkpoint_committed = False
         if since_commit >= checkpoint_features:
             _commit_render_checkpoint(
                 connection, database_path, checkpoint, peaks
             )
             since_commit = 0
+            checkpoint_committed = True
         if pause_after_features is not None and ordinal + 1 >= pause_after_features:
-            _commit_render_checkpoint(
-                connection, database_path, checkpoint, peaks
-            )
+            if not checkpoint_committed:
+                _commit_render_checkpoint(
+                    connection, database_path, checkpoint, peaks
+                )
             return False
-    if seen < rendered_prefix:
-        raise GlobalWaterwayPackageError("renderer feature traversal ended before checkpoint")
+        if checkpoint_committed:
+            _resume_renderer_write_reservation(
+                connection,
+                trusted_data_version,
+            )
     checkpoint = {"renderComplete": True, "renderedFeatures": seen}
     _commit_render_checkpoint(connection, database_path, checkpoint, peaks)
+    _resume_renderer_write_reservation(connection, trusted_data_version)
     return True
 
 
@@ -3830,7 +4022,17 @@ def _payload(tile: TileKey, rows: Sequence[Sequence[object]]) -> bytes:
 def _ensure_owned_partial_directory(
     connection: sqlite3.Connection,
     partial_directory: Path,
+    *,
+    trusted_data_version: int | None = None,
 ) -> None:
+    if trusted_data_version is not None and (
+        not connection.in_transaction
+        or int(connection.execute("PRAGMA data_version").fetchone()[0])
+        != trusted_data_version
+    ):
+        raise GlobalWaterwayPackageError(
+            "partial ownership lacks the trusted renderer write reservation"
+        )
     expected = {
         "path": os.path.abspath(partial_directory),
         "schema": _PARTIAL_OWNER_SCHEMA,
@@ -3853,6 +4055,11 @@ def _ensure_owned_partial_directory(
             )
         _meta_set(connection, "partialDirectoryOwner", expected)
         connection.commit()
+        if trusted_data_version is not None:
+            _resume_renderer_write_reservation(
+                connection,
+                trusted_data_version,
+            )
         return
     if owner != expected:
         raise GlobalWaterwayPackageError("partial directory ownership identity differs")
@@ -3936,8 +4143,13 @@ def _build_runtime_files(
     *,
     size_policy_mode: object,
     available_destination_bytes: int | None,
+    trusted_data_version: int | None = None,
 ) -> tuple[int, int, dict[str, int]]:
-    _ensure_owned_partial_directory(connection, partial_directory)
+    _ensure_owned_partial_directory(
+        connection,
+        partial_directory,
+        trusted_data_version=trusted_data_version,
+    )
     records_path = partial_directory / "records.fadictpack"
     index_path = partial_directory / "tile-index.bin"
     checkpoint = dict(
@@ -4060,6 +4272,11 @@ def _build_runtime_files(
                 )
                 _meta_set(connection, "peaks", peaks)
                 connection.commit()
+                if trusted_data_version is not None:
+                    _resume_renderer_write_reservation(
+                        connection,
+                        trusted_data_version,
+                    )
         if staged is not None:
             raise GlobalWaterwayPackageError(
                 "staged waterway records remain outside package traversal"
@@ -4089,6 +4306,11 @@ def _build_runtime_files(
     )
     _meta_set(connection, "peaks", peaks)
     connection.commit()
+    if trusted_data_version is not None:
+        _resume_renderer_write_reservation(
+            connection,
+            trusted_data_version,
+        )
     return records_bytes, present_tiles, peaks
 
 
@@ -4246,6 +4468,13 @@ def _publish(
     recovery_receipt: Mapping[str, object] | None = None,
     immediate_pre_publish_validator: Callable[[], None] | None = None,
 ) -> Mapping[str, object]:
+    if not connection.in_transaction:
+        raise GlobalWaterwayPackageError(
+            "waterway publication lacks renderer write reservation"
+        )
+    trusted_data_version = int(
+        connection.execute("PRAGMA data_version").fetchone()[0]
+    )
     if _render_code_identities() != dict(code_identities):
         raise GlobalWaterwayPackageError("waterway renderer code identity drifted")
     raw_size_policy = render_run_identity.get("sizePolicy")
@@ -4259,29 +4488,19 @@ def _publish(
         raise GlobalWaterwayPackageError(
             "waterway renderer size-policy identity drifted"
         )
-    available_destination_bytes = _initial_visual_destination_capacity(
+    _ensure_owned_partial_directory(
         connection,
-        output_directory=output_directory,
-        render_run_sha256=render_run_sha256,
-        size_policy_mode=policy_mode,
+        partial_directory,
+        trusted_data_version=trusted_data_version,
     )
-    if (
-        recovery_receipt is not None
-        and policy_mode
-        == size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
-    ):
-        persisted_recovery = _meta_get(connection, "renderRecoveryReceipt")
-        expected_recovery = dict(recovery_receipt)
-        expected_recovery["initialAvailableDestinationBytes"] = (
-            available_destination_bytes
-        )
-        if persisted_recovery != expected_recovery:
-            raise GlobalWaterwayPackageError(
-                "visual-evaluation recovery capacity receipt differs"
-            )
-        recovery_receipt = MappingProxyType(dict(persisted_recovery))
     semantic_sha256 = _renderer_semantic_sha256(connection)
     projection = _projection_stats(connection, windows)
+    available_destination_bytes = _current_visual_staging_capacity(
+        connection,
+        partial_directory=partial_directory,
+        output_directory=output_directory,
+        size_policy_mode=policy_mode,
+    )
     _, present_tiles, peaks = _build_runtime_files(
         connection,
         database_path,
@@ -4289,6 +4508,7 @@ def _publish(
         windows,
         size_policy_mode=policy_mode,
         available_destination_bytes=available_destination_bytes,
+        trusted_data_version=trusted_data_version,
     )
     if recovery_receipt is not None:
         ingest_for_peak = _meta_get(connection, "ingestReceipt")
@@ -4462,114 +4682,64 @@ def _publish(
             "mandatoryPhoneFootprintBytes"
         ]
 
-    apply_size_decision(size_decision)
-    if recovery_receipt is None:
-        for _ in range(16):
-            receipt_bytes = _canonical_json_bytes(receipt)
-            published_bytes = runtime_bytes + len(receipt_bytes)
-            next_decision = enforce_global_waterway_storage_ceiling(
-                published_bytes,
-                size_policy_mode=policy_mode,
-                available_destination_bytes=available_destination_bytes,
-            )
-            if (
-                projection["publishedDirectoryBytes"] == published_bytes
-                and dict(size_decision) == dict(next_decision)
-            ):
-                break
-            projection["publishedDirectoryBytes"] = published_bytes
-            size_decision = next_decision
-            apply_size_decision(size_decision)
-        else:
-            raise GlobalWaterwayPackageError(
-                "published waterway directory byte accounting did not converge"
-            )
-    else:
-        normalized = json.loads(
-            _canonical_json_bytes(receipt).decode("utf-8", "strict")
-        )
-        normalized["build"].pop("recovery")
-        normalized_projection = normalized["projection"]
-        for _ in range(16):
-            normalized_bytes = _canonical_json_bytes(normalized)
-            normalized_total = runtime_bytes + len(normalized_bytes)
-            normalized_decision = enforce_global_waterway_storage_ceiling(
-                normalized_total,
-                size_policy_mode=policy_mode,
-                available_destination_bytes=available_destination_bytes,
-            )
-            normalized_size_policy = normalized["build"]["sizePolicy"]
-            if (
-                normalized_projection["publishedDirectoryBytes"] == normalized_total
-                and normalized_size_policy["decision"]
-                == dict(normalized_decision)
-            ):
-                break
-            normalized_projection["publishedDirectoryBytes"] = normalized_total
-            normalized_size_policy["decision"] = dict(normalized_decision)
-            normalized_projection["preferredCeilingExceeded"] = normalized_decision[
-                "preferredComponentPackageCeilingExceeded"
-            ]
-            normalized_projection["hardComponentCeilingExceeded"] = normalized_decision[
-                "hardComponentPackageCeilingExceeded"
-            ]
-            normalized_projection[
-                "preferredMandatoryPhoneFootprintCeilingExceeded"
-            ] = normalized_decision[
-                "preferredMandatoryPhoneFootprintCeilingExceeded"
-            ]
-            normalized_projection[
-                "hardMandatoryPhoneFootprintCeilingExceeded"
-            ] = normalized_decision[
-                "hardMandatoryPhoneFootprintCeilingExceeded"
-            ]
-            normalized_projection["mandatoryPhoneFootprintBytes"] = normalized_decision[
-                "mandatoryPhoneFootprintBytes"
-            ]
-        else:
-            raise GlobalWaterwayPackageError(
-                "recovered waterway normalized byte accounting did not converge"
-            )
-        projection["publishedDirectoryBytes"] = normalized_total
-        receipt["build"]["sizePolicy"] = normalized_size_policy
-        projection.update(normalized_projection)
+    final_recovery = None
+    if recovery_receipt is not None:
         final_recovery = dict(recovery_receipt)
         final_recovery["publishedDirectoryBytes"] = 0
         final_recovery["sizePolicyDecision"] = dict(size_decision)
         receipt["build"]["recovery"] = final_recovery
-        for _ in range(16):
-            receipt_bytes = _canonical_json_bytes(receipt)
-            published_bytes = runtime_bytes + len(receipt_bytes)
-            actual_decision = enforce_global_waterway_storage_ceiling(
-                published_bytes,
-                size_policy_mode=policy_mode,
-                available_destination_bytes=available_destination_bytes,
-            )
-            if (
-                final_recovery["publishedDirectoryBytes"] == published_bytes
-                and final_recovery["sizePolicyDecision"]
-                == dict(actual_decision)
-            ):
-                break
-            final_recovery["publishedDirectoryBytes"] = published_bytes
-            final_recovery["sizePolicyDecision"] = dict(actual_decision)
-        else:
-            raise GlobalWaterwayPackageError(
-                "recovered waterway actual byte accounting did not converge"
-            )
-        if (
-            policy_mode
-            != size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
-        ):
-            _meta_set(connection, "renderRecoveryReceipt", final_recovery)
-            connection.commit()
-    enforce_global_waterway_storage_ceiling(
-        published_bytes,
-        size_policy_mode=policy_mode,
-        available_destination_bytes=available_destination_bytes,
-    )
+    apply_size_decision(size_decision)
+
+    def converge_receipt(
+        publication_boundary_free_bytes: int | None,
+    ) -> tuple[bytes, int, Mapping[str, object]]:
+        nonlocal size_decision
+        for padding_bytes in range(65):
+            if padding_bytes:
+                projection["accountingConvergencePadding"] = "x" * (
+                    padding_bytes - 1
+                )
+            else:
+                projection.pop("accountingConvergencePadding", None)
+            for _ in range(32):
+                candidate_bytes = _canonical_json_bytes(receipt)
+                candidate_total = runtime_bytes + len(candidate_bytes)
+                candidate_decision = enforce_global_waterway_storage_ceiling(
+                    candidate_total,
+                    size_policy_mode=policy_mode,
+                    available_destination_bytes=available_destination_bytes,
+                )
+                if publication_boundary_free_bytes is not None:
+                    candidate_decision = _bind_publication_boundary_capacity(
+                        candidate_decision,
+                        destination_free_bytes=publication_boundary_free_bytes,
+                    )
+                stable = (
+                    projection["publishedDirectoryBytes"] == candidate_total
+                    and receipt["build"]["sizePolicy"]["decision"]
+                    == dict(candidate_decision)
+                )
+                if final_recovery is not None:
+                    stable = (
+                        stable
+                        and final_recovery["publishedDirectoryBytes"]
+                        == candidate_total
+                        and final_recovery["sizePolicyDecision"]
+                        == dict(candidate_decision)
+                    )
+                if stable:
+                    return candidate_bytes, candidate_total, candidate_decision
+                projection["publishedDirectoryBytes"] = candidate_total
+                size_decision = candidate_decision
+                apply_size_decision(candidate_decision)
+                if final_recovery is not None:
+                    final_recovery["publishedDirectoryBytes"] = candidate_total
+                    final_recovery["sizePolicyDecision"] = dict(candidate_decision)
+        raise GlobalWaterwayPackageError(
+            "published waterway directory byte accounting did not converge"
+        )
+
     receipt_path = partial_directory / "build-receipt.json"
-    _write_synced(receipt_path, receipt_bytes)
     if (
         policy_mode
         == size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
@@ -4585,119 +4755,17 @@ def _publish(
             if measured_boundary_free == bound_boundary_free:
                 break
             bound_boundary_free = measured_boundary_free
-            if recovery_receipt is None:
-                for _ in range(16):
-                    receipt_bytes = _canonical_json_bytes(receipt)
-                    published_bytes = runtime_bytes + len(receipt_bytes)
-                    boundary_decision = _bind_publication_boundary_capacity(
-                        enforce_global_waterway_storage_ceiling(
-                            published_bytes,
-                            size_policy_mode=policy_mode,
-                            available_destination_bytes=available_destination_bytes,
-                        ),
-                        destination_free_bytes=bound_boundary_free,
-                    )
-                    if (
-                        projection["publishedDirectoryBytes"] == published_bytes
-                        and receipt["build"]["sizePolicy"]["decision"]
-                        == dict(boundary_decision)
-                    ):
-                        break
-                    projection["publishedDirectoryBytes"] = published_bytes
-                    apply_size_decision(boundary_decision)
-                else:
-                    raise GlobalWaterwayPackageError(
-                        "visual-evaluation waterway byte accounting did not converge"
-                    )
-            else:
-                normalized = json.loads(
-                    _canonical_json_bytes(receipt).decode("utf-8", "strict")
-                )
-                normalized["build"].pop("recovery")
-                normalized_projection = normalized["projection"]
-                normalized_size_policy = normalized["build"]["sizePolicy"]
-                for _ in range(16):
-                    normalized_bytes = _canonical_json_bytes(normalized)
-                    normalized_total = runtime_bytes + len(normalized_bytes)
-                    normalized_decision = _bind_publication_boundary_capacity(
-                        enforce_global_waterway_storage_ceiling(
-                            normalized_total,
-                            size_policy_mode=policy_mode,
-                            available_destination_bytes=available_destination_bytes,
-                        ),
-                        destination_free_bytes=bound_boundary_free,
-                    )
-                    if (
-                        normalized_projection["publishedDirectoryBytes"]
-                        == normalized_total
-                        and normalized_size_policy["decision"]
-                        == dict(normalized_decision)
-                    ):
-                        break
-                    normalized_projection["publishedDirectoryBytes"] = normalized_total
-                    normalized_size_policy["decision"] = dict(normalized_decision)
-                    normalized_projection["preferredCeilingExceeded"] = (
-                        normalized_decision[
-                            "preferredComponentPackageCeilingExceeded"
-                        ]
-                    )
-                    normalized_projection["hardComponentCeilingExceeded"] = (
-                        normalized_decision["hardComponentPackageCeilingExceeded"]
-                    )
-                    normalized_projection[
-                        "preferredMandatoryPhoneFootprintCeilingExceeded"
-                    ] = normalized_decision[
-                        "preferredMandatoryPhoneFootprintCeilingExceeded"
-                    ]
-                    normalized_projection[
-                        "hardMandatoryPhoneFootprintCeilingExceeded"
-                    ] = normalized_decision[
-                        "hardMandatoryPhoneFootprintCeilingExceeded"
-                    ]
-                    normalized_projection["mandatoryPhoneFootprintBytes"] = (
-                        normalized_decision["mandatoryPhoneFootprintBytes"]
-                    )
-                else:
-                    raise GlobalWaterwayPackageError(
-                        "recovered visual-evaluation normalized byte accounting "
-                        "did not converge"
-                    )
-                receipt["build"]["sizePolicy"] = normalized_size_policy
-                projection.update(normalized_projection)
-                final_recovery = receipt["build"]["recovery"]
-                for _ in range(16):
-                    receipt_bytes = _canonical_json_bytes(receipt)
-                    published_bytes = runtime_bytes + len(receipt_bytes)
-                    actual_decision = _bind_publication_boundary_capacity(
-                        enforce_global_waterway_storage_ceiling(
-                            published_bytes,
-                            size_policy_mode=policy_mode,
-                            available_destination_bytes=available_destination_bytes,
-                        ),
-                        destination_free_bytes=bound_boundary_free,
-                    )
-                    if (
-                        final_recovery["publishedDirectoryBytes"] == published_bytes
-                        and final_recovery["sizePolicyDecision"]
-                        == dict(actual_decision)
-                    ):
-                        break
-                    final_recovery["publishedDirectoryBytes"] = published_bytes
-                    final_recovery["sizePolicyDecision"] = dict(actual_decision)
-                else:
-                    raise GlobalWaterwayPackageError(
-                        "recovered visual-evaluation actual byte accounting did not "
-                        "converge"
-                    )
-                _meta_set(connection, "renderRecoveryReceipt", final_recovery)
-                connection.commit()
-            receipt_bytes = _canonical_json_bytes(receipt)
-            published_bytes = runtime_bytes + len(receipt_bytes)
+            receipt_bytes, published_bytes, size_decision = converge_receipt(
+                bound_boundary_free
+            )
             _write_synced(receipt_path, receipt_bytes)
         else:
             raise GlobalWaterwayPackageError(
                 "visual-evaluation publication-boundary capacity did not stabilize"
             )
+    else:
+        receipt_bytes, published_bytes, size_decision = converge_receipt(None)
+        _write_synced(receipt_path, receipt_bytes)
     partial_sizes = _require_exact_directory_inventory(
         partial_directory,
         {

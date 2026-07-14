@@ -10,7 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
-from . import reference_presentation_policy, semantic_model, sourced_text
+from . import model, reference_presentation_policy, semantic_model, sourced_text
 from .model import TileKey
 from .osm_global_waterway_package import GlobalWaterwayPackageError
 from .reference_presentation_policy import (
@@ -233,6 +233,7 @@ def classifier_identity_sha256() -> str:
     total = 0
     for module in (
         __import__(__name__, fromlist=["*"]),
+        model,
         reference_presentation_policy,
         semantic_model,
         sourced_text,

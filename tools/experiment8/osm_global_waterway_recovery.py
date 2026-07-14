@@ -254,13 +254,15 @@ class WaterwayRenderRecoveryAuthority:
             raise GlobalWaterwayPackageError(
                 "waterway render recovery predecessor size-policy binding is malformed"
             )
-        if (
-            not self.predecessor_size_policy_identity_bound
-            and self.predecessor_size_policy_mode
+        if not self.predecessor_size_policy_identity_bound and (
+            self.predecessor_size_policy_mode
             != size_policy_module.BUDGETED_RELEASE_V1
+            or self.intended_size_policy_mode
+            != size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
         ):
             raise GlobalWaterwayPackageError(
-                "legacy waterway recovery predecessor must be budgeted release"
+                "legacy waterway recovery must transition from budgeted release "
+                "to complete visual evaluation"
             )
 
     def document(self) -> dict[str, object]:
@@ -514,6 +516,10 @@ def _require_owned_resume_partial(
                 raise GlobalWaterwayPackageError(
                     f"waterway recovery resume {label} prefix is missing"
                 )
+            if expected_sha256 != hashlib.sha256(b"").hexdigest():
+                raise GlobalWaterwayPackageError(
+                    f"waterway recovery resume {label} prefix SHA-256 differs"
+                )
             continue
         digest = hashlib.sha256()
         remaining = byte_count
@@ -625,9 +631,6 @@ def _recovery_receipt_document(
     new_render_identity: Mapping[str, object],
     new_render_sha256: str,
     sqlite_evidence_overhead_bytes: int = 0,
-    published_directory_bytes: int | None = None,
-    size_policy_decision: Mapping[str, object] | None = None,
-    initial_available_destination_bytes: int | None = None,
 ) -> dict[str, object]:
     meta = {
         key: _fact_document(byte_count, sha256)
@@ -675,77 +678,7 @@ def _recovery_receipt_document(
         "sqliteEvidenceOverheadBytes": sqlite_evidence_overhead_bytes,
         "transactionComplete": True,
     }
-    if published_directory_bytes is not None:
-        if type(published_directory_bytes) is not int or published_directory_bytes <= 0:
-            raise GlobalWaterwayPackageError(
-                "waterway recovery published byte accounting is malformed"
-            )
-        document["publishedDirectoryBytes"] = published_directory_bytes
-        if not isinstance(size_policy_decision, Mapping):
-            raise GlobalWaterwayPackageError(
-                "waterway recovery published size-policy decision is absent"
-            )
-        document["sizePolicyDecision"] = dict(size_policy_decision)
-    elif size_policy_decision is not None:
-        raise GlobalWaterwayPackageError(
-            "waterway recovery size-policy decision lacks published bytes"
-        )
-    if initial_available_destination_bytes is not None:
-        if (
-            authority.intended_size_policy_mode
-            != size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
-            or type(initial_available_destination_bytes) is not int
-            or initial_available_destination_bytes < 0
-        ):
-            raise GlobalWaterwayPackageError(
-                "waterway recovery initial destination capacity is malformed"
-            )
-        document["initialAvailableDestinationBytes"] = (
-            initial_available_destination_bytes
-        )
     return document
-
-
-def _validated_recovery_size_policy_decision(
-    *,
-    authority: WaterwayRenderRecoveryAuthority,
-    published_directory_bytes: object,
-    raw_decision: object,
-) -> Mapping[str, object] | None:
-    if published_directory_bytes is None:
-        if raw_decision is not None:
-            raise GlobalWaterwayPackageError(
-                "waterway recovery size-policy decision lacks published bytes"
-            )
-        return None
-    if type(published_directory_bytes) is not int or published_directory_bytes <= 0:
-        raise GlobalWaterwayPackageError(
-            "waterway recovery published byte accounting is malformed"
-        )
-    if not isinstance(raw_decision, Mapping):
-        raise GlobalWaterwayPackageError(
-            "waterway recovery published size-policy decision is absent"
-        )
-    expected = store.enforce_global_waterway_storage_ceiling(
-        published_directory_bytes,
-        size_policy_mode=authority.intended_size_policy_mode,
-        available_destination_bytes=raw_decision.get("availableDestinationBytes"),
-    )
-    if (
-        authority.intended_size_policy_mode
-        == size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
-    ):
-        expected = store._bind_publication_boundary_capacity(
-            expected,
-            destination_free_bytes=raw_decision.get(
-                "publicationBoundaryDestinationFreeBytes"
-            ),
-        )
-    if dict(raw_decision) != dict(expected):
-        raise GlobalWaterwayPackageError(
-            "waterway recovery published size-policy decision differs"
-        )
-    return expected
 
 
 def _validate_complete_admission(
@@ -839,6 +772,23 @@ def _validate_first_recovery(
         documents=documents,
         authority=authority,
     )
+    incident_render_identity = documents["renderRunIdentity"]
+    raw_zooms = incident_render_identity.get("zooms")
+    if (
+        type(raw_zooms) is not list
+        or not raw_zooms
+        or any(type(value) is not int for value in raw_zooms)
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery incident render zoom identity is malformed"
+        )
+    store._validated_renderer_prefix_stream(
+        connection,
+        source_binding=source_binding,
+        zooms=tuple(raw_zooms),
+        run_identity=incident_render_identity,
+        rendered_prefix=authority.rendered_features,
+    )
     source_counts = _require_source_counts(connection, authority)
     renderer_counts = _require_renderer_counts(connection, authority)
     recovered_at = (
@@ -893,15 +843,6 @@ def _validate_recovery_resume(
         new_render_identity=new_render_identity,
         new_render_sha256=new_render_sha256,
         sqlite_evidence_overhead_bytes=sqlite_evidence_overhead_bytes,
-        published_directory_bytes=receipt.get("publishedDirectoryBytes"),
-        size_policy_decision=_validated_recovery_size_policy_decision(
-            authority=authority,
-            published_directory_bytes=receipt.get("publishedDirectoryBytes"),
-            raw_decision=receipt.get("sizePolicyDecision"),
-        ),
-        initial_available_destination_bytes=receipt.get(
-            "initialAvailableDestinationBytes"
-        ),
     )
     if receipt != expected:
         raise GlobalWaterwayPackageError(
@@ -932,12 +873,22 @@ def _validate_recovery_resume(
         raise GlobalWaterwayPackageError(
             "waterway recovery render checkpoint is malformed on resume"
         )
-    if int(
-        connection.execute("SELECT COUNT(*) FROM rendered_features").fetchone()[0]
-    ) != rendered_features:
+    raw_zooms = new_render_identity.get("zooms")
+    if (
+        type(raw_zooms) is not list
+        or not raw_zooms
+        or any(type(value) is not int for value in raw_zooms)
+    ):
         raise GlobalWaterwayPackageError(
-            "waterway recovery rendered prefix count differs on resume"
+            "waterway recovery render zoom identity is malformed on resume"
         )
+    store._validated_renderer_prefix_stream(
+        connection,
+        source_binding=source_binding,
+        zooms=tuple(raw_zooms),
+        run_identity=new_render_identity,
+        rendered_prefix=rendered_features,
+    )
     _require_source_counts(connection, authority)
     return _RecoveryPlan(
         resumed=True,
@@ -1028,28 +979,48 @@ def _validate_recovery_plan(
         authority.intended_size_policy_mode
         == size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
     ):
-        bound_available = plan.recovery_receipt.get(
-            "initialAvailableDestinationBytes"
-        )
-        stored_available = store._validated_visual_destination_capacity_evidence(
-            connection,
-            output_directory=output_directory,
-            render_run_sha256=new_render_sha256,
+        if partials:
+            capacity_evidence = store._current_visual_staging_capacity_evidence(
+                connection,
+                partial_directory=expected_partial,
+                output_directory=output_directory,
+                size_policy_mode=authority.intended_size_policy_mode,
+            )
+            if capacity_evidence is None:
+                raise GlobalWaterwayPackageError(
+                    "visual-evaluation recovery capacity evidence is absent"
+                )
+            partial_bytes, available_bytes = capacity_evidence
+        else:
+            partial_bytes = 0
+            try:
+                available_bytes = size_policy_module.destination_available_bytes(
+                    output_directory
+                )
+            except size_policy_module.ReferenceSizePolicyError as error:
+                raise GlobalWaterwayPackageError(str(error)) from error
+        store.enforce_global_waterway_storage_ceiling(
+            partial_bytes,
             size_policy_mode=authority.intended_size_policy_mode,
-            required=bool(partials) or bound_available is not None,
+            available_destination_bytes=available_bytes,
         )
-        if stored_available != bound_available:
-            raise GlobalWaterwayPackageError(
-                "waterway recovery visual capacity checkpoint differs from receipt"
-            )
-        decision = plan.recovery_receipt.get("sizePolicyDecision")
-        if isinstance(decision, Mapping) and decision.get(
-            "availableDestinationBytes"
-        ) != bound_available:
-            raise GlobalWaterwayPackageError(
-                "waterway recovery visual capacity decision differs from receipt"
-            )
     return plan
+
+
+def _require_reset_paths_clear(
+    *,
+    database_path: Path,
+    output_directory: Path,
+) -> None:
+    _require_no_sidecars(database_path)
+    if output_directory.exists() or output_directory.is_symlink():
+        raise GlobalWaterwayPackageError(
+            "waterway recovery output directory appeared before reset"
+        )
+    if _partial_directories(output_directory):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery partial directory appeared before reset"
+        )
 
 
 def _require_reset_boundary(
@@ -1061,15 +1032,10 @@ def _require_reset_boundary(
     authority: WaterwayRenderRecoveryAuthority,
     plan: _RecoveryPlan,
 ) -> None:
-    _require_no_sidecars(database_path)
-    if output_directory.exists() or output_directory.is_symlink():
-        raise GlobalWaterwayPackageError(
-            "waterway recovery output directory appeared before reset"
-        )
-    if _partial_directories(output_directory):
-        raise GlobalWaterwayPackageError(
-            "waterway recovery partial directory appeared before reset"
-        )
+    _require_reset_paths_clear(
+        database_path=database_path,
+        output_directory=output_directory,
+    )
     _require_external_evidence(
         failure_log=failure_log,
         backup_receipt=backup_receipt,
@@ -1170,6 +1136,18 @@ def _reset_renderer_state(
             root_ids_path=root_ids_path,
             source_binding=source_binding,
             expected_code_identities=expected_code_identities,
+        )
+        _require_reset_boundary(
+            database_path=database_path,
+            output_directory=output_directory,
+            failure_log=failure_log,
+            backup_receipt=backup_receipt,
+            authority=authority,
+            plan=plan,
+        )
+        _require_reset_paths_clear(
+            database_path=database_path,
+            output_directory=output_directory,
         )
         for table in _RENDERER_TABLES:
             connection.execute(f"DELETE FROM {table}")
@@ -1347,6 +1325,7 @@ def _validate_bound_global_waterway_recovery(
             raise GlobalWaterwayPackageError(
                 "waterway recovery validation connection is not query-only"
             )
+        connection.execute("BEGIN")
         ingest = store._meta_get(connection, "ingestReceipt")
         if not isinstance(ingest, dict) or not isinstance(
             ingest.get("admission"), dict
@@ -1433,6 +1412,8 @@ def _validate_bound_global_waterway_recovery(
             }
         )
     finally:
+        if connection.in_transaction:
+            connection.rollback()
         connection.close()
 
 
@@ -1493,6 +1474,9 @@ def _recover_bound_global_waterway_package(
     classifier = classifier_identity_sha256()
     connection = sqlite3.connect(database_path)
     try:
+        trusted_data_version = int(
+            connection.execute("PRAGMA data_version").fetchone()[0]
+        )
         ingest = store._meta_get(connection, "ingestReceipt")
         if not isinstance(ingest, dict) or not isinstance(
             ingest.get("admission"), dict
@@ -1550,6 +1534,7 @@ def _recover_bound_global_waterway_package(
             checkpoint_features=checkpoint_features,
             pause_after_features=None,
             run_identity=render_identity,
+            trusted_data_version=trusted_data_version,
         )
         if not complete:
             return GlobalWaterwayBuildResult(

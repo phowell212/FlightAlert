@@ -1035,6 +1035,36 @@ class GlobalWaterwayStoreTests(unittest.TestCase):
 
 
 class GlobalWaterwayRendererTests(unittest.TestCase):
+    def test_complete_renderer_code_identity_includes_tile_key_model(self) -> None:
+        from tools.experiment8 import model
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        identities = store._render_code_identities()
+        self.assertIn("model", identities)
+        self.assertEqual(
+            store._stream_identity(Path(model.__file__).resolve(), "model code"),
+            identities["model"],
+        )
+
+    def test_classifier_identity_includes_tile_key_model(self) -> None:
+        from tools.experiment8 import model
+        from tools.experiment8 import osm_global_waterway_renderer as renderer
+
+        streamed = []
+
+        def record_module(_digest, path, *, maximum_bytes):
+            self.assertEqual(renderer._MAX_CLASSIFIER_MODULE_BYTES, maximum_bytes)
+            streamed.append(Path(path).resolve())
+            return 0
+
+        with patch.object(
+            renderer,
+            "_update_classifier_digest_bounded",
+            side_effect=record_module,
+        ):
+            renderer.classifier_identity_sha256()
+        self.assertIn(Path(model.__file__).resolve(), streamed)
+
     def test_classifier_identity_streams_without_unbounded_read_bytes(self) -> None:
         from tools.experiment8 import osm_global_waterway_renderer as renderer
 
@@ -1711,7 +1741,8 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                 self.assertTrue(complete)
                 self.assertTrue(checkpoint["renderComplete"])
                 self.assertGreaterEqual(checkpoint["renderedFeatures"], 2)
-                self.assertFalse(writer.in_transaction)
+                self.assertTrue(writer.in_transaction)
+                writer.rollback()
             finally:
                 writer.close()
 
@@ -2161,6 +2192,8 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
         available_measurements = []
         real_build_runtime_files = store._build_runtime_files
         real_enforce = store.enforce_global_waterway_storage_ceiling
+        real_projection = store._projection_stats
+        real_semantic = store._renderer_semantic_sha256
 
         def record_capacity(_output_directory):
             events.append("capacity")
@@ -2180,6 +2213,14 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             )
             return real_build_runtime_files(*args, **kwargs)
 
+        def record_projection(*args, **kwargs):
+            events.append("projection")
+            return real_projection(*args, **kwargs)
+
+        def record_semantic(*args, **kwargs):
+            events.append("semantic")
+            return real_semantic(*args, **kwargs)
+
         enforced_modes = []
 
         def record_enforcement(*args, **kwargs):
@@ -2194,6 +2235,14 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             store,
             "_build_runtime_files",
             side_effect=record_runtime_build,
+        ), patch.object(
+            store,
+            "_projection_stats",
+            side_effect=record_projection,
+        ), patch.object(
+            store,
+            "_renderer_semantic_sha256",
+            side_effect=record_semantic,
         ), patch.object(
             store,
             "enforce_global_waterway_storage_ceiling",
@@ -2231,7 +2280,10 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             decision["publicationBoundaryRequiredReserveBytes"],
         )
         self.assertTrue(decision["publicationBoundaryAuthorized"])
-        self.assertEqual("capacity", events[0])
+        self.assertEqual(
+            ["semantic", "projection", "capacity", "runtime-build"],
+            events[:4],
+        )
         self.assertGreaterEqual(events.count("capacity"), 2)
         self.assertEqual(90_000_000_000, available_measurements[-1])
         self.assertIn("runtime-build", events)
@@ -2242,7 +2294,9 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
             receipt["projection"]["hardMandatoryPhoneFootprintCeilingExceeded"]
         )
 
-    def test_visual_capacity_authority_survives_owned_partial_resume(self) -> None:
+    def test_visual_capacity_is_measured_only_after_partial_ownership(self) -> None:
+        import sqlite3
+
         from tools.experiment8 import osm_global_waterway_store as store
         from tools.experiment8 import reference_size_policy as size_policy
         from tools.experiment8.osm_global_waterway_package import (
@@ -2251,22 +2305,86 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
 
         measurements = []
 
-        def measure(_output_directory):
-            value = (
-                100_000_000_000
-                if not measurements
-                else size_policy.DESTINATION_RESERVE_BYTES
-            )
-            measurements.append(value)
-            return value
+        def measured(_output_directory):
+            measurements.append(True)
+            return 100_000_000_000
 
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             size_policy,
             "destination_available_bytes",
-            side_effect=measure,
+            side_effect=measured,
+        ), patch.object(
+            store,
+            "_ensure_owned_partial_directory",
+            side_effect=GlobalWaterwayPackageError("synthetic owner stop"),
         ):
             root = Path(temporary)
-            with patch.object(store.os, "rename", side_effect=OSError("stop")):
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "owner stop"):
+                self._build(
+                    root,
+                    "visual-owner",
+                    size_policy_mode=(
+                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                    ),
+                )
+            connection = sqlite3.connect(
+                root / "visual-owner-work" / "waterway-state.sqlite"
+            )
+            try:
+                self.assertIsNone(store._meta_get(connection, "sizePolicyCapacity"))
+            finally:
+                connection.close()
+        self.assertEqual([], measurements)
+
+    def test_visual_capacity_rejects_partial_inventory_race(self) -> None:
+        from tools.experiment8 import reference_size_policy as size_policy
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raced = False
+
+            def mutate_partial_during_capacity(_output_directory):
+                nonlocal raced
+                if not raced:
+                    partial = next(root.glob("visual-race.partial-*"))
+                    (partial / "manifest.json").write_bytes(b"raced\n")
+                    raced = True
+                return 100_000_000_000
+
+            with patch.object(
+                size_policy,
+                "destination_available_bytes",
+                side_effect=mutate_partial_during_capacity,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "partial inventory changed while measuring capacity",
+            ):
+                self._build(
+                    root,
+                    "visual-race",
+                    size_policy_mode=(
+                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                    ),
+                )
+            self.assertTrue(raced)
+
+    def test_visual_capacity_authority_survives_owned_partial_resume(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import reference_size_policy as size_policy
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                size_policy,
+                "destination_available_bytes",
+                return_value=100_000_000_000,
+            ), patch.object(store.os, "rename", side_effect=OSError("stop")):
                 with self.assertRaisesRegex(
                     GlobalWaterwayPackageError, "atomic.*publication"
                 ):
@@ -2277,21 +2395,32 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                             size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
                         ),
                     )
-            resumed = self._build(
-                root,
-                "visual-resume",
-                size_policy_mode=(
-                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
-                ),
+            partial = next(root.glob("visual-resume.partial-*"))
+            partial_bytes_at_resume = sum(
+                path.stat().st_size for path in partial.iterdir()
             )
+            with patch.object(
+                size_policy,
+                "destination_available_bytes",
+                return_value=size_policy.DESTINATION_RESERVE_BYTES,
+            ):
+                resumed = self._build(
+                    root,
+                    "visual-resume",
+                    size_policy_mode=(
+                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                    ),
+                )
         self.assertEqual("complete", resumed.state)
         decision = resumed.receipt["build"]["sizePolicy"]["decision"]
-        self.assertEqual(100_000_000_000, decision["availableDestinationBytes"])
+        self.assertEqual(
+            size_policy.DESTINATION_RESERVE_BYTES + partial_bytes_at_resume,
+            decision["availableDestinationBytes"],
+        )
         self.assertEqual(
             size_policy.DESTINATION_RESERVE_BYTES,
             decision["publicationBoundaryDestinationFreeBytes"],
         )
-        self.assertGreaterEqual(len(measurements), 3)
 
     def test_fixture_package_is_accepted_by_independent_catalog_finalizer(self) -> None:
         from tools.experiment8.v3_class_catalog_finalizer import finalize_v3_class_catalog
@@ -2707,6 +2836,102 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                 self._validate_recovery(prepared)
             self.assertEqual(before, self._snapshot_database(prepared["database"]))
 
+    def test_validate_recovery_authenticates_exact_renderer_prefix_and_ids(self) -> None:
+        import sqlite3
+
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        mutations = {
+            "record-envelope": (
+                "UPDATE records SET envelope=zeroblob(length(envelope)) "
+                "WHERE rowid=(SELECT MIN(rowid) FROM records)"
+            ),
+            "rendered-feature": (
+                "UPDATE rendered_features SET source_type='wadi' WHERE ordinal=0"
+            ),
+            "feature-id": (
+                "UPDATE feature_ids SET full_sha=zeroblob(32) "
+                "WHERE hot_id=(SELECT MIN(hot_id) FROM feature_ids)"
+            ),
+            "variant-id": (
+                "UPDATE variant_ids SET full_sha=zeroblob(32) "
+                "WHERE hot_id=(SELECT MIN(hot_id) FROM variant_ids)"
+            ),
+            "geometry-id": (
+                "UPDATE geometry_ids SET full_sha=zeroblob(32) "
+                "WHERE hot_id=(SELECT MIN(hot_id) FROM geometry_ids)"
+            ),
+            "label-id": (
+                "UPDATE label_ids SET full_sha=zeroblob(32) "
+                "WHERE hot_id=(SELECT MIN(hot_id) FROM label_ids)"
+            ),
+            "sourced-id": (
+                "UPDATE sourced_ids SET full_sha=zeroblob(32) "
+                "WHERE hot_id=(SELECT MIN(hot_id) FROM sourced_ids)"
+            ),
+        }
+        for label, statement in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                paused = self._recover(prepared, pause_after_features=4)
+                self.assertEqual("paused", paused.state)
+                connection = sqlite3.connect(prepared["database"])
+                try:
+                    connection.execute(statement)
+                    connection.commit()
+                finally:
+                    connection.close()
+                before = self._snapshot_database(prepared["database"])
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "prefix|identity",
+                ):
+                    self._validate_recovery(prepared)
+                self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
+    def test_validate_recovery_rejects_absent_zero_byte_runtime_with_wrong_hash(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        def abandon_empty_partial(connection, _database, partial, _windows, **_kwargs):
+            store._ensure_owned_partial_directory(connection, partial)
+            store._meta_set(
+                connection,
+                "buildCheckpoint",
+                {
+                    "indexBytes": 0,
+                    "indexSha256": "f" * 64,
+                    "nextOrdinal": 0,
+                    "recordsBytes": 0,
+                    "recordsSha256": "e" * 64,
+                },
+            )
+            connection.commit()
+            raise GlobalWaterwayPackageError("synthetic empty-partial stop")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            with patch.object(
+                store,
+                "_build_runtime_files",
+                side_effect=abandon_empty_partial,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "synthetic empty-partial stop",
+            ):
+                self._recover(prepared)
+            before = self._snapshot_database(prepared["database"])
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "prefix SHA-256",
+            ):
+                self._validate_recovery(prepared)
+            self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
     def test_validation_does_not_replace_execution_revalidation(self) -> None:
         from tools.experiment8.osm_global_waterway_package import (
             GlobalWaterwayPackageError,
@@ -2721,6 +2946,270 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             with self.assertRaises(GlobalWaterwayPackageError):
                 self._recover(prepared)
             self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
+    def test_validate_recovery_uses_one_read_snapshot_for_renderer_prefix(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            paused = self._recover(prepared, pause_after_features=4)
+            self.assertEqual("paused", paused.state)
+            real_validate = store._validated_renderer_prefix_stream
+            transaction_states = []
+
+            def record_transaction(connection, **kwargs):
+                transaction_states.append(connection.in_transaction)
+                return real_validate(connection, **kwargs)
+
+            with patch.object(
+                store,
+                "_validated_renderer_prefix_stream",
+                side_effect=record_transaction,
+            ):
+                validation = self._validate_recovery(prepared)
+            self.assertEqual("accepted", validation["state"])
+            self.assertEqual([True], transaction_states)
+
+    def test_first_recovery_validates_exact_incident_renderer_prefix(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            connection = sqlite3.connect(prepared["database"])
+            try:
+                incident_identity = store._meta_get(
+                    connection,
+                    "renderRunIdentity",
+                )
+            finally:
+                connection.close()
+            real_validate = store._validated_renderer_prefix_stream
+            calls = []
+
+            def record_incident_prefix(connection, **kwargs):
+                calls.append(kwargs)
+                return real_validate(connection, **kwargs)
+
+            with patch.object(
+                store,
+                "_validated_renderer_prefix_stream",
+                side_effect=record_incident_prefix,
+            ):
+                validation = self._validate_recovery(prepared)
+            self.assertEqual("accepted", validation["state"])
+            self.assertEqual(1, len(calls))
+            self.assertEqual(
+                prepared["authority"].rendered_features,
+                calls[0]["rendered_prefix"],
+            )
+            self.assertEqual(incident_identity, calls[0]["run_identity"])
+
+    def test_recovery_renderer_prefix_holds_write_reservation(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            paused = self._recover(prepared, pause_after_features=4)
+            self.assertEqual("paused", paused.state)
+            real_validate = store._validated_renderer_prefix_stream
+            transaction_states = []
+
+            def record_transaction(connection, **kwargs):
+                transaction_states.append(connection.in_transaction)
+                return real_validate(connection, **kwargs)
+
+            with patch.object(
+                store,
+                "_validated_renderer_prefix_stream",
+                side_effect=record_transaction,
+            ):
+                resumed = self._recover(prepared)
+            self.assertEqual("complete", resumed.state)
+            self.assertGreaterEqual(len(transaction_states), 2)
+            self.assertTrue(transaction_states[-1])
+
+    def test_renderer_checkpoint_rejects_external_writer_between_reservations(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            paused = self._recover(prepared, pause_after_features=4)
+            self.assertEqual("paused", paused.state)
+            real_commit = store._commit_render_checkpoint
+            injected = False
+
+            def commit_then_external_writer(
+                connection,
+                database_path,
+                checkpoint,
+                peaks,
+            ):
+                nonlocal injected
+                real_commit(connection, database_path, checkpoint, peaks)
+                if not injected:
+                    external = sqlite3.connect(database_path)
+                    try:
+                        store._meta_set(
+                            external,
+                            "syntheticExternalWriter",
+                            {"committed": True},
+                        )
+                        external.commit()
+                    finally:
+                        external.close()
+                    injected = True
+
+            with patch.object(
+                store,
+                "_commit_render_checkpoint",
+                side_effect=commit_then_external_writer,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "another connection",
+            ):
+                self._recover(prepared)
+            self.assertTrue(injected)
+
+    def test_renderer_rejects_external_writer_between_reset_and_staging(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_configure = store._configure_render_connection
+            injected = False
+
+            def configure_then_external_writer(connection):
+                nonlocal injected
+                real_configure(connection)
+                external = sqlite3.connect(prepared["database"])
+                try:
+                    store._meta_set(
+                        external,
+                        "syntheticPostResetWriter",
+                        {"committed": True},
+                    )
+                    external.commit()
+                finally:
+                    external.close()
+                injected = True
+
+            with patch.object(
+                store,
+                "_configure_render_connection",
+                side_effect=configure_then_external_writer,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "another connection",
+            ):
+                self._recover(prepared)
+            self.assertTrue(injected)
+
+    def test_renderer_rejects_external_writer_after_final_checkpoint(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_commit = store._commit_render_checkpoint
+            injected = False
+
+            def commit_then_external_writer(
+                connection,
+                database_path,
+                checkpoint,
+                peaks,
+            ):
+                nonlocal injected
+                real_commit(connection, database_path, checkpoint, peaks)
+                if checkpoint["renderComplete"] and not injected:
+                    external = sqlite3.connect(database_path)
+                    try:
+                        store._meta_set(
+                            external,
+                            "syntheticPostRenderWriter",
+                            {"committed": True},
+                        )
+                        external.commit()
+                    finally:
+                        external.close()
+                    injected = True
+
+            with patch.object(
+                store,
+                "_commit_render_checkpoint",
+                side_effect=commit_then_external_writer,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "another connection",
+            ):
+                self._recover(prepared)
+            self.assertTrue(injected)
+
+    def test_renderer_rejects_external_writer_after_runtime_checkpoint(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_resume = store._resume_renderer_write_reservation
+            injected = False
+
+            def inject_before_runtime_reservation(connection, trusted_version):
+                nonlocal injected
+                build_checkpoint = store._meta_get(connection, "buildCheckpoint")
+                if (
+                    not injected
+                    and not connection.in_transaction
+                    and isinstance(build_checkpoint, dict)
+                    and build_checkpoint.get("nextOrdinal", 0) > 0
+                ):
+                    external = sqlite3.connect(prepared["database"])
+                    try:
+                        store._meta_set(
+                            external,
+                            "syntheticPostRuntimeWriter",
+                            {"committed": True},
+                        )
+                        external.commit()
+                    finally:
+                        external.close()
+                    injected = True
+                return real_resume(connection, trusted_version)
+
+            with patch.object(
+                store,
+                "_resume_renderer_write_reservation",
+                side_effect=inject_before_runtime_reservation,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "another connection",
+            ):
+                self._recover(prepared)
+            self.assertTrue(injected)
 
     def test_recovery_requested_policy_cannot_mint_transition_authority(self) -> None:
         from tools.experiment8 import reference_size_policy as size_policy
@@ -2777,33 +3266,39 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             GlobalWaterwayPackageError,
         )
 
-        with tempfile.TemporaryDirectory() as temporary:
-            prepared = self._prepare_recovery(Path(temporary))
-            current = store._render_code_identities()
-            drifted = {key: dict(value) for key, value in current.items()}
-            drifted["store"]["sha256"] = "f" * 64
-            real_validate = recovery._validate_first_recovery
-            validated = False
+        for drifted_module in ("store", "model"):
+            with self.subTest(
+                drifted_module=drifted_module
+            ), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                current = store._render_code_identities()
+                drifted = {key: dict(value) for key, value in current.items()}
+                drifted[drifted_module]["sha256"] = "f" * 64
+                real_validate = recovery._validate_first_recovery
+                validated = False
 
-            def mark_validated(*args, **kwargs):
-                nonlocal validated
-                plan = real_validate(*args, **kwargs)
-                validated = True
-                return plan
+                def mark_validated(*args, **kwargs):
+                    nonlocal validated
+                    plan = real_validate(*args, **kwargs)
+                    validated = True
+                    return plan
 
-            def code_identity():
-                return drifted if validated else current
+                def code_identity():
+                    return drifted if validated else current
 
-            with patch.object(
-                recovery,
-                "_validate_first_recovery",
-                side_effect=mark_validated,
-            ), patch.object(
-                store,
-                "_render_code_identities",
-                side_effect=code_identity,
-            ), self.assertRaisesRegex(GlobalWaterwayPackageError, "code identity"):
-                self._recover(prepared)
+                with patch.object(
+                    recovery,
+                    "_validate_first_recovery",
+                    side_effect=mark_validated,
+                ), patch.object(
+                    store,
+                    "_render_code_identities",
+                    side_effect=code_identity,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "code identity",
+                ):
+                    self._recover(prepared)
 
     def test_recovery_resume_rejects_noncanonical_or_impossible_utc_timestamp(self) -> None:
         import sqlite3
@@ -2920,7 +3415,7 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                     self._recover(prepared)
                 self.assertEqual(before, self._snapshot_database(prepared["database"]))
 
-    def test_recovered_publication_matches_clean_except_recovery_evidence(self) -> None:
+    def test_recovered_publication_reports_actual_bytes_including_recovery_evidence(self) -> None:
         from tools.experiment8 import osm_global_waterway_package as pipeline
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -2952,7 +3447,7 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             clean_receipt = json.loads(
                 (clean_output / "build-receipt.json").read_text("utf-8")
             )
-            recovery = recovered_receipt["build"].pop("recovery")
+            recovery = recovered_receipt["build"]["recovery"]
             self.assertEqual(1, recovery["resetCount"])
             self.assertTrue(recovery["transactionComplete"])
             binding = recovered_receipt["build"]["sizePolicy"]["binding"]
@@ -2969,7 +3464,116 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                 recovery["sizePolicyTransition"]["predecessor"]["mode"],
             )
             self.assertTrue(recovery["sizePolicyDecision"]["authorized"])
-            self.assertEqual(clean_receipt, recovered_receipt)
+            actual_published_bytes = sum(
+                path.stat().st_size for path in prepared["output"].iterdir()
+            )
+            self.assertEqual(
+                actual_published_bytes,
+                recovered_receipt["projection"]["publishedDirectoryBytes"],
+            )
+            self.assertEqual(
+                actual_published_bytes,
+                recovered_receipt["build"]["sizePolicy"]["decision"][
+                    "requiredPackageBytes"
+                ],
+            )
+            self.assertEqual(actual_published_bytes, recovery["publishedDirectoryBytes"])
+            self.assertEqual(
+                actual_published_bytes,
+                recovery["sizePolicyDecision"]["requiredPackageBytes"],
+            )
+            self.assertNotEqual(clean_receipt, recovered_receipt)
+
+    def test_recovered_actual_bytes_drive_historical_threshold_booleans(self) -> None:
+        from dataclasses import replace
+
+        from tools.experiment8 import reference_size_policy as size_policy
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            size_policy,
+            "destination_available_bytes",
+            return_value=100_000_000_000,
+        ):
+            root = Path(temporary)
+            first = self._prepare_recovery(root / "first")
+            first["authority"] = replace(
+                first["authority"],
+                intended_size_policy_mode=(
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                ),
+            )
+            first_result = self._recover(
+                first,
+                size_policy_mode=(
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                ),
+            )
+            self.assertEqual("complete", first_result.state)
+            threshold = sum(path.stat().st_size for path in first["output"].iterdir())
+
+            second = self._prepare_recovery(root / "second")
+            second["authority"] = replace(
+                second["authority"],
+                intended_size_policy_mode=(
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                ),
+            )
+            real_evaluate = size_policy.evaluate_reference_size_policy
+
+            def evaluate_at_boundary(**kwargs):
+                decision = dict(real_evaluate(**kwargs))
+                crossed = kwargs["required_package_bytes"] >= threshold
+                for key in (
+                    "preferredComponentPackageCeilingExceeded",
+                    "preferredMandatoryPhoneFootprintCeilingExceeded",
+                    "hardComponentPackageCeilingExceeded",
+                    "hardMandatoryPhoneFootprintCeilingExceeded",
+                ):
+                    decision[key] = crossed
+                return decision
+
+            with patch.object(
+                size_policy,
+                "evaluate_reference_size_policy",
+                side_effect=evaluate_at_boundary,
+            ):
+                second_result = self._recover(
+                    second,
+                    size_policy_mode=(
+                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                    ),
+                )
+            self.assertEqual("complete", second_result.state)
+            receipt = second_result.receipt
+            actual = sum(path.stat().st_size for path in second["output"].iterdir())
+            self.assertGreaterEqual(actual, threshold)
+            self.assertEqual(actual, receipt["projection"]["publishedDirectoryBytes"])
+            top = receipt["build"]["sizePolicy"]["decision"]
+            nested = receipt["build"]["recovery"]["sizePolicyDecision"]
+            fields = (
+                (
+                    "preferredCeilingExceeded",
+                    "preferredComponentPackageCeilingExceeded",
+                ),
+                (
+                    "preferredMandatoryPhoneFootprintCeilingExceeded",
+                    "preferredMandatoryPhoneFootprintCeilingExceeded",
+                ),
+                (
+                    "hardComponentCeilingExceeded",
+                    "hardComponentPackageCeilingExceeded",
+                ),
+                (
+                    "hardMandatoryPhoneFootprintCeilingExceeded",
+                    "hardMandatoryPhoneFootprintCeilingExceeded",
+                ),
+            )
+            for projection_key, decision_key in fields:
+                with self.subTest(decision_key=decision_key):
+                    self.assertTrue(receipt["projection"][projection_key])
+                    self.assertTrue(top[decision_key])
+                    self.assertTrue(nested[decision_key])
+            self.assertEqual(top, nested)
 
     def test_recovery_resume_rejects_size_policy_transition_tamper(self) -> None:
         import sqlite3
@@ -2997,6 +3601,117 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             with self.assertRaises(GlobalWaterwayPackageError):
                 self._recover(prepared)
             self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
+    def test_legacy_unbound_budgeted_recovery_transitions_to_visual_policy(self) -> None:
+        import sqlite3
+        from dataclasses import replace
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import reference_size_policy as size_policy
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            connection = sqlite3.connect(prepared["database"])
+            try:
+                predecessor = store._meta_get(connection, "renderRunIdentity")
+                predecessor.pop("sizePolicy")
+                store._meta_set(connection, "renderRunIdentity", predecessor)
+                connection.commit()
+                meta_facts = []
+                for key in self._PINNED_META:
+                    raw = bytes(
+                        connection.execute(
+                            "SELECT value FROM meta WHERE key=?", (key,)
+                        ).fetchone()[0]
+                    )
+                    byte_count, sha256 = self._fact(raw)
+                    meta_facts.append((key, byte_count, sha256))
+            finally:
+                connection.close()
+            database_raw = prepared["database"].read_bytes()
+            prepared["authority"] = replace(
+                prepared["authority"],
+                database_bytes=len(database_raw),
+                database_sha256=hashlib.sha256(database_raw).hexdigest(),
+                meta_identities=tuple(meta_facts),
+                predecessor_size_policy_mode=size_policy.BUDGETED_RELEASE_V1,
+                predecessor_size_policy_identity_bound=False,
+                intended_size_policy_mode=(
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                ),
+            )
+            database_fact = {
+                "bytes": len(database_raw),
+                "sha256": hashlib.sha256(database_raw).hexdigest(),
+            }
+            backup = json.loads(prepared["backup_receipt"].read_text("utf-8"))
+            backup["backupDatabase"] = database_fact
+            backup["sourceDatabase"] = database_fact
+            prepared["backup_receipt"].write_bytes(self._canonical(backup))
+            with patch.object(
+                size_policy,
+                "destination_available_bytes",
+                return_value=100_000_000_000,
+            ):
+                result = self._recover(
+                    prepared,
+                    size_policy_mode=(
+                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                    ),
+                )
+            self.assertEqual("complete", result.state)
+            transition = result.receipt["build"]["recovery"][
+                "sizePolicyTransition"
+            ]
+            self.assertEqual(
+                {
+                    "identityBound": False,
+                    "mode": size_policy.BUDGETED_RELEASE_V1,
+                },
+                transition["predecessor"],
+            )
+            self.assertEqual(
+                size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
+                transition["intended"]["mode"],
+            )
+
+    def test_legacy_unbound_recovery_rejects_every_nonvisual_transition(self) -> None:
+        from dataclasses import replace
+
+        from tools.experiment8 import reference_size_policy as size_policy
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            for predecessor, intended in (
+                (
+                    size_policy.BUDGETED_RELEASE_V1,
+                    size_policy.BUDGETED_RELEASE_V1,
+                ),
+                (
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
+                    size_policy.BUDGETED_RELEASE_V1,
+                ),
+                (
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
+                ),
+            ):
+                with self.subTest(
+                    predecessor=predecessor,
+                    intended=intended,
+                ), self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "budgeted.*visual",
+                ):
+                    replace(
+                        prepared["authority"],
+                        predecessor_size_policy_mode=predecessor,
+                        predecessor_size_policy_identity_bound=False,
+                        intended_size_policy_mode=intended,
+                    )
 
     def test_recovery_interruption_resumes_without_second_reset(self) -> None:
         import sqlite3
@@ -3034,9 +3749,8 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                 connection.close()
             first_document = json.loads(first_receipt)
             second_document = json.loads(second_receipt)
-            self.assertGreater(second_document.pop("publishedDirectoryBytes"), 0)
-            final_size_decision = second_document.pop("sizePolicyDecision")
-            self.assertTrue(final_size_decision["authorized"])
+            self.assertNotIn("publishedDirectoryBytes", second_document)
+            self.assertNotIn("sizePolicyDecision", second_document)
             self.assertEqual(1, second_document["resetCount"])
             self.assertEqual(first_document, second_document)
 
@@ -3143,20 +3857,34 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                     )
             connection = sqlite3.connect(prepared["database"])
             try:
-                capacity = store._meta_get(connection, "sizePolicyCapacity")
-                capacity["availableDestinationBytesBeforeStaging"] += 1
-                store._meta_set(connection, "sizePolicyCapacity", capacity)
+                self.assertIsNone(store._meta_get(connection, "sizePolicyCapacity"))
+                store._meta_set(
+                    connection,
+                    "sizePolicyCapacity",
+                    {
+                        "schema": "forged-retired-capacity-authority",
+                        "availableDestinationBytesBeforeStaging": 10**15,
+                    },
+                )
                 connection.commit()
             finally:
                 connection.close()
             before = self._snapshot_database(prepared["database"])
-            with self.assertRaisesRegex(GlobalWaterwayPackageError, "capacity"):
-                self._validate_recovery(
-                    prepared,
-                    size_policy_mode=(
-                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
-                    ),
-                )
+            with patch.object(
+                size_policy,
+                "destination_available_bytes",
+                return_value=size_policy.DESTINATION_RESERVE_BYTES - 1,
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError,
+                    "available|capacity|reserve",
+                ):
+                    self._validate_recovery(
+                        prepared,
+                        size_policy_mode=(
+                            size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                        ),
+                    )
             self.assertEqual(before, self._snapshot_database(prepared["database"]))
 
     def test_visual_recovery_resumes_after_boundary_measurement_failure(self) -> None:
@@ -3265,6 +3993,125 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             )
             self.assertEqual("complete", resumed.state)
             self.assertTrue(prepared["output"].is_dir())
+
+    def test_visual_recovery_validation_rejects_forged_sqlite_publication_bytes(self) -> None:
+        import sqlite3
+        from dataclasses import replace
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import reference_size_policy as size_policy
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            size_policy,
+            "destination_available_bytes",
+            return_value=100_000_000_000,
+        ):
+            prepared = self._prepare_recovery(Path(temporary))
+            prepared["authority"] = replace(
+                prepared["authority"],
+                intended_size_policy_mode=(
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                ),
+            )
+            with patch.object(store.os, "rename", side_effect=OSError("stop")):
+                with self.assertRaises(GlobalWaterwayPackageError):
+                    self._recover(
+                        prepared,
+                        size_policy_mode=(
+                            size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                        ),
+                    )
+            connection = sqlite3.connect(prepared["database"])
+            try:
+                receipt = store._meta_get(connection, "renderRecoveryReceipt")
+                forged = store._bind_publication_boundary_capacity(
+                    store.enforce_global_waterway_storage_ceiling(
+                        1,
+                        size_policy_mode=(
+                            size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                        ),
+                        available_destination_bytes=100_000_000_000,
+                    ),
+                    destination_free_bytes=100_000_000_000,
+                )
+                receipt["publishedDirectoryBytes"] = 1
+                receipt["sizePolicyDecision"] = dict(forged)
+                store._meta_set(connection, "renderRecoveryReceipt", receipt)
+                connection.commit()
+            finally:
+                connection.close()
+            before = self._snapshot_database(prepared["database"])
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "receipt|published.*bytes|partial.*accounting",
+            ):
+                self._validate_recovery(
+                    prepared,
+                    size_policy_mode=(
+                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                    ),
+                )
+            self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
+    def test_visual_recovery_validation_uses_fresh_free_space_without_mutation(self) -> None:
+        from dataclasses import replace
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8 import reference_size_policy as size_policy
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            prepared["authority"] = replace(
+                prepared["authority"],
+                intended_size_policy_mode=(
+                    size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                ),
+            )
+            with patch.object(
+                size_policy,
+                "destination_available_bytes",
+                return_value=100_000_000_000,
+            ), patch.object(store.os, "rename", side_effect=OSError("stop")):
+                with self.assertRaises(GlobalWaterwayPackageError):
+                    self._recover(
+                        prepared,
+                        size_policy_mode=(
+                            size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                        ),
+                    )
+            partial = next(prepared["output"].parent.glob("recovered.partial-*"))
+            before_database = self._snapshot_database(prepared["database"])
+            before_partial = {
+                path.name: path.read_bytes() for path in partial.iterdir()
+            }
+            with patch.object(
+                size_policy,
+                "destination_available_bytes",
+                return_value=size_policy.DESTINATION_RESERVE_BYTES - 1,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "capacity|reserve",
+            ):
+                self._validate_recovery(
+                    prepared,
+                    size_policy_mode=(
+                        size_policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                    ),
+                )
+            self.assertEqual(
+                before_database,
+                self._snapshot_database(prepared["database"]),
+            )
+            self.assertEqual(
+                before_partial,
+                {path.name: path.read_bytes() for path in partial.iterdir()},
+            )
 
     def test_recovery_resume_rejects_malformed_sqlite_overhead_canonically(self) -> None:
         import sqlite3
@@ -3411,6 +4258,63 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
                     hashed_snapshot,
                     self._snapshot_database(prepared["database"]),
                 )
+
+    def test_recovery_rechecks_full_boundary_after_destructive_input_hashing(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            before = self._snapshot_database(prepared["database"])
+            real_require = recovery._require_destructive_inputs_current
+
+            def race_output_after_hashing(**kwargs):
+                real_require(**kwargs)
+                prepared["output"].mkdir()
+
+            with patch.object(
+                recovery,
+                "_require_destructive_inputs_current",
+                side_effect=race_output_after_hashing,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "output directory appeared before reset",
+            ):
+                self._recover(prepared)
+            self.assertEqual(before, self._snapshot_database(prepared["database"]))
+
+    def test_recovery_fast_boundary_is_last_after_slow_hashes(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            before = self._snapshot_database(prepared["database"])
+            real_require = recovery._require_recovery_code_current
+            calls = 0
+
+            def race_output_after_final_slow_check(*args, **kwargs):
+                nonlocal calls
+                real_require(*args, **kwargs)
+                calls += 1
+                if calls == 3:
+                    prepared["output"].mkdir()
+
+            with patch.object(
+                recovery,
+                "_require_recovery_code_current",
+                side_effect=race_output_after_final_slow_check,
+            ), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "output directory appeared before reset",
+            ):
+                self._recover(prepared)
+            self.assertEqual(3, calls)
+            self.assertEqual(before, self._snapshot_database(prepared["database"]))
 
     def test_recovery_code_identity_is_rechecked_before_publication(self) -> None:
         from tools.experiment8 import osm_global_waterway_recovery as recovery

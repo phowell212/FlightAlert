@@ -120,9 +120,13 @@ def reference_size_policy_document() -> Mapping[str, object]:
             ),
         },
         "modes": list(REFERENCE_SIZE_POLICY_MODES),
-        "schema": "flightalert.experiment8.reference-size-policy.v1",
+        "schema": "flightalert.experiment8.reference-size-policy.v2",
         "visualEvaluationCapacityBasis": (
-            "destination-free-before-staging-plus-final-reserve-proof"
+            "fresh-destination-free-plus-exact-owned-partial-before-staging-"
+            "and-fresh-final-reserve-proof"
+        ),
+        "visualEvaluationCapacityPersistence": (
+            "memory-only-sqlite-capacity-is-not-authority"
         ),
     })
 

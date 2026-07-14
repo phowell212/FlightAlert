@@ -15,7 +15,7 @@ class ReferenceSizePolicyTests(unittest.TestCase):
         )
         document = policy.reference_size_policy_document()
         self.assertEqual(
-            "flightalert.experiment8.reference-size-policy.v1",
+            "flightalert.experiment8.reference-size-policy.v2",
             document["schema"],
         )
         self.assertEqual(25_000_000_000, document["historicalBudgets"]["preferredMandatoryPhoneFootprintBytes"])
@@ -24,8 +24,15 @@ class ReferenceSizePolicyTests(unittest.TestCase):
         self.assertEqual(40_000_000_000, document["historicalBudgets"]["hardMandatoryPhoneFootprintBytes"])
         self.assertEqual(1_500_000_000, document["destinationReserveBytes"])
         self.assertEqual(
-            "destination-free-before-staging-plus-final-reserve-proof",
+            (
+                "fresh-destination-free-plus-exact-owned-partial-before-staging-"
+                "and-fresh-final-reserve-proof"
+            ),
             document["visualEvaluationCapacityBasis"],
+        )
+        self.assertEqual(
+            "memory-only-sqlite-capacity-is-not-authority",
+            document["visualEvaluationCapacityPersistence"],
         )
         with self.assertRaisesRegex(policy.ReferenceSizePolicyError, "unsupported"):
             policy.reference_size_policy_binding("ignore-size")
@@ -44,7 +51,7 @@ class ReferenceSizePolicyTests(unittest.TestCase):
         self.assertEqual(policy.BUDGETED_RELEASE_V1, binding["mode"])
         self.assertEqual(policy.reference_size_policy_document(), binding["document"])
         self.assertEqual(
-            "3310cdcb1dc0773635e9eeace12f1d872b9d03317c375b348f3842b7540376b8",
+            "174f2e4a213e27e676578155d132b48513df9700108292af82f16a4516cdec3f",
             binding["documentSha256"],
         )
         self.assertEqual(
@@ -83,6 +90,40 @@ class ReferenceSizePolicyTests(unittest.TestCase):
         self.assertFalse(rejected["authorized"])
         self.assertTrue(rejected["hardComponentPackageCeilingExceeded"])
         self.assertTrue(rejected["hardMandatoryPhoneFootprintCeilingExceeded"])
+
+    def test_historical_preferred_and_hard_thresholds_are_exact(self) -> None:
+        from tools.experiment8 import reference_size_policy as policy
+
+        for required, preferred, hard in (
+            (23_499_999_999, False, False),
+            (23_500_000_000, True, False),
+            (38_499_999_999, True, False),
+            (38_500_000_000, True, True),
+        ):
+            with self.subTest(required=required):
+                decision = policy.evaluate_reference_size_policy(
+                    mode=policy.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
+                    required_package_bytes=required,
+                    available_destination_bytes=100_000_000_000,
+                )
+                self.assertEqual(
+                    preferred,
+                    decision["preferredComponentPackageCeilingExceeded"],
+                )
+                self.assertEqual(
+                    preferred,
+                    decision[
+                        "preferredMandatoryPhoneFootprintCeilingExceeded"
+                    ],
+                )
+                self.assertEqual(
+                    hard,
+                    decision["hardComponentPackageCeilingExceeded"],
+                )
+                self.assertEqual(
+                    hard,
+                    decision["hardMandatoryPhoneFootprintCeilingExceeded"],
+                )
 
     def test_visual_mode_requires_exact_dynamic_capacity_plus_reserve(self) -> None:
         from tools.experiment8 import reference_size_policy as policy
