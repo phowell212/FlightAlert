@@ -53,6 +53,20 @@ _MAX_RECORD_ENVELOPE_BYTES = (
 )
 _MAX_FILE_ORDINAL = 999_999_999_999
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_GENERIC_WRITE = 0x40000000
+_WINDOWS_DELETE_ACCESS = 0x00010000
+_WINDOWS_SYNCHRONIZE_ACCESS = 0x00100000
+_WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
+_WINDOWS_CREATE_NEW = 1
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_FILE_RENAME_INFO_CLASS = 3
+_WINDOWS_FILE_DISPOSITION_INFO_CLASS = 4
 _WATERWAY_CODES = {
     "river": 1,
     "stream": 2,
@@ -1021,7 +1035,24 @@ def _decode_feature_render_frame(reader) -> FeatureRenderFrame:
     )
 
 
-def _record_envelope(record: object, tile: TileKey) -> bytes:
+@dataclass(frozen=True, slots=True)
+class _RecordEnvelopeParts:
+    renderer_bytes: bytes
+    sourced_sha256: bytes
+    sourced_bytes: bytes
+
+    @property
+    def encoded_byte_count(self) -> int:
+        return (
+            4
+            + len(self.renderer_bytes)
+            + 4
+            + len(self.sourced_sha256)
+            + len(self.sourced_bytes)
+        )
+
+
+def _record_envelope_parts(record: object, tile: TileKey) -> _RecordEnvelopeParts:
     renderer = record.renderer_record
     sourced = record.sourced_text
     if renderer.posting.requested_tile != tile or sourced is None:
@@ -1032,13 +1063,36 @@ def _record_envelope(record: object, tile: TileKey) -> bytes:
         raise _error("waterway renderer record byte length is outside its bound")
     if not 0 < len(sourced_bytes) <= MAX_SOURCED_TEXT_RECORD_BYTES:
         raise _error("waterway sourced-text byte length is outside its bound")
+    sourced_sha256 = _require_sha256_bytes(
+        sourced.full_sha256,
+        "waterway sourced-text full identity",
+    )
+    return _RecordEnvelopeParts(
+        renderer_bytes=renderer_bytes,
+        sourced_sha256=sourced_sha256,
+        sourced_bytes=sourced_bytes,
+    )
+
+
+def _record_envelope(
+    record: object,
+    tile: TileKey,
+    prepared_parts: _RecordEnvelopeParts | None = None,
+) -> bytes:
+    parts = (
+        _record_envelope_parts(record, tile)
+        if prepared_parts is None
+        else prepared_parts
+    )
+    if not isinstance(parts, _RecordEnvelopeParts):
+        raise _error("waterway record envelope parts are invalid")
     return b"".join(
         (
-            struct.pack("<I", len(renderer_bytes)),
-            renderer_bytes,
-            struct.pack("<I", len(sourced_bytes)),
-            sourced.full_sha256,
-            sourced_bytes,
+            struct.pack("<I", len(parts.renderer_bytes)),
+            parts.renderer_bytes,
+            struct.pack("<I", len(parts.sourced_bytes)),
+            parts.sourced_sha256,
+            parts.sourced_bytes,
         )
     )
 
@@ -1128,7 +1182,13 @@ def _initial_frame_encoded_bytes(
     )
 
 
-def _encoded_record_row_bytes(envelope: bytes) -> int:
+def _encoded_record_row_bytes_for_envelope_length(envelope_byte_count: int) -> int:
+    _require_int(
+        envelope_byte_count,
+        1,
+        _MAX_RECORD_ENVELOPE_BYTES,
+        "feature frame record envelope byte count",
+    )
     return (
         1
         + 4
@@ -1142,10 +1202,16 @@ def _encoded_record_row_bytes(envelope: bytes) -> int:
         + 8
         + 32
         + 4
-        + len(envelope)
+        + envelope_byte_count
         + 4
         + 1
     )
+
+
+def _encoded_record_row_bytes(envelope: bytes) -> int:
+    if type(envelope) is not bytes:
+        raise _error("feature frame record envelope must be immutable bytes")
+    return _encoded_record_row_bytes_for_envelope_length(len(envelope))
 
 
 def _build_feature_render_frame(
@@ -1223,8 +1289,13 @@ def _build_feature_render_frame(
                 sourced.full_sha256,
             ):
                 budget.reserve(1 + 8 + 32)
-            envelope = _record_envelope(record, tile)
-            budget.reserve(_encoded_record_row_bytes(envelope))
+            envelope_parts = _record_envelope_parts(record, tile)
+            budget.reserve(
+                _encoded_record_row_bytes_for_envelope_length(
+                    envelope_parts.encoded_byte_count
+                )
+            )
+            envelope = _record_envelope(record, tile, envelope_parts)
             posting_key = struct.pack(
                 ">QQQi",
                 posting.feature_id,
@@ -1344,6 +1415,369 @@ def _require_directory_chain_unchanged(
             raise _error(f"{label} ancestor changed or became a link/reparse point")
 
 
+def _create_windows_owned_temp(path: Path) -> BinaryIO:
+    """Create one exact temp whose retained handle denies mutation/replacement."""
+
+    if os.name != "nt" or not path.is_absolute():
+        raise _error("Windows owned temp creation requires an absolute path")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(
+        str(path),
+        _WINDOWS_GENERIC_READ
+        | _WINDOWS_GENERIC_WRITE
+        | _WINDOWS_DELETE_ACCESS
+        | _WINDOWS_FILE_READ_ATTRIBUTES
+        | _WINDOWS_SYNCHRONIZE_ACCESS,
+        _WINDOWS_FILE_SHARE_READ,
+        None,
+        _WINDOWS_CREATE_NEW,
+        _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, ctypes.FormatError(error_code), str(path))
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            int(handle), os.O_RDWR | getattr(os, "O_BINARY", 0)
+        )
+    except BaseException as open_error:
+        try:
+            _mark_windows_native_handle_for_delete(int(handle))
+        except BaseException as cleanup_error:
+            open_error.add_note(
+                f"owned native temp cleanup failed: {cleanup_error}"
+            )
+        close_handle(handle)
+        raise
+    try:
+        return os.fdopen(descriptor, "w+b", buffering=0)
+    except BaseException as stream_error:
+        try:
+            _mark_windows_native_handle_for_delete(
+                msvcrt.get_osfhandle(descriptor)
+            )
+        except BaseException as cleanup_error:
+            stream_error.add_note(
+                f"owned native temp cleanup failed: {cleanup_error}"
+            )
+        os.close(descriptor)
+        raise
+
+
+def _windows_file_rename_info_buffer(destination: Path) -> object:
+    if os.name != "nt" or not destination.is_absolute():
+        raise _error("Windows handle publication requires an absolute destination")
+    if "\x00" in str(destination):
+        raise _error("Windows handle publication destination contains NUL")
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileRenameInfo(ctypes.Structure):
+        _fields_ = (
+            ("replace_if_exists", wintypes.BOOLEAN),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * 1),
+        )
+
+    encoded = str(destination).encode("utf-16-le")
+    name_offset = _FileRenameInfo.file_name.offset
+    buffer = ctypes.create_string_buffer(name_offset + len(encoded) + 2)
+    information = _FileRenameInfo.from_buffer(buffer)
+    information.replace_if_exists = False
+    information.root_directory = None
+    information.file_name_length = len(encoded)
+    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
+    return buffer
+
+
+def _publish_windows_owned_temp_no_replace(
+    handle: BinaryIO,
+    destination: Path,
+) -> None:
+    """Rename the object held by *handle* without replacing a destination."""
+
+    if os.name != "nt":
+        raise _error("Windows handle publication requires Windows")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    buffer = _windows_file_rename_info_buffer(destination)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    set_information.restype = wintypes.BOOL
+    if not set_information(
+        msvcrt.get_osfhandle(handle.fileno()),
+        _WINDOWS_FILE_RENAME_INFO_CLASS,
+        ctypes.byref(buffer),
+        len(buffer),
+    ):
+        error_code = ctypes.get_last_error()
+        raise OSError(
+            error_code,
+            ctypes.FormatError(error_code),
+            str(destination),
+        )
+
+
+def _mark_windows_native_handle_for_delete(native_handle: int) -> None:
+    if os.name != "nt":
+        raise _error("Windows handle disposition requires Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = (("delete_file", ctypes.c_ubyte),)
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    set_information.restype = wintypes.BOOL
+    information = _FileDispositionInfo(1)
+    if not set_information(
+        native_handle,
+        _WINDOWS_FILE_DISPOSITION_INFO_CLASS,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, ctypes.FormatError(error_code))
+
+
+def _mark_windows_owned_temp_for_delete(handle: BinaryIO) -> None:
+    if os.name != "nt":
+        raise _error("Windows handle disposition requires Windows")
+    import msvcrt
+
+    _mark_windows_native_handle_for_delete(
+        msvcrt.get_osfhandle(handle.fileno())
+    )
+
+
+class _AnchoredSpoolDirectory:
+    """Pin a verified directory chain for every side effect in one spool job."""
+
+    def __init__(self, path: Path, label: str) -> None:
+        self._label = label
+        self._chain = _require_plain_directory(path, label)
+        self.root = self._chain[-1][0]
+        self._windows_handles: list[int] = []
+        self._windows_kernel32: object | None = None
+
+    def __enter__(self) -> _AnchoredSpoolDirectory:
+        try:
+            if os.name == "nt":
+                self._hold_windows_chain()
+            else:
+                raise _error(
+                    f"{self._label} requires Windows retained-handle safety"
+                )
+            _require_directory_chain_unchanged(self._chain, self._label)
+        except BaseException:
+            self._close_holds()
+            raise
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        try:
+            self._close_holds()
+        except OSError as error:
+            close_error = _error(f"{self._label} anchor could not be released")
+            if exception is None:
+                raise close_error from error
+            exception.add_note(f"{close_error}: {error}")
+        return False
+
+    def _hold_windows_chain(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        invalid_handle = ctypes.c_void_p(-1).value
+        self._windows_kernel32 = kernel32
+        for candidate, expected_identity in self._chain:
+            handle = create_file(
+                str(candidate),
+                _WINDOWS_FILE_READ_ATTRIBUTES,
+                _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+                None,
+                _WINDOWS_OPEN_EXISTING,
+                _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT
+                | _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+            if handle == invalid_handle:
+                error_code = ctypes.get_last_error()
+                raise OSError(
+                    error_code,
+                    ctypes.FormatError(error_code),
+                    str(candidate),
+                )
+            self._windows_handles.append(int(handle))
+            _require_directory_chain_unchanged(
+                ((candidate, expected_identity),), self._label
+            )
+
+    def _close_holds(self) -> None:
+        first_error: OSError | None = None
+        if self._windows_kernel32 is not None:
+            close_handle = self._windows_kernel32.CloseHandle
+            while self._windows_handles:
+                handle = self._windows_handles.pop()
+                if not close_handle(handle) and first_error is None:
+                    import ctypes
+
+                    error_code = ctypes.get_last_error()
+                    first_error = OSError(
+                        error_code,
+                        ctypes.FormatError(error_code),
+                    )
+            self._windows_kernel32 = None
+        if first_error is not None:
+            raise first_error
+
+    def _require_leaf_name(self, name: str) -> str:
+        if (
+            type(name) is not str
+            or not name
+            or Path(name).name != name
+            or "/" in name
+            or "\\" in name
+        ):
+            raise _error(f"{self._label} file name must stay within its root")
+        return name
+
+    def require_unchanged(self) -> None:
+        _require_directory_chain_unchanged(self._chain, self._label)
+
+    def open_exclusive(self, name: str) -> tuple[BinaryIO, tuple[int, int]]:
+        leaf_name = self._require_leaf_name(name)
+        if os.name != "nt" or not self._windows_handles:
+            raise _error(f"{self._label} is not safely anchored")
+        handle = _create_windows_owned_temp(self.root / leaf_name)
+        try:
+            observed = os.fstat(handle.fileno())
+            _require_plain_file_stat(observed, "feature batch newly created spool")
+            return handle, _owned_file_identity(observed)
+        except BaseException as validation_error:
+            if os.name == "nt":
+                try:
+                    _mark_windows_owned_temp_for_delete(handle)
+                except BaseException as cleanup_error:
+                    validation_error.add_note(
+                        f"owned temp validation cleanup failed: {cleanup_error}"
+                    )
+            handle.close()
+            raise
+
+    def lstat(self, name: str) -> os.stat_result:
+        leaf_name = self._require_leaf_name(name)
+        if os.name != "nt" or not self._windows_handles:
+            raise _error(f"{self._label} is not safely anchored")
+        return os.lstat(self.root / leaf_name)
+
+    def publish_owned_no_replace(
+        self,
+        source_name: str,
+        destination_name: str,
+        handle: BinaryIO,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        source_leaf = self._require_leaf_name(source_name)
+        destination_leaf = self._require_leaf_name(destination_name)
+        observed = os.fstat(handle.fileno())
+        _require_plain_file_stat(observed, "feature batch owned temporary spool")
+        if _owned_file_identity(observed) != expected_identity:
+            raise _error("feature batch temporary spool handle identity changed")
+        if os.name != "nt" or not self._windows_handles:
+            raise _error(f"{self._label} is not safely anchored")
+        source_stat = self.lstat(source_leaf)
+        _require_plain_file_stat(source_stat, "feature batch temporary spool")
+        if _owned_file_identity(source_stat) != expected_identity:
+            raise _error("feature batch temporary spool name identity changed")
+        _publish_windows_owned_temp_no_replace(
+            handle,
+            self.root / destination_leaf,
+        )
+
+    def dispose_owned_open_file(
+        self,
+        candidate_names: Sequence[str],
+        handle: BinaryIO,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        leaves = tuple(self._require_leaf_name(name) for name in candidate_names)
+        try:
+            observed = os.fstat(handle.fileno())
+            _require_plain_file_stat(observed, "feature batch owned temporary spool")
+            if _owned_file_identity(observed) != expected_identity:
+                raise _error(
+                    "feature batch temporary spool handle identity changed before cleanup"
+                )
+            if os.name != "nt" or not self._windows_handles:
+                raise _error(f"{self._label} is not safely anchored")
+            _mark_windows_owned_temp_for_delete(handle)
+        finally:
+            handle.close()
+        for leaf_name in leaves:
+            try:
+                remaining = self.lstat(leaf_name)
+            except FileNotFoundError:
+                continue
+            if _owned_file_identity(remaining) == expected_identity:
+                raise _error("feature batch owned temporary spool survived cleanup")
+
+
 def _require_plain_file_stat(observed: os.stat_result, label: str) -> None:
     if (
         stat.S_ISLNK(observed.st_mode)
@@ -1363,6 +1797,10 @@ def _stat_signature(observed: os.stat_result) -> tuple[int, int, int, int, int]:
         int(observed.st_mtime_ns),
         int(observed.st_ctime_ns),
     )
+
+
+def _owned_file_identity(observed: os.stat_result) -> tuple[int, int]:
+    return (int(observed.st_dev), int(observed.st_ino))
 
 
 class _QuotaFileWriter:
@@ -1404,78 +1842,108 @@ class _QuotaFileWriter:
 def render_feature_batch_job(job_bytes: bytes) -> SpoolDescriptor:
     job = decode_feature_batch_job(job_bytes)
     spool_root = Path(job.spool_directory)
-    root_chain = _require_plain_directory(
-        spool_root, "feature batch spool directory"
-    )
     end_ordinal = job.start_ordinal + len(job.features)
     file_name = _expected_batch_file_name(job.start_ordinal, end_ordinal)
-    final_path = spool_root / file_name
-    temporary_path = spool_root / f"{file_name}.tmp-{os.getpid()}"
+    temporary_name = f"{file_name}.tmp-{os.getpid()}"
     source_range_sha256 = _source_range_sha256(job.features)
     point_count = sum(_feature_point_count(feature) for feature in job.features)
     try:
-        _require_directory_chain_unchanged(
-            root_chain, "feature batch spool directory"
-        )
-        with temporary_path.open("xb", buffering=0) as handle:
-            _require_directory_chain_unchanged(
-                root_chain, "feature batch spool directory"
-            )
-            writer = _QuotaFileWriter(handle, job.spool_byte_quota)
-            writer.raw(_BATCH_MAGIC)
-            writer.u8(_BATCH_VERSION, "feature batch spool version")
-            writer.u64(job.start_ordinal, "feature batch spool start ordinal")
-            writer.u64(end_ordinal, "feature batch spool end ordinal")
-            writer.raw(bytes.fromhex(job.render_run_identity_sha256))
-            writer.raw(bytes.fromhex(source_range_sha256))
-            writer.u64(point_count, "feature batch spool point count")
-            writer.u32(len(job.features), "feature batch spool frame count")
-            for offset, exact in enumerate(job.features):
-                registry = RecordingHotIdRegistry()
-                rendered = build_adaptive_waterway_feature(
-                    feature=exact,
-                    source_generation_sha256=job.source_generation_sha256,
-                    classifier_sha256=job.classifier_sha256,
-                    zooms=job.zooms,
-                    identity_registry=registry,
+        with _AnchoredSpoolDirectory(
+            spool_root, "feature batch spool directory"
+        ) as anchored_spool:
+            handle: BinaryIO | None = None
+            owned_identity: tuple[int, int] | None = None
+            try:
+                anchored_spool.require_unchanged()
+                handle, owned_identity = anchored_spool.open_exclusive(
+                    temporary_name
                 )
-                remaining_bytes = job.spool_byte_quota - writer.byte_count
-                if remaining_bytes <= 8:
-                    raise _error(
-                        "feature batch lacks remaining quota for a length-prefixed frame"
+                anchored_spool.require_unchanged()
+                writer = _QuotaFileWriter(handle, job.spool_byte_quota)
+                writer.raw(_BATCH_MAGIC)
+                writer.u8(_BATCH_VERSION, "feature batch spool version")
+                writer.u64(job.start_ordinal, "feature batch spool start ordinal")
+                writer.u64(end_ordinal, "feature batch spool end ordinal")
+                writer.raw(bytes.fromhex(job.render_run_identity_sha256))
+                writer.raw(bytes.fromhex(source_range_sha256))
+                writer.u64(point_count, "feature batch spool point count")
+                writer.u32(len(job.features), "feature batch spool frame count")
+                for offset, exact in enumerate(job.features):
+                    registry = RecordingHotIdRegistry()
+                    rendered = build_adaptive_waterway_feature(
+                        feature=exact,
+                        source_generation_sha256=job.source_generation_sha256,
+                        classifier_sha256=job.classifier_sha256,
+                        zooms=job.zooms,
+                        identity_registry=registry,
                     )
-                frame_byte_quota = remaining_bytes - 8
-                frame = _build_feature_render_frame(
-                    ordinal=job.start_ordinal + offset,
-                    exact=exact,
-                    rendered=rendered,
-                    registry_claims=registry.claims,
-                    maximum_encoded_bytes=frame_byte_quota,
+                    remaining_bytes = job.spool_byte_quota - writer.byte_count
+                    if remaining_bytes <= 8:
+                        raise _error(
+                            "feature batch lacks remaining quota for a length-prefixed frame"
+                        )
+                    frame_byte_quota = remaining_bytes - 8
+                    frame = _build_feature_render_frame(
+                        ordinal=job.start_ordinal + offset,
+                        exact=exact,
+                        rendered=rendered,
+                        registry_claims=registry.claims,
+                        maximum_encoded_bytes=frame_byte_quota,
+                    )
+                    encoded_frame = _encode_feature_render_frame(
+                        frame, frame_byte_quota
+                    )
+                    writer.u64(len(encoded_frame), "feature render frame byte count")
+                    writer.raw(encoded_frame)
+                handle.flush()
+                os.fsync(handle.fileno())
+                byte_count = writer.byte_count
+                spool_sha256 = writer.sha256
+                temporary_stat = anchored_spool.lstat(temporary_name)
+                _require_plain_file_stat(
+                    temporary_stat, "feature batch temporary spool"
                 )
-                encoded_frame = _encode_feature_render_frame(
-                    frame, frame_byte_quota
+                if _owned_file_identity(temporary_stat) != owned_identity:
+                    raise _error("feature batch temporary spool identity differs")
+                if temporary_stat.st_size != byte_count:
+                    raise _error(
+                        "feature batch temporary spool size differs after fsync"
+                    )
+                anchored_spool.require_unchanged()
+                anchored_spool.publish_owned_no_replace(
+                    temporary_name,
+                    file_name,
+                    handle,
+                    owned_identity,
                 )
-                writer.u64(len(encoded_frame), "feature render frame byte count")
-                writer.raw(encoded_frame)
-            handle.flush()
-            os.fsync(handle.fileno())
-            byte_count = writer.byte_count
-            spool_sha256 = writer.sha256
-        temporary_stat = os.lstat(temporary_path)
-        _require_plain_file_stat(temporary_stat, "feature batch temporary spool")
-        if temporary_stat.st_size != byte_count:
-            raise _error("feature batch temporary spool size differs after fsync")
-        _require_directory_chain_unchanged(
-            root_chain, "feature batch spool directory"
-        )
-        os.replace(temporary_path, final_path)
-        _require_directory_chain_unchanged(
-            root_chain, "feature batch spool directory"
-        )
-        published = os.lstat(final_path)
-        _require_plain_file_stat(published, "feature batch published spool")
-        if published.st_size != byte_count:
-            raise _error("feature batch published spool size differs")
+                anchored_spool.require_unchanged()
+                published = anchored_spool.lstat(file_name)
+                _require_plain_file_stat(published, "feature batch published spool")
+                if _owned_file_identity(published) != owned_identity:
+                    raise _error("feature batch published spool identity differs")
+                if published.st_size != byte_count:
+                    raise _error("feature batch published spool size differs")
+                handle.close()
+                handle = None
+            except BaseException as operation_error:
+                if handle is not None and owned_identity is not None:
+                    try:
+                        anchored_spool.dispose_owned_open_file(
+                            (temporary_name, file_name),
+                            handle,
+                            owned_identity,
+                        )
+                    except BaseException as cleanup_error:
+                        operation_error.add_note(
+                            "owned feature batch temp cleanup failed: "
+                            f"{cleanup_error}"
+                        )
+                    finally:
+                        handle = None
+                raise
+            finally:
+                if handle is not None:
+                    handle.close()
     except GlobalWaterwayPackageError:
         raise
     except OSError as error:

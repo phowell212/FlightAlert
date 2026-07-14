@@ -154,6 +154,22 @@ class FeatureBatchJobCodecTests(unittest.TestCase):
 
 
 class AuthenticatedFeatureBatchTests(unittest.TestCase):
+    def test_spool_anchor_fails_closed_without_windows_handle_semantics(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            anchor = parallel._AnchoredSpoolDirectory(
+                root,
+                "test spool directory",
+            )
+            with mock.patch.object(parallel.os, "name", "unsupported"):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "requires Windows"
+                ):
+                    anchor.__enter__()
+            self.assertEqual((), tuple(root.iterdir()))
+
     def test_worker_applies_remaining_quota_before_materializing_record_envelopes(self) -> None:
         from tools.experiment8 import waterway_parallel_render as parallel
 
@@ -170,6 +186,52 @@ class AuthenticatedFeatureBatchTests(unittest.TestCase):
                 ):
                     render_feature_batch_job(encode_feature_batch_job(job))
             self.assertEqual(0, envelope.call_count)
+
+    def test_late_record_quota_check_precedes_envelope_materialization(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        feature = _feature()
+        registry = RecordingHotIdRegistry()
+        rendered = parallel.build_adaptive_waterway_feature(
+            feature=feature,
+            source_generation_sha256=_SOURCE_SHA256,
+            classifier_sha256=_CLASSIFIER_SHA256,
+            zooms=(10, 11),
+            identity_registry=registry,
+        )
+        full_frame = parallel._build_feature_render_frame(
+            ordinal=20,
+            exact=feature,
+            rendered=rendered,
+            registry_claims=registry.claims,
+            maximum_encoded_bytes=16 * 1024 * 1024,
+        )
+        full_encoded = parallel._encode_feature_render_frame(
+            full_frame,
+            16 * 1024 * 1024,
+        )
+        last_record_bytes = parallel._encoded_record_row_bytes(
+            full_frame.record_rows[-1][11]
+        )
+        quota_before_last_record = len(full_encoded) - last_record_bytes
+
+        with mock.patch.object(
+            parallel,
+            "_record_envelope",
+            wraps=parallel._record_envelope,
+        ) as envelope:
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "remaining spool byte quota"
+            ):
+                parallel._build_feature_render_frame(
+                    ordinal=20,
+                    exact=feature,
+                    rendered=rendered,
+                    registry_claims=registry.claims,
+                    maximum_encoded_bytes=quota_before_last_record,
+                )
+
+        self.assertEqual(len(full_frame.record_rows) - 1, envelope.call_count)
 
     def test_worker_accepts_exact_spool_quota_and_rejects_one_byte_less(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -203,6 +265,293 @@ class AuthenticatedFeatureBatchTests(unittest.TestCase):
                         )
                     )
                 )
+
+    def test_worker_removes_owned_temp_after_failure_so_retry_can_succeed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job = _job(root, _feature())
+            temporary_path = root / (
+                f"000000000020-000000000021.batch.tmp-{os.getpid()}"
+            )
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "quota|byte bound"
+            ):
+                render_feature_batch_job(
+                    encode_feature_batch_job(replace(job, spool_byte_quota=128))
+                )
+            self.assertFalse(temporary_path.exists())
+
+            descriptor = render_feature_batch_job(encode_feature_batch_job(job))
+            self.assertTrue((root / descriptor.file_name).is_file())
+
+    def test_worker_removes_owned_temp_after_renderer_failure(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temporary_path = root / (
+                f"000000000020-000000000021.batch.tmp-{os.getpid()}"
+            )
+            with mock.patch.object(
+                parallel,
+                "build_adaptive_waterway_feature",
+                side_effect=RuntimeError("injected renderer failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "renderer failure"):
+                    render_feature_batch_job(
+                        encode_feature_batch_job(_job(root, _feature()))
+                    )
+            self.assertFalse(temporary_path.exists())
+
+    def test_worker_removes_owned_temp_after_fsync_failure(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temporary_path = root / (
+                f"000000000020-000000000021.batch.tmp-{os.getpid()}"
+            )
+            with mock.patch.object(
+                parallel.os,
+                "fsync",
+                side_effect=OSError("injected fsync failure"),
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "published atomically"
+                ):
+                    render_feature_batch_job(
+                        encode_feature_batch_job(_job(root, _feature()))
+                    )
+            self.assertFalse(temporary_path.exists())
+
+    def test_worker_preserves_a_preexisting_deterministic_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temporary_path = root / (
+                f"000000000020-000000000021.batch.tmp-{os.getpid()}"
+            )
+            sentinel = b"not owned by this worker"
+            temporary_path.write_bytes(sentinel)
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "published atomically"
+            ):
+                render_feature_batch_job(
+                    encode_feature_batch_job(_job(root, _feature()))
+                )
+
+            self.assertEqual(sentinel, temporary_path.read_bytes())
+            self.assertFalse((root / "000000000020-000000000021.batch").exists())
+
+    def test_worker_never_replaces_a_preexisting_final_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            final_path = root / "000000000020-000000000021.batch"
+            temporary_path = root / (
+                f"{final_path.name}.tmp-{os.getpid()}"
+            )
+            sentinel = b"authoritative prior batch"
+            final_path.write_bytes(sentinel)
+
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError, "published atomically"
+            ):
+                render_feature_batch_job(
+                    encode_feature_batch_job(_job(root, _feature()))
+                )
+
+            self.assertEqual(sentinel, final_path.read_bytes())
+            self.assertFalse(temporary_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle cleanup test")
+    def test_worker_uses_owned_handle_disposition_for_failed_temp_cleanup(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temporary_path = root / (
+                f"000000000020-000000000021.batch.tmp-{os.getpid()}"
+            )
+            with mock.patch.object(
+                parallel,
+                "_mark_windows_owned_temp_for_delete",
+                wraps=parallel._mark_windows_owned_temp_for_delete,
+            ) as disposition:
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "quota|byte bound"
+                ):
+                    render_feature_batch_job(
+                        encode_feature_batch_job(
+                            replace(
+                                _job(root, _feature()),
+                                spool_byte_quota=128,
+                            )
+                        )
+                    )
+            self.assertEqual(1, disposition.call_count)
+            self.assertFalse(temporary_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows native-handle cleanup test")
+    def test_worker_cleans_native_temp_if_fd_adoption_fails(self) -> None:
+        import msvcrt
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temporary_path = root / (
+                f"000000000020-000000000021.batch.tmp-{os.getpid()}"
+            )
+            with mock.patch.object(
+                msvcrt,
+                "open_osfhandle",
+                side_effect=OSError("injected fd adoption failure"),
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "published atomically"
+                ):
+                    render_feature_batch_job(
+                        encode_feature_batch_job(_job(root, _feature()))
+                    )
+            self.assertFalse(temporary_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows no-replace handle test")
+    def test_worker_preserves_a_final_created_at_publication_boundary(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            final_path = root / "000000000020-000000000021.batch"
+            temporary_path = root / (
+                f"{final_path.name}.tmp-{os.getpid()}"
+            )
+            sentinel = b"racing authoritative batch"
+            real_publish = parallel._publish_windows_owned_temp_no_replace
+
+            def racing_publish(handle: object, destination: Path) -> None:
+                destination.write_bytes(sentinel)
+                real_publish(handle, destination)
+
+            with mock.patch.object(
+                parallel,
+                "_publish_windows_owned_temp_no_replace",
+                side_effect=racing_publish,
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "published atomically"
+                ):
+                    render_feature_batch_job(
+                        encode_feature_batch_job(_job(root, _feature()))
+                    )
+
+            self.assertEqual(sentinel, final_path.read_bytes())
+            self.assertFalse(temporary_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows retained temp handle test")
+    def test_worker_retained_temp_handle_denies_source_name_replacement(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temporary_path = root / (
+                f"000000000020-000000000021.batch.tmp-{os.getpid()}"
+            )
+            stolen_path = root / "stolen.batch"
+            real_publish = parallel._publish_windows_owned_temp_no_replace
+            replacement_blocked = False
+
+            def guarded_publish(handle: object, destination: Path) -> None:
+                nonlocal replacement_blocked
+                try:
+                    os.replace(temporary_path, stolen_path)
+                except OSError:
+                    replacement_blocked = True
+                real_publish(handle, destination)
+
+            with mock.patch.object(
+                parallel,
+                "_publish_windows_owned_temp_no_replace",
+                side_effect=guarded_publish,
+            ):
+                descriptor = render_feature_batch_job(
+                    encode_feature_batch_job(_job(root, _feature()))
+                )
+
+            self.assertTrue(replacement_blocked)
+            self.assertFalse(temporary_path.exists())
+            self.assertFalse(stolen_path.exists())
+            self.assertTrue((root / descriptor.file_name).is_file())
+
+    @unittest.skipUnless(os.name == "nt", "Windows post-rename rollback test")
+    def test_worker_disposes_exact_published_file_after_post_rename_failure(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            final_path = root / "000000000020-000000000021.batch"
+            temporary_path = root / (
+                f"{final_path.name}.tmp-{os.getpid()}"
+            )
+            real_publish = parallel._publish_windows_owned_temp_no_replace
+
+            def publish_then_fail(handle: object, destination: Path) -> None:
+                real_publish(handle, destination)
+                raise RuntimeError("injected post-rename failure")
+
+            with mock.patch.object(
+                parallel,
+                "_publish_windows_owned_temp_no_replace",
+                side_effect=publish_then_fail,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "post-rename failure"):
+                    render_feature_batch_job(
+                        encode_feature_batch_job(_job(root, _feature()))
+                    )
+
+            self.assertFalse(temporary_path.exists())
+            self.assertFalse(final_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows close rollback test")
+    def test_worker_disposes_published_file_when_first_close_attempt_fails(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        class _FailFirstClose:
+            def __init__(self, wrapped: object) -> None:
+                self._wrapped = wrapped
+                self.close_calls = 0
+
+            def __getattr__(self, name: str):
+                return getattr(self._wrapped, name)
+
+            def close(self) -> None:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise OSError("injected first close failure")
+                self._wrapped.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            final_path = root / "000000000020-000000000021.batch"
+            temporary_path = root / (
+                f"{final_path.name}.tmp-{os.getpid()}"
+            )
+            real_create = parallel._create_windows_owned_temp
+
+            def create_with_close_failure(path: Path):
+                return _FailFirstClose(real_create(path))
+
+            with mock.patch.object(
+                parallel,
+                "_create_windows_owned_temp",
+                side_effect=create_with_close_failure,
+            ):
+                with self.assertRaisesRegex(
+                    GlobalWaterwayPackageError, "published atomically"
+                ):
+                    render_feature_batch_job(
+                        encode_feature_batch_job(_job(root, _feature()))
+                    )
+
+            self.assertFalse(temporary_path.exists())
+            self.assertFalse(final_path.exists())
 
     def test_reader_requires_parent_computed_source_range_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -240,6 +589,7 @@ class AuthenticatedFeatureBatchTests(unittest.TestCase):
                 descriptor.byte_count,
                 (root / descriptor.file_name).stat().st_size,
             )
+            self.assertEqual(1, (root / descriptor.file_name).stat().st_nlink)
             frames = read_feature_batch(
                 root,
                 descriptor,
@@ -488,6 +838,148 @@ class AuthenticatedFeatureBatchTests(unittest.TestCase):
                         _job(linked_parent / "spool", _feature())
                     )
                 )
+            self.assertEqual((), tuple(real_spool.iterdir()))
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory-handle race test")
+    def test_worker_holds_spool_ancestor_chain_through_temp_creation(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real_parent = base / "real-parent"
+            spool = real_parent / "spool"
+            spool.mkdir(parents=True)
+            outside_parent = base / "outside-parent"
+            outside_spool = outside_parent / "spool"
+            outside_spool.mkdir(parents=True)
+            moved_parent = base / "moved-parent"
+            probe = base / "symlink-probe"
+            try:
+                os.symlink(outside_parent, probe, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks are unavailable: {error}")
+            else:
+                probe.unlink()
+
+            real_create = parallel._create_windows_owned_temp
+            race_attempted = False
+            race_blocked = False
+
+            def racing_create(path: Path):
+                nonlocal race_attempted, race_blocked
+                if not race_attempted:
+                    race_attempted = True
+                    try:
+                        os.replace(real_parent, moved_parent)
+                    except OSError:
+                        race_blocked = True
+                    else:
+                        os.symlink(
+                            outside_parent,
+                            real_parent,
+                            target_is_directory=True,
+                        )
+                return real_create(path)
+
+            render_error: BaseException | None = None
+            descriptor: SpoolDescriptor | None = None
+            try:
+                with mock.patch.object(
+                    parallel,
+                    "_create_windows_owned_temp",
+                    side_effect=racing_create,
+                ):
+                    descriptor = render_feature_batch_job(
+                        encode_feature_batch_job(_job(spool, _feature()))
+                    )
+            except BaseException as error:
+                render_error = error
+
+            outside_names = tuple(path.name for path in outside_spool.iterdir())
+            if real_parent.is_symlink():
+                real_parent.unlink()
+                os.replace(moved_parent, real_parent)
+
+            self.assertTrue(race_attempted)
+            self.assertTrue(
+                race_blocked,
+                "the spool ancestor was replaceable while the worker opened its temp file",
+            )
+            self.assertEqual((), outside_names)
+            if render_error is not None:
+                raise render_error
+            assert descriptor is not None
+            self.assertTrue((spool / descriptor.file_name).is_file())
+
+    @unittest.skipUnless(os.name == "nt", "Windows publication guard race test")
+    def test_worker_holds_spool_ancestor_chain_through_publication(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real_parent = base / "real-parent"
+            spool = real_parent / "spool"
+            spool.mkdir(parents=True)
+            outside_parent = base / "outside-parent"
+            outside_spool = outside_parent / "spool"
+            outside_spool.mkdir(parents=True)
+            moved_parent = base / "moved-parent"
+            probe = base / "symlink-probe"
+            try:
+                os.symlink(outside_parent, probe, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks are unavailable: {error}")
+            else:
+                probe.unlink()
+
+            real_publish = parallel._publish_windows_owned_temp_no_replace
+            race_attempted = False
+            race_blocked = False
+
+            def racing_publish(handle: object, destination: Path) -> None:
+                nonlocal race_attempted, race_blocked
+                race_attempted = True
+                try:
+                    os.replace(real_parent, moved_parent)
+                except OSError:
+                    race_blocked = True
+                else:
+                    os.symlink(
+                        outside_parent,
+                        real_parent,
+                        target_is_directory=True,
+                    )
+                real_publish(handle, destination)
+
+            render_error: BaseException | None = None
+            descriptor: SpoolDescriptor | None = None
+            try:
+                with mock.patch.object(
+                    parallel,
+                    "_publish_windows_owned_temp_no_replace",
+                    side_effect=racing_publish,
+                ):
+                    descriptor = render_feature_batch_job(
+                        encode_feature_batch_job(_job(spool, _feature()))
+                    )
+            except BaseException as error:
+                render_error = error
+
+            outside_names = tuple(path.name for path in outside_spool.iterdir())
+            if real_parent.is_symlink():
+                real_parent.unlink()
+                os.replace(moved_parent, real_parent)
+
+            self.assertTrue(race_attempted)
+            self.assertTrue(
+                race_blocked,
+                "the spool ancestor was replaceable during final publication",
+            )
+            self.assertEqual((), outside_names)
+            if render_error is not None:
+                raise render_error
+            assert descriptor is not None
+            self.assertTrue((spool / descriptor.file_name).is_file())
 
     def test_reader_rejects_reparse_attribute_even_for_regular_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
