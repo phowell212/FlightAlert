@@ -319,9 +319,9 @@ class CandidatePolicyIdentityTests(unittest.TestCase):
         rule = "/tools/experiment8/osm_global_waterway_package.py text eol=lf"
         self.assertEqual(1, attributes.count(rule))
         source = (repository / "tools/experiment8/osm_global_waterway_package.py").read_bytes()
-        self.assertEqual(96_418, len(source))
+        self.assertEqual(107_127, len(source))
         self.assertEqual(
-            "b0dde525e09ac8748e56355420a3833d6cdc0b56e67432e2148fe1c89d7eae22",
+            "5971cf12483cfb24fd36760a8ed02fe22cd7841678ae3e83e7a174c0b269ae78",
             hashlib.sha256(source).hexdigest(),
         )
         self.assertNotIn(b"\r\n", source)

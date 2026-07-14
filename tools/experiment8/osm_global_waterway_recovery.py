@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +13,7 @@ from typing import Mapping, Sequence
 
 from . import osm_global_waterway_package as source_module
 from . import osm_global_waterway_store as store
+from . import reference_size_policy as size_policy_module
 from .osm_global_waterway_package import (
     GlobalWaterwayBuildResult,
     GlobalWaterwayPackageError,
@@ -23,6 +26,9 @@ _BACKUP_SCHEMA = (
 )
 _RECOVERY_SCHEMA = (
     "flightalert.experiment8.osm-global-waterway-render-recovery.v1"
+)
+_VALIDATION_SCHEMA = (
+    "flightalert.experiment8.osm-global-waterway-render-recovery-validation.v1"
 )
 _TIMESTAMP = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z"
@@ -184,6 +190,9 @@ class WaterwayRenderRecoveryAuthority:
     meta_identities: tuple[tuple[str, int, str], ...]
     source_table_counts: tuple[tuple[str, int], ...]
     renderer_table_counts: tuple[tuple[str, int], ...]
+    predecessor_size_policy_mode: str = size_policy_module.BUDGETED_RELEASE_V1
+    predecessor_size_policy_identity_bound: bool = True
+    intended_size_policy_mode: str = size_policy_module.BUDGETED_RELEASE_V1
 
     def __post_init__(self) -> None:
         if (
@@ -232,6 +241,27 @@ class WaterwayRenderRecoveryAuthority:
             raise GlobalWaterwayPackageError(
                 "waterway render recovery feature checkpoint/count authority differs"
             )
+        try:
+            size_policy_module.normalize_reference_size_policy_mode(
+                self.predecessor_size_policy_mode
+            )
+            size_policy_module.normalize_reference_size_policy_mode(
+                self.intended_size_policy_mode
+            )
+        except size_policy_module.ReferenceSizePolicyError as error:
+            raise GlobalWaterwayPackageError(str(error)) from error
+        if type(self.predecessor_size_policy_identity_bound) is not bool:
+            raise GlobalWaterwayPackageError(
+                "waterway render recovery predecessor size-policy binding is malformed"
+            )
+        if (
+            not self.predecessor_size_policy_identity_bound
+            and self.predecessor_size_policy_mode
+            != size_policy_module.BUDGETED_RELEASE_V1
+        ):
+            raise GlobalWaterwayPackageError(
+                "legacy waterway recovery predecessor must be budgeted release"
+            )
 
     def document(self) -> dict[str, object]:
         return {
@@ -254,6 +284,13 @@ class WaterwayRenderRecoveryAuthority:
                 "render-recovery-authority.v1"
             ),
             "sourceTableCounts": dict(self.source_table_counts),
+            "sizePolicyTransition": {
+                "intendedMode": self.intended_size_policy_mode,
+                "predecessorIdentityBound": (
+                    self.predecessor_size_policy_identity_bound
+                ),
+                "predecessorMode": self.predecessor_size_policy_mode,
+            },
         }
 
     @property
@@ -372,6 +409,134 @@ def _partial_directories(output_directory: Path) -> tuple[Path, ...]:
         ) from error
 
 
+def _require_owned_resume_partial(
+    connection: sqlite3.Connection,
+    partial_directory: Path,
+) -> None:
+    expected_owner = {
+        "path": os.path.abspath(partial_directory),
+        "schema": store._PARTIAL_OWNER_SCHEMA,
+    }
+    if store._meta_get(connection, "partialDirectoryOwner") != expected_owner:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery resume partial owner differs"
+        )
+    try:
+        partial_status = os.lstat(partial_directory)
+    except OSError as error:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery resume partial owner path is unreadable"
+        ) from error
+    if (
+        not stat.S_ISDIR(partial_status.st_mode)
+        or getattr(partial_status, "st_file_attributes", 0) & store._REPARSE_POINT
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery resume partial owner path is not one directory"
+        )
+    allowed_names = {
+        "build-receipt.json",
+        "manifest.json",
+        "records.fadictpack",
+        "tile-index.bin",
+    }
+    try:
+        entries = tuple(partial_directory.iterdir())
+    except OSError as error:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery resume partial inventory is unreadable"
+        ) from error
+    for entry in entries:
+        try:
+            entry_status = os.lstat(entry)
+        except OSError as error:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery resume partial inventory is unreadable"
+            ) from error
+        if (
+            entry.name not in allowed_names
+            or not stat.S_ISREG(entry_status.st_mode)
+            or getattr(entry_status, "st_file_attributes", 0) & store._REPARSE_POINT
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway recovery resume partial inventory differs"
+            )
+    checkpoint = store._meta_get(connection, "buildCheckpoint")
+    if checkpoint is None:
+        checkpoint = {
+            "indexBytes": 0,
+            "indexSha256": hashlib.sha256(b"").hexdigest(),
+            "nextOrdinal": 0,
+            "recordsBytes": 0,
+            "recordsSha256": hashlib.sha256(b"").hexdigest(),
+        }
+    expected_keys = {
+        "indexBytes",
+        "indexSha256",
+        "nextOrdinal",
+        "recordsBytes",
+        "recordsSha256",
+    }
+    if not isinstance(checkpoint, dict) or set(checkpoint) != expected_keys:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery resume runtime checkpoint is malformed"
+        )
+    next_ordinal = checkpoint.get("nextOrdinal")
+    index_bytes = checkpoint.get("indexBytes")
+    if (
+        type(next_ordinal) is not int
+        or next_ordinal < 0
+        or type(index_bytes) is not int
+        or index_bytes != next_ordinal * store.INDEX_ENTRY_BYTES
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery resume runtime index checkpoint is inconsistent"
+        )
+    for label, file_name, bytes_key, sha_key in (
+        ("records", "records.fadictpack", "recordsBytes", "recordsSha256"),
+        ("index", "tile-index.bin", "indexBytes", "indexSha256"),
+    ):
+        byte_count = checkpoint.get(bytes_key)
+        expected_sha256 = checkpoint.get(sha_key)
+        if (
+            type(byte_count) is not int
+            or byte_count < 0
+            or type(expected_sha256) is not str
+            or len(expected_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+        ):
+            raise GlobalWaterwayPackageError(
+                f"waterway recovery resume {label} checkpoint is malformed"
+            )
+        path = partial_directory / file_name
+        if not path.exists():
+            if byte_count:
+                raise GlobalWaterwayPackageError(
+                    f"waterway recovery resume {label} prefix is missing"
+                )
+            continue
+        digest = hashlib.sha256()
+        remaining = byte_count
+        try:
+            with path.open("rb") as handle:
+                while remaining:
+                    block = handle.read(min(1024 * 1024, remaining))
+                    if not block:
+                        raise GlobalWaterwayPackageError(
+                            f"waterway recovery resume {label} prefix ends early"
+                        )
+                    digest.update(block)
+                    remaining -= len(block)
+        except OSError as error:
+            raise GlobalWaterwayPackageError(
+                f"waterway recovery resume {label} prefix is unreadable"
+            ) from error
+        if digest.hexdigest() != expected_sha256:
+            raise GlobalWaterwayPackageError(
+                f"waterway recovery resume {label} prefix SHA-256 differs"
+            )
+
+
 def _require_external_evidence(
     *,
     failure_log: Path,
@@ -425,6 +590,18 @@ def _require_timestamp(value: object) -> str:
         raise GlobalWaterwayPackageError(
             "waterway recovery receipt timestamp is malformed"
         )
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as error:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery receipt timestamp is malformed"
+        ) from error
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery receipt timestamp is not canonical UTC"
+        )
     return value
 
 
@@ -449,6 +626,8 @@ def _recovery_receipt_document(
     new_render_sha256: str,
     sqlite_evidence_overhead_bytes: int = 0,
     published_directory_bytes: int | None = None,
+    size_policy_decision: Mapping[str, object] | None = None,
+    initial_available_destination_bytes: int | None = None,
 ) -> dict[str, object]:
     meta = {
         key: _fact_document(byte_count, sha256)
@@ -486,6 +665,13 @@ def _recovery_receipt_document(
         "resetCount": 1,
         "schema": _RECOVERY_SCHEMA,
         "sourceTableCounts": dict(authority.source_table_counts),
+        "sizePolicyTransition": {
+            "intended": dict(new_render_identity["sizePolicy"]),
+            "predecessor": {
+                "identityBound": authority.predecessor_size_policy_identity_bound,
+                "mode": authority.predecessor_size_policy_mode,
+            },
+        },
         "sqliteEvidenceOverheadBytes": sqlite_evidence_overhead_bytes,
         "transactionComplete": True,
     }
@@ -495,7 +681,71 @@ def _recovery_receipt_document(
                 "waterway recovery published byte accounting is malformed"
             )
         document["publishedDirectoryBytes"] = published_directory_bytes
+        if not isinstance(size_policy_decision, Mapping):
+            raise GlobalWaterwayPackageError(
+                "waterway recovery published size-policy decision is absent"
+            )
+        document["sizePolicyDecision"] = dict(size_policy_decision)
+    elif size_policy_decision is not None:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery size-policy decision lacks published bytes"
+        )
+    if initial_available_destination_bytes is not None:
+        if (
+            authority.intended_size_policy_mode
+            != size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+            or type(initial_available_destination_bytes) is not int
+            or initial_available_destination_bytes < 0
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway recovery initial destination capacity is malformed"
+            )
+        document["initialAvailableDestinationBytes"] = (
+            initial_available_destination_bytes
+        )
     return document
+
+
+def _validated_recovery_size_policy_decision(
+    *,
+    authority: WaterwayRenderRecoveryAuthority,
+    published_directory_bytes: object,
+    raw_decision: object,
+) -> Mapping[str, object] | None:
+    if published_directory_bytes is None:
+        if raw_decision is not None:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery size-policy decision lacks published bytes"
+            )
+        return None
+    if type(published_directory_bytes) is not int or published_directory_bytes <= 0:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery published byte accounting is malformed"
+        )
+    if not isinstance(raw_decision, Mapping):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery published size-policy decision is absent"
+        )
+    expected = store.enforce_global_waterway_storage_ceiling(
+        published_directory_bytes,
+        size_policy_mode=authority.intended_size_policy_mode,
+        available_destination_bytes=raw_decision.get("availableDestinationBytes"),
+    )
+    if (
+        authority.intended_size_policy_mode
+        == size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+    ):
+        expected = store._bind_publication_boundary_capacity(
+            expected,
+            destination_free_bytes=raw_decision.get(
+                "publicationBoundaryDestinationFreeBytes"
+            ),
+        )
+    if dict(raw_decision) != dict(expected):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery published size-policy decision differs"
+        )
+    return expected
 
 
 def _validate_complete_admission(
@@ -509,6 +759,24 @@ def _validate_complete_admission(
     admission = documents["admissionReceipt"]
     ingest = documents["ingestReceipt"]
     render_identity = documents["renderRunIdentity"]
+    predecessor_policy = render_identity.get("sizePolicy")
+    if authority.predecessor_size_policy_identity_bound:
+        try:
+            expected_predecessor = dict(
+                store._reference_size_policy_binding(
+                    authority.predecessor_size_policy_mode
+                )
+            )
+        except size_policy_module.ReferenceSizePolicyError as error:
+            raise GlobalWaterwayPackageError(str(error)) from error
+        if predecessor_policy != expected_predecessor:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery predecessor size-policy identity differs"
+            )
+    elif predecessor_policy is not None:
+        raise GlobalWaterwayPackageError(
+            "legacy waterway recovery predecessor unexpectedly binds a size policy"
+        )
     render_checkpoint = documents["renderCheckpoint"]
     if checkpoint.get("ingestComplete") is not True:
         raise GlobalWaterwayPackageError(
@@ -626,6 +894,14 @@ def _validate_recovery_resume(
         new_render_sha256=new_render_sha256,
         sqlite_evidence_overhead_bytes=sqlite_evidence_overhead_bytes,
         published_directory_bytes=receipt.get("publishedDirectoryBytes"),
+        size_policy_decision=_validated_recovery_size_policy_decision(
+            authority=authority,
+            published_directory_bytes=receipt.get("publishedDirectoryBytes"),
+            raw_decision=receipt.get("sizePolicyDecision"),
+        ),
+        initial_available_destination_bytes=receipt.get(
+            "initialAvailableDestinationBytes"
+        ),
     )
     if receipt != expected:
         raise GlobalWaterwayPackageError(
@@ -734,13 +1010,46 @@ def _validate_recovery_plan(
         raise GlobalWaterwayPackageError(
             "waterway recovery has an unowned partial directory on resume"
         )
-    return _validate_recovery_resume(
+    owner = store._meta_get(connection, "partialDirectoryOwner")
+    if partials:
+        _require_owned_resume_partial(connection, expected_partial)
+    elif owner is not None:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery resume partial owner lacks its directory"
+        )
+    plan = _validate_recovery_resume(
         connection,
         source_binding=source_binding,
         authority=authority,
         new_render_identity=new_render_identity,
         new_render_sha256=new_render_sha256,
     )
+    if (
+        authority.intended_size_policy_mode
+        == size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+    ):
+        bound_available = plan.recovery_receipt.get(
+            "initialAvailableDestinationBytes"
+        )
+        stored_available = store._validated_visual_destination_capacity_evidence(
+            connection,
+            output_directory=output_directory,
+            render_run_sha256=new_render_sha256,
+            size_policy_mode=authority.intended_size_policy_mode,
+            required=bool(partials) or bound_available is not None,
+        )
+        if stored_available != bound_available:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery visual capacity checkpoint differs from receipt"
+            )
+        decision = plan.recovery_receipt.get("sizePolicyDecision")
+        if isinstance(decision, Mapping) and decision.get(
+            "availableDestinationBytes"
+        ) != bound_available:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery visual capacity decision differs from receipt"
+            )
+    return plan
 
 
 def _require_reset_boundary(
@@ -769,6 +1078,31 @@ def _require_reset_boundary(
     _require_recovery_code_current(plan, "before reset")
 
 
+def _require_destructive_inputs_current(
+    *,
+    opl_path: Path,
+    root_ids_path: Path,
+    source_binding: WaterwaySourceBinding,
+    expected_code_identities: Mapping[str, object],
+) -> None:
+    store._require_identity(
+        root_ids_path,
+        expected_bytes=source_binding.root_ids_bytes,
+        expected_sha256=source_binding.root_ids_sha256,
+        label="recovery root-ID file at destructive boundary",
+    )
+    store._require_identity(
+        opl_path,
+        expected_bytes=source_binding.closure_opl_bytes,
+        expected_sha256=source_binding.closure_opl_sha256,
+        label="recovery closure OPL at destructive boundary",
+    )
+    if store._render_code_identities() != dict(expected_code_identities):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery renderer code identity drifted before reset"
+        )
+
+
 def _reset_renderer_state(
     connection: sqlite3.Connection,
     *,
@@ -778,6 +1112,10 @@ def _reset_renderer_state(
     backup_receipt: Path,
     authority: WaterwayRenderRecoveryAuthority,
     plan: _RecoveryPlan,
+    opl_path: Path,
+    root_ids_path: Path,
+    source_binding: WaterwaySourceBinding,
+    expected_code_identities: Mapping[str, object],
 ) -> _RecoveryPlan:
     updated_plan = plan
     try:
@@ -827,12 +1165,18 @@ def _reset_renderer_state(
             authority=authority,
             plan=plan,
         )
+        _require_destructive_inputs_current(
+            opl_path=opl_path,
+            root_ids_path=root_ids_path,
+            source_binding=source_binding,
+            expected_code_identities=expected_code_identities,
+        )
         for table in _RENDERER_TABLES:
             connection.execute(f"DELETE FROM {table}")
         connection.execute(
             "DELETE FROM meta WHERE key IN ("
             "'renderRunIdentity','renderCheckpoint','partialDirectoryOwner',"
-            "'buildCheckpoint')"
+            "'buildCheckpoint','sizePolicyCapacity')"
         )
         ingest = store._meta_get(connection, "ingestReceipt")
         peaks = dict(store._meta_get(connection, "peaks") or {})
@@ -925,6 +1269,173 @@ def _reset_renderer_state(
     return updated_plan
 
 
+def _checked_recovery_size_policy_mode(
+    authority: WaterwayRenderRecoveryAuthority,
+    size_policy_mode: object,
+) -> str:
+    try:
+        checked = size_policy_module.normalize_reference_size_policy_mode(
+            size_policy_mode
+        )
+    except size_policy_module.ReferenceSizePolicyError as error:
+        raise GlobalWaterwayPackageError(str(error)) from error
+    if checked != authority.intended_size_policy_mode:
+        raise GlobalWaterwayPackageError(
+            "waterway recovery requested size-policy transition lacks authority"
+        )
+    return checked
+
+
+def _validate_bound_global_waterway_recovery(
+    *,
+    opl_path: Path,
+    root_ids_path: Path,
+    output_directory: Path,
+    work_directory: Path,
+    package_id: str,
+    source_binding: WaterwaySourceBinding,
+    failure_log: Path,
+    backup_receipt: Path,
+    authority: WaterwayRenderRecoveryAuthority,
+    checkpoint_features: int,
+    production_authority: object,
+    size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
+) -> Mapping[str, object]:
+    from .osm_global_waterway_renderer import classifier_identity_sha256
+
+    if production_authority is not source_module._PRODUCTION_RENDER_AUTHORITY:
+        raise GlobalWaterwayPackageError(
+            "waterway render recovery validation requires package-owned authority"
+        )
+    if not isinstance(authority, WaterwayRenderRecoveryAuthority):
+        raise GlobalWaterwayPackageError(
+            "waterway render recovery validation incident authority is absent"
+        )
+    if package_id != authority.package_id:
+        raise GlobalWaterwayPackageError(
+            "waterway render recovery validation package ID differs"
+        )
+    if checkpoint_features != authority.checkpoint_features:
+        raise GlobalWaterwayPackageError(
+            "waterway render recovery validation checkpoint cadence differs"
+        )
+    checked_mode = _checked_recovery_size_policy_mode(
+        authority, size_policy_mode
+    )
+    checked_package_id = store._validated_package_id(package_id)
+    database_path = work_directory / "waterway-state.sqlite"
+    if not database_path.is_file() or database_path.is_symlink():
+        raise GlobalWaterwayPackageError(
+            "waterway render recovery validation database is absent or unsafe"
+        )
+    _require_no_sidecars(database_path)
+    code_identities = store._render_code_identities()
+    size_policy_binding = store._reference_size_policy_binding(checked_mode)
+    if code_identities.get("referenceSizePolicy") != size_policy_binding.get(
+        "module"
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery validation size-policy module identity differs"
+        )
+    classifier = classifier_identity_sha256()
+    uri = database_path.resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        query_only = int(connection.execute("PRAGMA query_only").fetchone()[0])
+        if query_only != 1:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery validation connection is not query-only"
+            )
+        ingest = store._meta_get(connection, "ingestReceipt")
+        if not isinstance(ingest, dict) or not isinstance(
+            ingest.get("admission"), dict
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway render recovery validation ingest receipt is absent"
+            )
+        render_identity = store._render_run_identity(
+            package_id=checked_package_id,
+            source_binding=source_binding,
+            zooms=store._DEFAULT_ZOOMS,
+            checkpoint_features=checkpoint_features,
+            code_identities=code_identities,
+            classifier_sha256=classifier,
+            admission_receipt=ingest["admission"],
+            ingest_semantic_sha256=str(ingest["semanticSha256"]),
+            size_policy_binding=size_policy_binding,
+        )
+        render_sha256 = hashlib.sha256(
+            source_module._canonical_json_bytes(render_identity)
+        ).hexdigest()
+        plan = _validate_recovery_plan(
+            connection,
+            database_path=database_path,
+            opl_path=opl_path,
+            root_ids_path=root_ids_path,
+            output_directory=output_directory,
+            failure_log=failure_log,
+            backup_receipt=backup_receipt,
+            source_binding=source_binding,
+            authority=authority,
+            new_render_identity=render_identity,
+            new_render_sha256=render_sha256,
+        )
+        database_identity = source_module._stream_identity(
+            database_path, "waterway recovery validation database"
+        )
+        if not plan.resumed and database_identity != _fact_document(
+            authority.database_bytes, authority.database_sha256
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway recovery validation database identity differs"
+            )
+        if not plan.resumed:
+            _require_reset_boundary(
+                database_path=database_path,
+                output_directory=output_directory,
+                failure_log=failure_log,
+                backup_receipt=backup_receipt,
+                authority=authority,
+                plan=plan,
+            )
+        else:
+            _require_no_sidecars(database_path)
+            if output_directory.exists() or output_directory.is_symlink():
+                raise GlobalWaterwayPackageError(
+                    "waterway recovery output directory appeared on resume"
+                )
+            _require_external_evidence(
+                failure_log=failure_log,
+                backup_receipt=backup_receipt,
+                authority=authority,
+            )
+            _require_recovery_code_current(plan, "during resume validation")
+        _require_destructive_inputs_current(
+            opl_path=opl_path,
+            root_ids_path=root_ids_path,
+            source_binding=source_binding,
+            expected_code_identities=code_identities,
+        )
+        return MappingProxyType(
+            {
+                "authorityPolicySha256": authority.policy_sha256,
+                "database": database_identity,
+                "queryOnly": query_only,
+                "recoveryRunIdentitySha256": render_sha256,
+                "resumed": plan.resumed,
+                "schema": _VALIDATION_SCHEMA,
+                "sizePolicyTransition": dict(
+                    plan.recovery_receipt["sizePolicyTransition"]
+                ),
+                "source": source_binding.document(),
+                "state": "accepted",
+            }
+        )
+    finally:
+        connection.close()
+
+
 def _recover_bound_global_waterway_package(
     *,
     opl_path: Path,
@@ -938,6 +1449,7 @@ def _recover_bound_global_waterway_package(
     authority: WaterwayRenderRecoveryAuthority,
     checkpoint_features: int,
     production_authority: object,
+    size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     from .osm_global_waterway_renderer import classifier_identity_sha256
 
@@ -957,6 +1469,9 @@ def _recover_bound_global_waterway_package(
         raise GlobalWaterwayPackageError(
             "waterway render recovery checkpoint cadence differs from exact incident"
         )
+    checked_size_policy_mode = _checked_recovery_size_policy_mode(
+        authority, size_policy_mode
+    )
     checked_package_id = store._validated_package_id(package_id)
     zooms = store._DEFAULT_ZOOMS
     database_path = work_directory / "waterway-state.sqlite"
@@ -966,6 +1481,15 @@ def _recover_bound_global_waterway_package(
         )
     _require_no_sidecars(database_path)
     code_identities = store._render_code_identities()
+    size_policy_binding = store._reference_size_policy_binding(
+        checked_size_policy_mode
+    )
+    if code_identities.get("referenceSizePolicy") != size_policy_binding.get(
+        "module"
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery size-policy module identity differs"
+        )
     classifier = classifier_identity_sha256()
     connection = sqlite3.connect(database_path)
     try:
@@ -985,6 +1509,7 @@ def _recover_bound_global_waterway_package(
             classifier_sha256=classifier,
             admission_receipt=ingest["admission"],
             ingest_semantic_sha256=str(ingest["semanticSha256"]),
+            size_policy_binding=size_policy_binding,
         )
         render_sha256 = hashlib.sha256(
             source_module._canonical_json_bytes(render_identity)
@@ -1011,6 +1536,10 @@ def _recover_bound_global_waterway_package(
                 backup_receipt=backup_receipt,
                 authority=authority,
                 plan=plan,
+                opl_path=opl_path,
+                root_ids_path=root_ids_path,
+                source_binding=source_binding,
+                expected_code_identities=code_identities,
             )
         store._configure_render_connection(connection)
         complete = store._stage_renderer_records(

@@ -13,6 +13,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, Iterator, Mapping, Sequence
 
+from . import reference_size_policy as size_policy_module
+
 from .osm_admission_evidence import (
     ADMISSION_GENERATOR,
     AdmissionProbeError,
@@ -2341,6 +2343,7 @@ def render_global_waterway_package(
     checkpoint_features: int = 100,
     pause_after_objects: int | None = None,
     pause_after_features: int | None = None,
+    size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     """Render production only from a fully revalidated extraction receipt."""
 
@@ -2374,6 +2377,7 @@ def render_global_waterway_package(
         pause_after_objects=pause_after_objects,
         pause_after_features=pause_after_features,
         production_authority=_PRODUCTION_RENDER_AUTHORITY,
+        size_policy_mode=size_policy_mode,
     )
 
 
@@ -2457,6 +2461,13 @@ def _production_waterway_render_recovery_authority():
                     ("label_ids", 5_008),
                     ("sourced_ids", 561),
                 ),
+                predecessor_size_policy_mode=(
+                    size_policy_module.BUDGETED_RELEASE_V1
+                ),
+                predecessor_size_policy_identity_bound=False,
+                intended_size_policy_mode=(
+                    size_policy_module.COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+                ),
             )
         )
     return _PRODUCTION_WATERWAY_RENDER_RECOVERY_AUTHORITY
@@ -2479,6 +2490,7 @@ def recover_global_waterway_package(
     failure_log: Path,
     backup_receipt: Path,
     checkpoint_features: int = 100,
+    size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     """Resume only the exact authenticated 260629 renderer-lock incident."""
 
@@ -2514,6 +2526,56 @@ def recover_global_waterway_package(
         authority=_production_waterway_render_recovery_authority(),
         checkpoint_features=checkpoint_features,
         production_authority=_PRODUCTION_RENDER_AUTHORITY,
+        size_policy_mode=size_policy_mode,
+    )
+
+
+def validate_global_waterway_render_recovery(
+    *,
+    extraction_directory: Path,
+    output_directory: Path,
+    work_directory: Path,
+    package_id: str,
+    failure_log: Path,
+    backup_receipt: Path,
+    checkpoint_features: int = 100,
+    size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
+) -> Mapping[str, object]:
+    """Authenticate one recovery request without mutating renderer state."""
+
+    if not all(
+        isinstance(path, Path)
+        for path in (
+            extraction_directory,
+            output_directory,
+            work_directory,
+            failure_log,
+            backup_receipt,
+        )
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway recovery validation paths must be pathlib.Path values"
+        )
+    source_binding = _source_binding_from_recovery_extraction(
+        extraction_directory
+    )
+    from .osm_global_waterway_recovery import (
+        _validate_bound_global_waterway_recovery as implementation,
+    )
+
+    return implementation(
+        opl_path=extraction_directory / "waterway-closure.opl",
+        root_ids_path=extraction_directory / "root-ids.txt",
+        output_directory=output_directory,
+        work_directory=work_directory,
+        package_id=package_id,
+        source_binding=source_binding,
+        failure_log=failure_log,
+        backup_receipt=backup_receipt,
+        authority=_production_waterway_render_recovery_authority(),
+        checkpoint_features=checkpoint_features,
+        production_authority=_PRODUCTION_RENDER_AUTHORITY,
+        size_policy_mode=size_policy_mode,
     )
 
 
@@ -2530,6 +2592,7 @@ def render_fixture_global_waterway_package(
     checkpoint_features: int = 100,
     pause_after_objects: int | None = None,
     pause_after_features: int | None = None,
+    size_policy_mode: object = size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
 ) -> GlobalWaterwayBuildResult:
     if (
         not isinstance(source_binding, WaterwaySourceBinding)
@@ -2554,6 +2617,7 @@ def render_fixture_global_waterway_package(
         checkpoint_features=checkpoint_features,
         pause_after_objects=pause_after_objects,
         pause_after_features=pause_after_features,
+        size_policy_mode=size_policy_mode,
     )
 
 
@@ -2583,6 +2647,10 @@ def _argument_parser() -> argparse.ArgumentParser:
     )
     render.add_argument("--checkpoint-objects", type=int, default=10_000)
     render.add_argument("--checkpoint-features", type=int, default=100)
+    render.add_argument(
+        "--size-policy",
+        default=size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
+    )
     recover = commands.add_parser(
         "recover-render",
         help="resume the one exact authenticated 260629 render-lock incident",
@@ -2594,6 +2662,25 @@ def _argument_parser() -> argparse.ArgumentParser:
     recover.add_argument("--failure-log", type=Path, required=True)
     recover.add_argument("--backup-receipt", type=Path, required=True)
     recover.add_argument("--checkpoint-features", type=int, default=100)
+    recover.add_argument(
+        "--size-policy",
+        default=size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
+    )
+    validate = commands.add_parser(
+        "validate-recovery",
+        help="authenticate the exact recovery request without mutating state",
+    )
+    validate.add_argument("--extraction", type=Path, required=True)
+    validate.add_argument("--output", type=Path, required=True)
+    validate.add_argument("--work", type=Path, required=True)
+    validate.add_argument("--package-id", required=True)
+    validate.add_argument("--failure-log", type=Path, required=True)
+    validate.add_argument("--backup-receipt", type=Path, required=True)
+    validate.add_argument("--checkpoint-features", type=int, default=100)
+    validate.add_argument(
+        "--size-policy",
+        default=size_policy_module.DEFAULT_REFERENCE_SIZE_POLICY_MODE,
+    )
     return parser
 
 
@@ -2620,6 +2707,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selection_run_directory=arguments.selection_run,
                 output_directory=arguments.output,
             )
+        elif arguments.command == "validate-recovery":
+            validation = validate_global_waterway_render_recovery(
+                extraction_directory=arguments.extraction,
+                output_directory=arguments.output,
+                work_directory=arguments.work,
+                package_id=arguments.package_id,
+                failure_log=arguments.failure_log,
+                backup_receipt=arguments.backup_receipt,
+                checkpoint_features=arguments.checkpoint_features,
+                size_policy_mode=arguments.size_policy,
+            )
+            _write_json(
+                sys.stdout,
+                {"state": "accepted", "validation": dict(validation)},
+            )
+            return 0
         elif arguments.command == "render":
             result = render_global_waterway_package(
                 extraction_directory=arguments.extraction,
@@ -2629,6 +2732,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 zooms=tuple(range(4, 12)),
                 checkpoint_objects=arguments.checkpoint_objects,
                 checkpoint_features=arguments.checkpoint_features,
+                size_policy_mode=arguments.size_policy,
             )
         else:
             result = recover_global_waterway_package(
@@ -2639,6 +2743,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 failure_log=arguments.failure_log,
                 backup_receipt=arguments.backup_receipt,
                 checkpoint_features=arguments.checkpoint_features,
+                size_policy_mode=arguments.size_policy,
             )
         _write_json(
             sys.stdout,
@@ -2687,6 +2792,7 @@ __all__ = [
     "render_global_waterway_package",
     "render_fixture_global_waterway_package",
     "source_binding_from_extraction_receipt",
+    "validate_global_waterway_render_recovery",
 ]
 
 
