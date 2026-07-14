@@ -3408,24 +3408,39 @@ class ParallelFeatureRenderer:
         }
         if not changed_keys:
             return False
-        missing_key: tuple[int, int] | None = None
-        for key in changed_keys:
-            old = before.get(key)
-            new = after.get(key)
-            reservation = self._reservations.get(key[0])
-            if (
-                old is None
-                or new is None
-                or old[0] != missing_name
-                or not old[1]
-                or new[1]
-                or reservation is None
-                or reservation.end_ordinal_exclusive != key[1]
-                or not reservation.spool_reserved
-            ):
-                return False
-            missing_key = key
-        return missing_key is not None
+        matching_keys = tuple(
+            key
+            for key in changed_keys
+            if before.get(key) is not None and before[key][0] == missing_name
+        )
+        if len(matching_keys) != 1:
+            return False
+        missing_key = matching_keys[0]
+        old = before[missing_key]
+        new = after.get(missing_key)
+        reservation = self._reservations.get(missing_key[0])
+        if (
+            new is None
+            or not old[1]
+            or new[1]
+            or reservation is None
+            or reservation.end_ordinal_exclusive != missing_key[1]
+            or not reservation.spool_reserved
+        ):
+            return False
+        other_changed_keys = changed_keys - {missing_key}
+        if not other_changed_keys:
+            return True
+        other_before = {
+            key: value for key, value in before.items() if key != missing_key
+        }
+        other_after = {
+            key: value for key, value in after.items() if key != missing_key
+        }
+        return self._active_inventory_transition_is_retryable(
+            other_before,
+            other_after,
+        )
 
     def _account_stable_spool_inventory(
         self,

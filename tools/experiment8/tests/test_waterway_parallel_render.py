@@ -573,6 +573,67 @@ class ParallelFeatureRendererTests(unittest.TestCase):
             self.assertEqual(reservation.spool_byte_quota, accounted)
             self.assertTrue(final_path.is_file())
 
+    def test_inventory_reconciles_one_publication_while_another_active_range_appears(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                (_feature(95), _feature(96)),
+                factory,
+                limits=_limits(max_points_per_job=3),
+            )
+            self.addCleanup(renderer.close)
+            renderer._submit_until_blocked()
+            reservations = tuple(
+                sorted(
+                    renderer._reservations.values(),
+                    key=lambda reservation: reservation.start_ordinal,
+                )
+            )
+            self.assertEqual(2, len(reservations))
+            first, second = reservations
+            first_base = (
+                f"{first.start_ordinal:012d}-"
+                f"{first.end_ordinal_exclusive:012d}.batch"
+            )
+            second_base = (
+                f"{second.start_ordinal:012d}-"
+                f"{second.end_ordinal_exclusive:012d}.batch"
+            )
+            first_temporary = root / f"{first_base}.tmp-4441"
+            first_final = root / first_base
+            second_temporary = root / f"{second_base}.tmp-4442"
+            first_temporary.write_bytes(b"first active")
+            real_lstat = parallel.os.lstat
+            transitioned = False
+
+            def advance_both_ranges(path: object):
+                nonlocal transitioned
+                if Path(path) == first_temporary and not transitioned:
+                    transitioned = True
+                    os.replace(first_temporary, first_final)
+                    second_temporary.write_bytes(b"second active")
+                return real_lstat(path)
+
+            with mock.patch.object(
+                parallel.os,
+                "lstat",
+                side_effect=advance_both_ranges,
+            ):
+                actual, _growth, accounted = renderer._inspect_spool_inventory()
+
+            self.assertTrue(transitioned)
+            self.assertEqual(len(b"first active") + len(b"second active"), actual)
+            self.assertEqual(
+                first.spool_byte_quota + second.spool_byte_quota,
+                accounted,
+            )
+            self.assertTrue(first_final.is_file())
+            self.assertTrue(second_temporary.is_file())
+
     def test_inventory_fails_closed_when_an_active_temp_never_stabilizes(self) -> None:
         from tools.experiment8 import waterway_parallel_render as parallel
 
