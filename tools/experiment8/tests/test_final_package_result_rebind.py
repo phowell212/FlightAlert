@@ -355,6 +355,45 @@ class FinalPackageResultRebindTest(unittest.TestCase):
             **arguments,  # type: ignore[arg-type]
         )
 
+    def _use_authority_v2_package(self) -> None:
+        from tools.experiment8.tests.test_v3_class_catalog_finalizer import (
+            _write_authority_v2_merged_package,
+        )
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            finalize_v3_class_catalog,
+        )
+
+        authority_root = self.root / "authority-v2"
+        authority_root.mkdir()
+        self.fixture.package = _write_authority_v2_merged_package(
+            authority_root
+        )
+        finalize_v3_class_catalog(self.fixture.package)
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        package_bytes = sum(
+            path.stat().st_size for path in self.fixture.package.iterdir()
+        )
+        result["package"].update(
+            {
+                "bytes": package_bytes,
+                "path": str(self.fixture.package.resolve()),
+            }
+        )
+        total_bytes = (
+            package_bytes
+            + self.fixture.apk.stat().st_size
+            + MANDATORY_RESERVE_BYTES
+        )
+        result["footprint"].update(
+            {
+                "hardStrictlyBelow": True,
+                "preferredStrictlyBelow": True,
+                "totalBytes": total_bytes,
+            }
+        )
+        result["state"] = "complete"
+        self.fixture.result.write_bytes(_canonical(result))
+
     def _assert_rejected_without_output(self) -> None:
         with self.assertRaises(ReferencePackageInstallError):
             self._rebind()
@@ -680,6 +719,24 @@ class FinalPackageResultRebindTest(unittest.TestCase):
         self.assertEqual(
             [], list(self.output.parent.glob(f".{self.output.name}.stage-*"))
         )
+
+    def test_authority_v2_package_rebinds_to_exact_final_apk(self) -> None:
+        self._use_authority_v2_package()
+        policy = installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+
+        self._rebind(install_policy=policy)
+
+        rebound = json.loads(self.output.read_text("utf-8"))
+        plan = HostInstallPlan.validate(
+            package_directory=self.fixture.package,
+            apk_path=self.final_apk,
+            final_result_path=self.output,
+            install_policy=policy,
+        )
+        self.assertEqual(plan.package_bytes, rebound["package"]["bytes"])
+        self.assertEqual(self.head, rebound["apk"]["sourceCommit"])
+        self.assertEqual(_sha256(BUILT_FINAL_APK), rebound["apk"]["sha256"])
+        self.assertEqual(policy, rebound["rebind"]["installPolicy"])
 
     def test_publication_mutation_removes_only_the_tool_created_link(self) -> None:
         real_link = rebind_module.os.link

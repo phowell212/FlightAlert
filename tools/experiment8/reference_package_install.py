@@ -17,6 +17,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 
+from .reference_size_policy import (
+    BUDGETED_RELEASE_V1,
+    COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
+    DESTINATION_RESERVE_BYTES,
+    REFERENCE_SIZE_POLICY_MODES,
+    evaluate_reference_size_policy,
+    reference_size_policy_document,
+)
+
 
 PACKAGE_ID = "world-experiment8-binary-v4"
 RUNTIME_SCHEMA_VERSION = 3
@@ -63,6 +72,34 @@ INSTALL_POLICIES = (
 )
 FINAL_RESULT_STATE_COMPLETE = "complete"
 FINAL_RESULT_STATE_FAILED_HARD_CEILING = "failed-hard-ceiling"
+AUTHORITY_MERGE_SCHEMA = "flightalert.experiment8.v3-package-merge.v2"
+AUTHORITY_MERGE_RECEIPT_SCHEMA = (
+    "flightalert.experiment8.v3-package-merge-receipt.v2"
+)
+AUTHORITY_FINALIZATION_RECEIPT_SCHEMA = (
+    "flightalert.experiment8.v3-class-catalog-finalization-receipt.v2"
+)
+FINAL_SIZE_ACCOUNTING_SCOPE = (
+    "final-six-file-package-after-class-catalog-finalization"
+)
+WATERWAY_BUILD_RECEIPT_SCHEMA = (
+    "flightalert.experiment8.osm-global-waterway-build.v2"
+)
+WATERWAY_BUILD_RECEIPT_FIELDS = {
+    "admission",
+    "attribution",
+    "build",
+    "catalogCountsClaimed",
+    "closureAudit",
+    "finalSemanticIdentitySha256",
+    "outputFiles",
+    "packageId",
+    "peakResources",
+    "projection",
+    "rendererSemanticStreamSha256",
+    "schema",
+    "source",
+}
 MAX_JSON_BYTES = 4 * 1024 * 1024
 HASH_CHUNK_BYTES = 4 * 1024 * 1024
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -276,6 +313,7 @@ class HostInstallPlan:
             finalization_receipt=finalization_receipt,
             file_by_name=file_by_name,
             require_primary_whole_earth=(release_policy or whole_earth_complete),
+            install_policy=install_policy,
         )
 
         apk = _hash_regular_file(apk_path, "APK")
@@ -3459,6 +3497,122 @@ def _plan_document(plan: HostInstallPlan) -> dict[str, object]:
     return document
 
 
+def _json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
+def _validated_authority_size_binding(value: object, label: str) -> Mapping[str, object]:
+    binding = _exact_mapping(value, label)
+    _exact_fields(
+        binding,
+        {"document", "documentSha256", "mode", "module", "schema"},
+        f"{label} fields",
+    )
+    if binding.get("schema") != (
+        "flightalert.experiment8.reference-size-policy-binding.v1"
+    ):
+        raise ReferencePackageInstallError(f"{label} schema differs")
+    document = _exact_mapping(binding.get("document"), f"{label} document")
+    if document != _json_value(reference_size_policy_document()):
+        raise ReferencePackageInstallError(f"{label} document differs")
+    if _exact_sha256(
+        binding.get("documentSha256"), f"{label} document SHA-256"
+    ) != hashlib.sha256(_canonical_json_bytes(document)).hexdigest():
+        raise ReferencePackageInstallError(f"{label} document hash differs")
+    mode = _exact_string(binding.get("mode"), f"{label} mode")
+    if mode not in REFERENCE_SIZE_POLICY_MODES:
+        raise ReferencePackageInstallError(f"{label} mode differs")
+    module = _exact_mapping(binding.get("module"), f"{label} module")
+    _exact_fields(module, {"bytes", "sha256"}, f"{label} module fields")
+    if _exact_integer(module.get("bytes"), f"{label} module bytes") <= 0:
+        raise ReferencePackageInstallError(f"{label} module is empty")
+    _exact_sha256(module.get("sha256"), f"{label} module SHA-256")
+    return binding
+
+
+def _validated_authority_size_decision(
+    value: object,
+    *,
+    binding: Mapping[str, object],
+    required_package_bytes: int,
+    label: str,
+) -> Mapping[str, object]:
+    decision = _exact_mapping(value, label)
+    mode = binding["mode"]
+    expected_fields = {
+        "authorized",
+        "availableDestinationBytes",
+        "hardComponentPackageCeilingExceeded",
+        "hardMandatoryPhoneFootprintCeilingExceeded",
+        "mandatoryPhoneFootprintBytes",
+        "mode",
+        "preferredComponentPackageCeilingExceeded",
+        "preferredMandatoryPhoneFootprintCeilingExceeded",
+        "requiredPackageBytes",
+        "requiredWithReserveBytes",
+        "schema",
+    }
+    visual = mode == COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+    if visual:
+        expected_fields.update(
+            {
+                "publicationBoundaryAuthorized",
+                "publicationBoundaryDestinationFreeBytes",
+                "publicationBoundaryRequiredReserveBytes",
+            }
+        )
+    _exact_fields(decision, expected_fields, f"{label} fields")
+    available = decision.get("availableDestinationBytes")
+    if visual:
+        available = _exact_integer(
+            available, f"{label} available destination bytes"
+        )
+    elif available is not None:
+        raise ReferencePackageInstallError(
+            f"{label} budgeted destination capacity must be null"
+        )
+    expected = dict(
+        evaluate_reference_size_policy(
+            mode=mode,
+            required_package_bytes=required_package_bytes,
+            available_destination_bytes=available,
+        )
+    )
+    if visual:
+        boundary = _exact_integer(
+            decision.get("publicationBoundaryDestinationFreeBytes"),
+            f"{label} publication boundary bytes",
+        )
+        if _exact_integer(
+            decision.get("publicationBoundaryRequiredReserveBytes"),
+            f"{label} publication boundary reserve",
+        ) != DESTINATION_RESERVE_BYTES:
+            raise ReferencePackageInstallError(
+                f"{label} publication boundary reserve differs"
+            )
+        boundary_authorized = boundary >= DESTINATION_RESERVE_BYTES
+        expected.update(
+            {
+                "authorized": bool(expected["authorized"])
+                and boundary_authorized,
+                "publicationBoundaryAuthorized": boundary_authorized,
+                "publicationBoundaryDestinationFreeBytes": boundary,
+                "publicationBoundaryRequiredReserveBytes": (
+                    DESTINATION_RESERVE_BYTES
+                ),
+            }
+        )
+    if decision != expected:
+        raise ReferencePackageInstallError(f"{label} accounting differs")
+    if decision.get("authorized") is not True:
+        raise ReferencePackageInstallError(f"{label} is not authorized")
+    return decision
+
+
 def _validate_receipts(
     *,
     manifest: Mapping[str, object],
@@ -3466,44 +3620,70 @@ def _validate_receipts(
     finalization_receipt: Mapping[str, object],
     file_by_name: Mapping[str, InstallFile],
     require_primary_whole_earth: bool = True,
+    install_policy: str = INSTALL_POLICY_RELEASE,
 ) -> None:
+    merge_receipt_schema = _exact_string(
+        merge_receipt.get("schema"), "merge receipt schema"
+    )
+    finalization_receipt_schema = _exact_string(
+        finalization_receipt.get("schema"), "finalization receipt schema"
+    )
+    authority_v2 = merge_receipt_schema == AUTHORITY_MERGE_RECEIPT_SCHEMA
+    if authority_v2 != (
+        finalization_receipt_schema == AUTHORITY_FINALIZATION_RECEIPT_SCHEMA
+    ):
+        raise ReferencePackageInstallError(
+            "merge and finalization authority schemas differ"
+        )
+    merge_receipt_fields = {
+        "coverage",
+        "inputs",
+        "mergerSha256",
+        "outputFiles",
+        "packageId",
+        "rendererSemanticStreamSha256",
+        "schema",
+        "subtypeCounts",
+    }
+    finalization_receipt_fields = {
+        "coverage",
+        "finalizerSha256",
+        "inputFiles",
+        "outputFiles",
+        "packageId",
+        "rendererContractSha256",
+        "rendererSemanticStreamSha256",
+        "schema",
+        "subtypeCounts",
+    }
+    if authority_v2:
+        merge_receipt_fields.update({"authorityReceipts", "sizePolicy"})
+        if "accountingConvergencePadding" in merge_receipt:
+            padding = merge_receipt["accountingConvergencePadding"]
+            if type(padding) is not str or len(padding) > 63 or set(padding) - {"x"}:
+                raise ReferencePackageInstallError(
+                    "merge accounting convergence padding is malformed"
+                )
+            merge_receipt_fields.add("accountingConvergencePadding")
+        finalization_receipt_fields.update(
+            {"authorityReceipts", "mergeReceipt", "sizePolicy"}
+        )
     _exact_fields(
         merge_receipt,
-        {
-            "coverage",
-            "inputs",
-            "mergerSha256",
-            "outputFiles",
-            "packageId",
-            "rendererSemanticStreamSha256",
-            "schema",
-            "subtypeCounts",
-        },
+        merge_receipt_fields,
         "merge receipt schema fields",
     )
     _exact_fields(
         finalization_receipt,
-        {
-            "coverage",
-            "finalizerSha256",
-            "inputFiles",
-            "outputFiles",
-            "packageId",
-            "rendererContractSha256",
-            "rendererSemanticStreamSha256",
-            "schema",
-            "subtypeCounts",
-        },
+        finalization_receipt_fields,
         "finalization receipt schema fields",
     )
-    if (
-        _exact_string(merge_receipt.get("schema"), "merge receipt schema")
-        != "flightalert.experiment8.v3-package-merge-receipt.v1"
+    if not authority_v2 and merge_receipt_schema != (
+        "flightalert.experiment8.v3-package-merge-receipt.v1"
     ):
         raise ReferencePackageInstallError("merge receipt schema differs")
-    if (
-        _exact_string(finalization_receipt.get("schema"), "finalization receipt schema")
-        != "flightalert.experiment8.v3-class-catalog-finalization-receipt.v1"
+    if not authority_v2 and finalization_receipt_schema != (
+        "flightalert.experiment8.v3-class-catalog-finalization-receipt.v1"
     ):
         raise ReferencePackageInstallError("finalization receipt schema differs")
     for receipt, label in (
@@ -3514,15 +3694,22 @@ def _validate_receipts(
             raise ReferencePackageInstallError(f"{label} package ID differs")
 
     merge = _exact_mapping(manifest.get("merge"), "manifest merge contract")
+    manifest_merge_fields = {"inputs", "mergerSha256", "output", "schema"}
+    if authority_v2:
+        manifest_merge_fields.update({"authorityReceipts", "sizePolicy"})
     _exact_fields(
         merge,
-        {"inputs", "mergerSha256", "output", "schema"},
+        manifest_merge_fields,
         "manifest merge schema fields",
     )
-    if (
-        _exact_string(merge.get("schema"), "manifest merge schema")
-        != "flightalert.experiment8.v3-package-merge.v1"
-    ):
+    expected_merge_schema = (
+        AUTHORITY_MERGE_SCHEMA
+        if authority_v2
+        else "flightalert.experiment8.v3-package-merge.v1"
+    )
+    if _exact_string(
+        merge.get("schema"), "manifest merge schema"
+    ) != expected_merge_schema:
         raise ReferencePackageInstallError("manifest merge schema differs")
     manifest_inputs = _merge_input_bindings(merge.get("inputs"), "manifest merge inputs")
     receipt_inputs = _merge_input_bindings(
@@ -3539,6 +3726,101 @@ def _validate_receipts(
         raise ReferencePackageInstallError("merge receipt merger SHA-256 differs")
     if merger_sha256 not in _checkout_stable_tool_hashes("v3_package_merger.py"):
         raise ReferencePackageInstallError("merger source SHA-256 differs")
+    if authority_v2:
+        manifest_authority = merge.get("authorityReceipts")
+        receipt_authority = merge_receipt.get("authorityReceipts")
+        final_authority = finalization_receipt.get("authorityReceipts")
+        if (
+            manifest_authority != receipt_authority
+            or receipt_authority != final_authority
+        ):
+            raise ReferencePackageInstallError("authority receipts differ")
+        if type(receipt_authority) is not list or not receipt_authority:
+            raise ReferencePackageInstallError("authority receipts are empty")
+        supplement_input_bindings: dict[
+            str, dict[str, tuple[int, str]]
+        ] = {}
+        for binding in manifest_inputs[1:]:
+            supplement_package_id = str(binding[1])
+            if supplement_package_id in supplement_input_bindings:
+                raise ReferencePackageInstallError(
+                    "supplement input package IDs are ambiguous"
+                )
+            supplement_input_bindings[supplement_package_id] = {
+                "manifest.json": (int(binding[2]), str(binding[3])),
+                "records.fadictpack": (int(binding[4]), str(binding[5])),
+                "tile-index.bin": (int(binding[6]), str(binding[7])),
+            }
+        authority_package_ids: set[str] = set()
+        for index, item in enumerate(receipt_authority):
+            authority = _exact_mapping(
+                item, f"authority receipt[{index}]"
+            )
+            _exact_fields(
+                authority,
+                {"bytes", "document", "packageId", "role", "sha256"},
+                f"authority receipt[{index}] fields",
+            )
+            package_id = _exact_string(
+                authority.get("packageId"),
+                f"authority receipt[{index}] package ID",
+            )
+            if package_id in authority_package_ids:
+                raise ReferencePackageInstallError(
+                    "authority receipt package IDs repeat"
+                )
+            authority_package_ids.add(package_id)
+            if authority.get("role") != "supplement":
+                raise ReferencePackageInstallError(
+                    "authority receipt role differs"
+                )
+            document = _exact_mapping(
+                authority.get("document"),
+                f"authority receipt[{index}] document",
+            )
+            _exact_fields(
+                document,
+                WATERWAY_BUILD_RECEIPT_FIELDS,
+                f"authority receipt[{index}] document fields",
+            )
+            if document.get("schema") != WATERWAY_BUILD_RECEIPT_SCHEMA:
+                raise ReferencePackageInstallError(
+                    "authority receipt document schema differs"
+                )
+            if _exact_string(
+                document.get("packageId"),
+                f"authority receipt[{index}] document package ID",
+            ) != package_id:
+                raise ReferencePackageInstallError(
+                    "authority receipt package ID differs"
+                )
+            if package_id not in supplement_input_bindings:
+                raise ReferencePackageInstallError(
+                    "authority receipt does not bind one supplement input"
+                )
+            authority_output_bindings = _binding_map(
+                document.get("outputFiles"),
+                f"authority receipt[{index}] output files",
+                MERGED_FILE_NAMES,
+            )
+            if (
+                authority_output_bindings
+                != supplement_input_bindings[package_id]
+            ):
+                raise ReferencePackageInstallError(
+                    "authority receipt output files differ from supplement input"
+                )
+            document_bytes = _canonical_json_bytes(document)
+            if _exact_integer(
+                authority.get("bytes"),
+                f"authority receipt[{index}] bytes",
+            ) != len(document_bytes) or _exact_sha256(
+                authority.get("sha256"),
+                f"authority receipt[{index}] SHA-256",
+            ) != hashlib.sha256(document_bytes).hexdigest():
+                raise ReferencePackageInstallError(
+                    "authority receipt byte binding differs"
+                )
 
     finalizer_sha256 = _exact_sha256(
         finalization_receipt.get("finalizerSha256"),
@@ -3638,6 +3920,105 @@ def _validate_receipts(
             raise ReferencePackageInstallError(
                 f"merge-to-finalization transition differs for {name}"
             )
+    if authority_v2:
+        merge_receipt_binding = _exact_mapping(
+            finalization_receipt.get("mergeReceipt"),
+            "finalization merge receipt binding",
+        )
+        _exact_fields(
+            merge_receipt_binding,
+            {"bytes", "name", "sha256"},
+            "finalization merge receipt binding fields",
+        )
+        if merge_receipt_binding.get("name") != "merge-receipt.json":
+            raise ReferencePackageInstallError(
+                "finalization merge receipt name differs"
+            )
+        actual_merge_receipt = file_by_name["merge-receipt.json"]
+        if _exact_integer(
+            merge_receipt_binding.get("bytes"),
+            "finalization merge receipt bytes",
+        ) != actual_merge_receipt.byte_length or _exact_sha256(
+            merge_receipt_binding.get("sha256"),
+            "finalization merge receipt SHA-256",
+        ) != actual_merge_receipt.sha256:
+            raise ReferencePackageInstallError(
+                "finalization merge receipt binding differs"
+            )
+
+        manifest_size_policy = merge.get("sizePolicy")
+        merge_size_policy = merge_receipt.get("sizePolicy")
+        if manifest_size_policy != merge_size_policy:
+            raise ReferencePackageInstallError(
+                "merge size policies differ"
+            )
+        pre_size_policy = _exact_mapping(
+            merge_size_policy, "merge size policy"
+        )
+        _exact_fields(
+            pre_size_policy,
+            {"accountingScope", "binding", "decision"},
+            "merge size policy fields",
+        )
+        if pre_size_policy.get("accountingScope") != (
+            "merge-output-before-class-catalog-finalization"
+        ):
+            raise ReferencePackageInstallError(
+                "merge size-policy scope differs"
+            )
+        pre_binding = _validated_authority_size_binding(
+            pre_size_policy.get("binding"), "merge size-policy binding"
+        )
+        expected_size_mode = (
+            COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+            if install_policy
+            == INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+            else BUDGETED_RELEASE_V1
+        )
+        if pre_binding["mode"] != expected_size_mode:
+            raise ReferencePackageInstallError(
+                "authority size-policy mode differs from install policy"
+            )
+        pre_required_bytes = (
+            sum(byte_count for byte_count, _ in merged_bindings.values())
+            + actual_merge_receipt.byte_length
+        )
+        _validated_authority_size_decision(
+            pre_size_policy.get("decision"),
+            binding=pre_binding,
+            required_package_bytes=pre_required_bytes,
+            label="merge size-policy decision",
+        )
+
+        final_size_policy = _exact_mapping(
+            finalization_receipt.get("sizePolicy"),
+            "finalization size policy",
+        )
+        _exact_fields(
+            final_size_policy,
+            {"accountingScope", "binding", "decision"},
+            "finalization size policy fields",
+        )
+        if final_size_policy.get("accountingScope") != FINAL_SIZE_ACCOUNTING_SCOPE:
+            raise ReferencePackageInstallError(
+                "finalization size-policy scope differs"
+            )
+        final_binding = _validated_authority_size_binding(
+            final_size_policy.get("binding"),
+            "finalization size-policy binding",
+        )
+        if final_binding != pre_binding:
+            raise ReferencePackageInstallError(
+                "finalization size-policy binding differs"
+            )
+        _validated_authority_size_decision(
+            final_size_policy.get("decision"),
+            binding=final_binding,
+            required_package_bytes=sum(
+                item.byte_length for item in file_by_name.values()
+            ),
+            label="finalization size-policy decision",
+        )
 
     output = _exact_mapping(merge.get("output"), "manifest merge output")
     for name, byte_key, sha_key in (
@@ -3687,12 +4068,24 @@ def _validate_receipts(
     ) != semantic:
         raise ReferencePackageInstallError("merge semantic stream differs")
 
-    merge_counts = _subtype_counts(
-        merge_receipt.get("subtypeCounts"), "merge subtype counts"
-    )
-    final_counts = _subtype_counts(
-        finalization_receipt.get("subtypeCounts"), "finalization subtype counts"
-    )
+    if authority_v2:
+        merge_counts = _authority_subtype_counts(
+            merge_receipt.get("subtypeCounts"), "merge subtype counts"
+        )
+        final_counts = _authority_subtype_counts(
+            finalization_receipt.get("subtypeCounts"),
+            "finalization subtype counts",
+        )
+        renderer_record_count = sum(item[2] for item in final_counts)
+    else:
+        merge_counts = _subtype_counts(
+            merge_receipt.get("subtypeCounts"), "merge subtype counts"
+        )
+        final_counts = _subtype_counts(
+            finalization_receipt.get("subtypeCounts"),
+            "finalization subtype counts",
+        )
+        renderer_record_count = sum(final_counts.values())
     if merge_counts != final_counts:
         raise ReferencePackageInstallError("merge and finalization subtype counts differ")
     final_coverage = _exact_mapping(
@@ -3723,7 +4116,7 @@ def _validate_receipts(
     if _exact_integer(
         final_coverage.get("rendererRecordCount"),
         "finalization renderer record count",
-    ) != sum(final_counts.values()):
+    ) != renderer_record_count:
         raise ReferencePackageInstallError("finalization renderer record count differs")
 
 
@@ -3893,6 +4286,57 @@ def _finalization_input_bindings(value: object) -> dict[str, tuple[int, str]]:
     if tuple(sorted(result)) != tuple(sorted(MERGED_FILE_NAMES)):
         raise ReferencePackageInstallError(f"{label} inventory differs")
     return result
+
+
+def _authority_subtype_counts(
+    value: object,
+    label: str,
+) -> tuple[tuple[int, str, int, int, int], ...]:
+    if type(value) is not list or not value:
+        raise ReferencePackageInstallError(f"{label} has the wrong exact type")
+    result: list[tuple[int, str, int, int, int]] = []
+    previous_subtype = -1
+    for index, item in enumerate(value):
+        document = _exact_mapping(item, f"{label}[{index}]")
+        _exact_fields(
+            document,
+            {
+                "canonicalVariantIds",
+                "distinctFeatureIds",
+                "postings",
+                "semanticSubtype",
+                "semanticSubtypeName",
+            },
+            f"{label}[{index}] fields",
+        )
+        subtype = _exact_integer(
+            document.get("semanticSubtype"), f"{label}[{index}] subtype"
+        )
+        if subtype <= previous_subtype:
+            raise ReferencePackageInstallError(f"{label} are not strictly ordered")
+        previous_subtype = subtype
+        name = _exact_string(
+            document.get("semanticSubtypeName"), f"{label}[{index}] name"
+        )
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None:
+            raise ReferencePackageInstallError(f"{label}[{index}] name is malformed")
+        postings = _exact_integer(
+            document.get("postings"), f"{label}[{index}] postings"
+        )
+        distinct = _exact_integer(
+            document.get("distinctFeatureIds"),
+            f"{label}[{index}] distinct feature IDs",
+        )
+        variants = _exact_integer(
+            document.get("canonicalVariantIds"),
+            f"{label}[{index}] canonical variant IDs",
+        )
+        if distinct > postings or variants > postings:
+            raise ReferencePackageInstallError(
+                f"{label}[{index}] counts are impossible"
+            )
+        result.append((subtype, name, postings, distinct, variants))
+    return tuple(result)
 
 
 def _subtype_counts(value: object, label: str) -> dict[str, int]:

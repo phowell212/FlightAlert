@@ -213,6 +213,156 @@ class _ValidInstallFixture:
         return _sha256((Path(__file__).parents[1] / name).read_bytes())
 
 
+class _AuthorityV2InstallFixture:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        complete_whole_earth_dictionary: bool = True,
+    ) -> None:
+        from tools.experiment8.tests.test_v3_class_catalog_finalizer import (
+            _write_authority_v2_merged_package,
+        )
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            finalize_v3_class_catalog,
+        )
+
+        self.package = _write_authority_v2_merged_package(
+            root,
+            complete_whole_earth_dictionary=(
+                complete_whole_earth_dictionary
+            ),
+        )
+        finalize_v3_class_catalog(self.package)
+        self.apk = root / "authority-v2-Flight Alert-debug.apk"
+        self.apk.write_bytes(b"authority-v2-source-matched-apk")
+        self.result = root / "authority-v2-final-result.json"
+        package_bytes = sum(
+            path.stat().st_size for path in self.package.iterdir()
+        )
+        total_bytes = (
+            package_bytes + self.apk.stat().st_size + MANDATORY_RESERVE_BYTES
+        )
+        self.result.write_bytes(
+            _canonical(
+                {
+                    "apk": {
+                        "bytes": self.apk.stat().st_size,
+                        "path": str(self.apk.resolve()),
+                        "sha256": _sha256(self.apk.read_bytes()),
+                    },
+                    "footprint": {
+                        "hardCeilingBytes": 40_000_000_000,
+                        "hardStrictlyBelow": True,
+                        "mandatoryReserveBytes": MANDATORY_RESERVE_BYTES,
+                        "preferredCeilingBytes": 25_000_000_000,
+                        "preferredStrictlyBelow": True,
+                        "totalBytes": total_bytes,
+                    },
+                    "package": {
+                        "bytes": package_bytes,
+                        "packageId": PACKAGE_ID,
+                        "path": str(self.package.resolve()),
+                    },
+                    "schema": (
+                        "flightalert.experiment8."
+                        "final-package-monitor-result.v1"
+                    ),
+                    "state": "complete",
+                }
+            )
+        )
+
+    def forge_unrelated_authority(self) -> None:
+        def forge(authority: dict[str, object]) -> None:
+            authority["packageId"] = "other"
+            document = authority["document"]
+            assert isinstance(document, dict)
+            document["packageId"] = "other"
+
+        self._rewrite_carried_authority(forge)
+
+    def forge_mismatched_authority_output(self) -> None:
+        def forge(authority: dict[str, object]) -> None:
+            document = authority["document"]
+            assert isinstance(document, dict)
+            output_files = document["outputFiles"]
+            assert isinstance(output_files, list)
+            records = next(
+                item
+                for item in output_files
+                if isinstance(item, dict)
+                and item.get("name") == "records.fadictpack"
+            )
+            records["sha256"] = "f" * 64
+
+        self._rewrite_carried_authority(forge)
+
+    def _rewrite_carried_authority(self, mutate) -> None:
+        manifest_path = self.package / "manifest.json"
+        merge_receipt_path = self.package / "merge-receipt.json"
+        final_receipt_path = (
+            self.package / "class-catalog-finalization-receipt.json"
+        )
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        merge_receipt = json.loads(merge_receipt_path.read_text("utf-8"))
+        final_receipt = json.loads(final_receipt_path.read_text("utf-8"))
+
+        def rewrite(authority: dict[str, object]) -> None:
+            mutate(authority)
+            document = authority["document"]
+            assert isinstance(document, dict)
+            document_bytes = _canonical(document)
+            authority["bytes"] = len(document_bytes)
+            authority["sha256"] = _sha256(document_bytes)
+
+        rewrite(manifest["merge"]["authorityReceipts"][0])
+        rewrite(merge_receipt["authorityReceipts"][0])
+        rewrite(final_receipt["authorityReceipts"][0])
+
+        base_manifest = json.loads(json.dumps(manifest))
+        base_manifest.pop("classCatalog")
+        base_manifest_raw = _canonical(base_manifest)
+        manifest_raw = _canonical(manifest)
+        merge_receipt["outputFiles"][0].update(
+            {
+                "bytes": len(base_manifest_raw),
+                "sha256": _sha256(base_manifest_raw),
+            }
+        )
+        merge_receipt_raw = _canonical(merge_receipt)
+        final_receipt["mergeReceipt"].update(
+            {
+                "bytes": len(merge_receipt_raw),
+                "sha256": _sha256(merge_receipt_raw),
+            }
+        )
+        final_receipt["inputFiles"][0].update(
+            {
+                "bytes": len(base_manifest_raw),
+                "sha256": _sha256(base_manifest_raw),
+            }
+        )
+        final_receipt["outputFiles"][0].update(
+            {
+                "bytes": len(manifest_raw),
+                "sha256": _sha256(manifest_raw),
+            }
+        )
+        final_receipt_raw = _canonical(final_receipt)
+        manifest_path.write_bytes(manifest_raw)
+        merge_receipt_path.write_bytes(merge_receipt_raw)
+        final_receipt_path.write_bytes(final_receipt_raw)
+
+        result = json.loads(self.result.read_text("utf-8"))
+        package_bytes = sum(path.stat().st_size for path in self.package.iterdir())
+        result["package"]["bytes"] = package_bytes
+        result["footprint"]["totalBytes"] = (
+            package_bytes + self.apk.stat().st_size + MANDATORY_RESERVE_BYTES
+        )
+        self.result.write_bytes(_canonical(result))
+
+
 class HostInstallPlanTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -270,6 +420,199 @@ class HostInstallPlanTest(unittest.TestCase):
             ReferencePackageInstallError, "manifest package ID differs"
         ):
             self.validate()
+
+    def test_authority_v2_receipts_and_final_six_file_accounting_validate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(Path(temporary))
+
+            plan = HostInstallPlan.validate(
+                package_directory=fixture.package,
+                apk_path=fixture.apk,
+                final_result_path=fixture.result,
+                install_policy=(
+                    installer_module.
+                    INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+                ),
+                require_install_policy_binding=False,
+            )
+
+            finalization = json.loads(
+                (
+                    fixture.package
+                    / "class-catalog-finalization-receipt.json"
+                ).read_text("utf-8")
+            )
+            self.assertEqual(
+                plan.package_bytes,
+                finalization["sizePolicy"]["decision"][
+                    "requiredPackageBytes"
+                ],
+            )
+            self.assertEqual(6, len(plan.package_files))
+
+    def test_authority_v2_visual_size_authority_cannot_cross_into_release(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(Path(temporary))
+
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError,
+                "size-policy mode differs from install policy",
+            ):
+                HostInstallPlan.validate(
+                    package_directory=fixture.package,
+                    apk_path=fixture.apk,
+                    final_result_path=fixture.result,
+                )
+
+    def test_authority_v2_receipt_must_bind_one_supplement_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(Path(temporary))
+            fixture.forge_unrelated_authority()
+
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError,
+                "authority receipt.*supplement input",
+            ):
+                HostInstallPlan.validate(
+                    package_directory=fixture.package,
+                    apk_path=fixture.apk,
+                    final_result_path=fixture.result,
+                    install_policy=(
+                        installer_module.
+                        INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+                    ),
+                    require_install_policy_binding=False,
+                )
+
+    def test_authority_v2_receipt_outputs_must_match_supplement_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(Path(temporary))
+            fixture.forge_mismatched_authority_output()
+
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError,
+                "authority receipt output files differ from supplement input",
+            ):
+                HostInstallPlan.validate(
+                    package_directory=fixture.package,
+                    apk_path=fixture.apk,
+                    final_result_path=fixture.result,
+                    install_policy=(
+                        installer_module.
+                        INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+                    ),
+                    require_install_policy_binding=False,
+                )
+
+    def test_authority_v2_finalizer_receipt_cannot_change_carried_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(Path(temporary))
+            receipt_path = (
+                fixture.package / "class-catalog-finalization-receipt.json"
+            )
+            receipt = json.loads(receipt_path.read_text("utf-8"))
+            receipt["authorityReceipts"][0]["sha256"] = "0" * 64
+            receipt_path.write_bytes(_canonical(receipt))
+            result = json.loads(fixture.result.read_text("utf-8"))
+            package_bytes = sum(
+                path.stat().st_size for path in fixture.package.iterdir()
+            )
+            result["package"]["bytes"] = package_bytes
+            result["footprint"]["totalBytes"] = (
+                package_bytes
+                + fixture.apk.stat().st_size
+                + MANDATORY_RESERVE_BYTES
+            )
+            fixture.result.write_bytes(_canonical(result))
+
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError,
+                "authority receipts differ",
+            ):
+                HostInstallPlan.validate(
+                    package_directory=fixture.package,
+                    apk_path=fixture.apk,
+                    final_result_path=fixture.result,
+                    install_policy=(
+                        installer_module.
+                        INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+                    ),
+                    require_install_policy_binding=False,
+                )
+
+    def test_authority_v2_final_six_file_byte_decision_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(Path(temporary))
+            receipt_path = (
+                fixture.package / "class-catalog-finalization-receipt.json"
+            )
+            receipt = json.loads(receipt_path.read_text("utf-8"))
+            receipt["sizePolicy"]["decision"]["requiredPackageBytes"] += 1
+            receipt_path.write_bytes(_canonical(receipt))
+            result = json.loads(fixture.result.read_text("utf-8"))
+            package_bytes = sum(
+                path.stat().st_size for path in fixture.package.iterdir()
+            )
+            result["package"]["bytes"] = package_bytes
+            result["footprint"]["totalBytes"] = (
+                package_bytes
+                + fixture.apk.stat().st_size
+                + MANDATORY_RESERVE_BYTES
+            )
+            fixture.result.write_bytes(_canonical(result))
+
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError,
+                "finalization size-policy decision accounting differs",
+            ):
+                HostInstallPlan.validate(
+                    package_directory=fixture.package,
+                    apk_path=fixture.apk,
+                    final_result_path=fixture.result,
+                    install_policy=(
+                        installer_module.
+                        INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+                    ),
+                    require_install_policy_binding=False,
+                )
+
+    def test_authority_v2_visual_evaluation_preserves_honest_incomplete_claim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(
+                Path(temporary),
+                complete_whole_earth_dictionary=False,
+            )
+
+            with self.assertRaisesRegex(
+                ReferencePackageInstallError,
+                "not whole-earth complete",
+            ):
+                HostInstallPlan.validate(
+                    package_directory=fixture.package,
+                    apk_path=fixture.apk,
+                    final_result_path=fixture.result,
+                )
+
+            plan = HostInstallPlan.validate(
+                package_directory=fixture.package,
+                apk_path=fixture.apk,
+                final_result_path=fixture.result,
+                install_policy=(
+                    installer_module.
+                    INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+                ),
+                require_install_policy_binding=False,
+            )
+
+            self.assertFalse(plan.whole_earth_complete)
+            self.assertEqual(
+                installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION,
+                plan.install_policy,
+            )
 
     def test_unexpected_package_entry_is_rejected(self) -> None:
         (self.fixture.package / "extra.bin").write_bytes(b"not-runtime")

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import struct
@@ -23,6 +24,13 @@ from .reference_presentation_policy import (
     SubtypeCatalogCounts,
     canonical_class_catalog_bytes,
 )
+from .reference_size_policy import (
+    COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1,
+    DESTINATION_RESERVE_BYTES,
+    REFERENCE_SIZE_POLICY_MODES,
+    evaluate_reference_size_policy,
+    reference_size_policy_document,
+)
 from .renderer_tile_package import (
     INDEX_ENTRY_BYTES,
     INDEX_FLAG_PRESENT,
@@ -40,6 +48,46 @@ CATALOG_FILE_NAME = "class-catalog.bin"
 RECEIPT_FILE_NAME = "class-catalog-finalization-receipt.json"
 
 _RECEIPT_SCHEMA = "flightalert.experiment8.v3-class-catalog-finalization-receipt.v1"
+_AUTHORITY_RECEIPT_SCHEMA = (
+    "flightalert.experiment8.v3-class-catalog-finalization-receipt.v2"
+)
+_AUTHORITY_MERGE_SCHEMA = "flightalert.experiment8.v3-package-merge.v2"
+_AUTHORITY_MERGE_RECEIPT_SCHEMA = (
+    "flightalert.experiment8.v3-package-merge-receipt.v2"
+)
+_MERGE_RECEIPT_FILE_NAME = "merge-receipt.json"
+_FINAL_SIZE_ACCOUNTING_SCOPE = (
+    "final-six-file-package-after-class-catalog-finalization"
+)
+_WATERWAY_BUILD_RECEIPT_SCHEMA = (
+    "flightalert.experiment8.osm-global-waterway-build.v2"
+)
+_WATERWAY_BUILD_RECEIPT_FIELDS = {
+    "admission",
+    "attribution",
+    "build",
+    "catalogCountsClaimed",
+    "closureAudit",
+    "finalSemanticIdentitySha256",
+    "outputFiles",
+    "packageId",
+    "peakResources",
+    "projection",
+    "rendererSemanticStreamSha256",
+    "schema",
+    "source",
+}
+_AUTHORITY_PRE_FINAL_FILE_NAMES = {
+    "manifest.json",
+    "merge-receipt.json",
+    "records.fadictpack",
+    "tile-index.bin",
+}
+_AUTHORITY_FINAL_FILE_NAMES = {
+    *_AUTHORITY_PRE_FINAL_FILE_NAMES,
+    CATALOG_FILE_NAME,
+    RECEIPT_FILE_NAME,
+}
 _SEMANTIC_STREAM_DOMAIN = b"flight-alert-exp8-semantic-v1\0"
 _MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 _FILE_HASH_CHUNK_BYTES = 4 * 1024 * 1024
@@ -114,6 +162,10 @@ class _Package:
     records_file: _FileBinding
     index_file: _FileBinding
     existing_catalog_sha256: str | None
+    merge_receipt_file: _FileBinding | None
+    authority_merge_receipt: Mapping[str, object] | None
+    authority_receipts: tuple[Mapping[str, object], ...]
+    authority_size_policy: Mapping[str, object] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +350,544 @@ def _validate_declared_runtime_binding(
             raise V3ClassCatalogFinalizationError(f"{label} differs from its file")
 
 
+def _exact_mapping(value: object, label: str) -> dict[str, object]:
+    if type(value) is not dict:
+        raise V3ClassCatalogFinalizationError(f"{label} must be an object")
+    return value
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _validate_size_policy_binding(
+    value: object,
+    label: str,
+) -> dict[str, object]:
+    binding = _exact_mapping(value, label)
+    if set(binding) != {"document", "documentSha256", "mode", "module", "schema"}:
+        raise V3ClassCatalogFinalizationError(f"{label} fields differ")
+    if binding.get("schema") != (
+        "flightalert.experiment8.reference-size-policy-binding.v1"
+    ):
+        raise V3ClassCatalogFinalizationError(f"{label} schema differs")
+    document = _exact_mapping(binding.get("document"), f"{label} document")
+    expected_document = _plain_json(reference_size_policy_document())
+    if document != expected_document:
+        raise V3ClassCatalogFinalizationError(f"{label} document differs")
+    if _sha256_text(
+        binding.get("documentSha256"), f"{label} document SHA-256"
+    ) != hashlib.sha256(_canonical_json_bytes(document)).hexdigest():
+        raise V3ClassCatalogFinalizationError(f"{label} document hash differs")
+    mode = _exact_text(binding.get("mode"), f"{label} mode")
+    if mode not in REFERENCE_SIZE_POLICY_MODES:
+        raise V3ClassCatalogFinalizationError(f"{label} mode differs")
+    module = _exact_mapping(binding.get("module"), f"{label} module")
+    if set(module) != {"bytes", "sha256"}:
+        raise V3ClassCatalogFinalizationError(f"{label} module fields differ")
+    if _exact_int(
+        module.get("bytes"), f"{label} module bytes", 1, _ANDROID_MAX_RECORD_OFFSET
+    ) <= 0:
+        raise V3ClassCatalogFinalizationError(f"{label} module is empty")
+    _sha256_text(
+        module.get("sha256"), f"{label} module SHA-256"
+    )
+    return binding
+
+
+def _validated_size_decision(
+    value: object,
+    *,
+    binding: Mapping[str, object],
+    required_package_bytes: int,
+    label: str,
+) -> dict[str, object]:
+    decision = _exact_mapping(value, label)
+    mode = binding["mode"]
+    fields = {
+        "authorized",
+        "availableDestinationBytes",
+        "hardComponentPackageCeilingExceeded",
+        "hardMandatoryPhoneFootprintCeilingExceeded",
+        "mandatoryPhoneFootprintBytes",
+        "mode",
+        "preferredComponentPackageCeilingExceeded",
+        "preferredMandatoryPhoneFootprintCeilingExceeded",
+        "requiredPackageBytes",
+        "requiredWithReserveBytes",
+        "schema",
+    }
+    visual = mode == COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1
+    if visual:
+        fields.update(
+            {
+                "publicationBoundaryAuthorized",
+                "publicationBoundaryDestinationFreeBytes",
+                "publicationBoundaryRequiredReserveBytes",
+            }
+        )
+    if set(decision) != fields:
+        raise V3ClassCatalogFinalizationError(f"{label} fields differ")
+    available = decision.get("availableDestinationBytes")
+    if visual:
+        available = _exact_int(
+            available,
+            f"{label} available destination bytes",
+            0,
+            _ANDROID_MAX_RECORD_OFFSET,
+        )
+    elif available is not None:
+        raise V3ClassCatalogFinalizationError(
+            f"{label} budgeted destination capacity must be null"
+        )
+    expected = dict(
+        evaluate_reference_size_policy(
+            mode=mode,
+            required_package_bytes=required_package_bytes,
+            available_destination_bytes=available,
+        )
+    )
+    if visual:
+        boundary = _exact_int(
+            decision.get("publicationBoundaryDestinationFreeBytes"),
+            f"{label} publication boundary bytes",
+            0,
+            _ANDROID_MAX_RECORD_OFFSET,
+        )
+        if _exact_int(
+            decision.get("publicationBoundaryRequiredReserveBytes"),
+            f"{label} publication boundary reserve",
+            0,
+            _ANDROID_MAX_RECORD_OFFSET,
+        ) != DESTINATION_RESERVE_BYTES:
+            raise V3ClassCatalogFinalizationError(
+                f"{label} publication boundary reserve differs"
+            )
+        boundary_authorized = boundary >= DESTINATION_RESERVE_BYTES
+        if _exact_bool(
+            decision.get("publicationBoundaryAuthorized"),
+            f"{label} publication authorization",
+        ) != boundary_authorized:
+            raise V3ClassCatalogFinalizationError(
+                f"{label} publication authorization differs"
+            )
+        expected["publicationBoundaryAuthorized"] = boundary_authorized
+        expected["publicationBoundaryDestinationFreeBytes"] = boundary
+        expected["publicationBoundaryRequiredReserveBytes"] = (
+            DESTINATION_RESERVE_BYTES
+        )
+        expected["authorized"] = bool(expected["authorized"]) and boundary_authorized
+    if decision != expected:
+        raise V3ClassCatalogFinalizationError(f"{label} accounting differs")
+    if decision["authorized"] is not True:
+        raise V3ClassCatalogFinalizationError(f"{label} is not authorized")
+    return decision
+
+
+def _binding_map(
+    value: object,
+    *,
+    label: str,
+    expected_names: tuple[str, ...],
+) -> dict[str, tuple[int, str]]:
+    if type(value) is not list or len(value) != len(expected_names):
+        raise V3ClassCatalogFinalizationError(f"{label} inventory differs")
+    result: dict[str, tuple[int, str]] = {}
+    for index, item in enumerate(value):
+        binding = _exact_mapping(item, f"{label}[{index}]")
+        if set(binding) != {"bytes", "name", "sha256"}:
+            raise V3ClassCatalogFinalizationError(f"{label}[{index}] fields differ")
+        name = _exact_text(binding.get("name"), f"{label}[{index}] name")
+        if name in result:
+            raise V3ClassCatalogFinalizationError(f"{label} repeats {name}")
+        result[name] = (
+            _exact_int(
+                binding.get("bytes"),
+                f"{label}[{index}] bytes",
+                0,
+                _ANDROID_MAX_RECORD_OFFSET,
+            ),
+            _sha256_text(binding.get("sha256"), f"{label}[{index}] SHA-256"),
+        )
+    if tuple(result) != expected_names:
+        raise V3ClassCatalogFinalizationError(f"{label} inventory differs")
+    return result
+
+
+def _supplement_input_bindings(
+    value: object,
+) -> dict[str, dict[str, tuple[int, str]]]:
+    if type(value) is not list or not value:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge inputs have the wrong exact type"
+        )
+    expected_fields = {
+        "manifestBytes",
+        "manifestSha256",
+        "packageId",
+        "recordsBytes",
+        "recordsSha256",
+        "role",
+        "tileIndexBytes",
+        "tileIndexSha256",
+    }
+    supplement_bindings: dict[str, dict[str, tuple[int, str]]] = {}
+    for index, item in enumerate(value):
+        binding = _exact_mapping(item, f"V3 authority merge inputs[{index}]")
+        if set(binding) != expected_fields:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge input fields differ"
+            )
+        role = _exact_text(
+            binding.get("role"), f"V3 authority merge inputs[{index}] role"
+        )
+        package_id = _validate_package_id(binding.get("packageId"))
+        byte_facts = {
+            field: _exact_int(
+                binding.get(field),
+                f"V3 authority merge inputs[{index}] {label}",
+                0,
+                _ANDROID_MAX_RECORD_OFFSET,
+            )
+            for field, label in (
+                ("manifestBytes", "manifest bytes"),
+                ("recordsBytes", "records bytes"),
+                ("tileIndexBytes", "index bytes"),
+            )
+        }
+        sha_facts = {
+            field: _sha256_text(
+                binding.get(field),
+                f"V3 authority merge inputs[{index}] {label}",
+            )
+            for field, label in (
+                ("manifestSha256", "manifest SHA-256"),
+                ("recordsSha256", "records SHA-256"),
+                ("tileIndexSha256", "index SHA-256"),
+            )
+        }
+        if index == 0:
+            if role != "primary":
+                raise V3ClassCatalogFinalizationError(
+                    "V3 authority merge input roles are not canonical"
+                )
+        elif role != "supplement":
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge input roles are not canonical"
+            )
+        else:
+            if package_id in supplement_bindings:
+                raise V3ClassCatalogFinalizationError(
+                    "V3 authority merge supplement package IDs are ambiguous"
+                )
+            supplement_bindings[package_id] = {
+                "manifest.json": (
+                    byte_facts["manifestBytes"],
+                    sha_facts["manifestSha256"],
+                ),
+                "records.fadictpack": (
+                    byte_facts["recordsBytes"],
+                    sha_facts["recordsSha256"],
+                ),
+                "tile-index.bin": (
+                    byte_facts["tileIndexBytes"],
+                    sha_facts["tileIndexSha256"],
+                ),
+            }
+    return supplement_bindings
+
+
+def _package_entry_names(directory: Path) -> set[str]:
+    try:
+        return {entry.name for entry in directory.iterdir()}
+    except OSError as error:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority exact package inventory is unreadable"
+        ) from error
+
+
+def _assert_authority_preflight_inventory(directory: Path) -> None:
+    actual = _package_entry_names(directory)
+    allowed = (
+        _AUTHORITY_PRE_FINAL_FILE_NAMES,
+        {*_AUTHORITY_PRE_FINAL_FILE_NAMES, CATALOG_FILE_NAME},
+        _AUTHORITY_FINAL_FILE_NAMES,
+    )
+    if not any(actual == expected for expected in allowed):
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority exact package inventory differs"
+        )
+
+
+def _assert_authority_final_inventory(directory: Path) -> None:
+    if _package_entry_names(directory) != _AUTHORITY_FINAL_FILE_NAMES:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority exact final six-file package inventory differs"
+        )
+
+
+def _assert_authority_staged_receipt_inventory(
+    directory: Path,
+    stage: _OwnedStagedFile,
+) -> None:
+    actual = _package_entry_names(directory)
+    if stage.path.name not in actual:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority staged receipt is absent from package inventory"
+        )
+    without_stage = actual - {stage.path.name}
+    before_receipt = {*_AUTHORITY_PRE_FINAL_FILE_NAMES, CATALOG_FILE_NAME}
+    if without_stage not in (before_receipt, _AUTHORITY_FINAL_FILE_NAMES):
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority exact staged package inventory differs"
+        )
+
+
+def _load_authority_merge_receipt(
+    *,
+    directory: Path,
+    manifest: Mapping[str, object],
+    base_manifest_bytes: bytes,
+    package_id: str,
+    renderer_semantic_stream_sha256: str,
+    records_file: _FileBinding,
+    index_file: _FileBinding,
+) -> tuple[
+    _FileBinding | None,
+    Mapping[str, object] | None,
+    tuple[Mapping[str, object], ...],
+    Mapping[str, object] | None,
+]:
+    merge = manifest.get("merge")
+    if type(merge) is not dict or merge.get("schema") != _AUTHORITY_MERGE_SCHEMA:
+        return None, None, (), None
+    if set(merge) != {
+        "authorityReceipts",
+        "inputs",
+        "mergerSha256",
+        "output",
+        "schema",
+        "sizePolicy",
+    }:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge manifest fields differ"
+        )
+    receipt_path = directory / _MERGE_RECEIPT_FILE_NAME
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt is missing or aliased"
+        )
+    receipt_file = _file_binding(receipt_path)
+    if not 0 < receipt_file.byte_length <= _MAX_MANIFEST_BYTES:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt byte length is outside its bound"
+        )
+    try:
+        with receipt_path.open("rb") as handle:
+            receipt_raw = handle.read(_MAX_MANIFEST_BYTES + 1)
+    except OSError as error:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt is unreadable"
+        ) from error
+    if len(receipt_raw) != receipt_file.byte_length:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt changed while being read"
+        )
+    receipt = _strict_json(receipt_raw, "V3 authority merge receipt")
+    if _canonical_json_bytes(receipt) != receipt_raw:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt is not canonical JSON"
+        )
+    expected_receipt_fields = {
+        "authorityReceipts",
+        "coverage",
+        "inputs",
+        "mergerSha256",
+        "outputFiles",
+        "packageId",
+        "rendererSemanticStreamSha256",
+        "schema",
+        "sizePolicy",
+        "subtypeCounts",
+    }
+    if "accountingConvergencePadding" in receipt:
+        padding = receipt["accountingConvergencePadding"]
+        if type(padding) is not str or len(padding) > 63 or set(padding) - {"x"}:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge accounting padding is malformed"
+            )
+        expected_receipt_fields.add("accountingConvergencePadding")
+    if set(receipt) != expected_receipt_fields:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt fields differ"
+        )
+    if receipt.get("schema") != _AUTHORITY_MERGE_RECEIPT_SCHEMA:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt schema differs"
+        )
+    if _validate_package_id(receipt.get("packageId")) != package_id:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt package ID differs"
+        )
+    for key, label in (
+        ("inputs", "inputs"),
+        ("mergerSha256", "merger SHA-256"),
+        ("authorityReceipts", "authority receipts"),
+        ("sizePolicy", "size policy"),
+    ):
+        if receipt.get(key) != merge.get(key):
+            raise V3ClassCatalogFinalizationError(
+                f"V3 authority merge {label} differ"
+            )
+    if _sha256_text(
+        receipt.get("rendererSemanticStreamSha256"),
+        "V3 authority merge renderer semantic stream SHA-256",
+    ) != renderer_semantic_stream_sha256:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge semantic stream differs"
+        )
+    authority_value = receipt.get("authorityReceipts")
+    if type(authority_value) is not list or not authority_value:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge authority receipts are empty"
+        )
+    supplement_bindings = _supplement_input_bindings(
+        receipt.get("inputs")
+    )
+    authority_receipts: list[Mapping[str, object]] = []
+    package_ids: set[str] = set()
+    for index, item in enumerate(authority_value):
+        authority = _exact_mapping(
+            item, f"V3 authority merge authorityReceipts[{index}]"
+        )
+        if set(authority) != {"bytes", "document", "packageId", "role", "sha256"}:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt fields differ"
+            )
+        authority_package_id = _validate_package_id(authority.get("packageId"))
+        if authority_package_id in package_ids:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt package IDs repeat"
+            )
+        package_ids.add(authority_package_id)
+        if authority.get("role") != "supplement":
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt role differs"
+            )
+        document = _exact_mapping(
+            authority.get("document"),
+            "V3 authority merge authority receipt document",
+        )
+        if (
+            document.get("schema") != _WATERWAY_BUILD_RECEIPT_SCHEMA
+            or set(document) != _WATERWAY_BUILD_RECEIPT_FIELDS
+        ):
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt document schema differs"
+            )
+        if _validate_package_id(document.get("packageId")) != authority_package_id:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt package ID differs"
+            )
+        if authority_package_id not in supplement_bindings:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt does not bind one "
+                "supplement input"
+            )
+        authority_output_bindings = _binding_map(
+            document.get("outputFiles"),
+            label="V3 authority merge authority receipt output files",
+            expected_names=(
+                "manifest.json",
+                "records.fadictpack",
+                "tile-index.bin",
+            ),
+        )
+        if authority_output_bindings != supplement_bindings[authority_package_id]:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt output files differ "
+                "from supplement input"
+            )
+        document_bytes = _canonical_json_bytes(document)
+        if _exact_int(
+            authority.get("bytes"),
+            "V3 authority merge authority receipt bytes",
+            1,
+            _MAX_MANIFEST_BYTES,
+        ) != len(document_bytes) or _sha256_text(
+            authority.get("sha256"),
+            "V3 authority merge authority receipt SHA-256",
+        ) != hashlib.sha256(document_bytes).hexdigest():
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge authority receipt byte binding differs"
+            )
+        authority_receipts.append(authority)
+
+    bindings = _binding_map(
+        receipt.get("outputFiles"),
+        label="V3 authority merge output files",
+        expected_names=("manifest.json", "records.fadictpack", "tile-index.bin"),
+    )
+    expected_bindings = {
+        "manifest.json": (
+            len(base_manifest_bytes),
+            hashlib.sha256(base_manifest_bytes).hexdigest(),
+        ),
+        "records.fadictpack": (
+            records_file.byte_length,
+            records_file.sha256,
+        ),
+        "tile-index.bin": (index_file.byte_length, index_file.sha256),
+    }
+    if bindings != expected_bindings:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge output files differ"
+        )
+    coverage = _exact_mapping(receipt.get("coverage"), "V3 authority merge coverage")
+    manifest_coverage = _exact_mapping(manifest.get("coverage"), "V3 coverage")
+    for key in (
+        "completeDeclaredScope",
+        "completeWholeEarthDictionary",
+        "tileCount",
+        "zoomRanges",
+    ):
+        if coverage.get(key) != manifest_coverage.get(key):
+            raise V3ClassCatalogFinalizationError(
+                f"V3 authority merge coverage differs for {key}"
+            )
+    size_policy = _exact_mapping(receipt.get("sizePolicy"), "V3 authority size policy")
+    if set(size_policy) != {"accountingScope", "binding", "decision"} or (
+        size_policy.get("accountingScope")
+        != "merge-output-before-class-catalog-finalization"
+    ):
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge size-policy scope differs"
+        )
+    binding = _validate_size_policy_binding(
+        size_policy.get("binding"), "V3 authority size-policy binding"
+    )
+    _validated_size_decision(
+        size_policy.get("decision"),
+        binding=binding,
+        required_package_bytes=(
+            len(base_manifest_bytes)
+            + records_file.byte_length
+            + index_file.byte_length
+            + receipt_file.byte_length
+        ),
+        label="V3 authority merge size-policy decision",
+    )
+    if _file_binding(receipt_path) != receipt_file:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge receipt changed while being authenticated"
+        )
+    return receipt_file, receipt, tuple(authority_receipts), size_policy
+
+
 def _load_package(directory: Path) -> _Package:
     if not isinstance(directory, Path):
         raise V3ClassCatalogFinalizationError(
@@ -475,6 +1065,23 @@ def _load_package(directory: Path) -> _Package:
 
     base_manifest = dict(manifest)
     base_manifest.pop("classCatalog", None)
+    base_manifest_bytes = _canonical_json_bytes(base_manifest)
+    (
+        merge_receipt_file,
+        authority_merge_receipt,
+        authority_receipts,
+        authority_size_policy,
+    ) = _load_authority_merge_receipt(
+        directory=directory,
+        manifest=base_manifest,
+        base_manifest_bytes=base_manifest_bytes,
+        package_id=package_id,
+        renderer_semantic_stream_sha256=renderer_semantic,
+        records_file=records_file,
+        index_file=index_file,
+    )
+    if merge_receipt_file is not None:
+        _assert_authority_preflight_inventory(directory)
     manifest_file = _file_binding(manifest_path)
     if manifest_file.sha256 != hashlib.sha256(manifest_raw).hexdigest():
         raise V3ClassCatalogFinalizationError("V3 manifest changed while being loaded")
@@ -483,7 +1090,7 @@ def _load_package(directory: Path) -> _Package:
         package_id=package_id,
         manifest=manifest,
         manifest_raw=manifest_raw,
-        base_manifest_bytes=_canonical_json_bytes(base_manifest),
+        base_manifest_bytes=base_manifest_bytes,
         renderer_semantic_stream_sha256=renderer_semantic,
         ranges=tuple(ranges),
         tile_count=tile_count,
@@ -492,6 +1099,10 @@ def _load_package(directory: Path) -> _Package:
         records_file=records_file,
         index_file=index_file,
         existing_catalog_sha256=existing_catalog_sha256,
+        merge_receipt_file=merge_receipt_file,
+        authority_merge_receipt=authority_merge_receipt,
+        authority_receipts=authority_receipts,
+        authority_size_policy=authority_size_policy,
     )
 
 
@@ -778,6 +1389,43 @@ def _counts_document(
     ]
 
 
+def _validate_authority_audit(package: _Package, audit: _Audit) -> None:
+    receipt = package.authority_merge_receipt
+    if receipt is None:
+        return
+    coverage = _exact_mapping(
+        receipt.get("coverage"), "V3 authority merge coverage"
+    )
+    if set(coverage) != {
+        "completeDeclaredScope",
+        "completeWholeEarthDictionary",
+        "presentTileCount",
+        "primaryWholeEarthPreserved",
+        "tileCount",
+        "zoomRanges",
+    }:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge coverage fields differ"
+        )
+    if _exact_int(
+        coverage.get("presentTileCount"),
+        "V3 authority merge present tile count",
+        0,
+        package.tile_count,
+    ) != audit.present_tile_count:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge present tile count differs"
+        )
+    _exact_bool(
+        coverage.get("primaryWholeEarthPreserved"),
+        "V3 authority merge primary whole-earth preservation",
+    )
+    if receipt.get("subtypeCounts") != _counts_document(audit.subtype_counts):
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge subtype counts differ"
+        )
+
+
 def _validate_existing_catalog(package: _Package, audit: _Audit) -> None:
     if package.existing_catalog_sha256 is None:
         return
@@ -832,9 +1480,14 @@ def _receipt_document(
     catalog_bytes: bytes,
     manifest_sha256: str,
     manifest_bytes: bytes,
+    final_size_policy: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
-        "schema": _RECEIPT_SCHEMA,
+    receipt: dict[str, object] = {
+        "schema": (
+            _AUTHORITY_RECEIPT_SCHEMA
+            if package.merge_receipt_file is not None
+            else _RECEIPT_SCHEMA
+        ),
         "packageId": package.package_id,
         "finalizerSha256": _finalizer_sha256(),
         "inputFiles": [
@@ -887,6 +1540,145 @@ def _receipt_document(
             },
         ],
     }
+    if package.merge_receipt_file is not None:
+        if final_size_policy is None:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority final size policy is absent"
+            )
+        receipt["authorityReceipts"] = [
+            dict(item) for item in package.authority_receipts
+        ]
+        receipt["mergeReceipt"] = {
+            "bytes": package.merge_receipt_file.byte_length,
+            "name": _MERGE_RECEIPT_FILE_NAME,
+            "sha256": package.merge_receipt_file.sha256,
+        }
+        receipt["sizePolicy"] = dict(final_size_policy)
+    return receipt
+
+
+def _final_size_policy(
+    package: _Package,
+    *,
+    required_package_bytes: int,
+    publication_boundary_free_bytes: int,
+) -> dict[str, object]:
+    source = package.authority_size_policy
+    if source is None:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority source size policy is absent"
+        )
+    binding = _validate_size_policy_binding(
+        source.get("binding"), "V3 authority final size-policy binding"
+    )
+    source_decision = _exact_mapping(
+        source.get("decision"), "V3 authority source size-policy decision"
+    )
+    mode = binding["mode"]
+    available = source_decision.get("availableDestinationBytes")
+    if mode == COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1:
+        available = _exact_int(
+            available,
+            "V3 authority source available destination bytes",
+            0,
+            _ANDROID_MAX_RECORD_OFFSET,
+        )
+    else:
+        available = None
+    decision = dict(
+        evaluate_reference_size_policy(
+            mode=mode,
+            required_package_bytes=required_package_bytes,
+            available_destination_bytes=available,
+        )
+    )
+    if mode == COMPLETE_UNCOMPRESSED_VISUAL_EVALUATION_V1:
+        boundary = _exact_int(
+            publication_boundary_free_bytes,
+            "V3 authority final publication boundary bytes",
+            0,
+            _ANDROID_MAX_RECORD_OFFSET,
+        )
+        boundary_authorized = boundary >= DESTINATION_RESERVE_BYTES
+        decision.update(
+            {
+                "authorized": bool(decision["authorized"])
+                and boundary_authorized,
+                "publicationBoundaryAuthorized": boundary_authorized,
+                "publicationBoundaryDestinationFreeBytes": boundary,
+                "publicationBoundaryRequiredReserveBytes": (
+                    DESTINATION_RESERVE_BYTES
+                ),
+            }
+        )
+    if decision["authorized"] is not True:
+        raise V3ClassCatalogFinalizationError(
+            "V3 final six-file package lacks authenticated size capacity"
+        )
+    return {
+        "accountingScope": _FINAL_SIZE_ACCOUNTING_SCOPE,
+        "binding": binding,
+        "decision": decision,
+    }
+
+
+def _converged_receipt(
+    *,
+    package: _Package,
+    audit: _Audit,
+    catalog_sha256: str,
+    catalog_bytes: bytes,
+    manifest_sha256: str,
+    manifest_bytes: bytes,
+    publication_boundary_free_bytes: int | None = None,
+) -> tuple[dict[str, object], bytes]:
+    if package.merge_receipt_file is None:
+        receipt = _receipt_document(
+            package=package,
+            audit=audit,
+            catalog_sha256=catalog_sha256,
+            catalog_bytes=catalog_bytes,
+            manifest_sha256=manifest_sha256,
+            manifest_bytes=manifest_bytes,
+        )
+        return receipt, _canonical_json_bytes(receipt)
+    if publication_boundary_free_bytes is None:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority final publication capacity is absent"
+        )
+    fixed_bytes = (
+        len(manifest_bytes)
+        + package.records_file.byte_length
+        + package.index_file.byte_length
+        + len(catalog_bytes)
+        + package.merge_receipt_file.byte_length
+    )
+    required_package_bytes = fixed_bytes
+    for _ in range(64):
+        size_policy = _final_size_policy(
+            package,
+            required_package_bytes=required_package_bytes,
+            publication_boundary_free_bytes=(
+                publication_boundary_free_bytes
+            ),
+        )
+        receipt = _receipt_document(
+            package=package,
+            audit=audit,
+            catalog_sha256=catalog_sha256,
+            catalog_bytes=catalog_bytes,
+            manifest_sha256=manifest_sha256,
+            manifest_bytes=manifest_bytes,
+            final_size_policy=size_policy,
+        )
+        receipt_bytes = _canonical_json_bytes(receipt)
+        next_required = fixed_bytes + len(receipt_bytes)
+        if next_required == required_package_bytes:
+            return receipt, receipt_bytes
+        required_package_bytes = next_required
+    raise V3ClassCatalogFinalizationError(
+        "V3 final six-file size accounting did not converge"
+    )
 
 
 def _assert_file_binding(binding: _FileBinding) -> None:
@@ -905,6 +1697,11 @@ def _assert_file_binding(binding: _FileBinding) -> None:
         raise V3ClassCatalogFinalizationError(
             f"{binding.path.name} changed during finalization"
         )
+
+
+def _assert_authority_receipt_binding(package: _Package) -> None:
+    if package.merge_receipt_file is not None:
+        _assert_file_binding(package.merge_receipt_file)
 
 
 def _stat_is_reparse(information: os.stat_result) -> bool:
@@ -1014,6 +1811,103 @@ def _stage_bytes(path: Path, data: bytes) -> _OwnedStagedFile:
             pass
         _remove_owned_stage(staged)
         raise
+
+
+def _rewrite_owned_stage(
+    stage: _OwnedStagedFile,
+    data: bytes,
+    *,
+    label: str,
+) -> None:
+    _assert_owned_stage(stage, label)
+    try:
+        with stage.path.open("r+b") as handle:
+            if _stat_identity(os.fstat(handle.fileno())) != stage.identity:
+                raise V3ClassCatalogFinalizationError(
+                    f"{label} identity changed while open"
+                )
+            handle.seek(0)
+            handle.truncate(0)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except V3ClassCatalogFinalizationError:
+        raise
+    except OSError as error:
+        raise V3ClassCatalogFinalizationError(
+            f"{label} could not be rewritten"
+        ) from error
+    _assert_owned_stage(stage, label)
+    if stage.path.read_bytes() != data:
+        raise V3ClassCatalogFinalizationError(f"{label} readback differs")
+
+
+def _publication_capacity(directory: Path) -> int:
+    try:
+        free = shutil.disk_usage(directory).free
+    except OSError as error:
+        raise V3ClassCatalogFinalizationError(
+            "V3 finalization publication capacity is unreadable"
+        ) from error
+    return _exact_int(
+        free,
+        "V3 finalization publication capacity",
+        0,
+        _ANDROID_MAX_RECORD_OFFSET,
+    )
+
+
+def _stage_converged_authority_receipt(
+    *,
+    package: _Package,
+    audit: _Audit,
+    catalog_sha256: str,
+    catalog_bytes: bytes,
+    manifest_sha256: str,
+    manifest_bytes: bytes,
+    receipt_path: Path,
+) -> tuple[dict[str, object], bytes, _OwnedStagedFile]:
+    boundary = _publication_capacity(package.directory)
+    receipt, receipt_bytes = _converged_receipt(
+        package=package,
+        audit=audit,
+        catalog_sha256=catalog_sha256,
+        catalog_bytes=catalog_bytes,
+        manifest_sha256=manifest_sha256,
+        manifest_bytes=manifest_bytes,
+        publication_boundary_free_bytes=boundary,
+    )
+    stage = _stage_bytes(receipt_path, receipt_bytes)
+    try:
+        for _ in range(16):
+            observed = _publication_capacity(package.directory)
+            if observed == boundary:
+                confirmed = _publication_capacity(package.directory)
+                if confirmed == observed:
+                    return receipt, receipt_bytes, stage
+                observed = confirmed
+            boundary = observed
+            receipt, receipt_bytes = _converged_receipt(
+                package=package,
+                audit=audit,
+                catalog_sha256=catalog_sha256,
+                catalog_bytes=catalog_bytes,
+                manifest_sha256=manifest_sha256,
+                manifest_bytes=manifest_bytes,
+                publication_boundary_free_bytes=boundary,
+            )
+            _rewrite_owned_stage(
+                stage,
+                receipt_bytes,
+                label="staged authority finalization receipt",
+            )
+    except BaseException:
+        _remove_owned_stage(stage)
+        raise
+    _remove_owned_stage(stage)
+    raise V3ClassCatalogFinalizationError(
+        "V3 finalization publication capacity did not stabilize"
+    )
 
 
 def _sync_posix_directory_metadata(directory: Path) -> None:
@@ -1138,6 +2032,7 @@ def finalize_v3_class_catalog(
         raise V3ClassCatalogFinalizationError(
             "V3 renderer semantic stream SHA-256 differs from the manifest"
         )
+    _validate_authority_audit(package, audit)
     _validate_existing_catalog(package, audit)
 
     catalog_bytes = canonical_class_catalog_bytes(
@@ -1162,25 +2057,21 @@ def finalize_v3_class_catalog(
             "finalized V3 manifest byte length is outside its bound"
         )
     manifest_sha256 = hashlib.sha256(final_manifest_bytes).hexdigest()
-    receipt = _receipt_document(
-        package=package,
-        audit=audit,
-        catalog_sha256=catalog_sha256,
-        catalog_bytes=catalog_bytes,
-        manifest_sha256=manifest_sha256,
-        manifest_bytes=final_manifest_bytes,
-    )
-    receipt_bytes = _canonical_json_bytes(receipt)
+    receipt: dict[str, object] | None = None
+    receipt_bytes: bytes | None = None
+    if package.merge_receipt_file is None:
+        receipt, receipt_bytes = _converged_receipt(
+            package=package,
+            audit=audit,
+            catalog_sha256=catalog_sha256,
+            catalog_bytes=catalog_bytes,
+            manifest_sha256=manifest_sha256,
+            manifest_bytes=final_manifest_bytes,
+        )
 
     catalog_path = package.directory / CATALOG_FILE_NAME
     manifest_path = package.directory / "manifest.json"
     receipt_path = package.directory / RECEIPT_FILE_NAME
-    result = FinalizationResult(
-        package_directory=package.directory,
-        catalog_sha256=catalog_sha256,
-        manifest_sha256=manifest_sha256,
-        receipt=receipt,
-    )
     staged_paths: list[_OwnedStagedFile] = []
     try:
         staged_catalog = _stage_bytes(catalog_path, catalog_bytes)
@@ -1191,11 +2082,13 @@ def finalize_v3_class_catalog(
         _assert_file_binding(package.manifest_file)
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
+        _assert_authority_receipt_binding(package)
 
         _notify(publication_hook, "before_catalog_replace")
         _assert_file_binding(package.manifest_file)
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
+        _assert_authority_receipt_binding(package)
         _replace_staged(staged_catalog, catalog_path)
         staged_paths.remove(staged_catalog)
         _readback(catalog_path, catalog_bytes, catalog_sha256)
@@ -1204,6 +2097,7 @@ def finalize_v3_class_catalog(
         _assert_file_binding(package.manifest_file)
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
+        _assert_authority_receipt_binding(package)
 
         if manifest_path.read_bytes() != package.manifest_raw:
             raise V3ClassCatalogFinalizationError(
@@ -1213,10 +2107,12 @@ def finalize_v3_class_catalog(
         _assert_file_binding(package.manifest_file)
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
+        _assert_authority_receipt_binding(package)
         _invalidate_existing_receipt(receipt_path)
         _assert_file_binding(package.manifest_file)
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
+        _assert_authority_receipt_binding(package)
         _readback(catalog_path, catalog_bytes, catalog_sha256)
         _replace_staged(staged_manifest, manifest_path)
         staged_paths.remove(staged_manifest)
@@ -1226,13 +2122,35 @@ def finalize_v3_class_catalog(
         _notify(publication_hook, "before_receipt_replace")
         _assert_file_binding(package.records_file)
         _assert_file_binding(package.index_file)
+        _assert_authority_receipt_binding(package)
         _readback(catalog_path, catalog_bytes, catalog_sha256)
         _readback(manifest_path, final_manifest_bytes, manifest_sha256)
-        staged_receipt = _stage_bytes(receipt_path, receipt_bytes)
+        if package.merge_receipt_file is not None:
+            _assert_authority_preflight_inventory(package.directory)
+            receipt, receipt_bytes, staged_receipt = (
+                _stage_converged_authority_receipt(
+                    package=package,
+                    audit=audit,
+                    catalog_sha256=catalog_sha256,
+                    catalog_bytes=catalog_bytes,
+                    manifest_sha256=manifest_sha256,
+                    manifest_bytes=final_manifest_bytes,
+                    receipt_path=receipt_path,
+                )
+            )
+        else:
+            assert receipt_bytes is not None
+            staged_receipt = _stage_bytes(receipt_path, receipt_bytes)
         staged_paths.append(staged_receipt)
         try:
+            if package.merge_receipt_file is not None:
+                _assert_authority_staged_receipt_inventory(
+                    package.directory,
+                    staged_receipt,
+                )
             _replace_staged(staged_receipt, receipt_path)
             staged_paths.remove(staged_receipt)
+            assert receipt_bytes is not None
             _readback(
                 receipt_path,
                 receipt_bytes,
@@ -1247,14 +2165,23 @@ def finalize_v3_class_catalog(
             )
             _assert_file_binding(package.records_file)
             _assert_file_binding(package.index_file)
+            _assert_authority_receipt_binding(package)
             _readback(catalog_path, catalog_bytes, catalog_sha256)
             _readback(manifest_path, final_manifest_bytes, manifest_sha256)
+            if package.merge_receipt_file is not None:
+                _assert_authority_final_inventory(package.directory)
         except BaseException:
             _invalidate_existing_receipt(receipt_path)
             raise
     finally:
         _cleanup_owned_stages(staged_paths)
-    return result
+    assert receipt is not None
+    return FinalizationResult(
+        package_directory=package.directory,
+        catalog_sha256=catalog_sha256,
+        manifest_sha256=manifest_sha256,
+        receipt=receipt,
+    )
 
 
 def _main(arguments: Sequence[str] | None = None) -> int:

@@ -71,7 +71,374 @@ def _write_v3_package(
     return manifest
 
 
+def _write_authority_v2_merged_package(
+    root: Path,
+    *,
+    complete_whole_earth_dictionary: bool = True,
+) -> Path:
+    from tools.experiment8.tests.test_v3_package_merger import (
+        _write_package,
+        _write_recovered_water_build_receipt,
+    )
+    from tools.experiment8.v3_package_merger import merge_v3_packages
+
+    tile = TileKey(0, 0, 0)
+    record = _line_renderer_record(tile)
+    payload = encode_tile_payload(tile, [RendererTileRecord(record, None)])
+    primary = root / "primary"
+    water = root / "water"
+    output = root / "world-experiment8-binary-v4"
+    _write_package(
+        primary,
+        "primary",
+        {tile: payload},
+        complete_whole_earth_dictionary=complete_whole_earth_dictionary,
+    )
+    _write_package(water, "water", {tile: payload})
+    water_receipt = _write_recovered_water_build_receipt(water)
+    merge_v3_packages(
+        primary_directory=primary,
+        supplement_directories=(water,),
+        supplement_build_receipts=(water_receipt,),
+        output_directory=output,
+        package_id="world-experiment8-binary-v4",
+    )
+    return output
+
+
 class V3ClassCatalogFinalizerTests(unittest.TestCase):
+    def test_authority_v2_receipt_and_final_six_file_accounting_are_preserved(
+        self,
+    ) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            RECEIPT_FILE_NAME,
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+            merge_receipt_path = package / "merge-receipt.json"
+            original_merge_receipt_raw = merge_receipt_path.read_bytes()
+            original_merge_receipt = json.loads(
+                original_merge_receipt_raw.decode("utf-8")
+            )
+            original_manifest = json.loads(
+                (package / "manifest.json").read_text("utf-8")
+            )
+
+            result = finalize_v3_class_catalog(package)
+
+            self.assertEqual(
+                original_merge_receipt_raw,
+                merge_receipt_path.read_bytes(),
+            )
+            final_manifest = json.loads(
+                (package / "manifest.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                original_manifest["merge"]["authorityReceipts"],
+                final_manifest["merge"]["authorityReceipts"],
+            )
+            receipt = result.receipt
+            self.assertEqual(
+                "flightalert.experiment8."
+                "v3-class-catalog-finalization-receipt.v2",
+                receipt["schema"],
+            )
+            self.assertEqual(
+                original_merge_receipt["authorityReceipts"],
+                receipt["authorityReceipts"],
+            )
+            self.assertEqual(
+                {
+                    "bytes": len(original_merge_receipt_raw),
+                    "name": "merge-receipt.json",
+                    "sha256": hashlib.sha256(
+                        original_merge_receipt_raw
+                    ).hexdigest(),
+                },
+                receipt["mergeReceipt"],
+            )
+            size_policy = receipt["sizePolicy"]
+            self.assertEqual(
+                "final-six-file-package-after-class-catalog-finalization",
+                size_policy["accountingScope"],
+            )
+            self.assertEqual(
+                original_merge_receipt["sizePolicy"]["binding"],
+                size_policy["binding"],
+            )
+            expected_package_bytes = sum(
+                path.stat().st_size for path in package.iterdir()
+            )
+            self.assertEqual(6, len(tuple(package.iterdir())))
+            self.assertEqual(
+                expected_package_bytes,
+                size_policy["decision"]["requiredPackageBytes"],
+            )
+            self.assertTrue(size_policy["decision"]["authorized"])
+            self.assertEqual(
+                _canonical_json_bytes(receipt),
+                (package / RECEIPT_FILE_NAME).read_bytes(),
+            )
+
+    def test_authority_v2_merge_receipt_tamper_fails_before_publication(self) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            RECEIPT_FILE_NAME,
+            V3ClassCatalogFinalizationError,
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+            merge_receipt_path = package / "merge-receipt.json"
+            merge_receipt = json.loads(merge_receipt_path.read_text("utf-8"))
+            merge_receipt["authorityReceipts"][0]["sha256"] = "0" * 64
+            merge_receipt_path.write_bytes(_canonical_json_bytes(merge_receipt))
+            before = {
+                path.name: path.read_bytes()
+                for path in package.iterdir()
+                if path.is_file()
+            }
+
+            with self.assertRaisesRegex(
+                V3ClassCatalogFinalizationError,
+                "authority receipts differ",
+            ):
+                finalize_v3_class_catalog(package)
+
+            self.assertEqual(
+                before,
+                {
+                    path.name: path.read_bytes()
+                    for path in package.iterdir()
+                    if path.is_file()
+                },
+            )
+            self.assertFalse((package / RECEIPT_FILE_NAME).exists())
+            self.assertFalse((package / "class-catalog.bin").exists())
+
+    def test_authority_v2_rejects_unrelated_self_hashed_authority(self) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            V3ClassCatalogFinalizationError,
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+            manifest_path = package / "manifest.json"
+            receipt_path = package / "merge-receipt.json"
+            original_manifest_bytes = manifest_path.read_bytes()
+            original_receipt_bytes = receipt_path.read_bytes()
+            manifest = json.loads(original_manifest_bytes)
+            receipt = json.loads(original_receipt_bytes)
+            for owner in (manifest["merge"], receipt):
+                authority = owner["authorityReceipts"][0]
+                authority["packageId"] = "other"
+                authority["document"]["packageId"] = "other"
+                document_bytes = _canonical_json_bytes(authority["document"])
+                authority["bytes"] = len(document_bytes)
+                authority["sha256"] = hashlib.sha256(document_bytes).hexdigest()
+            forged_manifest_bytes = _canonical_json_bytes(manifest)
+            self.assertEqual(len(original_manifest_bytes), len(forged_manifest_bytes))
+            manifest_path.write_bytes(forged_manifest_bytes)
+            receipt["outputFiles"][0].update(
+                {
+                    "bytes": len(forged_manifest_bytes),
+                    "sha256": hashlib.sha256(forged_manifest_bytes).hexdigest(),
+                }
+            )
+            forged_receipt_bytes = _canonical_json_bytes(receipt)
+            self.assertEqual(len(original_receipt_bytes), len(forged_receipt_bytes))
+            receipt_path.write_bytes(forged_receipt_bytes)
+
+            with self.assertRaisesRegex(
+                V3ClassCatalogFinalizationError,
+                "authority receipt.*supplement input",
+            ):
+                finalize_v3_class_catalog(package)
+
+            self.assertFalse((package / "class-catalog.bin").exists())
+            self.assertFalse(
+                (package / "class-catalog-finalization-receipt.json").exists()
+            )
+
+    def test_authority_v2_receipt_outputs_must_match_supplement_input(self) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            V3ClassCatalogFinalizationError,
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+            manifest_path = package / "manifest.json"
+            receipt_path = package / "merge-receipt.json"
+            original_manifest_bytes = manifest_path.read_bytes()
+            original_receipt_bytes = receipt_path.read_bytes()
+            manifest = json.loads(original_manifest_bytes)
+            receipt = json.loads(original_receipt_bytes)
+            for owner in (manifest["merge"], receipt):
+                authority = owner["authorityReceipts"][0]
+                records = next(
+                    item
+                    for item in authority["document"]["outputFiles"]
+                    if item["name"] == "records.fadictpack"
+                )
+                records["sha256"] = "f" * 64
+                document_bytes = _canonical_json_bytes(authority["document"])
+                authority["bytes"] = len(document_bytes)
+                authority["sha256"] = hashlib.sha256(document_bytes).hexdigest()
+            forged_manifest_bytes = _canonical_json_bytes(manifest)
+            self.assertEqual(len(original_manifest_bytes), len(forged_manifest_bytes))
+            manifest_path.write_bytes(forged_manifest_bytes)
+            receipt["outputFiles"][0].update(
+                {
+                    "bytes": len(forged_manifest_bytes),
+                    "sha256": hashlib.sha256(forged_manifest_bytes).hexdigest(),
+                }
+            )
+            forged_receipt_bytes = _canonical_json_bytes(receipt)
+            self.assertEqual(len(original_receipt_bytes), len(forged_receipt_bytes))
+            receipt_path.write_bytes(forged_receipt_bytes)
+
+            with self.assertRaisesRegex(
+                V3ClassCatalogFinalizationError,
+                "authority receipt output files differ from supplement input",
+            ):
+                finalize_v3_class_catalog(package)
+
+            self.assertFalse((package / "class-catalog.bin").exists())
+
+    def test_authority_v2_rejects_unexpected_package_entry_before_publication(
+        self,
+    ) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            V3ClassCatalogFinalizationError,
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+            (package / "extra.bin").write_bytes(b"not part of the package")
+
+            with self.assertRaisesRegex(
+                V3ClassCatalogFinalizationError,
+                "exact package inventory",
+            ):
+                finalize_v3_class_catalog(package)
+
+            self.assertFalse((package / "class-catalog.bin").exists())
+            self.assertFalse(
+                (package / "class-catalog-finalization-receipt.json").exists()
+            )
+
+    def test_authority_v2_uses_fresh_stable_publication_capacity(self) -> None:
+        from tools.experiment8.reference_size_policy import DESTINATION_RESERVE_BYTES
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            V3ClassCatalogFinalizationError,
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+            insufficient = mock.Mock(free=DESTINATION_RESERVE_BYTES - 1)
+
+            with mock.patch("shutil.disk_usage", return_value=insufficient), self.assertRaisesRegex(
+                V3ClassCatalogFinalizationError,
+                "final six-file package lacks authenticated size capacity",
+            ):
+                finalize_v3_class_catalog(package)
+
+            receipt_path = package / "class-catalog-finalization-receipt.json"
+            self.assertTrue(
+                not receipt_path.exists() or receipt_path.read_bytes() == b""
+            )
+
+    def test_authority_v2_binds_two_equal_post_stage_capacity_reads(self) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+            stable_free = 90_000_000_000
+            capacity = mock.Mock(free=stable_free)
+
+            with mock.patch(
+                "shutil.disk_usage", return_value=capacity
+            ) as disk_usage:
+                result = finalize_v3_class_catalog(package)
+
+            self.assertGreaterEqual(disk_usage.call_count, 3)
+            self.assertEqual(
+                stable_free,
+                result.receipt["sizePolicy"]["decision"][
+                    "publicationBoundaryDestinationFreeBytes"
+                ],
+            )
+
+    def test_authority_v2_concurrent_extra_never_gets_a_valid_receipt(self) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            RECEIPT_FILE_NAME,
+            V3ClassCatalogFinalizationError,
+            finalize_v3_class_catalog,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+
+            def add_extra_before_receipt(event: str) -> None:
+                if event == "before_receipt_replace":
+                    (package / "extra.bin").write_bytes(b"raced")
+
+            with self.assertRaisesRegex(
+                V3ClassCatalogFinalizationError,
+                "exact package inventory",
+            ):
+                finalize_v3_class_catalog(
+                    package,
+                    publication_hook=add_extra_before_receipt,
+                )
+
+            receipt_path = package / RECEIPT_FILE_NAME
+            self.assertTrue(
+                not receipt_path.exists() or receipt_path.read_bytes() == b""
+            )
+
+    def test_v1_finalization_receipt_retains_its_exact_legacy_field_set(self) -> None:
+        from tools.experiment8.v3_class_catalog_finalizer import (
+            finalize_v3_class_catalog,
+        )
+
+        tile = TileKey(1, 0, 0)
+        record = _line_renderer_record(tile)
+        payload = encode_tile_payload(tile, [RendererTileRecord(record, None)])
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "package"
+            _write_v3_package(package, {tile: payload}, (record,))
+
+            receipt = finalize_v3_class_catalog(package).receipt
+
+            self.assertEqual(
+                "flightalert.experiment8."
+                "v3-class-catalog-finalization-receipt.v1",
+                receipt["schema"],
+            )
+            self.assertEqual(
+                {
+                    "coverage",
+                    "finalizerSha256",
+                    "inputFiles",
+                    "outputFiles",
+                    "packageId",
+                    "rendererContractSha256",
+                    "rendererSemanticStreamSha256",
+                    "schema",
+                    "subtypeCounts",
+                },
+                set(receipt),
+            )
+
     def test_finalizes_exact_catalog_counts_and_preserves_runtime_bytes(self) -> None:
         from tools.experiment8.v3_class_catalog_finalizer import (
             RECEIPT_FILE_NAME,
