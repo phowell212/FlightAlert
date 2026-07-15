@@ -16,6 +16,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReferenceFilterPreferencesTest {
+    private fun expected_app_defaults(): FilterState =
+        ReferenceFilterPreferences.fromLegacyGroups(
+            placesEnabled = FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED,
+            waterEnabled = FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED,
+            regionsEnabled = FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED,
+            publicLandsEnabled = FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED,
+        )
+
     private fun installed_catalog(
         subtype_counts: Map<SemanticSubtype, ULong>,
     ): ReferenceClassCatalog {
@@ -45,17 +53,24 @@ class ReferenceFilterPreferencesTest {
     }
 
     @Test
-    fun coastlineOutlineDefaultsOffButCanBeEnabledAndReset() {
-        val defaults = FilterState.defaults()
+    fun appDefaultsKeepOnlyCoastlinesAndDefaultProtectedLandRowsOff() {
+        val defaults = ReferenceFilterPreferences.app_defaults()
 
+        assertEquals(expected_app_defaults(), defaults)
         assertFalse(defaults.stored_enabled(FilterId.OUTLINES_COASTLINES))
+        assertFalse(defaults.stored_enabled(FilterId.LABELS_PROTECTED_LANDS))
+        assertFalse(defaults.stored_enabled(FilterId.OUTLINES_PROTECTED_AREAS))
         assertTrue(defaults.stored_enabled(FilterId.OUTLINES_INTERNATIONAL))
-
-        val coastlineEnabled = defaults.with_filter(FilterId.OUTLINES_COASTLINES, true)
-        assertTrue(coastlineEnabled.stored_enabled(FilterId.OUTLINES_COASTLINES))
-        assertFalse(
-            ReferenceFilterPreferences.reset(coastlineEnabled)
-                .stored_enabled(FilterId.OUTLINES_COASTLINES),
+        assertTrue(defaults.labels_master_enabled)
+        assertTrue(defaults.outlines_master_enabled)
+        assertTrue(
+            FilterId.entries
+                .filterNot {
+                    it == FilterId.OUTLINES_COASTLINES ||
+                        it == FilterId.LABELS_PROTECTED_LANDS ||
+                        it == FilterId.OUTLINES_PROTECTED_AREAS
+                }
+                .all(defaults::stored_enabled),
         )
     }
 
@@ -160,20 +175,18 @@ class ReferenceFilterPreferencesTest {
     }
 
     @Test
-    fun resetUsesAllPolicyDefaultsRatherThanOnlyVisibleControls() {
-        val changed = FilterState.defaults()
+    fun changingThenResettingReturnsTheSingleAppDefaultState() {
+        val app_defaults = ReferenceFilterPreferences.app_defaults()
+        val changed = app_defaults
             .with_labels_master(false)
             .with_outlines_master(false)
             .with_filter(FilterId.LABELS_STREAMS, false)
             .with_filter(FilterId.OUTLINES_OTHER, false)
+            .with_filter(FilterId.OUTLINES_COASTLINES, true)
+            .with_filter(FilterId.LABELS_PROTECTED_LANDS, true)
+            .with_filter(FilterId.OUTLINES_PROTECTED_AREAS, true)
 
-        assertEquals(FilterState.defaults(), ReferenceFilterPreferences.reset(changed))
-        assertFalse(FilterState.defaults().stored_enabled(FilterId.OUTLINES_COASTLINES))
-        assertTrue(
-            FilterId.entries
-                .filterNot { it == FilterId.OUTLINES_COASTLINES }
-                .all { FilterState.defaults().stored_enabled(it) },
-        )
+        assertEquals(app_defaults, ReferenceFilterPreferences.reset(changed))
     }
 
     @Test

@@ -8,6 +8,12 @@ import com.flightalert.map.ReferencePolicyException
 
 object ReferenceFilterPreferences {
     const val schema = "flight-alert-reference-filters-v1"
+    private val app_default_state = fromLegacyGroups(
+        placesEnabled = FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED,
+        waterEnabled = FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED,
+        regionsEnabled = FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED,
+        publicLandsEnabled = FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED,
+    )
 
     fun encode(state: FilterState): String = buildString {
         append(schema).append('\n')
@@ -71,9 +77,9 @@ object ReferenceFilterPreferences {
         )
     }
 
-    fun reset(@Suppress("UNUSED_PARAMETER") current_state: FilterState): FilterState {
-        return FilterState.defaults()
-    }
+    fun app_defaults(): FilterState = app_default_state
+
+    fun reset(@Suppress("UNUSED_PARAMETER") current_state: FilterState): FilterState = app_defaults()
 
     fun fromLegacyGroups(
         placesEnabled: Boolean,

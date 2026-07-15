@@ -4345,7 +4345,7 @@ class FlightMapView(
                 water_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED ||
                 region_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_REGION_LABELS_ENABLED ||
                 public_lands_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_PUBLIC_LANDS_ENABLED ||
-                reference_filter_state != FilterState.defaults()
+                reference_filter_state != ReferenceFilterPreferences.app_defaults()
     }
 
     private fun filters_restrict_aircraft(): Boolean {
