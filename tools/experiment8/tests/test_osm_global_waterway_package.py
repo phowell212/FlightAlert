@@ -1826,6 +1826,10 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
         binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
         mutations = (
             ("missing schema field", lambda entry: entry.pop("geometryUsage")),
+            (
+                "boolean integer field",
+                lambda entry: entry.__setitem__("candidateFeatureCount", True),
+            ),
             ("framed byte column", None),
             ("status column", None),
         )
@@ -1883,6 +1887,130 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
                         )
                     finally:
                         connection.close()
+
+    def test_direct_way_fast_path_rejects_coordinated_source_name_drift(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=Path(temporary),
+                source_binding=binding,
+                checkpoint_objects=4,
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                analysis = store._analyze_admission_root(
+                    connection,
+                    1,
+                    100,
+                    materialize=True,
+                )
+                entry = dict(analysis.entry)
+                entry["primaryName"] = "Coordinated rewrite"
+                entry["ownedNameField"] = {
+                    "key": entry["nameSourceKey"],
+                    "value": entry["primaryName"],
+                }
+                candidate = analysis.candidates[0]
+                candidate_metadata, source_metadata = store._feature_metadata(
+                    root=entry["root"],
+                    source_document=store._source_document_from_database(connection),
+                    name_source_key=entry["nameSourceKey"],
+                    primary_name=entry["primaryName"],
+                    english_name=entry["englishName"],
+                    waterway_type=candidate.waterway_type,
+                    complete_named_relation=False,
+                    required_node_ids=frozenset(),
+                    source_occurrence_paths=candidate.source_occurrence_paths,
+                    dependency_evidence=entry["dependencyEvidence"],
+                )
+                candidate_sha256, source_sha256 = store._hash_materialized_candidate(
+                    candidate_metadata=candidate_metadata,
+                    source_metadata=source_metadata,
+                    parts=candidate.parts,
+                )
+                changed = store._canonical_json_no_lf_bytes(entry)
+                connection.execute(
+                    "UPDATE admission_roots SET entry_json=?,entry_sha=?,framed_bytes=? "
+                    "WHERE root_kind=1 AND root_id=100",
+                    (changed, hashlib.sha256(changed).digest(), 8 + len(changed)),
+                )
+                connection.execute(
+                    "UPDATE admission_candidates SET candidate_feature_sha=?,"
+                    "source_feature_sha=? WHERE root_kind=1 AND root_id=100 "
+                    "AND feature_ordinal=0",
+                    (candidate_sha256, source_sha256),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                store.GlobalWaterwayPackageError,
+                "entry schema",
+            ):
+                connection = sqlite3.connect(result.database_path)
+                try:
+                    tuple(
+                        store._iter_render_waterway_features(
+                            connection,
+                            source_binding=binding,
+                        )
+                    )
+                finally:
+                    connection.close()
+
+    def test_direct_way_batch_rejects_text_entry_before_byte_cap_bypass(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=Path(temporary),
+                source_binding=binding,
+                checkpoint_objects=4,
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                raw = bytes(
+                    connection.execute(
+                        "SELECT entry_json FROM admission_roots "
+                        "WHERE root_kind=1 AND root_id=100"
+                    ).fetchone()[0]
+                )
+                text = raw.decode("utf-8", "strict")
+                self.assertLess(len(text), len(raw))
+                connection.execute(
+                    "UPDATE admission_roots SET entry_json=? "
+                    "WHERE root_kind=1 AND root_id=100",
+                    (text,),
+                )
+                connection.commit()
+                with patch.object(
+                    store,
+                    "_DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES",
+                    len(raw),
+                ):
+                    with self.assertRaisesRegex(
+                        store.GlobalWaterwayPackageError,
+                        "direct-way root.*(?:storage|exceeds)",
+                    ):
+                        store._direct_way_root_id_batch(connection, 0)
+            finally:
+                connection.close()
 
     def test_direct_way_fast_path_hard_bounds_actual_point_rows(self) -> None:
         import sqlite3

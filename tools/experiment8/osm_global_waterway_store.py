@@ -2661,6 +2661,9 @@ def _admitted_direct_way_entry(
     way_timestamp: str,
     way_payload_sha256: bytes,
     waterway_type: str,
+    name_source_key: str,
+    primary_name: str,
+    english_name: str | None,
     point_count: int,
     candidate_sha256: bytes,
     candidate_stream_sha256: bytes,
@@ -2684,20 +2687,9 @@ def _admitted_direct_way_entry(
         raise GlobalWaterwayPackageError(
             "admitted direct-way entry is not canonical JSON"
         )
-    name_source_key = entry.get("nameSourceKey")
-    primary_name = entry.get("primaryName")
-    english_name = entry.get("englishName")
     stored_dependency_evidence = entry.get("dependencyEvidence")
     if (
-        type(name_source_key) is not str
-        or not name_source_key
-        or type(primary_name) is not str
-        or not primary_name.strip()
-        or not (
-            english_name is None
-            or (type(english_name) is str and bool(english_name.strip()))
-        )
-        or not isinstance(stored_dependency_evidence, dict)
+        not isinstance(stored_dependency_evidence, dict)
         or set(stored_dependency_evidence) != {"records", "sha256"}
         or type(stored_dependency_evidence.get("records")) is not int
         or stored_dependency_evidence["records"] != point_count + 1
@@ -2759,7 +2751,7 @@ def _admitted_direct_way_entry(
             }
         ],
     }
-    if entry != expected_entry:
+    if raw != _canonical_json_no_lf_bytes(expected_entry):
         raise GlobalWaterwayPackageError(
             "admitted direct-way entry schema or cross-fields differ"
         )
@@ -2778,6 +2770,7 @@ def _admitted_direct_way_entry(
 _DIRECT_WAY_STREAM_BATCH_ROOTS = 100
 _DIRECT_WAY_STREAM_BATCH_POINTS = 524_288
 _DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES = 128 * 1024 * 1024
+_DIRECT_WAY_STREAM_BATCH_TAG_BYTES = source_module._MAX_LINE_BYTES
 
 
 def _closed_query_rows(
@@ -2798,28 +2791,38 @@ def _direct_way_root_id_batch(
 ) -> tuple[int, ...]:
     rows = _closed_query_rows(
         connection,
-        "SELECT r.id,c.point_count,length(ar.entry_json) FROM roots r "
+        "SELECT r.id,c.point_count,typeof(ar.entry_json),"
+        "length(CAST(ar.entry_json AS BLOB)),typeof(w.tags),"
+        "length(CAST(w.tags AS BLOB)) FROM roots r "
         "LEFT JOIN admission_roots ar "
         "ON ar.root_kind=r.kind AND ar.root_id=r.id "
         "LEFT JOIN admission_candidates c "
         "ON c.root_kind=r.kind AND c.root_id=r.id AND c.feature_ordinal=0 "
+        "LEFT JOIN ways w ON w.id=r.id "
         "WHERE r.kind=1 AND r.id>? ORDER BY r.id LIMIT ?",
         (after_root_id, _DIRECT_WAY_STREAM_BATCH_ROOTS),
     )
     selected = []
     selected_points = 0
     selected_entry_bytes = 0
+    selected_tag_bytes = 0
     for row in rows:
         root_id = int(row[0])
         point_count = 0 if row[1] is None else int(row[1])
-        entry_bytes = 0 if row[2] is None else int(row[2])
-        if point_count < 0 or entry_bytes < 0:
+        if row[2] != "blob" or row[4] != "blob":
             raise GlobalWaterwayPackageError(
-                "direct-way admitted point or entry count is malformed"
+                "direct-way root evidence storage type is malformed"
+            )
+        entry_bytes = int(row[3])
+        tag_bytes = int(row[5])
+        if point_count < 0 or entry_bytes < 0 or tag_bytes < 0:
+            raise GlobalWaterwayPackageError(
+                "direct-way admitted point, entry, or tag count is malformed"
             )
         if (
             point_count > _DIRECT_WAY_STREAM_BATCH_POINTS
             or entry_bytes > _DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES
+            or tag_bytes > _DIRECT_WAY_STREAM_BATCH_TAG_BYTES
         ):
             raise GlobalWaterwayPackageError(
                 "direct-way root exceeds its stream batch ceiling"
@@ -2831,12 +2834,15 @@ def _direct_way_root_id_batch(
                 > _DIRECT_WAY_STREAM_BATCH_POINTS
                 or selected_entry_bytes + entry_bytes
                 > _DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES
+                or selected_tag_bytes + tag_bytes
+                > _DIRECT_WAY_STREAM_BATCH_TAG_BYTES
             )
         ):
             break
         selected.append(root_id)
         selected_points += point_count
         selected_entry_bytes += entry_bytes
+        selected_tag_bytes += tag_bytes
     root_ids = tuple(selected)
     if any(
         root_id <= after_root_id
@@ -2917,7 +2923,7 @@ def _direct_way_stream_batch(
         "SELECT r.id,ar.entry_json,length(ar.entry_sha),substr(ar.entry_sha,1,33),"
         "ar.framed_bytes,ar.status,length(ar.candidate_stream_sha),"
         "substr(ar.candidate_stream_sha,1,33),w.version,w.timestamp,"
-        "length(w.payload_sha),substr(w.payload_sha,1,33) "
+        "length(w.payload_sha),substr(w.payload_sha,1,33),w.tags "
         "FROM roots r LEFT JOIN admission_roots ar "
         "ON ar.root_kind=r.kind AND ar.root_id=r.id "
         "LEFT JOIN ways w ON w.id=r.id "
@@ -3036,6 +3042,12 @@ def _iter_authenticated_direct_way_features(
                 raise GlobalWaterwayPackageError(
                     "admitted direct-way SHA-256 evidence is malformed"
                 )
+            tags = _decode_tags(root_row[12], f"direct way {root_id}")
+            name_source_key, primary_name, english_name = _source_names(tags)
+            if dict(tags).get("waterway") != candidate_row[2]:
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way source type differs"
+                )
 
             dependency_digest = _start_direct_way_dependency_digest(
                 root_id,
@@ -3109,6 +3121,9 @@ def _iter_authenticated_direct_way_features(
                 way_timestamp=root_row[9],
                 way_payload_sha256=way_payload_sha256,
                 waterway_type=candidate_row[2],
+                name_source_key=name_source_key,
+                primary_name=primary_name,
+                english_name=english_name,
                 point_count=len(points),
                 candidate_sha256=candidate_sha256,
                 candidate_stream_sha256=stored_stream_sha256,
@@ -3118,9 +3133,6 @@ def _iter_authenticated_direct_way_features(
                 },
             )
             root = entry["root"]
-            name_source_key = entry["nameSourceKey"]
-            primary_name = entry["primaryName"]
-            english_name = entry["englishName"]
             dependency_evidence = entry["dependencyEvidence"]
             source_path = (((1, root_id, -1),),)
             candidate_metadata, source_metadata = _feature_metadata(
