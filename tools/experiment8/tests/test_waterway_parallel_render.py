@@ -2217,6 +2217,59 @@ class ParallelFeatureRendererTests(unittest.TestCase):
                 {path.name: path.read_bytes() for path in root.iterdir()},
             )
 
+    def test_refill_keyboard_interrupt_aborts_immediately_without_returning_head(
+        self,
+    ) -> None:
+        interrupt = KeyboardInterrupt("injected refill interrupt")
+        large_base = _feature(401)
+        large_points = large_base.parts[0] + (
+            ExactWaterwayPoint(4_014, -751_000_000, 396_000_000),
+            ExactWaterwayPoint(4_015, -748_000_000, 398_000_000),
+            ExactWaterwayPoint(4_016, -745_000_000, 400_000_000),
+        )
+        large = replace(
+            large_base,
+            parts=(large_points,),
+            required_node_ids=frozenset((large_points[1].node_id,)),
+        )
+
+        def interrupted_source():
+            yield large
+            yield _feature(402)
+            yield _feature(403)
+            yield _feature(404)
+            raise interrupt
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            limits = _limits(
+                max_in_flight_jobs=4,
+                max_in_flight_points=9,
+                max_points_per_job=3,
+            )
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                interrupted_source(),
+                factory,
+                limits=limits,
+            )
+
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                renderer.next_batch()
+
+            self.assertIs(interrupt, raised.exception)
+            executor = factory.instances[0]
+            self.assertEqual([(True, True)], executor.shutdown_calls)
+            self.assertEqual(1, renderer._next_yield_ordinal)
+            self.assertTrue(renderer._yielded_spools)
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "cannot continue after failure",
+            ):
+                renderer.next_batch()
+            renderer.close()
+
     def test_reverse_completion_still_yields_checkpoint_and_pause_aligned_ranges_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _prepare(Path(temporary) / "spool")

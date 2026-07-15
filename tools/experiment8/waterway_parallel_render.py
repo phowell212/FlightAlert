@@ -5650,7 +5650,7 @@ class ParallelFeatureRenderer:
         batch = self._take_next_completed()
         try:
             self._submit_until_blocked()
-        except BaseException as error:
+        except Exception as error:
             self._deferred_error = error
         return batch
 
