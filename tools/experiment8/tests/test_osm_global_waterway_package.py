@@ -2357,6 +2357,57 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
                 zooms=tuple(range(4, 12)),
             )
 
+    def test_mixed_script_name_en_is_retained_as_an_honest_gap(self) -> None:
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+            build_adaptive_waterway_feature,
+            classifier_identity_sha256,
+        )
+        from tools.experiment8.sourced_text import EnglishGapReason, LayoutMode
+
+        feature = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=22_734_030,
+            source_version=1,
+            source_timestamp="2026-06-29T00:00:00Z",
+            waterway_type="river",
+            name_source_key="name",
+            primary_name="Кіші Алматы",
+            english_name="Kіshі Almaty",
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(1, 768_000_000, 432_000_000),
+                ExactWaterwayPoint(2, 769_000_000, 433_000_000),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=bytes.fromhex(
+                "eb4eb7e313daf64b40f30591a57c982b"
+                "fde68e5806bd2924905c0681c234affe"
+            ),
+        )
+
+        rendered = build_adaptive_waterway_feature(
+            feature=feature,
+            source_generation_sha256="1" * 64,
+            classifier_sha256=classifier_identity_sha256(),
+            zooms=tuple(range(4, 12)),
+        )
+        sourced = next(
+            record.sourced_text
+            for records in rendered.tiles.values()
+            for record in records
+        )
+
+        self.assertEqual("Кіші Алматы", sourced.primary_text)
+        self.assertIsNone(sourced.english_text)
+        self.assertEqual(LayoutMode.SINGLE, sourced.layout_mode)
+        self.assertEqual(
+            EnglishGapReason.HAS_STRONG_NON_LATIN,
+            sourced.english_gap_reason,
+        )
+        self.assertIsNotNone(sourced.english_source_field_id)
+
     def test_non_nfc_source_name_fails_closed_without_normalization(self) -> None:
         from tools.experiment8.osm_global_waterway_package import GlobalWaterwayPackageError
         from tools.experiment8.osm_global_waterway_renderer import (

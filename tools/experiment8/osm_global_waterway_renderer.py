@@ -525,15 +525,6 @@ def build_adaptive_waterway_feature(
         raise GlobalWaterwayPackageError(
             "sourced-text policy would alter the exact primary source name"
         )
-    if (
-        feature.english_name is not None
-        and exact_text.primary_script_signals.has_strong_non_latin
-        and exact_text.english_text != feature.english_name
-    ):
-        raise GlobalWaterwayPackageError(
-            "non-Latin source primary cannot retain its exact same-source name:en"
-        )
-
     feature_id = int.from_bytes(feature.source_feature_sha256[:8], "big")
     combined: dict[TileKey, list[RendererTileRecord]] = {}
     point_counts: dict[int, int] = {}
