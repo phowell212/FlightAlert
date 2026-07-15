@@ -74,7 +74,7 @@ internal fun is_inside_viewport(x: Float, y: Float, viewport: Viewport, padding:
 }
 
 private const val LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION =
-    "Local baked Esri World Basemap v2 reference dictionary"
+    "Local whole-world OpenStreetMap-derived reference data, © OpenStreetMap contributors"
 
 enum class ReferenceTileOverlay(
     val cache_key: String,
