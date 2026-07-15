@@ -5079,6 +5079,235 @@ class GlobalWaterwayRenderRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(incident_identity, calls[0]["run_identity"])
 
+    def test_first_recovery_hashes_sources_only_at_destructive_boundary(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_require_identity = store._require_identity
+            recovery_labels = []
+
+            def record_identity(*args, **kwargs):
+                label = kwargs["label"]
+                if label.startswith("recovery "):
+                    recovery_labels.append(label)
+                return real_require_identity(*args, **kwargs)
+
+            with patch.object(
+                store,
+                "_require_identity",
+                side_effect=record_identity,
+            ):
+                result = self._recover(prepared, pause_after_features=2)
+
+            self.assertEqual("paused", result.state)
+            self.assertEqual(
+                [
+                    "recovery root-ID file at destructive boundary",
+                    "recovery closure OPL at destructive boundary",
+                ],
+                recovery_labels,
+            )
+
+    def test_first_recovery_counts_only_at_locked_destructive_boundary(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_source_counts = recovery._require_source_counts
+            real_renderer_counts = recovery._require_renderer_counts
+            source_transactions = []
+            renderer_transactions = []
+
+            def record_source_counts(connection, authority):
+                source_transactions.append(connection.in_transaction)
+                return real_source_counts(connection, authority)
+
+            def record_renderer_counts(connection, authority):
+                renderer_transactions.append(connection.in_transaction)
+                return real_renderer_counts(connection, authority)
+
+            with patch.object(
+                recovery,
+                "_require_source_counts",
+                side_effect=record_source_counts,
+            ), patch.object(
+                recovery,
+                "_require_renderer_counts",
+                side_effect=record_renderer_counts,
+            ):
+                result = self._recover(prepared, pause_after_features=2)
+
+            self.assertEqual("paused", result.state)
+            self.assertEqual([True], source_transactions)
+            self.assertEqual([True], renderer_transactions)
+
+    def test_first_recovery_count_mismatch_rejects_at_locked_boundary(self) -> None:
+        from dataclasses import replace
+
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+
+        cases = (
+            ("source_table_counts", "_require_source_counts"),
+            ("renderer_table_counts", "_require_renderer_counts"),
+        )
+        for field_name, helper_name in cases:
+            with self.subTest(
+                family=field_name
+            ), tempfile.TemporaryDirectory() as temporary:
+                prepared = self._prepare_recovery(Path(temporary))
+                counts = getattr(prepared["authority"], field_name)
+                prepared["authority"] = replace(
+                    prepared["authority"],
+                    **{
+                        field_name: (
+                            (counts[0][0], counts[0][1] + 1),
+                            *counts[1:],
+                        )
+                    },
+                )
+                before = self._snapshot_database(prepared["database"])
+                real_require_counts = getattr(recovery, helper_name)
+                transaction_states = []
+
+                def record_mismatch(connection, authority):
+                    transaction_states.append(connection.in_transaction)
+                    return real_require_counts(connection, authority)
+
+                with patch.object(
+                    recovery,
+                    helper_name,
+                    side_effect=record_mismatch,
+                ), self.assertRaises(GlobalWaterwayPackageError):
+                    self._recover(prepared)
+
+                self.assertEqual([True], transaction_states)
+                self.assertEqual(
+                    before,
+                    self._snapshot_database(prepared["database"]),
+                )
+
+    def test_query_only_recovery_keeps_full_identity_and_count_preflight(self) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            real_require_identity = store._require_identity
+            real_source_counts = recovery._require_source_counts
+            real_renderer_counts = recovery._require_renderer_counts
+            recovery_labels = []
+            count_families = []
+
+            def record_identity(*args, **kwargs):
+                label = kwargs["label"]
+                if label.startswith("recovery "):
+                    recovery_labels.append(label)
+                return real_require_identity(*args, **kwargs)
+
+            def record_source_counts(connection, authority):
+                count_families.append("source")
+                return real_source_counts(connection, authority)
+
+            def record_renderer_counts(connection, authority):
+                count_families.append("renderer")
+                return real_renderer_counts(connection, authority)
+
+            with patch.object(
+                store,
+                "_require_identity",
+                side_effect=record_identity,
+            ), patch.object(
+                recovery,
+                "_require_source_counts",
+                side_effect=record_source_counts,
+            ), patch.object(
+                recovery,
+                "_require_renderer_counts",
+                side_effect=record_renderer_counts,
+            ):
+                validation = self._validate_recovery(prepared)
+
+            self.assertEqual("accepted", validation["state"])
+            self.assertEqual(["source", "renderer"], count_families)
+            self.assertEqual(
+                [
+                    "recovery root-ID file",
+                    "recovery closure OPL",
+                    "recovery root-ID file at destructive boundary",
+                    "recovery closure OPL at destructive boundary",
+                ],
+                recovery_labels,
+            )
+
+    def test_recovery_resume_keeps_identity_counts_and_current_prefix_validation(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_recovery as recovery
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared = self._prepare_recovery(Path(temporary))
+            paused = self._recover(prepared, pause_after_features=4)
+            self.assertEqual("paused", paused.state)
+            real_require_identity = store._require_identity
+            real_source_counts = recovery._require_source_counts
+            real_renderer_counts = recovery._require_renderer_counts
+            real_prefix_validation = store._validated_renderer_prefix_stream
+            recovery_labels = []
+            count_families = []
+            validated_prefixes = []
+
+            def record_identity(*args, **kwargs):
+                label = kwargs["label"]
+                if label.startswith("recovery "):
+                    recovery_labels.append(label)
+                return real_require_identity(*args, **kwargs)
+
+            def record_source_counts(connection, authority):
+                count_families.append("source")
+                return real_source_counts(connection, authority)
+
+            def record_renderer_counts(connection, authority):
+                count_families.append("renderer")
+                return real_renderer_counts(connection, authority)
+
+            def record_prefix(connection, **kwargs):
+                validated_prefixes.append(kwargs["rendered_prefix"])
+                return real_prefix_validation(connection, **kwargs)
+
+            with patch.object(
+                store,
+                "_require_identity",
+                side_effect=record_identity,
+            ), patch.object(
+                recovery,
+                "_require_source_counts",
+                side_effect=record_source_counts,
+            ), patch.object(
+                recovery,
+                "_require_renderer_counts",
+                side_effect=record_renderer_counts,
+            ), patch.object(
+                store,
+                "_validated_renderer_prefix_stream",
+                side_effect=record_prefix,
+            ):
+                resumed = self._recover(prepared)
+
+            self.assertEqual("complete", resumed.state)
+            self.assertEqual(
+                ["recovery root-ID file", "recovery closure OPL"],
+                recovery_labels,
+            )
+            self.assertEqual(["source"], count_families)
+            self.assertTrue(validated_prefixes)
+            self.assertEqual(4, validated_prefixes[0])
+
     def test_recovery_renderer_prefix_holds_write_reservation(self) -> None:
         from tools.experiment8 import osm_global_waterway_store as store
 

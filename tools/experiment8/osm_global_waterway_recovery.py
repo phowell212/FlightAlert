@@ -762,6 +762,7 @@ def _validate_first_recovery(
     authority: WaterwayRenderRecoveryAuthority,
     new_render_identity: Mapping[str, object],
     new_render_sha256: str,
+    defer_counts_to_reset_boundary: bool,
 ) -> _RecoveryPlan:
     raw_documents: dict[str, tuple[bytes, dict[str, object]]] = {}
     for key in _META_KEYS:
@@ -792,8 +793,12 @@ def _validate_first_recovery(
         run_identity=incident_render_identity,
         rendered_prefix=authority.rendered_features,
     )
-    source_counts = _require_source_counts(connection, authority)
-    renderer_counts = _require_renderer_counts(connection, authority)
+    if defer_counts_to_reset_boundary:
+        source_counts = authority.source_table_counts
+        renderer_counts = authority.renderer_table_counts
+    else:
+        source_counts = _require_source_counts(connection, authority)
+        renderer_counts = _require_renderer_counts(connection, authority)
     recovered_at = (
         datetime.now(timezone.utc)
         .replace(microsecond=0)
@@ -918,24 +923,26 @@ def _validate_recovery_plan(
     authority: WaterwayRenderRecoveryAuthority,
     new_render_identity: Mapping[str, object],
     new_render_sha256: str,
+    defer_first_reset_identity_and_counts: bool,
 ) -> _RecoveryPlan:
     _require_no_sidecars(database_path)
     if output_directory.exists() or output_directory.is_symlink():
         raise GlobalWaterwayPackageError(
             "waterway recovery output directory already exists"
         )
-    store._require_identity(
-        root_ids_path,
-        expected_bytes=source_binding.root_ids_bytes,
-        expected_sha256=source_binding.root_ids_sha256,
-        label="recovery root-ID file",
-    )
-    store._require_identity(
-        opl_path,
-        expected_bytes=source_binding.closure_opl_bytes,
-        expected_sha256=source_binding.closure_opl_sha256,
-        label="recovery closure OPL",
-    )
+    if not defer_first_reset_identity_and_counts:
+        store._require_identity(
+            root_ids_path,
+            expected_bytes=source_binding.root_ids_bytes,
+            expected_sha256=source_binding.root_ids_sha256,
+            label="recovery root-ID file",
+        )
+        store._require_identity(
+            opl_path,
+            expected_bytes=source_binding.closure_opl_bytes,
+            expected_sha256=source_binding.closure_opl_sha256,
+            label="recovery closure OPL",
+        )
     _require_external_evidence(
         failure_log=failure_log,
         backup_receipt=backup_receipt,
@@ -944,6 +951,19 @@ def _validate_recovery_plan(
     stored_recovery = _raw_meta(
         connection, "renderRecoveryReceipt", required=False
     )
+    if defer_first_reset_identity_and_counts and stored_recovery is not None:
+        store._require_identity(
+            root_ids_path,
+            expected_bytes=source_binding.root_ids_bytes,
+            expected_sha256=source_binding.root_ids_sha256,
+            label="recovery root-ID file",
+        )
+        store._require_identity(
+            opl_path,
+            expected_bytes=source_binding.closure_opl_bytes,
+            expected_sha256=source_binding.closure_opl_sha256,
+            label="recovery closure OPL",
+        )
     partials = _partial_directories(output_directory)
     if stored_recovery is None:
         if partials:
@@ -956,6 +976,7 @@ def _validate_recovery_plan(
             authority=authority,
             new_render_identity=new_render_identity,
             new_render_sha256=new_render_sha256,
+            defer_counts_to_reset_boundary=defer_first_reset_identity_and_counts,
         )
     expected_partial = output_directory.with_name(
         output_directory.name + ".partial-" + new_render_sha256[:16]
@@ -1417,6 +1438,7 @@ def _validate_bound_global_waterway_recovery(
             authority=authority,
             new_render_identity=render_identity,
             new_render_sha256=render_sha256,
+            defer_first_reset_identity_and_counts=False,
         )
         database_identity = source_module._stream_identity(
             database_path, "waterway recovery validation database"
@@ -1635,6 +1657,7 @@ def _recover_bound_global_waterway_package(
             authority=authority,
             new_render_identity=render_identity,
             new_render_sha256=render_sha256,
+            defer_first_reset_identity_and_counts=True,
         )
         parallel_limits = store._default_parallel_render_limits(render_workers)
         if progress_file is not None:
