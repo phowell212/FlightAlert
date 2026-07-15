@@ -1818,6 +1818,184 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
                 finally:
                     connection.close()
 
+    def test_direct_way_fast_path_rejects_complete_admission_entry_drift(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        mutations = (
+            ("missing schema field", lambda entry: entry.pop("geometryUsage")),
+            ("framed byte column", None),
+            ("status column", None),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                result = store.ingest_global_waterway_closure(
+                    opl_path=CLOSURE_FIXTURE,
+                    root_ids_path=ROOT_FIXTURE,
+                    work_directory=Path(temporary),
+                    source_binding=binding,
+                    checkpoint_objects=4,
+                )
+                connection = sqlite3.connect(result.database_path)
+                try:
+                    if mutate is not None:
+                        raw = bytes(
+                            connection.execute(
+                                "SELECT entry_json FROM admission_roots "
+                                "WHERE root_kind=1 AND root_id=100"
+                            ).fetchone()[0]
+                        )
+                        entry = json.loads(raw.decode("utf-8", "strict"))
+                        mutate(entry)
+                        changed = store._canonical_json_no_lf_bytes(entry)
+                        connection.execute(
+                            "UPDATE admission_roots SET entry_json=?,entry_sha=?,"
+                            "framed_bytes=? WHERE root_kind=1 AND root_id=100",
+                            (changed, hashlib.sha256(changed).digest(), 8 + len(changed)),
+                        )
+                    elif label == "framed byte column":
+                        connection.execute(
+                            "UPDATE admission_roots SET framed_bytes=framed_bytes+1 "
+                            "WHERE root_kind=1 AND root_id=100"
+                        )
+                    else:
+                        connection.execute(
+                            "UPDATE admission_roots SET status='no_line_geometry' "
+                            "WHERE root_kind=1 AND root_id=100"
+                        )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                with self.assertRaisesRegex(
+                    store.GlobalWaterwayPackageError,
+                    "admitted direct-way.*(?:schema|column)",
+                ):
+                    connection = sqlite3.connect(result.database_path)
+                    try:
+                        tuple(
+                            store._iter_render_waterway_features(
+                                connection,
+                                source_binding=binding,
+                            )
+                        )
+                    finally:
+                        connection.close()
+
+    def test_direct_way_fast_path_hard_bounds_actual_point_rows(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=Path(temporary),
+                source_binding=binding,
+                checkpoint_objects=4,
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                connection.execute(
+                    "INSERT INTO way_nodes(way_id,ordinal,node_id) VALUES (100,4,1)"
+                )
+                connection.commit()
+                with patch.object(store, "_DIRECT_WAY_STREAM_BATCH_POINTS", 4):
+                    with self.assertRaisesRegex(
+                        store.GlobalWaterwayPackageError,
+                        "direct-way point batch exceeds",
+                    ):
+                        tuple(
+                            store._iter_render_waterway_features(
+                                connection,
+                                source_binding=binding,
+                            )
+                        )
+            finally:
+                connection.close()
+
+    def test_direct_way_fast_path_rejects_coordinated_dependency_hash_drift(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=Path(temporary),
+                source_binding=binding,
+                checkpoint_objects=4,
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                analysis = store._analyze_admission_root(
+                    connection,
+                    1,
+                    100,
+                    materialize=True,
+                )
+                entry = dict(analysis.entry)
+                entry["dependencyEvidence"] = {
+                    "records": entry["dependencyEvidence"]["records"],
+                    "sha256": "0" * 64,
+                }
+                candidate = analysis.candidates[0]
+                candidate_metadata, source_metadata = store._feature_metadata(
+                    root=entry["root"],
+                    source_document=store._source_document_from_database(connection),
+                    name_source_key=entry["nameSourceKey"],
+                    primary_name=entry["primaryName"],
+                    english_name=entry["englishName"],
+                    waterway_type=candidate.waterway_type,
+                    complete_named_relation=False,
+                    required_node_ids=frozenset(),
+                    source_occurrence_paths=candidate.source_occurrence_paths,
+                    dependency_evidence=entry["dependencyEvidence"],
+                )
+                candidate_sha256, source_sha256 = store._hash_materialized_candidate(
+                    candidate_metadata=candidate_metadata,
+                    source_metadata=source_metadata,
+                    parts=candidate.parts,
+                )
+                changed = store._canonical_json_no_lf_bytes(entry)
+                connection.execute(
+                    "UPDATE admission_roots SET entry_json=?,entry_sha=?,framed_bytes=? "
+                    "WHERE root_kind=1 AND root_id=100",
+                    (changed, hashlib.sha256(changed).digest(), 8 + len(changed)),
+                )
+                connection.execute(
+                    "UPDATE admission_candidates SET candidate_feature_sha=?,"
+                    "source_feature_sha=? WHERE root_kind=1 AND root_id=100 "
+                    "AND feature_ordinal=0",
+                    (candidate_sha256, source_sha256),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                store.GlobalWaterwayPackageError,
+                "entry schema",
+            ):
+                connection = sqlite3.connect(result.database_path)
+                try:
+                    tuple(
+                        store._iter_render_waterway_features(
+                            connection,
+                            source_binding=binding,
+                        )
+                    )
+                finally:
+                    connection.close()
+
     def test_direct_way_fast_path_is_exact_across_closed_cursor_batches(self) -> None:
         import sqlite3
 
@@ -1861,20 +2039,22 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
             )
             connection = sqlite3.connect(result.database_path)
             try:
-                with patch.object(store, "_DIRECT_WAY_STREAM_BATCH_POINTS", 3):
-                    self.assertEqual(
-                        (1,),
-                        store._direct_way_root_id_batch(connection, 0),
-                    )
+                with patch.object(store, "_DIRECT_WAY_STREAM_BATCH_POINTS", 1):
+                    with self.assertRaisesRegex(
+                        store.GlobalWaterwayPackageError,
+                        "direct-way root exceeds",
+                    ):
+                        store._direct_way_root_id_batch(connection, 0)
                 with patch.object(
                     store,
                     "_DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES",
                     1,
                 ):
-                    self.assertEqual(
-                        (1,),
-                        store._direct_way_root_id_batch(connection, 0),
-                    )
+                    with self.assertRaisesRegex(
+                        store.GlobalWaterwayPackageError,
+                        "direct-way root exceeds",
+                    ):
+                        store._direct_way_root_id_batch(connection, 0)
                 stream = iter(
                     store._iter_render_waterway_features(
                         connection,
