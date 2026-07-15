@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
 import shutil
 import struct
 import tempfile
+import threading
 import unittest
 import zlib
 from pathlib import Path
@@ -434,6 +436,658 @@ def _write_converged_build_receipt(
 
 
 class V3PackageMergerTests(unittest.TestCase):
+    def _write_parallel_fixture(self, root: Path) -> tuple[Path, Path]:
+        primary = root / "parallel-primary"
+        supplement = root / "parallel-supplement"
+        primary_payloads: dict[TileKey, bytes] = {}
+        supplement_payloads: dict[TileKey, bytes] = {}
+        for y in range(8):
+            for x in range(8):
+                tile = TileKey(3, x, y)
+                first = _line_renderer_record(tile)
+                second = dataclasses.replace(
+                    first,
+                    posting=dataclasses.replace(
+                        first.posting,
+                        feature_id=(
+                            first.posting.feature_id ^ 0x0F0F0F0F0F0F0F0F
+                        ),
+                    ),
+                )
+                primary_payloads[tile] = encode_tile_payload(
+                    tile, [RendererTileRecord(first, None)]
+                )
+                supplement_payloads[tile] = encode_tile_payload(
+                    tile, [RendererTileRecord(second, None)]
+                )
+        _write_package(primary, "parallel-primary", primary_payloads)
+        _write_package(supplement, "parallel-supplement", supplement_payloads)
+        return primary, supplement
+
+    def _inverted_parallel_deflater(self, original_deflate):
+        first_tile = (0, 0)
+        first_started = threading.Event()
+        later_completed = threading.Event()
+        observation_lock = threading.Lock()
+        completion_order: list[tuple[int, int]] = []
+        worker_threads: set[int] = set()
+
+        def deflate(payload: bytes) -> bytes:
+            _, x, y, _ = struct.unpack_from(
+                "<BIII", payload, len(b"FAE8TILE1\0")
+            )
+            tile = (x, y)
+            if tile == first_tile:
+                first_started.set()
+                if not later_completed.wait(5):
+                    raise AssertionError("later compression did not overtake the first")
+            else:
+                if not first_started.wait(5):
+                    raise AssertionError("first compression worker did not start")
+            compressed = original_deflate(payload)
+            with observation_lock:
+                worker_threads.add(threading.get_ident())
+                completion_order.append(tile)
+            if tile != first_tile:
+                later_completed.set()
+            return compressed
+
+        return deflate, completion_order, worker_threads
+
+    def test_parallel_and_serial_binary_streams_are_byte_identical(self) -> None:
+        from tools.experiment8 import v3_package_merger
+        from tools.experiment8.v3_class_catalog_finalizer import _load_package
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, supplement = self._write_parallel_fixture(root)
+            serial = root / "serial"
+            parallel = root / "parallel"
+            v3_package_merger.merge_v3_packages(
+                primary_directory=primary,
+                supplement_directories=(supplement,),
+                output_directory=serial,
+                package_id="parallel-equivalence",
+                compression_workers=1,
+            )
+
+            original_deflate = v3_package_merger.raw_deflate
+            deliberately_reordered_deflate, completion_order, worker_threads = (
+                self._inverted_parallel_deflater(original_deflate)
+            )
+
+            with mock.patch.object(
+                v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+            ), mock.patch.object(
+                v3_package_merger,
+                "raw_deflate",
+                deliberately_reordered_deflate,
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=parallel,
+                    package_id="parallel-equivalence",
+                    compression_workers=4,
+                )
+
+            self.assertGreaterEqual(len(worker_threads), 2)
+            self.assertNotEqual(completion_order[0], (0, 0))
+            self.assertGreater(completion_order.index((0, 0)), 0)
+            for name in ("records.fadictpack", "tile-index.bin"):
+                self.assertEqual(
+                    (serial / name).read_bytes(),
+                    (parallel / name).read_bytes(),
+                )
+            serial_manifest = json.loads((serial / "manifest.json").read_text("utf-8"))
+            parallel_manifest = json.loads(
+                (parallel / "manifest.json").read_text("utf-8")
+            )
+            serial_receipt = json.loads(
+                (serial / "merge-receipt.json").read_text("utf-8")
+            )
+            parallel_receipt = json.loads(
+                (parallel / "merge-receipt.json").read_text("utf-8")
+            )
+            self.assertEqual(serial_manifest, parallel_manifest)
+            self.assertEqual(serial_receipt, parallel_receipt)
+            self.assertEqual(_load_package(serial).tile_count, 64)
+            self.assertEqual(_load_package(parallel).tile_count, 64)
+
+    def test_parallel_queue_is_bounded_by_batch_count_and_raw_bytes(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        class DeferredFuture:
+            def __init__(self, owner, function, arguments):
+                self.owner = owner
+                self.function = function
+                self.arguments = arguments
+
+            def result(self):
+                try:
+                    return self.function(*self.arguments)
+                finally:
+                    self.owner.outstanding -= 1
+
+        class DeferredExecutor:
+            instances = []
+
+            def __init__(self, *, max_workers, thread_name_prefix):
+                self.max_workers = max_workers
+                self.thread_name_prefix = thread_name_prefix
+                self.outstanding = 0
+                self.maximum_outstanding = 0
+                self.__class__.instances.append(self)
+
+            def submit(self, function, *arguments):
+                self.outstanding += 1
+                self.maximum_outstanding = max(
+                    self.maximum_outstanding, self.outstanding
+                )
+                return DeferredFuture(self, function, arguments)
+
+            def shutdown(self, *, wait, cancel_futures):
+                self.assertions = (wait, cancel_futures)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, supplement = self._write_parallel_fixture(root)
+            with mock.patch.object(
+                v3_package_merger,
+                "ThreadPoolExecutor",
+                DeferredExecutor,
+            ), mock.patch.object(
+                v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+            ), mock.patch.object(
+                v3_package_merger, "_PARALLEL_PENDING_RAW_BYTES", 1_500
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=root / "bounded",
+                    package_id="bounded-parallel-queue",
+                    compression_workers=4,
+                )
+            self.assertEqual(len(DeferredExecutor.instances), 1)
+            raw_bounded = DeferredExecutor.instances.pop()
+            self.assertEqual(raw_bounded.maximum_outstanding, 1)
+            self.assertEqual(raw_bounded.outstanding, 0)
+            self.assertEqual(raw_bounded.assertions, (True, True))
+
+            with mock.patch.object(
+                v3_package_merger,
+                "ThreadPoolExecutor",
+                DeferredExecutor,
+            ), mock.patch.object(
+                v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+            ), mock.patch.object(
+                v3_package_merger,
+                "_PARALLEL_PENDING_RAW_BYTES",
+                1 << 30,
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=root / "batch-bounded",
+                    package_id="batch-bounded-parallel-queue",
+                    compression_workers=2,
+                )
+            self.assertEqual(len(DeferredExecutor.instances), 1)
+            batch_bounded = DeferredExecutor.instances.pop()
+            self.assertEqual(batch_bounded.maximum_outstanding, 4)
+            self.assertEqual(batch_bounded.outstanding, 0)
+            self.assertEqual(batch_bounded.assertions, (True, True))
+
+    def test_earlier_worker_failure_precedes_a_later_input_failure(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        class WorkerFailure(RuntimeError):
+            pass
+
+        class InputFailure(RuntimeError):
+            pass
+
+        def failing_input():
+            yield b"first already-produced payload"
+            raise InputFailure("later input failure")
+
+        real_executor = v3_package_merger.ThreadPoolExecutor
+
+        class RecordingExecutor:
+            instances = []
+
+            def __init__(self, *, max_workers, thread_name_prefix):
+                self.delegate = real_executor(
+                    max_workers=max_workers,
+                    thread_name_prefix=thread_name_prefix,
+                )
+                self.shutdown_arguments = None
+                self.__class__.instances.append(self)
+
+            def submit(self, function, *arguments):
+                return self.delegate.submit(function, *arguments)
+
+            def shutdown(self, *, wait, cancel_futures):
+                self.shutdown_arguments = (wait, cancel_futures)
+                self.delegate.shutdown(
+                    wait=wait,
+                    cancel_futures=cancel_futures,
+                )
+
+        def fail_compression(_payload):
+            raise WorkerFailure("earlier compression failure")
+
+        with mock.patch.object(
+            v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+        ), mock.patch.object(
+            v3_package_merger,
+            "raw_deflate",
+            side_effect=fail_compression,
+        ):
+            with self.assertRaisesRegex(
+                WorkerFailure, "earlier compression failure"
+            ):
+                list(
+                    v3_package_merger._encode_tiles_ordered(
+                        failing_input(), compression_workers=1
+                    )
+                )
+            with mock.patch.object(
+                v3_package_merger,
+                "ThreadPoolExecutor",
+                RecordingExecutor,
+            ), self.assertRaisesRegex(
+                WorkerFailure, "earlier compression failure"
+            ):
+                list(
+                    v3_package_merger._encode_tiles_ordered(
+                        failing_input(), compression_workers=2
+                    )
+                )
+        self.assertEqual(len(RecordingExecutor.instances), 1)
+        self.assertEqual(
+            RecordingExecutor.instances[0].shutdown_arguments,
+            (True, True),
+        )
+        self.assertFalse(
+            any(
+                thread.name.startswith("flightalert-v3-merge")
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_earlier_worker_failure_precedes_a_later_submit_failure(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        class WorkerFailure(RuntimeError):
+            pass
+
+        class SubmitFailure(RuntimeError):
+            pass
+
+        real_executor = v3_package_merger.ThreadPoolExecutor
+
+        class SecondSubmitFails:
+            instances = []
+
+            def __init__(self, *, max_workers, thread_name_prefix):
+                self.delegate = real_executor(
+                    max_workers=max_workers,
+                    thread_name_prefix=thread_name_prefix,
+                )
+                self.submissions = 0
+                self.shutdown_arguments = None
+                self.worker_started = threading.Event()
+                self.release_worker = threading.Event()
+                self.__class__.instances.append(self)
+
+            def submit(self, function, *arguments):
+                self.submissions += 1
+                if self.submissions == 1:
+                    def run_first_submission():
+                        self.worker_started.set()
+                        if not self.release_worker.wait(5):
+                            raise AssertionError("first compression worker was not released")
+                        return function(*arguments)
+
+                    return self.delegate.submit(run_first_submission)
+                if not self.worker_started.wait(5):
+                    raise AssertionError("first compression worker did not start")
+                self.release_worker.set()
+                raise SubmitFailure("later submit failure")
+
+            def shutdown(self, *, wait, cancel_futures):
+                self.shutdown_arguments = (wait, cancel_futures)
+                self.release_worker.set()
+                self.delegate.shutdown(
+                    wait=wait,
+                    cancel_futures=cancel_futures,
+                )
+
+        with mock.patch.object(
+            v3_package_merger,
+            "ThreadPoolExecutor",
+            SecondSubmitFails,
+        ), mock.patch.object(
+            v3_package_merger,
+            "raw_deflate",
+            side_effect=WorkerFailure("earlier compression failure"),
+        ), mock.patch.object(
+            v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+        ), self.assertRaisesRegex(
+            WorkerFailure, "earlier compression failure"
+        ):
+            list(
+                v3_package_merger._encode_tiles_ordered(
+                    (b"first", b"second"), compression_workers=2
+                )
+            )
+        self.assertEqual(len(SecondSubmitFails.instances), 1)
+        executor = SecondSubmitFails.instances[0]
+        self.assertEqual(executor.submissions, 2)
+        self.assertEqual(executor.shutdown_arguments, (True, True))
+        self.assertFalse(
+            any(
+                thread.name.startswith("flightalert-v3-merge")
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_parallel_batch_preserves_earlier_output_failure_and_cleans_partial(
+        self,
+    ) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        class WorkerFailure(RuntimeError):
+            pass
+
+        class OutputFailure(RuntimeError):
+            pass
+
+        first_tile = TileKey(1, 0, 0)
+        second_tile = TileKey(1, 0, 1)
+        payloads = {
+            tile: encode_tile_payload(
+                tile,
+                [RendererTileRecord(_line_renderer_record(tile), None)],
+            )
+            for tile in (first_tile, second_tile)
+        }
+        original_deflate = v3_package_merger.raw_deflate
+        original_open = Path.open
+
+        def fail_second_compression(payload: bytes) -> bytes:
+            _, _, y, _ = struct.unpack_from(
+                "<BIII", payload, len(b"FAE8TILE1\0")
+            )
+            if y == second_tile.y:
+                raise WorkerFailure("later compression failure")
+            return original_deflate(payload)
+
+        class FailingRecordsHandle:
+            def __init__(self, delegate):
+                self.delegate = delegate
+
+            def __enter__(self):
+                self.delegate.__enter__()
+                return self
+
+            def __exit__(self, *arguments):
+                return self.delegate.__exit__(*arguments)
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
+            def write(self, _payload):
+                raise OutputFailure("earlier output failure")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary = root / "primary"
+            _write_package(primary, "output-failure-primary", payloads)
+            for workers in (1, 2):
+                with self.subTest(compression_workers=workers):
+                    output = root / f"output-{workers}"
+                    partial = output.with_name(output.name + ".partial")
+
+                    def fail_records_open(path: Path, *arguments, **keywords):
+                        delegate = original_open(path, *arguments, **keywords)
+                        if path == partial / "records.fadictpack":
+                            return FailingRecordsHandle(delegate)
+                        return delegate
+
+                    with mock.patch.object(
+                        v3_package_merger,
+                        "raw_deflate",
+                        side_effect=fail_second_compression,
+                    ), mock.patch.object(
+                        v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 2
+                    ), mock.patch.object(
+                        Path, "open", fail_records_open
+                    ), mock.patch.object(
+                        v3_package_merger.os,
+                        "replace",
+                        side_effect=AssertionError("failed merge was published"),
+                    ) as replace_mock, self.assertRaisesRegex(
+                        OutputFailure, "earlier output failure"
+                    ):
+                        v3_package_merger.merge_v3_packages(
+                            primary_directory=primary,
+                            supplement_directories=(),
+                            output_directory=output,
+                            package_id=f"output-failure-{workers}",
+                            compression_workers=workers,
+                        )
+                    replace_mock.assert_not_called()
+                    self.assertFalse(output.exists())
+                    self.assertFalse(partial.exists())
+            self.assertFalse(
+                any(
+                    thread.name.startswith("flightalert-v3-merge")
+                    for thread in threading.enumerate()
+                )
+            )
+
+    def test_parallel_dual_failure_never_publishes_or_leaks_partial(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        class WorkerFailure(RuntimeError):
+            pass
+
+        class InputFailure(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, supplement = self._write_parallel_fixture(root)
+            output = root / "dual-failure-output"
+            partial = output.with_name(output.name + ".partial")
+            original_merge_payload = v3_package_merger._merge_payload
+            merged_payload_calls = 0
+
+            def fail_second_payload(*arguments, **keywords):
+                nonlocal merged_payload_calls
+                merged_payload_calls += 1
+                if merged_payload_calls == 2:
+                    raise InputFailure("later input failure")
+                return original_merge_payload(*arguments, **keywords)
+
+            with mock.patch.object(
+                v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+            ), mock.patch.object(
+                v3_package_merger,
+                "raw_deflate",
+                side_effect=WorkerFailure("earlier compression failure"),
+            ), mock.patch.object(
+                v3_package_merger,
+                "_merge_payload",
+                side_effect=fail_second_payload,
+            ), mock.patch.object(
+                v3_package_merger.os,
+                "replace",
+                side_effect=AssertionError("failed merge was published"),
+            ) as replace_mock, self.assertRaisesRegex(
+                WorkerFailure, "earlier compression failure"
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=output,
+                    package_id="dual-failure-cleanup",
+                    compression_workers=2,
+                )
+            replace_mock.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertFalse(partial.exists())
+
+    def test_one_worker_is_a_serial_fallback_without_an_executor(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, supplement = self._write_parallel_fixture(root)
+            with mock.patch.object(
+                v3_package_merger,
+                "ThreadPoolExecutor",
+                side_effect=AssertionError("serial fallback created an executor"),
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=root / "serial",
+                    package_id="serial-fallback",
+                    compression_workers=1,
+                )
+
+    def test_cli_can_select_the_serial_compression_fallback(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        captured = {}
+
+        def capture_merge(**keywords):
+            captured.update(keywords)
+            return v3_package_merger.MergeResult(
+                keywords["output_directory"], {}, {}
+            )
+
+        with mock.patch.object(
+            v3_package_merger,
+            "merge_v3_packages",
+            side_effect=capture_merge,
+        ):
+            status = v3_package_merger._main(
+                (
+                    "--primary",
+                    "primary",
+                    "--supplement",
+                    "supplement",
+                    "--output",
+                    "output",
+                    "--package-id",
+                    "cli-workers",
+                    "--compression-workers",
+                    "1",
+                )
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured["compression_workers"], 1)
+
+    def test_merger_identity_drift_has_an_exact_canonical_whitelist(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        def leaf_differences(left, right, path=()):
+            if type(left) is not type(right):
+                return {path}
+            if isinstance(left, dict):
+                if set(left) != set(right):
+                    return {path}
+                result = set()
+                for key in left:
+                    result.update(
+                        leaf_differences(left[key], right[key], path + (key,))
+                    )
+                return result
+            if isinstance(left, list):
+                if len(left) != len(right):
+                    return {path}
+                result = set()
+                for index, (left_item, right_item) in enumerate(zip(left, right)):
+                    result.update(
+                        leaf_differences(
+                            left_item, right_item, path + (index,)
+                        )
+                    )
+                return result
+            return set() if left == right else {path}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, supplement = self._write_parallel_fixture(root)
+            old_output = root / "old-identity"
+            new_output = root / "new-identity"
+            with mock.patch.object(
+                v3_package_merger, "_merger_sha256", return_value="1" * 64
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=old_output,
+                    package_id="identity-whitelist",
+                    compression_workers=1,
+                )
+            deliberately_reordered_deflate, completion_order, worker_threads = (
+                self._inverted_parallel_deflater(v3_package_merger.raw_deflate)
+            )
+            with mock.patch.object(
+                v3_package_merger, "_merger_sha256", return_value="2" * 64
+            ), mock.patch.object(
+                v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+            ), mock.patch.object(
+                v3_package_merger,
+                "raw_deflate",
+                deliberately_reordered_deflate,
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=new_output,
+                    package_id="identity-whitelist",
+                    compression_workers=4,
+                )
+
+            self.assertGreaterEqual(len(worker_threads), 2)
+            self.assertNotEqual(completion_order[0], (0, 0))
+            self.assertGreater(completion_order.index((0, 0)), 0)
+            for name in ("records.fadictpack", "tile-index.bin"):
+                self.assertEqual(
+                    (old_output / name).read_bytes(),
+                    (new_output / name).read_bytes(),
+                )
+            old_manifest = json.loads(
+                (old_output / "manifest.json").read_text("utf-8")
+            )
+            new_manifest = json.loads(
+                (new_output / "manifest.json").read_text("utf-8")
+            )
+            old_receipt = json.loads(
+                (old_output / "merge-receipt.json").read_text("utf-8")
+            )
+            new_receipt = json.loads(
+                (new_output / "merge-receipt.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                leaf_differences(old_manifest, new_manifest),
+                {("merge", "mergerSha256")},
+            )
+            self.assertEqual(
+                leaf_differences(old_receipt, new_receipt),
+                {
+                    ("mergerSha256",),
+                    ("outputFiles", 0, "sha256"),
+                },
+            )
+
     def test_compressed_input_length_is_bounded_before_record_read(self) -> None:
         from tools.experiment8.v3_package_merger import (
             V3PackageMergeError,
@@ -778,6 +1432,59 @@ class V3PackageMergerTests(unittest.TestCase):
                         package_id="publication-bound-output",
                     )
             self.assertFalse(output.exists())
+
+    def test_parallel_post_write_audit_reopens_streams_before_publication(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        tiles = (TileKey(1, 0, 0), TileKey(1, 0, 1))
+        payloads = {
+            tile: encode_tile_payload(
+                tile,
+                [RendererTileRecord(_line_renderer_record(tile), None)],
+            )
+            for tile in tiles
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, output = root / "primary", root / "output"
+            partial = output.with_name(output.name + ".partial")
+            _write_package(primary, "primary", payloads)
+            original_audit = v3_package_merger._audit_output
+            audit_calls = 0
+
+            def corrupt_written_stream(directory, windows):
+                nonlocal audit_calls
+                audit_calls += 1
+                records_path = directory / "records.fadictpack"
+                records = bytearray(records_path.read_bytes())
+                records[len(records) // 2] ^= 0x80
+                records_path.write_bytes(records)
+                return original_audit(directory, windows)
+
+            with mock.patch.object(
+                v3_package_merger,
+                "_audit_output",
+                side_effect=corrupt_written_stream,
+            ), mock.patch.object(
+                v3_package_merger, "_PARALLEL_BATCH_TILE_LIMIT", 1
+            ), mock.patch.object(
+                v3_package_merger.os,
+                "replace",
+                side_effect=AssertionError("unaudited output was published"),
+            ) as replace_mock, self.assertRaises(
+                v3_package_merger.V3PackageMergeError
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(),
+                    output_directory=output,
+                    package_id="post-write-audit",
+                    compression_workers=2,
+                )
+            self.assertEqual(audit_calls, 1)
+            replace_mock.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertFalse(partial.exists())
 
     def test_same_tile_merge_preserves_envelopes_orders_and_dedupes(self) -> None:
         from tools.experiment8.v3_package_merger import merge_v3_packages

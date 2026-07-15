@@ -10,8 +10,9 @@ import sqlite3
 import struct
 import unicodedata
 import zlib
-from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections import Counter, deque
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,12 @@ _MAX_COMPRESSED_TILE_BYTES = (
     + (MAX_TILE_BYTES >> 25)
     + 13
 )
+_MAX_COMPRESSION_WORKERS = 64
+_DEFAULT_COMPRESSION_WORKER_LIMIT = 12
+_PARALLEL_BATCH_TILE_LIMIT = 512
+_PARALLEL_BATCH_RAW_BYTES = 4 * 1024 * 1024
+_PARALLEL_PENDING_RAW_BYTES = 128 * 1024 * 1024
+_PARALLEL_PENDING_BATCHES_PER_WORKER = 2
 _TILE_PAYLOAD_HEADER_BYTES = len(TILE_PAYLOAD_MAGIC) + struct.calcsize("<BIII")
 _WATERWAY_BUILD_SCHEMA = "flightalert.experiment8.osm-global-waterway-build.v2"
 _WATERWAY_RECOVERY_SCHEMA = (
@@ -257,6 +264,25 @@ class MergeResult:
     output_directory: Path
     manifest: Mapping[str, object]
     receipt: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodedTile:
+    compressed: bytes
+    raw_length: int
+    raw_hash32: int
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodedBatchResult:
+    tiles: tuple[_EncodedTile | None, ...]
+    failure: BaseException | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingEncodedBatch:
+    future: Future[_EncodedBatchResult]
+    raw_bytes: int
 
 
 def _canonical_json_bytes(document: object) -> bytes:
@@ -1565,8 +1591,141 @@ def _merge_payload(
     )
     if len(payload) != payload_bytes or len(payload) > MAX_TILE_BYTES:
         raise V3PackageMergeError("merged V3 tile byte length exceeds its bound")
-    _extract_envelopes(tile, payload)
+    # Every input envelope was validated above; _audit_output reopens and
+    # validates the exact compressed stream before any package is published.
     return payload
+
+
+def _validated_compression_workers(value: int | None) -> int:
+    if value is None:
+        detected = os.cpu_count()
+        if type(detected) is not int or detected < 1:
+            return 1
+        return min(detected, _DEFAULT_COMPRESSION_WORKER_LIMIT)
+    if type(value) is not int or not 1 <= value <= _MAX_COMPRESSION_WORKERS:
+        raise V3PackageMergeError(
+            f"compression workers must be an integer from 1 to {_MAX_COMPRESSION_WORKERS}"
+        )
+    return value
+
+
+def _encode_tile_batch(
+    payloads: tuple[bytes | None, ...],
+) -> _EncodedBatchResult:
+    encoded: list[_EncodedTile | None] = []
+    for payload in payloads:
+        try:
+            if payload is None:
+                encoded.append(None)
+                continue
+            compressed = raw_deflate(payload)
+            if len(compressed) > _MAX_COMPRESSED_TILE_BYTES:
+                raise V3PackageMergeError(
+                    "merged V3 compressed tile length exceeds its bound"
+                )
+            encoded.append(
+                _EncodedTile(
+                    compressed=compressed,
+                    raw_length=len(payload),
+                    raw_hash32=raw_hash32(payload),
+                )
+            )
+        except BaseException as error:
+            return _EncodedBatchResult(
+                tiles=tuple(encoded),
+                failure=error,
+            )
+    return _EncodedBatchResult(tiles=tuple(encoded), failure=None)
+
+
+def _encode_tiles_ordered(
+    payloads: Iterable[bytes | None],
+    *,
+    compression_workers: int,
+) -> Iterator[_EncodedTile | None]:
+    """Compress bounded batches concurrently and publish results in input order."""
+
+    if compression_workers == 1:
+        for payload in payloads:
+            result = _encode_tile_batch((payload,))
+            yield from result.tiles
+            if result.failure is not None:
+                raise result.failure
+        return
+
+    executor = ThreadPoolExecutor(
+        max_workers=compression_workers,
+        thread_name_prefix="flightalert-v3-merge",
+    )
+    pending: deque[_PendingEncodedBatch] = deque()
+    pending_raw_bytes = 0
+    batch: list[bytes | None] = []
+    batch_raw_bytes = 0
+    pending_batch_limit = (
+        compression_workers * _PARALLEL_PENDING_BATCHES_PER_WORKER
+    )
+
+    def drain_oldest() -> Iterator[_EncodedTile | None]:
+        nonlocal pending_raw_bytes
+        item = pending.popleft()
+        pending_raw_bytes -= item.raw_bytes
+        result = item.future.result()
+        yield from result.tiles
+        if result.failure is not None:
+            raise result.failure
+
+    def submit_batch() -> Iterator[_EncodedTile | None]:
+        nonlocal batch, batch_raw_bytes, pending_raw_bytes
+        if not batch:
+            return
+        while pending and (
+            len(pending) >= pending_batch_limit
+            or pending_raw_bytes + batch_raw_bytes
+            > _PARALLEL_PENDING_RAW_BYTES
+        ):
+            yield from drain_oldest()
+        submitted = tuple(batch)
+        try:
+            future = executor.submit(_encode_tile_batch, submitted)
+        except Exception:
+            while pending:
+                yield from drain_oldest()
+            raise
+        pending.append(_PendingEncodedBatch(future, batch_raw_bytes))
+        pending_raw_bytes += batch_raw_bytes
+        batch = []
+        batch_raw_bytes = 0
+
+    try:
+        source = iter(payloads)
+        while True:
+            try:
+                payload = next(source)
+            except StopIteration:
+                break
+            except Exception:
+                yield from submit_batch()
+                while pending:
+                    yield from drain_oldest()
+                raise
+            payload_bytes = 0 if payload is None else len(payload)
+            if batch and (
+                len(batch) >= _PARALLEL_BATCH_TILE_LIMIT
+                or batch_raw_bytes + payload_bytes > _PARALLEL_BATCH_RAW_BYTES
+            ):
+                yield from submit_batch()
+            batch.append(payload)
+            batch_raw_bytes += payload_bytes
+            if (
+                len(batch) >= _PARALLEL_BATCH_TILE_LIMIT
+                or batch_raw_bytes >= _PARALLEL_BATCH_RAW_BYTES
+            ):
+                yield from submit_batch()
+        yield from submit_batch()
+        while pending:
+            yield from drain_oldest()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _read_output_payload(
@@ -1922,11 +2081,15 @@ def merge_v3_packages(
     supplement_build_receipts: Sequence[Path] = (),
     output_directory: Path,
     package_id: str,
+    compression_workers: int | None = None,
 ) -> MergeResult:
     """Stream one primary and sparse supplements into one Android-readable V3 package."""
 
     if not isinstance(output_directory, Path):
         raise V3PackageMergeError("output directory must be a pathlib.Path")
+    compression_worker_count = _validated_compression_workers(
+        compression_workers
+    )
     checked_package_id = _validate_package_id(package_id)
     if type(supplement_directories) not in (tuple, list):
         raise V3PackageMergeError("supplement directories must be an ordered sequence")
@@ -2010,48 +2173,58 @@ def merge_v3_packages(
                     )
             output_records = stack.enter_context(output_records_path.open("wb"))
             output_index = stack.enter_context(output_index_path.open("wb"))
-            for tile in _tiles_index_order(windows):
-                any_present = False
-                merged_records: dict[
-                    tuple[int, int, int, int], _RawEnvelope
-                ] = {}
-                merged_payload_bytes = _TILE_PAYLOAD_HEADER_BYTES
-                for package, state in zip(packages, states, strict=True):
-                    present, records = _read_input_tile(package, state, tile)
-                    any_present = any_present or present
-                    if present:
-                        merged_payload_bytes = _merge_contribution(
-                            tile,
-                            merged_records,
-                            merged_payload_bytes,
-                            records,
-                        )
-                if not any_present:
-                    output_index.write(_ZERO_INDEX_ENTRY)
-                    output_index_digest.update(_ZERO_INDEX_ENTRY)
-                    continue
-                payload = _merge_payload(
-                    tile,
-                    merged_records,
-                    merged_payload_bytes,
-                )
-                compressed = raw_deflate(payload)
-                if len(compressed) > _MAX_COMPRESSED_TILE_BYTES:
-                    raise V3PackageMergeError(
-                        "merged V3 compressed tile length exceeds its bound"
+
+            def merged_payloads() -> Iterator[bytes | None]:
+                for tile in _tiles_index_order(windows):
+                    any_present = False
+                    merged_records: dict[
+                        tuple[int, int, int, int], _RawEnvelope
+                    ] = {}
+                    merged_payload_bytes = _TILE_PAYLOAD_HEADER_BYTES
+                    for package, state in zip(packages, states, strict=True):
+                        present, records = _read_input_tile(package, state, tile)
+                        any_present = any_present or present
+                        if present:
+                            merged_payload_bytes = _merge_contribution(
+                                tile,
+                                merged_records,
+                                merged_payload_bytes,
+                                records,
+                            )
+                    if not any_present:
+                        yield None
+                        continue
+                    yield _merge_payload(
+                        tile,
+                        merged_records,
+                        merged_payload_bytes,
                     )
-                index_entry = encode_index_entry(
-                    offset=output_offset,
-                    compressed_length=len(compressed),
-                    raw_length=len(payload),
-                    raw_hash32=raw_hash32(payload),
-                )
-                output_index.write(index_entry)
-                output_index_digest.update(index_entry)
-                output_records.write(compressed)
-                output_records_digest.update(compressed)
-                output_offset += len(compressed)
-                present_tiles += 1
+
+            encoded_tiles = _encode_tiles_ordered(
+                merged_payloads(),
+                compression_workers=compression_worker_count,
+            )
+            try:
+                for encoded in encoded_tiles:
+                    if encoded is None:
+                        output_index.write(_ZERO_INDEX_ENTRY)
+                        output_index_digest.update(_ZERO_INDEX_ENTRY)
+                        continue
+                    compressed = encoded.compressed
+                    index_entry = encode_index_entry(
+                        offset=output_offset,
+                        compressed_length=len(compressed),
+                        raw_length=encoded.raw_length,
+                        raw_hash32=encoded.raw_hash32,
+                    )
+                    output_index.write(index_entry)
+                    output_index_digest.update(index_entry)
+                    output_records.write(compressed)
+                    output_records_digest.update(compressed)
+                    output_offset += len(compressed)
+                    present_tiles += 1
+            finally:
+                encoded_tiles.close()
             for package, state in zip(packages, states, strict=True):
                 _finish_input_validation(package, state)
         if output_index_path.stat().st_size != output_index_bytes:
@@ -2257,6 +2430,14 @@ def _main(arguments: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--package-id", required=True)
+    parser.add_argument(
+        "--compression-workers",
+        type=int,
+        help=(
+            "ordered compression worker count; 1 selects the deterministic "
+            "serial fallback"
+        ),
+    )
     parsed = parser.parse_args(arguments)
     result = merge_v3_packages(
         primary_directory=parsed.primary,
@@ -2264,6 +2445,7 @@ def _main(arguments: Sequence[str] | None = None) -> int:
         supplement_build_receipts=tuple(parsed.supplement_build_receipt),
         output_directory=parsed.output,
         package_id=parsed.package_id,
+        compression_workers=parsed.compression_workers,
     )
     print(_canonical_json_bytes(result.receipt).decode("utf-8"), end="")
     return 0
