@@ -67,6 +67,16 @@ _SUBTYPE_BY_WATERWAY = {
 _MAX_CLASSIFIER_MODULE_BYTES = 16 * 1024 * 1024
 _MAX_CLASSIFIER_TOTAL_BYTES = 64 * 1024 * 1024
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_V3_VISIBLE_SOURCE_NAME_INCOMPATIBILITIES = frozenset(
+    (
+        "control-scalar",
+        "empty-or-wrong-type",
+        "not-nfc",
+        "replacement-scalar",
+        "shared-policy-rejected",
+        "shared-policy-would-rewrite",
+    )
+)
 
 
 def _u64_identity(label: str, registry: HotIdRegistry | None = None) -> int:
@@ -75,6 +85,26 @@ def _u64_identity(label: str, registry: HotIdRegistry | None = None) -> int:
         return registry.register(b"FAE8OSMID1\0", canonical).hot_id
     digest = hashlib.sha256(b"FAE8OSMID1\0" + canonical).digest()
     return int.from_bytes(digest[:8], "big")
+
+
+def _v3_visible_source_name_incompatibility(value: object) -> str | None:
+    """Return why exact source text cannot be carried, without rewriting it."""
+
+    if type(value) is not str or not value:
+        return "empty-or-wrong-type"
+    if "\ufffd" in value:
+        return "replacement-scalar"
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        return "control-scalar"
+    if unicodedata.normalize("NFC", value) != value:
+        return "not-nfc"
+    try:
+        analysis = sourced_text.DEFAULT_SOURCED_TEXT_POLICY.analyze_text(value)
+    except (UnicodeError, ValueError):
+        return "shared-policy-rejected"
+    if analysis.canonical_text != value:
+        return "shared-policy-would-rewrite"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,23 +173,16 @@ class ExactWaterwayFeature:
                 raise GlobalWaterwayPackageError(
                     "waterway V3 source alternate is malformed"
                 )
-            if unicodedata.normalize("NFC", alternate_pair[1]) != alternate_pair[1]:
+            incompatibility = _v3_visible_source_name_incompatibility(
+                alternate_pair[1]
+            )
+            if incompatibility == "not-nfc":
                 raise GlobalWaterwayPackageError(
                     "waterway V3 source alternate must already be NFC"
                 )
-            try:
-                alternate_analysis = (
-                    sourced_text.DEFAULT_SOURCED_TEXT_POLICY.analyze_text(
-                        alternate_pair[1]
-                    )
-                )
-            except (UnicodeError, ValueError) as error:
+            if incompatibility is not None:
                 raise GlobalWaterwayPackageError(
                     "waterway V3 source alternate is not source-text compatible"
-                ) from error
-            if alternate_analysis.canonical_text != alternate_pair[1]:
-                raise GlobalWaterwayPackageError(
-                    "waterway V3 source alternate would be rewritten"
                 )
         if type(self.complete_named_relation) is not bool or (
             self.source_kind == "way" and self.complete_named_relation
@@ -198,16 +221,21 @@ def _v3_waterway_text_choice(
 
     if not isinstance(feature, ExactWaterwayFeature):
         raise GlobalWaterwayPackageError("V3 waterway text choice requires exact source")
-    if unicodedata.normalize("NFC", feature.primary_name) == feature.primary_name:
+    compatible_english = (
+        feature.english_name
+        if _v3_visible_source_name_incompatibility(feature.english_name) is None
+        else None
+    )
+    if _v3_visible_source_name_incompatibility(feature.primary_name) is None:
         return _V3WaterwayTextChoice(
             feature.name_source_key,
             feature.primary_name,
-            feature.english_name,
+            compatible_english,
             False,
         )
     candidates = []
-    if feature.english_name is not None:
-        candidates.append(("name:en", feature.english_name))
+    if compatible_english is not None:
+        candidates.append(("name:en", compatible_english))
     if feature.v3_source_alternate_key is not None:
         candidates.append(
             (
@@ -216,17 +244,11 @@ def _v3_waterway_text_choice(
             )
         )
     for source_key, alternate in candidates:
-        if alternate is None or unicodedata.normalize("NFC", alternate) != alternate:
-            continue
-        try:
-            analysis = sourced_text.DEFAULT_SOURCED_TEXT_POLICY.analyze_text(alternate)
-        except (UnicodeError, ValueError):
-            continue
-        if analysis.canonical_text != alternate:
+        if _v3_visible_source_name_incompatibility(alternate) is not None:
             continue
         declared_english = (
-            feature.english_name
-            if source_key != "name:en" and feature.english_name != alternate
+            compatible_english
+            if source_key != "name:en" and compatible_english != alternate
             else None
         )
         return _V3WaterwayTextChoice(
@@ -620,7 +642,8 @@ def build_adaptive_waterway_feature(
     )
     english_field_id = (
         _u64_identity("openstreetmap.tag.name:en", registry)
-        if text_choice.english_name is not None
+        if feature.english_name is not None
+        and text_choice.name_source_key != "name:en"
         else None
     )
     context = SourceEvidenceContext(

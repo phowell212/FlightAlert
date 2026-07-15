@@ -19,7 +19,6 @@ from typing import BinaryIO, Callable, Iterator, Mapping, Sequence
 
 from . import osm_global_waterway_package as source_module
 from . import reference_size_policy as size_policy_module
-from . import sourced_text
 from .osm_global_waterway_package import (
     GLOBAL_POLICY_SHA256,
     GlobalWaterwayBuildResult,
@@ -86,14 +85,14 @@ _BUILD_SCHEMA = "flightalert.experiment8.osm-global-waterway-build.v2"
 _RENDER_RUN_SCHEMA = "flightalert.experiment8.osm-global-waterway-render-run.v2"
 _RENDER_PROGRESS_SCHEMA = "flightalert.experiment8.waterway-render-progress.v1"
 _RENDERER_TEXT_POLICY_SCHEMA = (
-    "flightalert.experiment8.osm-waterway-v3-renderer-text-policy.v2"
+    "flightalert.experiment8.osm-waterway-v3-renderer-text-policy.v3"
 )
 _RENDERER_TEXT_AUDIT_SCHEMA = (
-    "flightalert.experiment8.osm-waterway-v3-renderer-text-audit.v2"
+    "flightalert.experiment8.osm-waterway-v3-renderer-text-audit.v3"
 )
-_RENDERER_TEXT_POLICY_DOMAIN = b"FAE8WATERV3RENDERERTEXTPOLICY2\0"
-_RENDERER_TEXT_AUDIT_DOMAIN = b"FAE8WATERV3RENDERERTEXTAUDIT2\0"
-_RENDERER_TEXT_EVENT_DOMAIN = b"FAE8WATERV3RENDERERTEXTEVENT2\0"
+_RENDERER_TEXT_POLICY_DOMAIN = b"FAE8WATERV3RENDERERTEXTPOLICY3\0"
+_RENDERER_TEXT_AUDIT_DOMAIN = b"FAE8WATERV3RENDERERTEXTAUDIT3\0"
+_RENDERER_TEXT_EVENT_DOMAIN = b"FAE8WATERV3RENDERERTEXTEVENT3\0"
 _SEMANTIC_STREAM_DOMAIN = b"flight-alert-exp8-semantic-v1\0"
 _DEFAULT_ZOOMS = tuple(range(4, 12))
 _ZERO_INDEX_ENTRY = b"\0" * INDEX_ENTRY_BYTES
@@ -1605,19 +1604,11 @@ def _source_names(tags: Sequence[tuple[str, str]]) -> tuple[str, str, str | None
 
 
 def _v3_compatible_visible_source_name(value: object) -> bool:
-    if (
-        type(value) is not str
-        or not value
-        or "\ufffd" in value
-        or any(unicodedata.category(character) == "Cc" for character in value)
-        or unicodedata.normalize("NFC", value) != value
-    ):
-        return False
-    try:
-        analysis = sourced_text.DEFAULT_SOURCED_TEXT_POLICY.analyze_text(value)
-    except (UnicodeError, ValueError):
-        return False
-    return analysis.canonical_text == value
+    from .osm_global_waterway_renderer import (
+        _v3_visible_source_name_incompatibility,
+    )
+
+    return _v3_visible_source_name_incompatibility(value) is None
 
 
 def _v3_exact_source_alternate(
@@ -1629,7 +1620,7 @@ def _v3_exact_source_alternate(
 ) -> tuple[str | None, str | None]:
     """Select one exact non-English source field only when V3 can carry it."""
 
-    if unicodedata.normalize("NFC", primary_name) == primary_name:
+    if _v3_compatible_visible_source_name(primary_name):
         return None, None
     if _v3_compatible_visible_source_name(english_name):
         # Exact name:en remains carried by ExactWaterwayFeature.english_name.
@@ -4160,16 +4151,31 @@ def _render_code_identities() -> dict[str, object]:
 
 
 def _renderer_text_policy_binding() -> dict[str, object]:
+    from .osm_global_waterway_renderer import (
+        _V3_VISIBLE_SOURCE_NAME_INCOMPATIBILITIES,
+    )
+
     document = {
         "currentV3Compatibility": {
-            "alreadyNfcPrimary": "preserve exact source primary and declared English",
-            "nonNfcPrimary": (
+            "compatiblePrimary": (
+                "preserve exact source primary and compatible exact declared English"
+            ),
+            "incompatibleDeclaredEnglish": (
+                "omit text without rewrite, retain source-field evidence, and bind one "
+                "exact-reason audit event"
+            ),
+            "incompatiblePrimary": (
                 "use first exact V3-safe source alternate in the frozen field order"
             ),
             "nonRepresentable": (
                 "emit no label records; preserve source traversal and bind one audit event"
             ),
         },
+        "auditEventOrder": [
+            "incompatible declared English",
+            "incompatible primary",
+        ],
+        "incompatibilityReasons": sorted(_V3_VISIBLE_SOURCE_NAME_INCOMPATIBILITIES),
         "normalization": "none",
         "sourceAlternateOrder": [
             "name:en",
@@ -4199,9 +4205,12 @@ def _empty_renderer_text_audit() -> dict[str, object]:
     document: dict[str, object] = {
         "aggregateSha256": hashlib.sha256(_RENDERER_TEXT_AUDIT_DOMAIN).hexdigest(),
         "alternateSourceFieldCounts": {},
+        "englishIncompatibilityCounts": {},
         "exactSourceAlternateFeatures": 0,
-        "nonNfcPrimaryFeatures": 0,
+        "incompatibleEnglishFeatures": 0,
+        "incompatiblePrimaryFeatures": 0,
         "policySha256": _renderer_text_policy_binding()["sha256"],
+        "primaryIncompatibilityCounts": {},
         "schema": _RENDERER_TEXT_AUDIT_SCHEMA,
         "sourceFeatures": 0,
         "unrepresentableOmissions": 0,
@@ -4224,7 +4233,8 @@ def _validated_renderer_text_audit(raw: object) -> dict[str, object]:
         raise GlobalWaterwayPackageError("renderer text audit policy identity differs")
     for key in (
         "sourceFeatures",
-        "nonNfcPrimaryFeatures",
+        "incompatibleEnglishFeatures",
+        "incompatiblePrimaryFeatures",
         "exactSourceAlternateFeatures",
         "unrepresentableOmissions",
     ):
@@ -4242,12 +4252,43 @@ def _validated_renderer_text_audit(raw: object) -> dict[str, object]:
         raise GlobalWaterwayPackageError(
             "renderer text audit alternate-field counts are malformed"
         )
+    from .osm_global_waterway_renderer import (
+        _V3_VISIBLE_SOURCE_NAME_INCOMPATIBILITIES,
+    )
+
+    raw_incompatibility_counts = document.get("primaryIncompatibilityCounts")
+    if not isinstance(raw_incompatibility_counts, dict) or any(
+        key not in _V3_VISIBLE_SOURCE_NAME_INCOMPATIBILITIES
+        or type(value) is not int
+        or value <= 0
+        for key, value in raw_incompatibility_counts.items()
+    ):
+        raise GlobalWaterwayPackageError(
+            "renderer text audit incompatibility counts are malformed"
+        )
+    raw_english_incompatibility_counts = document.get(
+        "englishIncompatibilityCounts"
+    )
+    if not isinstance(raw_english_incompatibility_counts, dict) or any(
+        key not in _V3_VISIBLE_SOURCE_NAME_INCOMPATIBILITIES
+        or type(value) is not int
+        or value <= 0
+        for key, value in raw_english_incompatibility_counts.items()
+    ):
+        raise GlobalWaterwayPackageError(
+            "renderer text audit English incompatibility counts are malformed"
+        )
     if (
         sum(raw_field_counts.values()) != document["exactSourceAlternateFeatures"]
-        or document["nonNfcPrimaryFeatures"]
+        or sum(raw_english_incompatibility_counts.values())
+        != document["incompatibleEnglishFeatures"]
+        or sum(raw_incompatibility_counts.values())
+        != document["incompatiblePrimaryFeatures"]
+        or document["incompatiblePrimaryFeatures"]
         != document["exactSourceAlternateFeatures"]
         + document["unrepresentableOmissions"]
-        or document["nonNfcPrimaryFeatures"] > document["sourceFeatures"]
+        or document["incompatiblePrimaryFeatures"] > document["sourceFeatures"]
+        or document["incompatibleEnglishFeatures"] > document["sourceFeatures"]
     ):
         raise GlobalWaterwayPackageError("renderer text audit counters contradict policy")
     for key in ("aggregateSha256", "stateSha256"):
@@ -4263,22 +4304,75 @@ def _validated_renderer_text_audit(raw: object) -> dict[str, object]:
     return document
 
 
+def _append_renderer_text_audit_event(
+    audit: dict[str, object],
+    event: Mapping[str, object],
+) -> None:
+    event_bytes = _canonical_json_bytes(event)
+    audit["aggregateSha256"] = hashlib.sha256(
+        _RENDERER_TEXT_EVENT_DOMAIN
+        + bytes.fromhex(str(audit["aggregateSha256"]))
+        + struct.pack(">Q", len(event_bytes))
+        + event_bytes
+    ).hexdigest()
+
+
 def _record_renderer_text_outcome(
     audit: dict[str, object],
     feature: object,
 ) -> None:
     from .osm_global_waterway_renderer import (
         ExactWaterwayFeature,
+        _v3_visible_source_name_incompatibility,
         _v3_waterway_text_choice,
     )
 
     if not isinstance(feature, ExactWaterwayFeature):
         raise GlobalWaterwayPackageError("renderer text audit requires exact source")
     audit["sourceFeatures"] = int(audit["sourceFeatures"]) + 1
-    if unicodedata.normalize("NFC", feature.primary_name) == feature.primary_name:
+    english_incompatibility = (
+        _v3_visible_source_name_incompatibility(feature.english_name)
+        if feature.english_name is not None
+        else None
+    )
+    if english_incompatibility is not None:
+        audit["incompatibleEnglishFeatures"] = (
+            int(audit["incompatibleEnglishFeatures"]) + 1
+        )
+        english_counts = dict(audit["englishIncompatibilityCounts"])
+        english_counts[english_incompatibility] = (
+            int(english_counts.get(english_incompatibility, 0)) + 1
+        )
+        audit["englishIncompatibilityCounts"] = dict(sorted(english_counts.items()))
+        _append_renderer_text_audit_event(
+            audit,
+            {
+                "englishIncompatibility": english_incompatibility,
+                "englishNameSha256": hashlib.sha256(
+                    feature.english_name.encode("utf-8", "strict")
+                ).hexdigest(),
+                "englishSourceField": "name:en",
+                "outcome": "incompatible-declared-english-omission",
+                "sourceFeatureSha256": feature.source_feature_sha256.hex(),
+                "sourceId": feature.source_id,
+                "sourceKind": feature.source_kind,
+                "waterwayType": feature.waterway_type,
+            },
+        )
+    incompatibility = _v3_visible_source_name_incompatibility(feature.primary_name)
+    if incompatibility is None:
         return
     choice = _v3_waterway_text_choice(feature)
-    audit["nonNfcPrimaryFeatures"] = int(audit["nonNfcPrimaryFeatures"]) + 1
+    audit["incompatiblePrimaryFeatures"] = (
+        int(audit["incompatiblePrimaryFeatures"]) + 1
+    )
+    incompatibility_counts = dict(audit["primaryIncompatibilityCounts"])
+    incompatibility_counts[incompatibility] = (
+        int(incompatibility_counts.get(incompatibility, 0)) + 1
+    )
+    audit["primaryIncompatibilityCounts"] = dict(
+        sorted(incompatibility_counts.items())
+    )
     if choice is None:
         alternate_name_sha256 = None
         alternate_source_field = None
@@ -4291,7 +4385,7 @@ def _record_renderer_text_outcome(
             choice.primary_name.encode("utf-8", "strict")
         ).hexdigest()
         alternate_source_field = choice.name_source_key
-        outcome = "exact-source-alternate-for-non-nfc-primary"
+        outcome = "exact-source-alternate-for-incompatible-primary"
         audit["exactSourceAlternateFeatures"] = (
             int(audit["exactSourceAlternateFeatures"]) + 1
         )
@@ -4307,19 +4401,14 @@ def _record_renderer_text_outcome(
         "primaryNameSha256": hashlib.sha256(
             feature.primary_name.encode("utf-8", "strict")
         ).hexdigest(),
+        "primaryIncompatibility": incompatibility,
         "primarySourceField": feature.name_source_key,
         "sourceFeatureSha256": feature.source_feature_sha256.hex(),
         "sourceId": feature.source_id,
         "sourceKind": feature.source_kind,
         "waterwayType": feature.waterway_type,
     }
-    event_bytes = _canonical_json_bytes(event)
-    audit["aggregateSha256"] = hashlib.sha256(
-        _RENDERER_TEXT_EVENT_DOMAIN
-        + bytes.fromhex(str(audit["aggregateSha256"]))
-        + struct.pack(">Q", len(event_bytes))
-        + event_bytes
-    ).hexdigest()
+    _append_renderer_text_audit_event(audit, event)
 
 
 def _seal_renderer_text_audit(audit: dict[str, object]) -> dict[str, object]:
@@ -4797,8 +4886,8 @@ def _validated_renderer_prefix_stream(
     text_audit = _seal_renderer_text_audit(text_audit)
     if stored_text_audit is None:
         if run_identity.get("rendererTextPolicy") is not None or text_audit[
-            "nonNfcPrimaryFeatures"
-        ]:
+            "incompatiblePrimaryFeatures"
+        ] or text_audit["incompatibleEnglishFeatures"]:
             raise GlobalWaterwayPackageError(
                 "legacy renderer checkpoint lacks its required text audit"
             )

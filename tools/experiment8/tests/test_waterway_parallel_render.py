@@ -121,12 +121,15 @@ def _feature(source_id: int = 7) -> ExactWaterwayFeature:
 def _non_nfc_feature(
     source_id: int = 70,
     *,
+    primary_name: str = "গড়াই-মধুমতি নদী",
+    english_name: str | None = None,
     alternate_key: str | None = None,
     alternate_name: str | None = None,
 ) -> ExactWaterwayFeature:
     return replace(
         _feature(source_id),
-        primary_name="গড়াই-মধুমতি নদী",
+        primary_name=primary_name,
+        english_name=english_name,
         v3_source_alternate_key=alternate_key,
         v3_source_alternate_name=alternate_name,
     )
@@ -3664,6 +3667,64 @@ class ParentFrameValidationTests(unittest.TestCase):
         validate_frame_against_exact_source(20, exact, frame)
         self.assertEqual((), self._validate_rows(exact, frame))
 
+    def test_worker_omits_policy_rewritten_primary_instead_of_crashing(self) -> None:
+        exact = _non_nfc_feature(
+            source_id=34_953_117,
+            primary_name="Dearncomb Beck ",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "omitted", exact)
+
+        self.assertEqual((), frame.geometry_source_witnesses)
+        self.assertEqual((), frame.registry_claims)
+        self.assertEqual((), frame.record_rows)
+        self.assertEqual(0, frame.posting_bytes)
+        validate_frame_against_exact_source(20, exact, frame)
+        self.assertEqual((), self._validate_rows(exact, frame))
+
+    def test_worker_transports_source_bound_primary_to_honest_omission(self) -> None:
+        from tools.experiment8 import osm_global_waterway_package as source
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        self.assertEqual(
+            source._MAX_TEXT_UTF8_BYTES,
+            parallel._MAX_SOURCE_TEXT_BYTES,
+        )
+        exact = _non_nfc_feature(
+            source_id=74,
+            primary_name="A" * 4_097,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "omitted", exact)
+
+        self.assertEqual((), frame.record_rows)
+        self.assertEqual(0, frame.posting_bytes)
+        validate_frame_against_exact_source(20, exact, frame)
+        self.assertEqual((), self._validate_rows(exact, frame))
+
+    def test_worker_transports_incompatible_english_source_field_evidence(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.model import TileKey
+
+        exact = _non_nfc_feature(
+            source_id=75,
+            primary_name="Река",
+            english_name="R" * 4_097,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "english", exact)
+
+        self.assertEqual(frame.record_rows, self._validate_rows(exact, frame))
+        row = frame.record_rows[0]
+        tile = TileKey(int(row[0]), int(row[2]), int(row[1]))
+        _, sourced = parallel._decode_parent_record_envelope(row[11], tile)
+        self.assertIsNone(sourced.english_text)
+        self.assertEqual("MISSING", sourced.english_gap_reason.name)
+        self.assertEqual(
+            parallel._u64_identity("openstreetmap.tag.name:en"),
+            sourced.english_source_field_id,
+        )
+
     def test_parent_rejects_any_nonempty_payload_for_a_v3_text_omission(self) -> None:
         exact = _non_nfc_feature()
         representable = _feature(71)
@@ -3716,6 +3777,30 @@ class ParentFrameValidationTests(unittest.TestCase):
         renderer, sourced = parallel._decode_parent_record_envelope(row[11], tile)
         self.assertEqual("Gorai-Madhumati River", renderer.variant.text)
         self.assertEqual("Gorai-Madhumati River", sourced.primary_text)
+        self.assertEqual(
+            parallel._u64_identity("openstreetmap.tag.official_name"),
+            renderer.variant.placement.text_source_field_id,
+        )
+
+    def test_worker_uses_exact_alternate_for_policy_rewritten_primary(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.model import TileKey
+
+        exact = _non_nfc_feature(
+            source_id=34_953_117,
+            primary_name="Dearncomb Beck ",
+            alternate_key="official_name",
+            alternate_name="Dearncomb Beck",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "alternate", exact)
+
+        self.assertEqual(frame.record_rows, self._validate_rows(exact, frame))
+        row = frame.record_rows[0]
+        tile = TileKey(int(row[0]), int(row[2]), int(row[1]))
+        renderer, sourced = parallel._decode_parent_record_envelope(row[11], tile)
+        self.assertEqual("Dearncomb Beck", renderer.variant.text)
+        self.assertEqual("Dearncomb Beck", sourced.primary_text)
         self.assertEqual(
             parallel._u64_identity("openstreetmap.tag.official_name"),
             renderer.variant.placement.text_source_field_id,

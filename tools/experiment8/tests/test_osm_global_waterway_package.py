@@ -2502,9 +2502,147 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
             store._empty_renderer_text_audit(), feature
         )
         self.assertEqual(1, audit["sourceFeatures"])
-        self.assertEqual(1, audit["nonNfcPrimaryFeatures"])
+        self.assertEqual(1, audit["incompatiblePrimaryFeatures"])
         self.assertEqual(0, audit["exactSourceAlternateFeatures"])
         self.assertEqual(1, audit["unrepresentableOmissions"])
+        self.assertEqual({"not-nfc": 1}, audit["primaryIncompatibilityCounts"])
+
+    def test_policy_rewritten_primary_without_exact_alternate_is_audited_and_omitted(
+        self,
+    ) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+            build_adaptive_waterway_feature,
+            classifier_identity_sha256,
+        )
+
+        feature = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=34_953_117,
+            source_version=1,
+            source_timestamp="2026-06-29T00:00:00Z",
+            waterway_type="stream",
+            name_source_key="name",
+            primary_name="Dearncomb Beck ",
+            english_name=None,
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(1, -30_000_000, 540_000_000),
+                ExactWaterwayPoint(2, -29_000_000, 541_000_000),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=hashlib.sha256(
+                b"policy-rewritten-primary"
+            ).digest(),
+        )
+
+        rendered = build_adaptive_waterway_feature(
+            feature=feature,
+            source_generation_sha256="1" * 64,
+            classifier_sha256=classifier_identity_sha256(),
+            zooms=tuple(range(4, 12)),
+        )
+        self.assertEqual({}, dict(rendered.tiles))
+        audit = store._advance_renderer_text_audit(
+            store._empty_renderer_text_audit(), feature
+        )
+        self.assertEqual(1, audit["sourceFeatures"])
+        self.assertEqual(1, audit["incompatiblePrimaryFeatures"])
+        self.assertEqual(0, audit["exactSourceAlternateFeatures"])
+        self.assertEqual(1, audit["unrepresentableOmissions"])
+        self.assertEqual(
+            {"shared-policy-would-rewrite": 1},
+            audit["primaryIncompatibilityCounts"],
+        )
+
+    def test_incompatible_declared_english_is_never_silently_rewritten(self) -> None:
+        from dataclasses import replace
+
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+            _u64_identity,
+            _v3_waterway_text_choice,
+            build_adaptive_waterway_feature,
+            classifier_identity_sha256,
+        )
+        from tools.experiment8.sourced_text import EnglishGapReason
+
+        base = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=860_947_747,
+            source_version=1,
+            source_timestamp="2026-06-29T00:00:00Z",
+            waterway_type="stream",
+            name_source_key="name",
+            primary_name="Karakoyun Deresi",
+            english_name="Karakoyun River ",
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(1, 280_000_000, 410_000_000),
+                ExactWaterwayPoint(2, 281_000_000, 411_000_000),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=hashlib.sha256(
+                b"incompatible declared English"
+            ).digest(),
+        )
+
+        compatible_primary = _v3_waterway_text_choice(base)
+        self.assertIsNotNone(compatible_primary)
+        self.assertEqual("Karakoyun Deresi", compatible_primary.primary_name)
+        self.assertIsNone(compatible_primary.english_name)
+        english_audit = store._advance_renderer_text_audit(
+            store._empty_renderer_text_audit(), base
+        )
+        self.assertEqual(1, english_audit["sourceFeatures"])
+        self.assertEqual(1, english_audit["incompatibleEnglishFeatures"])
+        self.assertEqual(
+            {"shared-policy-would-rewrite": 1},
+            english_audit["englishIncompatibilityCounts"],
+        )
+        self.assertNotEqual(
+            store._empty_renderer_text_audit()["aggregateSha256"],
+            english_audit["aggregateSha256"],
+        )
+
+        non_latin = replace(
+            base,
+            primary_name="سگارگری",
+            english_name="Saga\u0304rgeri",
+        )
+        rendered = build_adaptive_waterway_feature(
+            feature=non_latin,
+            source_generation_sha256="1" * 64,
+            classifier_sha256=classifier_identity_sha256(),
+            zooms=tuple(range(4, 12)),
+        )
+        sourced = next(
+            record.sourced_text
+            for records in rendered.tiles.values()
+            for record in records
+        )
+        self.assertIsNone(sourced.english_text)
+        self.assertEqual(EnglishGapReason.MISSING, sourced.english_gap_reason)
+        self.assertEqual(
+            _u64_identity("openstreetmap.tag.name:en"),
+            sourced.english_source_field_id,
+        )
+
+        exact_alternate = _v3_waterway_text_choice(
+            replace(
+                base,
+                primary_name="Karakoyun Deresi ",
+                v3_source_alternate_key="official_name",
+                v3_source_alternate_name="Karakoyun Deresi",
+            )
+        )
+        self.assertIsNotNone(exact_alternate)
+        self.assertEqual("Karakoyun Deresi", exact_alternate.primary_name)
+        self.assertIsNone(exact_alternate.english_name)
 
     def test_non_nfc_primary_uses_deterministic_exact_language_source_alternate(self) -> None:
         from tools.experiment8.osm_global_waterway_renderer import (
@@ -2586,6 +2724,19 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
                 english_name=None,
             ),
         )
+        self.assertEqual(
+            ("official_name", "Dearncomb Beck"),
+            store._v3_exact_source_alternate(
+                (
+                    ("name", "Dearncomb Beck "),
+                    ("official_name", "Dearncomb Beck"),
+                    ("waterway", "stream"),
+                ),
+                primary_key="name",
+                primary_name="Dearncomb Beck ",
+                english_name=None,
+            ),
+        )
 
     def test_v3_source_alternate_rejects_replacement_and_control_scalars(self) -> None:
         from tools.experiment8 import osm_global_waterway_store as store
@@ -2658,10 +2809,13 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
 
         self.assertEqual(final, repeated)
         self.assertEqual(2, final["sourceFeatures"])
-        self.assertEqual(1, final["nonNfcPrimaryFeatures"])
+        self.assertEqual(1, final["incompatiblePrimaryFeatures"])
+        self.assertEqual(0, final["incompatibleEnglishFeatures"])
         self.assertEqual(1, final["exactSourceAlternateFeatures"])
         self.assertEqual(0, final["unrepresentableOmissions"])
+        self.assertEqual({}, final["englishIncompatibilityCounts"])
         self.assertEqual({"name:en": 1}, final["alternateSourceFieldCounts"])
+        self.assertEqual({"not-nfc": 1}, final["primaryIncompatibilityCounts"])
         self.assertNotEqual(initial["aggregateSha256"], final["aggregateSha256"])
         self.assertEqual(
             store._renderer_text_policy_binding()["sha256"],
@@ -2673,6 +2827,20 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
             store.GlobalWaterwayPackageError, "renderer text audit"
         ):
             store._validated_renderer_text_audit(mutated)
+
+        legacy = dict(final)
+        legacy["schema"] = (
+            "flightalert.experiment8.osm-waterway-v3-renderer-text-audit.v2"
+        )
+        with self.assertRaisesRegex(
+            store.GlobalWaterwayPackageError, "policy identity"
+        ):
+            store._validated_renderer_text_audit(legacy)
+
+        self.assertEqual(
+            "flightalert.experiment8.osm-waterway-v3-renderer-text-policy.v3",
+            store._renderer_text_policy_binding()["document"]["schema"],
+        )
 
 
 class GlobalWaterwayPublicationTests(unittest.TestCase):
@@ -4534,9 +4702,12 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                     "sha256": supplement["rendererTextPolicy"]["sha256"],
                 },
             )
-            self.assertEqual(0, text_audit["nonNfcPrimaryFeatures"])
+            self.assertEqual(0, text_audit["incompatiblePrimaryFeatures"])
+            self.assertEqual(0, text_audit["incompatibleEnglishFeatures"])
             self.assertEqual(0, text_audit["exactSourceAlternateFeatures"])
             self.assertEqual(0, text_audit["unrepresentableOmissions"])
+            self.assertEqual({}, text_audit["englishIncompatibilityCounts"])
+            self.assertEqual({}, text_audit["primaryIncompatibilityCounts"])
             self.assertGreater(text_audit["sourceFeatures"], 0)
             self.assertEqual(
                 {

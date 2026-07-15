@@ -89,7 +89,7 @@ _MAX_SPOOL_BYTES = 1024 * 1024 * 1024
 _MAX_PATH_BYTES = 32_768
 _MAX_TIMESTAMP_BYTES = 256
 _MAX_SOURCE_KEY_BYTES = 1_024
-_MAX_SOURCE_TEXT_BYTES = 4_096
+_MAX_SOURCE_TEXT_BYTES = 65_535
 _MAX_REGISTRY_DOMAIN_BYTES = 256
 _MAX_REGISTRY_CANONICAL_BYTES = 16 * 1024 * 1024
 _MAX_REGISTRY_CLAIMS = 4_096
@@ -1601,7 +1601,8 @@ def validate_and_decode_record_rows(
     )
     english_field_id = (
         _u64_identity("openstreetmap.tag.name:en", expected_registry)
-        if text_choice.english_name is not None
+        if exact.english_name is not None
+        and text_choice.name_source_key != "name:en"
         else None
     )
     evidence_context = SourceEvidenceContext(
