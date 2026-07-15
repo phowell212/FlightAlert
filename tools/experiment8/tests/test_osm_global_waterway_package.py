@@ -2277,6 +2277,86 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
             tidal_variant.source_style_layer_ids,
         )
 
+    def test_positive_sub_meter_path_keeps_exact_geometry_with_one_meter_prominence(
+        self,
+    ) -> None:
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+            build_adaptive_waterway_feature,
+            classifier_identity_sha256,
+        )
+
+        feature = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=5_148_596,
+            source_version=1,
+            source_timestamp="2026-06-29T00:00:00Z",
+            waterway_type="river",
+            name_source_key="name",
+            primary_name="River Tove",
+            english_name=None,
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(35_695_846, -10_313_541, 521_283_820),
+                ExactWaterwayPoint(35_695_848, -10_313_494, 521_283_843),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=hashlib.sha256(
+                b"real River Tove way 5148596"
+            ).digest(),
+        )
+
+        rendered = build_adaptive_waterway_feature(
+            feature=feature,
+            source_generation_sha256="1" * 64,
+            classifier_sha256=classifier_identity_sha256(),
+            zooms=tuple(range(4, 12)),
+        )
+
+        self.assertEqual(1, rendered.complete_length_m)
+        self.assertTrue(rendered.tiles)
+
+    def test_truly_zero_distance_path_still_fails_closed(self) -> None:
+        from tools.experiment8.osm_global_waterway_package import (
+            GlobalWaterwayPackageError,
+        )
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+            build_adaptive_waterway_feature,
+            classifier_identity_sha256,
+        )
+
+        feature = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=9,
+            source_version=1,
+            source_timestamp="2026-06-29T00:00:00Z",
+            waterway_type="river",
+            name_source_key="name",
+            primary_name="Zero River",
+            english_name=None,
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(1, -10_313_541, 521_283_820),
+                ExactWaterwayPoint(2, -10_313_541, 521_283_820),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=hashlib.sha256(b"zero-distance fixture").digest(),
+        )
+
+        with self.assertRaisesRegex(
+            GlobalWaterwayPackageError,
+            "zero geographic length",
+        ):
+            build_adaptive_waterway_feature(
+                feature=feature,
+                source_generation_sha256="1" * 64,
+                classifier_sha256=classifier_identity_sha256(),
+                zooms=tuple(range(4, 12)),
+            )
+
     def test_non_nfc_source_name_fails_closed_without_normalization(self) -> None:
         from tools.experiment8.osm_global_waterway_package import GlobalWaterwayPackageError
         from tools.experiment8.osm_global_waterway_renderer import (

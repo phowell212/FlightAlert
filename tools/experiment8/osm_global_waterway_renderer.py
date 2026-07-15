@@ -419,10 +419,9 @@ def _great_circle_length_m(parts: Sequence[Sequence[ExactWaterwayPoint]]) -> int
                 * math.sin(delta_longitude / 2.0) ** 2
             )
             total += 2.0 * radius_m * math.asin(min(1.0, math.sqrt(haversine)))
-    length = math.floor(total + 0.5)
-    if length <= 0:
+    if total <= 0.0:
         raise GlobalWaterwayPackageError("waterway path has zero geographic length")
-    return length
+    return max(1, math.floor(total + 0.5))
 
 
 def _candidate_tiles(
