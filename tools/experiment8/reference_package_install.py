@@ -187,6 +187,7 @@ class HostInstallPlan:
     preferred_strictly_below: bool
     hard_strictly_below: bool
     install_policy: str
+    declared_scope_complete: bool
     whole_earth_complete: bool
 
     @classmethod
@@ -285,10 +286,11 @@ class HostInstallPlan:
                 "manifest Unicode script profile identity differs"
             )
         coverage = _exact_mapping(manifest.get("coverage"), "manifest coverage")
-        if not _exact_bool(
+        declared_scope_complete = _exact_bool(
             coverage.get("completeDeclaredScope"),
             "manifest complete-declared-scope claim",
-        ):
+        )
+        if release_policy and not declared_scope_complete:
             raise ReferencePackageInstallError("package declared scope is incomplete")
         whole_earth_complete = _exact_bool(
             coverage.get("completeWholeEarthDictionary"),
@@ -385,6 +387,7 @@ class HostInstallPlan:
             preferred_strictly_below=preferred,
             hard_strictly_below=hard,
             install_policy=install_policy,
+            declared_scope_complete=declared_scope_complete,
             whole_earth_complete=whole_earth_complete,
         )
 
@@ -3493,6 +3496,7 @@ def _plan_document(plan: HostInstallPlan) -> dict[str, object]:
     }
     if plan.install_policy != INSTALL_POLICY_RELEASE:
         document["installPolicy"] = plan.install_policy
+        document["declaredScopeComplete"] = plan.declared_scope_complete
         document["wholeEarthComplete"] = plan.whole_earth_complete
     return document
 

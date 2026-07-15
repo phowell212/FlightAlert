@@ -3192,6 +3192,7 @@ class ProductionBoundaryTest(unittest.TestCase):
         self.assertEqual(6, len(document["files"]))
         self.assertTrue(document["hardStrictlyBelow"])
         self.assertNotIn("installPolicy", document)
+        self.assertNotIn("declaredScopeComplete", document)
         self.assertNotIn("wholeEarthComplete", document)
 
     def test_powershell_wrapper_runs_the_real_validate_only_cli(self) -> None:
@@ -3264,6 +3265,7 @@ class ProductionBoundaryTest(unittest.TestCase):
         self.assertEqual(
             "full-fidelity-visual-evaluation", document["installPolicy"]
         )
+        self.assertTrue(document["declaredScopeComplete"])
         self.assertTrue(document["wholeEarthComplete"])
 
     def test_cli_dispatches_finalize_and_rollback_modes(self) -> None:
@@ -3374,6 +3376,21 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
         )
         self._refresh_manifest_and_result_bindings()
 
+    def _set_honest_incomplete_declared_scope_claim(self) -> None:
+        self._rewrite_package_json(
+            "manifest.json",
+            lambda document: document["coverage"].__setitem__(
+                "completeDeclaredScope", False
+            ),
+        )
+        self._rewrite_package_json(
+            "merge-receipt.json",
+            lambda document: document["coverage"].__setitem__(
+                "completeDeclaredScope", False
+            ),
+        )
+        self._refresh_manifest_and_result_bindings()
+
     def test_visual_evaluation_policy_preserves_honest_incomplete_claim(self) -> None:
         policy = getattr(
             installer_module, "INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION", None
@@ -3392,6 +3409,29 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
 
         self.assertEqual(policy, plan.install_policy)
         self.assertFalse(plan.whole_earth_complete)
+
+    def test_visual_evaluation_policy_preserves_honest_incomplete_declared_scope(
+        self,
+    ) -> None:
+        policy = installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+        self._set_honest_incomplete_declared_scope_claim()
+        self._set_honest_incomplete_whole_earth_claim()
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "declared scope is incomplete"
+        ):
+            self.validate()
+
+        plan = self.validate(
+            install_policy=policy, require_install_policy_binding=False
+        )
+        document = installer_module._plan_document(plan)
+
+        self.assertEqual(policy, plan.install_policy)
+        self.assertFalse(plan.declared_scope_complete)
+        self.assertFalse(plan.whole_earth_complete)
+        self.assertFalse(document["declaredScopeComplete"])
+        self.assertFalse(document["wholeEarthComplete"])
 
     def test_visual_evaluation_policy_records_but_does_not_enforce_size_ceiling(
         self,
