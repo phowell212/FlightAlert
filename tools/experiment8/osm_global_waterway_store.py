@@ -1597,8 +1597,6 @@ def _source_names(tags: Sequence[tuple[str, str]]) -> tuple[str, str, str | None
         value = by_key[key]
         if value.strip():
             english = by_key.get("name:en") if key != "name:en" else None
-            if english is not None and not english.strip():
-                english = None
             return key, value, english
     raise GlobalWaterwayPackageError("selected waterway root has no nonblank exact source name")
 

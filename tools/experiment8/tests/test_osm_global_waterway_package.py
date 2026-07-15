@@ -2571,6 +2571,17 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
         )
         from tools.experiment8.sourced_text import EnglishGapReason
 
+        self.assertEqual(
+            ("name", "River", "   "),
+            store._source_names(
+                (
+                    ("name", "River"),
+                    ("name:en", "   "),
+                    ("waterway", "river"),
+                )
+            ),
+        )
+
         base = ExactWaterwayFeature(
             source_kind="way",
             source_id=860_947_747,
