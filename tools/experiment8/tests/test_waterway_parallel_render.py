@@ -2014,6 +2014,209 @@ class ParallelFeatureRendererTests(unittest.TestCase):
         self.assertEqual((20, 21), (descriptor.start_ordinal, descriptor.end_ordinal_exclusive))
         self.assertEqual((102,), tuple(frame.source_id for frame in frames))
 
+    def test_completed_head_replenishes_the_bounded_window_without_byte_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            features = tuple(_feature(source_id) for source_id in range(1, 10))
+            limits = _limits(
+                max_in_flight_jobs=4,
+                max_in_flight_points=12,
+                max_points_per_job=3,
+            )
+            completion_order = []
+            factory = _ReverseExecutorFactory(
+                completion_hook=lambda job, _descriptor: completion_order.append(
+                    job.start_ordinal
+                )
+            )
+            renderer = _parallel_renderer(root, features, factory, limits=limits)
+            batches = []
+            try:
+                while (batch := renderer.next_batch()) is not None:
+                    batches.append(batch)
+                    descriptor = batch[0]
+                    executor = factory.instances[0]
+                    yielded_count = len(batches)
+                    maximum_outstanding_count = min(
+                        limits.max_in_flight_jobs,
+                        len(features) - yielded_count,
+                    )
+                    outstanding_count = len(renderer._reservations)
+                    self.assertLessEqual(
+                        outstanding_count,
+                        maximum_outstanding_count,
+                    )
+                    if outstanding_count < maximum_outstanding_count:
+                        self.assertIsNotNone(renderer._ready_job)
+                        self.assertFalse(
+                            renderer._ready_job_fits(renderer._ready_job)
+                        )
+                    self.assertEqual(
+                        yielded_count + outstanding_count,
+                        len(executor.submissions),
+                    )
+                    reserved_points, reserved_input_bytes = (
+                        renderer._reservation_totals()
+                    )
+                    self.assertLessEqual(
+                        reserved_points,
+                        limits.max_in_flight_points,
+                    )
+                    self.assertLessEqual(
+                        reserved_input_bytes,
+                        limits.max_in_flight_input_bytes,
+                    )
+                    _actual, _growth, accounted = renderer._inspect_spool_inventory()
+                    self.assertLessEqual(accounted, limits.max_spool_bytes)
+                    spool_bytes = (root / descriptor.file_name).read_bytes()
+                    self.assertEqual(descriptor.byte_count, len(spool_bytes))
+                    self.assertEqual(
+                        descriptor.sha256,
+                        hashlib.sha256(spool_bytes).hexdigest(),
+                    )
+                    renderer.release_batch(descriptor)
+            finally:
+                renderer.close()
+
+            self.assertEqual([3, 2, 1, 0], completion_order[:4])
+            self.assertEqual(
+                list(range(len(features))),
+                [
+                    frame.ordinal
+                    for _descriptor, _exact, frames in batches
+                    for frame in frames
+                ],
+            )
+            self.assertEqual(
+                [feature.source_id for feature in features],
+                [
+                    feature.source_id
+                    for _descriptor, exact, _frames in batches
+                    for feature in exact
+                ],
+            )
+            payloads = tuple(
+                arguments[0]
+                for _future, function, arguments in factory.instances[0].submissions
+                if function is render_feature_batch_job
+            )
+            self.assertEqual(
+                tuple(
+                    encode_feature_batch_job(
+                        replace(
+                            _job(root, feature),
+                            start_ordinal=ordinal,
+                            spool_byte_quota=limits.max_spool_bytes_per_job,
+                        )
+                    )
+                    for ordinal, feature in enumerate(features)
+                ),
+                payloads,
+            )
+            executor = factory.instances[0]
+            self.assertLessEqual(executor.peak_jobs, limits.max_in_flight_jobs)
+            self.assertLessEqual(executor.peak_points, limits.max_in_flight_points)
+            self.assertLessEqual(
+                executor.peak_input_bytes,
+                limits.max_in_flight_input_bytes,
+            )
+            self.assertLessEqual(executor.peak_spool_bytes, limits.max_spool_bytes)
+
+    def test_refill_source_error_returns_one_head_then_aborts_without_later_yield(
+        self,
+    ) -> None:
+        source_error = RuntimeError("injected refill source failure")
+        large_base = _feature(301)
+        large_points = large_base.parts[0] + (
+            ExactWaterwayPoint(3_014, -751_000_000, 396_000_000),
+            ExactWaterwayPoint(3_015, -748_000_000, 398_000_000),
+            ExactWaterwayPoint(3_016, -745_000_000, 400_000_000),
+        )
+        large = replace(
+            large_base,
+            parts=(large_points,),
+            required_node_ids=frozenset((large_points[1].node_id,)),
+        )
+
+        def failing_source():
+            yield large
+            yield _feature(302)
+            yield _feature(303)
+            yield _feature(304)
+            raise source_error
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _prepare(Path(temporary) / "spool")
+            limits = _limits(
+                max_in_flight_jobs=4,
+                max_in_flight_points=9,
+                max_points_per_job=3,
+            )
+            factory = _ReverseExecutorFactory()
+            renderer = _parallel_renderer(
+                root,
+                failing_source(),
+                factory,
+                limits=limits,
+            )
+
+            first = renderer.next_batch()
+
+            self.assertEqual(
+                (0, 1),
+                (
+                    first[0].start_ordinal,
+                    first[0].end_ordinal_exclusive,
+                ),
+            )
+            self.assertEqual((301,), tuple(feature.source_id for feature in first[1]))
+            executor = factory.instances[0]
+            self.assertEqual(3, len(executor.submissions))
+            self.assertFalse(executor.submissions[-1][0].done())
+            self.assertFalse(renderer._failed)
+            self.assertEqual([], executor.shutdown_calls)
+            self.assertLessEqual(len(renderer._reservations), limits.max_in_flight_jobs)
+            reserved_points, reserved_input_bytes = renderer._reservation_totals()
+            self.assertLessEqual(reserved_points, limits.max_in_flight_points)
+            self.assertLessEqual(
+                reserved_input_bytes,
+                limits.max_in_flight_input_bytes,
+            )
+            _actual, _growth, accounted = renderer._inspect_spool_inventory()
+            self.assertLessEqual(accounted, limits.max_spool_bytes)
+            evidence = {
+                path.name: path.read_bytes()
+                for path in root.iterdir()
+            }
+
+            with self.assertRaises(RuntimeError) as raised:
+                renderer.next_batch()
+
+            self.assertIs(source_error, raised.exception)
+            self.assertEqual([(True, True)], executor.shutdown_calls)
+            self.assertTrue(executor.submissions[-1][0].cancelled())
+            self.assertTrue(renderer._failed)
+            self.assertTrue(renderer._closed)
+            self.assertEqual(1, renderer._next_yield_ordinal)
+            self.assertIn(1, renderer._completed)
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "cannot continue after failure",
+            ):
+                renderer.next_batch()
+            with self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "preserves yielded spools after failure",
+            ):
+                renderer.release_batch(first[0])
+            renderer.close()
+            self.assertEqual(
+                evidence,
+                {path.name: path.read_bytes() for path in root.iterdir()},
+            )
+
     def test_reverse_completion_still_yields_checkpoint_and_pause_aligned_ranges_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _prepare(Path(temporary) / "spool")

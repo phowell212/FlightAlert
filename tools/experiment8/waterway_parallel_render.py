@@ -5077,6 +5077,7 @@ class ParallelFeatureRenderer:
         self._completed: dict[int, _CompletedRenderBatch] = {}
         self._known_ranges: dict[tuple[int, int], int] = {}
         self._yielded_spools: dict[str, _YieldedSpool] = {}
+        self._deferred_error: BaseException | None = None
         self._closed = False
         self._failed = False
         try:
@@ -5639,6 +5640,20 @@ class ParallelFeatureRenderer:
         self._next_yield_ordinal = reservation.end_ordinal_exclusive
         return completed.descriptor, reservation.features, completed.frames
 
+    def _take_next_completed_and_replenish(
+        self,
+    ) -> tuple[
+        SpoolDescriptor,
+        tuple[ExactWaterwayFeature, ...],
+        tuple[FeatureRenderFrame, ...],
+    ]:
+        batch = self._take_next_completed()
+        try:
+            self._submit_until_blocked()
+        except BaseException as error:
+            self._deferred_error = error
+        return batch
+
     def _remember_yielded_spool(self, descriptor: SpoolDescriptor) -> None:
         if descriptor.file_name in self._yielded_spools:
             raise _error("parallel render yielded the same spool more than once")
@@ -5792,6 +5807,11 @@ class ParallelFeatureRenderer:
         tuple[ExactWaterwayFeature, ...],
         tuple[FeatureRenderFrame, ...],
     ] | None:
+        if self._deferred_error is not None:
+            error = self._deferred_error
+            self._deferred_error = None
+            self._abort(error)
+            raise error
         if self._failed:
             raise _error("parallel render scheduler cannot continue after failure")
         if self._closed:
@@ -5800,11 +5820,11 @@ class ParallelFeatureRenderer:
             while True:
                 self._collect_completed()
                 if self._next_yield_ordinal in self._completed:
-                    return self._take_next_completed()
+                    return self._take_next_completed_and_replenish()
                 self._submit_until_blocked()
                 self._collect_completed()
                 if self._next_yield_ordinal in self._completed:
-                    return self._take_next_completed()
+                    return self._take_next_completed_and_replenish()
                 if not self._reservations and self._input_exhausted:
                     self._inspect_spool_inventory()
                     self._shutdown(cancel_futures=False)
