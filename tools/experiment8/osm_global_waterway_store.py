@@ -19,6 +19,7 @@ from typing import BinaryIO, Callable, Iterator, Mapping, Sequence
 
 from . import osm_global_waterway_package as source_module
 from . import reference_size_policy as size_policy_module
+from . import sourced_text
 from .osm_global_waterway_package import (
     GLOBAL_POLICY_SHA256,
     GlobalWaterwayBuildResult,
@@ -84,6 +85,15 @@ _MAX_RELATION_POINTS = MAX_RENDERER_RECORD_BYTES // _RELATION_POINT_ACCOUNTING_B
 _BUILD_SCHEMA = "flightalert.experiment8.osm-global-waterway-build.v2"
 _RENDER_RUN_SCHEMA = "flightalert.experiment8.osm-global-waterway-render-run.v2"
 _RENDER_PROGRESS_SCHEMA = "flightalert.experiment8.waterway-render-progress.v1"
+_RENDERER_TEXT_POLICY_SCHEMA = (
+    "flightalert.experiment8.osm-waterway-v3-renderer-text-policy.v2"
+)
+_RENDERER_TEXT_AUDIT_SCHEMA = (
+    "flightalert.experiment8.osm-waterway-v3-renderer-text-audit.v2"
+)
+_RENDERER_TEXT_POLICY_DOMAIN = b"FAE8WATERV3RENDERERTEXTPOLICY2\0"
+_RENDERER_TEXT_AUDIT_DOMAIN = b"FAE8WATERV3RENDERERTEXTAUDIT2\0"
+_RENDERER_TEXT_EVENT_DOMAIN = b"FAE8WATERV3RENDERERTEXTEVENT2\0"
 _SEMANTIC_STREAM_DOMAIN = b"flight-alert-exp8-semantic-v1\0"
 _DEFAULT_ZOOMS = tuple(range(4, 12))
 _ZERO_INDEX_ENTRY = b"\0" * INDEX_ENTRY_BYTES
@@ -1594,6 +1604,67 @@ def _source_names(tags: Sequence[tuple[str, str]]) -> tuple[str, str, str | None
     raise GlobalWaterwayPackageError("selected waterway root has no nonblank exact source name")
 
 
+def _v3_compatible_visible_source_name(value: object) -> bool:
+    if (
+        type(value) is not str
+        or not value
+        or "\ufffd" in value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+        or unicodedata.normalize("NFC", value) != value
+    ):
+        return False
+    try:
+        analysis = sourced_text.DEFAULT_SOURCED_TEXT_POLICY.analyze_text(value)
+    except (UnicodeError, ValueError):
+        return False
+    return analysis.canonical_text == value
+
+
+def _v3_exact_source_alternate(
+    tags: Sequence[tuple[str, str]],
+    *,
+    primary_key: str,
+    primary_name: str,
+    english_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Select one exact non-English source field only when V3 can carry it."""
+
+    if unicodedata.normalize("NFC", primary_name) == primary_name:
+        return None, None
+    if _v3_compatible_visible_source_name(english_name):
+        # Exact name:en remains carried by ExactWaterwayFeature.english_name.
+        return None, None
+    by_key = dict(tags)
+    language_keys = [
+        key
+        for key, _ in tags
+        if key not in {primary_key, "name:en"} and _supported_language_name(key)
+    ]
+    primary_match = _LANGUAGE_NAME_KEY.fullmatch(primary_key)
+    primary_language = primary_match.group(1).casefold() if primary_match else None
+    normalized_primary = unicodedata.normalize("NFC", primary_name)
+    same_language_keys = [
+        key
+        for key in language_keys
+        if (
+            (_LANGUAGE_NAME_KEY.fullmatch(key).group(1).casefold() == primary_language)
+            if primary_language is not None
+            else unicodedata.normalize("NFC", by_key[key]) == normalized_primary
+        )
+    ]
+    ordered_keys = list(same_language_keys)
+    if primary_key != "official_name" and "official_name" in by_key:
+        ordered_keys.append("official_name")
+    ordered_keys.extend(key for key in language_keys if key not in ordered_keys)
+    if primary_key != "int_name" and "int_name" in by_key:
+        ordered_keys.append("int_name")
+    for key in ordered_keys:
+        value = by_key[key]
+        if _v3_compatible_visible_source_name(value):
+            return key, value
+    return None, None
+
+
 def _point_rows(
     connection: sqlite3.Connection,
     way_id: int,
@@ -1728,6 +1799,8 @@ class _AdmissionRootAnalysis:
     entry_bytes: bytes
     candidates: tuple[_CandidateEvidence, ...]
     legacy_first_terminal_reason: str | None
+    v3_source_alternate_key: str | None
+    v3_source_alternate_name: str | None
 
 
 def _source_document_from_database(connection: sqlite3.Connection) -> dict[str, object]:
@@ -2601,8 +2674,19 @@ def _analyze_admission_root(
         raise GlobalWaterwayPackageError(
             "waterway admission entry byte ceiling exceeded"
         )
+    alternate_key, alternate_name = _v3_exact_source_alternate(
+        tags,
+        primary_key=name_key,
+        primary_name=primary,
+        english_name=english,
+    )
     return _AdmissionRootAnalysis(
-        MappingProxyType(entry), entry_bytes, tuple(candidates), legacy_reason
+        MappingProxyType(entry),
+        entry_bytes,
+        tuple(candidates),
+        legacy_reason,
+        alternate_key,
+        alternate_name,
     )
 
 
@@ -2647,6 +2731,8 @@ def _analysis_features(analysis: _AdmissionRootAnalysis):
             candidate.parts,
             candidate.required_node_ids,
             candidate.source_feature_sha256,
+            analysis.v3_source_alternate_key,
+            analysis.v3_source_alternate_name,
         )
 
 
@@ -3044,6 +3130,12 @@ def _iter_authenticated_direct_way_features(
                 )
             tags = _decode_tags(root_row[12], f"direct way {root_id}")
             name_source_key, primary_name, english_name = _source_names(tags)
+            alternate_key, alternate_name = _v3_exact_source_alternate(
+                tags,
+                primary_key=name_source_key,
+                primary_name=primary_name,
+                english_name=english_name,
+            )
             if dict(tags).get("waterway") != candidate_row[2]:
                 raise GlobalWaterwayPackageError(
                     "admitted direct-way source type differs"
@@ -3175,6 +3267,8 @@ def _iter_authenticated_direct_way_features(
                 parts,
                 frozenset(),
                 source_sha256,
+                alternate_key,
+                alternate_name,
             )
         if point_index != len(batch.point_rows):
             raise GlobalWaterwayPackageError(
@@ -4065,6 +4159,183 @@ def _render_code_identities() -> dict[str, object]:
     }
 
 
+def _renderer_text_policy_binding() -> dict[str, object]:
+    document = {
+        "currentV3Compatibility": {
+            "alreadyNfcPrimary": "preserve exact source primary and declared English",
+            "nonNfcPrimary": (
+                "use first exact V3-safe source alternate in the frozen field order"
+            ),
+            "nonRepresentable": (
+                "emit no label records; preserve source traversal and bind one audit event"
+            ),
+        },
+        "normalization": "none",
+        "sourceAlternateOrder": [
+            "name:en",
+            "same-language supported name:<language> field",
+            "official_name when it is not the selected primary field",
+            "remaining supported name:<language> fields in stored source order",
+            "int_name",
+        ],
+        "schema": _RENDERER_TEXT_POLICY_SCHEMA,
+        "sourceFeatureIdentity": "preserve unchanged",
+    }
+    raw = _canonical_json_bytes(document)
+    return {
+        "document": document,
+        "sha256": hashlib.sha256(_RENDERER_TEXT_POLICY_DOMAIN + raw).hexdigest(),
+    }
+
+
+def _renderer_text_audit_state_sha256(document: Mapping[str, object]) -> str:
+    state = {key: value for key, value in document.items() if key != "stateSha256"}
+    return hashlib.sha256(
+        _RENDERER_TEXT_AUDIT_DOMAIN + _canonical_json_bytes(state)
+    ).hexdigest()
+
+
+def _empty_renderer_text_audit() -> dict[str, object]:
+    document: dict[str, object] = {
+        "aggregateSha256": hashlib.sha256(_RENDERER_TEXT_AUDIT_DOMAIN).hexdigest(),
+        "alternateSourceFieldCounts": {},
+        "exactSourceAlternateFeatures": 0,
+        "nonNfcPrimaryFeatures": 0,
+        "policySha256": _renderer_text_policy_binding()["sha256"],
+        "schema": _RENDERER_TEXT_AUDIT_SCHEMA,
+        "sourceFeatures": 0,
+        "unrepresentableOmissions": 0,
+    }
+    document["stateSha256"] = _renderer_text_audit_state_sha256(document)
+    return document
+
+
+def _validated_renderer_text_audit(raw: object) -> dict[str, object]:
+    if not isinstance(raw, Mapping):
+        raise GlobalWaterwayPackageError("renderer text audit is absent or malformed")
+    document = dict(raw)
+    if set(document) != set(_empty_renderer_text_audit()):
+        raise GlobalWaterwayPackageError("renderer text audit fields are malformed")
+    if (
+        document.get("schema") != _RENDERER_TEXT_AUDIT_SCHEMA
+        or document.get("policySha256")
+        != _renderer_text_policy_binding()["sha256"]
+    ):
+        raise GlobalWaterwayPackageError("renderer text audit policy identity differs")
+    for key in (
+        "sourceFeatures",
+        "nonNfcPrimaryFeatures",
+        "exactSourceAlternateFeatures",
+        "unrepresentableOmissions",
+    ):
+        value = document.get(key)
+        if type(value) is not int or not 0 <= value <= source_module._MAX_SIGNED_63:
+            raise GlobalWaterwayPackageError("renderer text audit counters are malformed")
+    raw_field_counts = document.get("alternateSourceFieldCounts")
+    if not isinstance(raw_field_counts, dict) or any(
+        type(key) is not str
+        or not key
+        or type(value) is not int
+        or value <= 0
+        for key, value in raw_field_counts.items()
+    ):
+        raise GlobalWaterwayPackageError(
+            "renderer text audit alternate-field counts are malformed"
+        )
+    if (
+        sum(raw_field_counts.values()) != document["exactSourceAlternateFeatures"]
+        or document["nonNfcPrimaryFeatures"]
+        != document["exactSourceAlternateFeatures"]
+        + document["unrepresentableOmissions"]
+        or document["nonNfcPrimaryFeatures"] > document["sourceFeatures"]
+    ):
+        raise GlobalWaterwayPackageError("renderer text audit counters contradict policy")
+    for key in ("aggregateSha256", "stateSha256"):
+        value = document.get(key)
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise GlobalWaterwayPackageError("renderer text audit SHA-256 is malformed")
+    if document["stateSha256"] != _renderer_text_audit_state_sha256(document):
+        raise GlobalWaterwayPackageError("renderer text audit state SHA-256 differs")
+    return document
+
+
+def _record_renderer_text_outcome(
+    audit: dict[str, object],
+    feature: object,
+) -> None:
+    from .osm_global_waterway_renderer import (
+        ExactWaterwayFeature,
+        _v3_waterway_text_choice,
+    )
+
+    if not isinstance(feature, ExactWaterwayFeature):
+        raise GlobalWaterwayPackageError("renderer text audit requires exact source")
+    audit["sourceFeatures"] = int(audit["sourceFeatures"]) + 1
+    if unicodedata.normalize("NFC", feature.primary_name) == feature.primary_name:
+        return
+    choice = _v3_waterway_text_choice(feature)
+    audit["nonNfcPrimaryFeatures"] = int(audit["nonNfcPrimaryFeatures"]) + 1
+    if choice is None:
+        alternate_name_sha256 = None
+        alternate_source_field = None
+        outcome = "unrepresentable-v3-visible-text-omission"
+        audit["unrepresentableOmissions"] = (
+            int(audit["unrepresentableOmissions"]) + 1
+        )
+    else:
+        alternate_name_sha256 = hashlib.sha256(
+            choice.primary_name.encode("utf-8", "strict")
+        ).hexdigest()
+        alternate_source_field = choice.name_source_key
+        outcome = "exact-source-alternate-for-non-nfc-primary"
+        audit["exactSourceAlternateFeatures"] = (
+            int(audit["exactSourceAlternateFeatures"]) + 1
+        )
+        field_counts = dict(audit["alternateSourceFieldCounts"])
+        field_counts[choice.name_source_key] = (
+            int(field_counts.get(choice.name_source_key, 0)) + 1
+        )
+        audit["alternateSourceFieldCounts"] = dict(sorted(field_counts.items()))
+    event = {
+        "alternateNameSha256": alternate_name_sha256,
+        "alternateSourceField": alternate_source_field,
+        "outcome": outcome,
+        "primaryNameSha256": hashlib.sha256(
+            feature.primary_name.encode("utf-8", "strict")
+        ).hexdigest(),
+        "primarySourceField": feature.name_source_key,
+        "sourceFeatureSha256": feature.source_feature_sha256.hex(),
+        "sourceId": feature.source_id,
+        "sourceKind": feature.source_kind,
+        "waterwayType": feature.waterway_type,
+    }
+    event_bytes = _canonical_json_bytes(event)
+    audit["aggregateSha256"] = hashlib.sha256(
+        _RENDERER_TEXT_EVENT_DOMAIN
+        + bytes.fromhex(str(audit["aggregateSha256"]))
+        + struct.pack(">Q", len(event_bytes))
+        + event_bytes
+    ).hexdigest()
+
+
+def _seal_renderer_text_audit(audit: dict[str, object]) -> dict[str, object]:
+    audit["stateSha256"] = _renderer_text_audit_state_sha256(audit)
+    return _validated_renderer_text_audit(audit)
+
+
+def _advance_renderer_text_audit(
+    raw_audit: object,
+    feature: object,
+) -> dict[str, object]:
+    audit = _validated_renderer_text_audit(raw_audit)
+    _record_renderer_text_outcome(audit, feature)
+    return _seal_renderer_text_audit(audit)
+
+
 def _render_run_identity(
     *,
     package_id: str,
@@ -4095,6 +4366,7 @@ def _render_run_identity(
         "packageId": package_id,
         "ingestSemanticSha256": ingest_semantic_sha256,
         "runtime": _runtime_identity_document(),
+        "rendererTextPolicy": _renderer_text_policy_binding(),
         "schema": _RENDER_RUN_SCHEMA,
         "sizePolicy": dict(size_policy_binding),
         "source": source_binding.document(),
@@ -4451,6 +4723,7 @@ def _validated_renderer_prefix_stream(
     zooms: tuple[int, ...],
     run_identity: Mapping[str, object],
     rendered_prefix: int,
+    stored_text_audit: object,
 ):
     from .osm_global_waterway_renderer import build_adaptive_waterway_feature
     from .semantic_model import HotIdRegistry
@@ -4482,6 +4755,7 @@ def _validated_renderer_prefix_stream(
         )
     }
     registry = HotIdRegistry()
+    text_audit = _empty_renderer_text_audit()
     source = iter(
         _iter_render_waterway_features(connection, source_binding=source_binding)
     )
@@ -4518,8 +4792,21 @@ def _validated_renderer_prefix_stream(
             )
         _validate_rendered_feature_prefix(connection, exact, rendered)
         _extend_expected_renderer_identities(expected, exact, rendered)
+        _record_renderer_text_outcome(text_audit, exact)
     _validate_renderer_identity_tables(connection, expected)
-    return source, registry
+    text_audit = _seal_renderer_text_audit(text_audit)
+    if stored_text_audit is None:
+        if run_identity.get("rendererTextPolicy") is not None or text_audit[
+            "nonNfcPrimaryFeatures"
+        ]:
+            raise GlobalWaterwayPackageError(
+                "legacy renderer checkpoint lacks its required text audit"
+            )
+    elif text_audit != _validated_renderer_text_audit(stored_text_audit):
+        raise GlobalWaterwayPackageError(
+            "renderer checkpoint text audit differs from exact source prefix"
+        )
+    return source, registry, text_audit
 
 
 def _commit_render_checkpoint(
@@ -5103,7 +5390,11 @@ def _stage_renderer_records(
         )
         stored_identity = _meta_get(connection, "renderRunIdentity")
         if stored_identity is None:
-            checkpoint = {"renderComplete": False, "renderedFeatures": 0}
+            checkpoint = {
+                "renderComplete": False,
+                "renderedFeatures": 0,
+                "rendererTextAudit": _empty_renderer_text_audit(),
+            }
             rendered_prefix = 0
         elif stored_identity != dict(run_identity):
             raise GlobalWaterwayPackageError(
@@ -5157,12 +5448,13 @@ def _stage_renderer_records(
                 ),
             )
             _resume_renderer_write_reservation(connection, trusted_data_version)
-        source, registry = _validated_renderer_prefix_stream(
+        source, registry, text_audit = _validated_renderer_prefix_stream(
             connection,
             source_binding=source_binding,
             zooms=zooms,
             run_identity=run_identity,
             rendered_prefix=rendered_prefix,
+            stored_text_audit=checkpoint.get("rendererTextAudit"),
         )
         if progress_publisher is not None:
             progress_publisher.reconcile(rendered_prefix)
@@ -5233,6 +5525,7 @@ def _stage_renderer_records(
                         zooms=zooms,
                         peaks=peaks,
                     )
+                    _record_renderer_text_outcome(text_audit, exact)
                     seen = ordinal + 1
                     checkpoint = {
                         "renderComplete": False,
@@ -5241,6 +5534,9 @@ def _stage_renderer_records(
                     since_commit += 1
                     checkpoint_committed = False
                     if since_commit >= checkpoint_features:
+                        checkpoint["rendererTextAudit"] = dict(
+                            _seal_renderer_text_audit(text_audit)
+                        )
                         if progress_publisher is not None:
                             progress_publisher.require_unchanged()
                         _commit_render_checkpoint_with_progress(
@@ -5264,6 +5560,9 @@ def _stage_renderer_records(
                             pending_descriptors.remove(committed_descriptor)
                     if pause_after_features is not None and seen >= pause_after_features:
                         if not checkpoint_committed:
+                            checkpoint["rendererTextAudit"] = dict(
+                                _seal_renderer_text_audit(text_audit)
+                            )
                             if progress_publisher is not None:
                                 progress_publisher.require_unchanged()
                             _commit_render_checkpoint_with_progress(
@@ -5289,7 +5588,11 @@ def _stage_renderer_records(
                             connection,
                             trusted_data_version,
                         )
-            checkpoint = {"renderComplete": True, "renderedFeatures": seen}
+            checkpoint = {
+                "renderComplete": True,
+                "renderedFeatures": seen,
+                "rendererTextAudit": dict(_seal_renderer_text_audit(text_audit)),
+            }
             if progress_publisher is not None:
                 progress_publisher.require_unchanged()
             _commit_render_checkpoint_with_progress(
@@ -5842,6 +6145,8 @@ def _manifest_document(
     admission_aggregate_sha256: str,
     admission_policy_sha256: str,
     ingest_semantic_sha256: str,
+    renderer_text_policy: Mapping[str, object],
+    renderer_text_audit: Mapping[str, object],
     records_identity: Mapping[str, object],
     index_identity: Mapping[str, object],
 ) -> dict[str, object]:
@@ -5885,6 +6190,8 @@ def _manifest_document(
             "ingestSemanticSha256": ingest_semantic_sha256,
             "records": dict(records_identity),
             "requestedZooms": list(_DEFAULT_ZOOMS),
+            "rendererTextAudit": dict(renderer_text_audit),
+            "rendererTextPolicy": dict(renderer_text_policy),
             "rootPolicySha256": source_binding.selection_policy_sha256,
             "runIdentitySha256": run_identity_sha256,
             "selectionManifestSha256": source_binding.selection_manifest_sha256,
@@ -5945,6 +6252,36 @@ def _publish(
     if dict(raw_size_policy) != dict(current_size_policy):
         raise GlobalWaterwayPackageError(
             "waterway renderer size-policy identity drifted"
+        )
+    renderer_text_policy = _renderer_text_policy_binding()
+    if render_run_identity.get("rendererTextPolicy") != renderer_text_policy:
+        raise GlobalWaterwayPackageError(
+            "waterway renderer text-policy identity drifted"
+        )
+    render_checkpoint = _meta_get(connection, "renderCheckpoint")
+    if (
+        not isinstance(render_checkpoint, dict)
+        or render_checkpoint.get("renderComplete") is not True
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway publication lacks complete renderer text audit"
+        )
+    renderer_text_audit = _validated_renderer_text_audit(
+        render_checkpoint.get("rendererTextAudit")
+    )
+    rendered_feature_count = int(
+        connection.execute("SELECT COUNT(*) FROM rendered_features").fetchone()[0]
+    )
+    admitted_feature_count = int(
+        connection.execute("SELECT COUNT(*) FROM admission_candidates").fetchone()[0]
+    )
+    if (
+        renderer_text_audit["sourceFeatures"] != rendered_feature_count
+        or rendered_feature_count != admitted_feature_count
+        or render_checkpoint.get("renderedFeatures") != rendered_feature_count
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway renderer text audit coverage differs from admitted source"
         )
     _ensure_owned_partial_directory(
         connection,
@@ -6007,6 +6344,8 @@ def _publish(
         ingest_semantic_sha256=str(
             render_run_identity["ingestSemanticSha256"]
         ),
+        renderer_text_policy=renderer_text_policy,
+        renderer_text_audit=renderer_text_audit,
         records_identity=records_identity,
         index_identity=index_identity,
     )
@@ -6100,6 +6439,7 @@ def _publish(
         },
         "projection": projection,
         "rendererSemanticStreamSha256": semantic_sha256,
+        "rendererTextAudit": dict(renderer_text_audit),
         "schema": _BUILD_SCHEMA,
         "source": source_binding.document(),
     }
@@ -6114,6 +6454,8 @@ def _publish(
         "manifestSha256": output_files[0]["sha256"],
         "rendererRunIdentitySha256": render_run_sha256,
         "rendererSemanticStreamSha256": semantic_sha256,
+        "rendererTextAuditStateSha256": renderer_text_audit["stateSha256"],
+        "rendererTextPolicySha256": renderer_text_policy["sha256"],
         "schema": "flightalert.experiment8.osm-waterway-final-semantic-identity.v2",
         "source": source_binding.document(),
     }

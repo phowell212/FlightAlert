@@ -118,6 +118,20 @@ def _feature(source_id: int = 7) -> ExactWaterwayFeature:
     )
 
 
+def _non_nfc_feature(
+    source_id: int = 70,
+    *,
+    alternate_key: str | None = None,
+    alternate_name: str | None = None,
+) -> ExactWaterwayFeature:
+    return replace(
+        _feature(source_id),
+        primary_name="গড়াই-মধুমতি নদী",
+        v3_source_alternate_key=alternate_key,
+        v3_source_alternate_name=alternate_name,
+    )
+
+
 def _job(spool_directory: Path, *features: ExactWaterwayFeature) -> FeatureRenderBatchJob:
     from tools.experiment8 import waterway_parallel_render as parallel
 
@@ -396,6 +410,73 @@ class FeatureBatchJobCodecTests(unittest.TestCase):
             decoded = decode_feature_batch_job(encoded)
             self.assertEqual(job, decoded)
             self.assertEqual(encoded, encode_feature_batch_job(decoded))
+
+    def test_job_codec_round_trips_the_exact_v3_source_alternate_pair(self) -> None:
+        exact = _non_nfc_feature(
+            alternate_key="official_name",
+            alternate_name="Gorai-Madhumati River",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            job = _job(Path(temporary), exact)
+            encoded = encode_feature_batch_job(job)
+            decoded = decode_feature_batch_job(encoded)
+
+        self.assertEqual(job, decoded)
+        self.assertEqual("official_name", decoded.features[0].v3_source_alternate_key)
+        self.assertEqual(
+            "Gorai-Madhumati River",
+            decoded.features[0].v3_source_alternate_name,
+        )
+        self.assertEqual(encoded, encode_feature_batch_job(decoded))
+
+    def test_job_codec_versions_the_exact_source_alternate_layout(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            encoded = encode_feature_batch_job(_job(Path(temporary), _feature()))
+
+        self.assertEqual(b"FAE8WRJOB\x03", encoded[: len(b"FAE8WRJOB") + 1])
+        self.assertEqual(b"FAE8WRSOURCERANGE2\0", parallel._SOURCE_RANGE_DOMAIN)
+        self.assertEqual(b"FAE8WRSOURCEFRAME2\0", parallel._SOURCE_FRAME_DOMAIN)
+
+    def test_job_decoder_rejects_legacy_v2_after_exact_feature_layout_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            encoded = bytearray(
+                encode_feature_batch_job(_job(Path(temporary), _feature()))
+            )
+        encoded[len(b"FAE8WRJOB")] = 2
+
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "version"):
+            decode_feature_batch_job(bytes(encoded))
+
+    def test_exact_feature_encoder_rejects_an_unpaired_v3_source_alternate(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        exact = copy(
+            _non_nfc_feature(
+                alternate_key="official_name",
+                alternate_name="Gorai-Madhumati River",
+            )
+        )
+        object.__setattr__(exact, "v3_source_alternate_name", None)
+
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "alternate.*paired"):
+            parallel._encode_exact_feature(exact)
+
+    def test_exact_feature_decoder_rejects_mismatched_alternate_presence(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        exact = _non_nfc_feature(
+            alternate_key="official_name",
+            alternate_name="Gorai-Madhumati River",
+        )
+        encoded = bytearray(parallel._encode_exact_feature(exact))
+        pair_prefix = b"\x01\x01" + struct.pack("<I", len(b"official_name"))
+        pair_offset = encoded.index(pair_prefix)
+        encoded[pair_offset + 1] = 0
+
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "alternate.*paired"):
+            parallel._decode_exact_feature(bytes(encoded))
 
     def test_public_job_encoder_stops_encoding_at_the_job_byte_bound(self) -> None:
         from tools.experiment8 import waterway_parallel_render as parallel
@@ -2510,6 +2591,44 @@ class ParallelFeatureRendererTests(unittest.TestCase):
 
 
 class AuthenticatedFeatureBatchTests(unittest.TestCase):
+    def test_batch_codec_versions_the_empty_omission_frame_semantics(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor, _ = _render(root)
+            contents = (root / descriptor.file_name).read_bytes()
+
+        self.assertEqual(
+            b"FAE8WRBATCH\x03",
+            contents[: len(b"FAE8WRBATCH") + 1],
+        )
+        self.assertEqual(
+            "flightalert.experiment8.waterway-render-batch.v3",
+            parallel._BATCH_SCHEMA,
+        )
+
+    def test_batch_reader_rejects_legacy_v2_after_frame_semantics_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor, _ = _render(root)
+            path = root / descriptor.file_name
+            contents = bytearray(path.read_bytes())
+            contents[len(b"FAE8WRBATCH")] = 2
+            path.write_bytes(contents)
+            changed = replace(
+                descriptor,
+                sha256=hashlib.sha256(contents).hexdigest(),
+            )
+
+            with self.assertRaisesRegex(GlobalWaterwayPackageError, "version"):
+                read_feature_batch(
+                    root,
+                    changed,
+                    expected_render_run_identity_sha256=_RUN_SHA256,
+                    expected_source_range_sha256=descriptor.source_range_sha256,
+                )
+
     def test_worker_rejects_wrong_package_owner_before_any_spool_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = prepare_spool_directory(
@@ -3516,6 +3635,99 @@ class ParentFrameValidationTests(unittest.TestCase):
         corrupt_renderer = self._tamper(frame, record_rows=tuple(rows))
         with self.assertRaises(GlobalWaterwayPackageError):
             self._validate_rows(exact, corrupt_renderer)
+
+    def test_worker_and_parent_preserve_an_explicit_honest_v3_text_omission(self) -> None:
+        exact = _non_nfc_feature()
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "omitted", exact)
+
+        feature_identity = (
+            "feature_ids",
+            exact.source_feature_sha256[:8],
+            exact.source_feature_sha256,
+        )
+        self.assertEqual((), frame.geometry_source_witnesses)
+        self.assertEqual((), frame.registry_claims)
+        self.assertEqual((feature_identity,), frame.identity_rows)
+        self.assertEqual((), frame.record_rows)
+        self.assertEqual(0, frame.posting_bytes)
+        self.assertEqual(
+            (
+                20,
+                exact.source_kind,
+                exact.source_id,
+                exact.waterway_type,
+                exact.source_feature_sha256,
+            ),
+            frame.rendered_feature_row,
+        )
+        validate_frame_against_exact_source(20, exact, frame)
+        self.assertEqual((), self._validate_rows(exact, frame))
+
+    def test_parent_rejects_any_nonempty_payload_for_a_v3_text_omission(self) -> None:
+        exact = _non_nfc_feature()
+        representable = _feature(71)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            omitted = self._render_one(root / "omitted", exact)
+            populated = self._render_one(root / "populated", representable)
+
+        cases = {
+            "geometry": self._tamper(
+                omitted,
+                geometry_source_witnesses=populated.geometry_source_witnesses,
+            ),
+            "registry": self._tamper(
+                omitted,
+                registry_claims=populated.registry_claims,
+            ),
+            "identity": self._tamper(
+                omitted,
+                identity_rows=omitted.identity_rows + populated.identity_rows[1:2],
+            ),
+            "record": self._tamper(
+                omitted,
+                record_rows=populated.record_rows,
+            ),
+            "posting bytes": self._tamper(omitted, posting_bytes=1),
+        }
+        for name, candidate in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                GlobalWaterwayPackageError,
+                "omission|empty",
+            ):
+                self._validate_rows(exact, candidate)
+
+    def test_parent_uses_the_exact_v3_source_alternate_in_strict_validation(self) -> None:
+        from tools.experiment8 import waterway_parallel_render as parallel
+        from tools.experiment8.model import TileKey
+
+        exact = _non_nfc_feature(
+            source_id=72,
+            alternate_key="official_name",
+            alternate_name="Gorai-Madhumati River",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            frame = self._render_one(Path(temporary) / "alternate", exact)
+
+        self.assertEqual(frame.record_rows, self._validate_rows(exact, frame))
+        row = frame.record_rows[0]
+        tile = TileKey(int(row[0]), int(row[2]), int(row[1]))
+        renderer, sourced = parallel._decode_parent_record_envelope(row[11], tile)
+        self.assertEqual("Gorai-Madhumati River", renderer.variant.text)
+        self.assertEqual("Gorai-Madhumati River", sourced.primary_text)
+        self.assertEqual(
+            parallel._u64_identity("openstreetmap.tag.official_name"),
+            renderer.variant.placement.text_source_field_id,
+        )
+
+    def test_parent_rejects_an_empty_omission_frame_for_representable_text(self) -> None:
+        omitted_exact = _non_nfc_feature()
+        representable = _feature(73)
+        with tempfile.TemporaryDirectory() as temporary:
+            omitted = self._render_one(Path(temporary) / "omitted", omitted_exact)
+        with self.assertRaisesRegex(GlobalWaterwayPackageError, "omission|empty"):
+            self._validate_rows(representable, omitted)
 
     def test_parent_validation_never_rerenders_the_exact_feature(self) -> None:
         from tools.experiment8 import waterway_parallel_render as parallel

@@ -2408,8 +2408,64 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
         )
         self.assertIsNotNone(sourced.english_source_field_id)
 
-    def test_non_nfc_source_name_fails_closed_without_normalization(self) -> None:
-        from tools.experiment8.osm_global_waterway_package import GlobalWaterwayPackageError
+    def test_non_nfc_primary_uses_exact_nfc_source_alternate_without_normalizing(self) -> None:
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+            _u64_identity,
+            build_adaptive_waterway_feature,
+            classifier_identity_sha256,
+        )
+
+        feature = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=26_002_882,
+            source_version=15,
+            source_timestamp="2022-06-09T00:57:41Z",
+            waterway_type="river",
+            name_source_key="name",
+            primary_name="গড়াই-মধুমতি নদী",
+            english_name="Gorai-Madhumati River",
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(1, -760_000_000, 390_000_000),
+                ExactWaterwayPoint(2, -750_000_000, 400_000_000),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=bytes.fromhex(
+                "d161b2019ea8dc5e6931e8c56abc3ee9"
+                "4a64e6dd4b6f059b5aeb826e9ae1ca35"
+            ),
+        )
+
+        rendered = build_adaptive_waterway_feature(
+            feature=feature,
+            source_generation_sha256="1" * 64,
+            classifier_sha256=classifier_identity_sha256(),
+            zooms=tuple(range(4, 12)),
+        )
+        records = tuple(
+            record for tile_records in rendered.tiles.values() for record in tile_records
+        )
+        self.assertTrue(records)
+        for record in records:
+            sourced = record.sourced_text
+            self.assertIsNotNone(sourced)
+            self.assertEqual("Gorai-Madhumati River", sourced.primary_text)
+            self.assertIsNone(sourced.english_text)
+            self.assertEqual(
+                _u64_identity("openstreetmap.tag.name:en"),
+                sourced.primary_source_field_id,
+            )
+            self.assertNotIn("গড়াই-মধুমতি নদী".encode("utf-8"), sourced.canonical_bytes)
+            self.assertNotIn("গড়াই-মধুমতি নদী".encode("utf-8"), sourced.canonical_bytes)
+            self.assertEqual(
+                feature.source_feature_sha256[:8],
+                record.renderer_record.posting.feature_id.to_bytes(8, "big"),
+            )
+
+    def test_non_nfc_primary_without_exact_nfc_alternate_is_audited_and_omitted(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
         from tools.experiment8.osm_global_waterway_renderer import (
             ExactWaterwayFeature,
             ExactWaterwayPoint,
@@ -2435,15 +2491,188 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
             source_feature_sha256=hashlib.sha256(b"non-nfc fixture").digest(),
         )
 
-        with self.assertRaisesRegex(
-            GlobalWaterwayPackageError, "non-NFC.*without normalization"
-        ):
-            build_adaptive_waterway_feature(
-                feature=feature,
-                source_generation_sha256="1" * 64,
-                classifier_sha256=classifier_identity_sha256(),
-                zooms=tuple(range(4, 12)),
+        rendered = build_adaptive_waterway_feature(
+            feature=feature,
+            source_generation_sha256="1" * 64,
+            classifier_sha256=classifier_identity_sha256(),
+            zooms=tuple(range(4, 12)),
+        )
+        self.assertEqual({}, dict(rendered.tiles))
+        audit = store._advance_renderer_text_audit(
+            store._empty_renderer_text_audit(), feature
+        )
+        self.assertEqual(1, audit["sourceFeatures"])
+        self.assertEqual(1, audit["nonNfcPrimaryFeatures"])
+        self.assertEqual(0, audit["exactSourceAlternateFeatures"])
+        self.assertEqual(1, audit["unrepresentableOmissions"])
+
+    def test_non_nfc_primary_uses_deterministic_exact_language_source_alternate(self) -> None:
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+            _u64_identity,
+            build_adaptive_waterway_feature,
+            classifier_identity_sha256,
+        )
+
+        feature = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=30_803_714,
+            source_version=4,
+            source_timestamp="2026-06-29T00:00:00Z",
+            waterway_type="stream",
+            name_source_key="name",
+            primary_name="A\u030a",
+            english_name=None,
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(1, 100_000_000, 600_000_000),
+                ExactWaterwayPoint(2, 110_000_000, 610_000_000),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=hashlib.sha256(b"language alternate").digest(),
+            v3_source_alternate_key="name:se",
+            v3_source_alternate_name="Johka",
+        )
+
+        rendered = build_adaptive_waterway_feature(
+            feature=feature,
+            source_generation_sha256="1" * 64,
+            classifier_sha256=classifier_identity_sha256(),
+            zooms=tuple(range(4, 12)),
+        )
+        records = tuple(
+            record for tile_records in rendered.tiles.values() for record in tile_records
+        )
+        self.assertTrue(records)
+        for record in records:
+            self.assertEqual("Johka", record.renderer_record.variant.text)
+            self.assertEqual("Johka", record.sourced_text.primary_text)
+            self.assertEqual(
+                _u64_identity("openstreetmap.tag.name:se"),
+                record.sourced_text.primary_source_field_id,
             )
+
+    def test_source_alternate_selection_matches_frozen_census_order(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        tags = (
+            ("name", "Leavá" + "s\u030c" + "johka"),
+            ("int_name", "International fallback"),
+            ("name:fit", "Pessijoki"),
+            ("name:se", "Leavášjohka"),
+            ("waterway", "river"),
+        )
+        self.assertEqual(
+            ("name:se", "Leavášjohka"),
+            store._v3_exact_source_alternate(
+                tags,
+                primary_key="name",
+                primary_name=tags[0][1],
+                english_name=None,
+            ),
+        )
+        self.assertEqual(
+            ("name:fit", "Pessijoki"),
+            store._v3_exact_source_alternate(
+                (
+                    ("name", "Besse" + "s\u030c" + "johka"),
+                    ("name:fit", "Pessijoki"),
+                    ("int_name", "International fallback"),
+                    ("waterway", "river"),
+                ),
+                primary_key="name",
+                primary_name="Besse" + "s\u030c" + "johka",
+                english_name=None,
+            ),
+        )
+
+    def test_v3_source_alternate_rejects_replacement_and_control_scalars(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        tags = (
+            ("name", "Cafe\u0301 River"),
+            ("name:fr", "Rivi\ufffdre"),
+            ("official_name", "River\x01Name"),
+            ("waterway", "river"),
+        )
+
+        self.assertEqual(
+            (None, None),
+            store._v3_exact_source_alternate(
+                tags,
+                primary_key="name",
+                primary_name=tags[0][1],
+                english_name=None,
+            ),
+        )
+
+    def test_renderer_text_audit_binds_exact_source_alternate_without_raw_rewrite(self) -> None:
+        from tools.experiment8 import osm_global_waterway_store as store
+        from tools.experiment8.osm_global_waterway_renderer import (
+            ExactWaterwayFeature,
+            ExactWaterwayPoint,
+        )
+
+        ordinary = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=1,
+            source_version=1,
+            source_timestamp="2026-06-29T00:00:00Z",
+            waterway_type="river",
+            name_source_key="name",
+            primary_name="Ordinary River",
+            english_name=None,
+            complete_named_relation=False,
+            parts=((
+                ExactWaterwayPoint(1, -760_000_000, 390_000_000),
+                ExactWaterwayPoint(2, -750_000_000, 400_000_000),
+            ),),
+            required_node_ids=frozenset(),
+            source_feature_sha256=hashlib.sha256(b"ordinary fixture").digest(),
+        )
+        bengali = ExactWaterwayFeature(
+            source_kind="way",
+            source_id=26_002_882,
+            source_version=15,
+            source_timestamp="2022-06-09T00:57:41Z",
+            waterway_type="river",
+            name_source_key="name",
+            primary_name="গড়াই-মধুমতি নদী",
+            english_name="Gorai-Madhumati River",
+            complete_named_relation=False,
+            parts=ordinary.parts,
+            required_node_ids=frozenset(),
+            source_feature_sha256=bytes.fromhex(
+                "d161b2019ea8dc5e6931e8c56abc3ee9"
+                "4a64e6dd4b6f059b5aeb826e9ae1ca35"
+            ),
+        )
+
+        initial = store._empty_renderer_text_audit()
+        after_ordinary = store._advance_renderer_text_audit(initial, ordinary)
+        final = store._advance_renderer_text_audit(after_ordinary, bengali)
+        repeated = store._advance_renderer_text_audit(
+            store._advance_renderer_text_audit(initial, ordinary), bengali
+        )
+
+        self.assertEqual(final, repeated)
+        self.assertEqual(2, final["sourceFeatures"])
+        self.assertEqual(1, final["nonNfcPrimaryFeatures"])
+        self.assertEqual(1, final["exactSourceAlternateFeatures"])
+        self.assertEqual(0, final["unrepresentableOmissions"])
+        self.assertEqual({"name:en": 1}, final["alternateSourceFieldCounts"])
+        self.assertNotEqual(initial["aggregateSha256"], final["aggregateSha256"])
+        self.assertEqual(
+            store._renderer_text_policy_binding()["sha256"],
+            final["policySha256"],
+        )
+        mutated = dict(final)
+        mutated["sourceFeatures"] = 3
+        with self.assertRaisesRegex(
+            store.GlobalWaterwayPackageError, "renderer text audit"
+        ):
+            store._validated_renderer_text_audit(mutated)
 
 
 class GlobalWaterwayPublicationTests(unittest.TestCase):
@@ -4293,6 +4522,22 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                 "OpenStreetMap contributors", supplement["attribution"]["credit"]
             )
             self.assertIn("extraction receipt", supplement["attribution"]["sourceOffer"])
+            text_audit = supplement["rendererTextAudit"]
+            self.assertEqual(
+                first.receipt["rendererTextAudit"],
+                text_audit,
+            )
+            self.assertEqual(
+                first.receipt["build"]["runIdentity"]["rendererTextPolicy"],
+                {
+                    "document": supplement["rendererTextPolicy"]["document"],
+                    "sha256": supplement["rendererTextPolicy"]["sha256"],
+                },
+            )
+            self.assertEqual(0, text_audit["nonNfcPrimaryFeatures"])
+            self.assertEqual(0, text_audit["exactSourceAlternateFeatures"])
+            self.assertEqual(0, text_audit["unrepresentableOmissions"])
+            self.assertGreater(text_audit["sourceFeatures"], 0)
             self.assertEqual(
                 {
                     "canal": {"filterId": "labels.canals", "semanticSubtype": 350},
@@ -4394,6 +4639,34 @@ class GlobalWaterwayPublicationTests(unittest.TestCase):
                     (root / "clean" / filename).read_bytes(),
                     filename,
                 )
+
+    def test_feature_checkpoint_resume_rejects_resealed_text_audit_tamper(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paused = self._build(root, "audit-tamper", pause_after_features=2)
+            self.assertEqual("paused", paused.state)
+            database = root / "audit-tamper-work" / "waterway-state.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                checkpoint = dict(store._meta_get(connection, "renderCheckpoint"))
+                audit = dict(checkpoint["rendererTextAudit"])
+                audit["sourceFeatures"] = 1
+                audit["stateSha256"] = store._renderer_text_audit_state_sha256(audit)
+                checkpoint["rendererTextAudit"] = audit
+                store._meta_set(connection, "renderCheckpoint", checkpoint)
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                store.GlobalWaterwayPackageError,
+                "checkpoint text audit differs from exact source prefix",
+            ):
+                self._build(root, "audit-tamper")
 
     def test_reached_pause_target_stays_paused_instead_of_publishing_a_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

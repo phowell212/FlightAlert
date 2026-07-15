@@ -735,15 +735,29 @@ def _validate_complete_admission(
         raise GlobalWaterwayPackageError(
             "waterway recovery source binding differs from exact incident"
         )
+    expected_render_checkpoint: dict[str, object] = {
+        "renderComplete": False,
+        "renderedFeatures": authority.rendered_features,
+    }
+    incident_text_policy = render_identity.get("rendererTextPolicy")
+    if incident_text_policy is not None:
+        if incident_text_policy != store._renderer_text_policy_binding():
+            raise GlobalWaterwayPackageError(
+                "waterway recovery predecessor text-policy identity differs"
+            )
+        incident_text_audit = store._validated_renderer_text_audit(
+            render_checkpoint.get("rendererTextAudit")
+        )
+        if incident_text_audit["sourceFeatures"] != authority.rendered_features:
+            raise GlobalWaterwayPackageError(
+                "waterway recovery predecessor text-audit coverage differs"
+            )
+        expected_render_checkpoint["rendererTextAudit"] = incident_text_audit
     if (
         render_identity.get("packageId") != authority.package_id
         or render_identity.get("checkpointFeatures")
         != authority.checkpoint_features
-        or render_checkpoint
-        != {
-            "renderComplete": False,
-            "renderedFeatures": authority.rendered_features,
-        }
+        or render_checkpoint != expected_render_checkpoint
     ):
         raise GlobalWaterwayPackageError(
             "waterway recovery failed-render checkpoint differs from exact incident"
@@ -792,6 +806,7 @@ def _validate_first_recovery(
         zooms=tuple(raw_zooms),
         run_identity=incident_render_identity,
         rendered_prefix=authority.rendered_features,
+        stored_text_audit=documents["renderCheckpoint"].get("rendererTextAudit"),
     )
     if defer_counts_to_reset_boundary:
         source_counts = authority.source_table_counts
@@ -896,6 +911,7 @@ def _validate_recovery_resume(
         zooms=tuple(raw_zooms),
         run_identity=new_render_identity,
         rendered_prefix=rendered_features,
+        stored_text_audit=checkpoint.get("rendererTextAudit"),
     )
     _require_source_counts(connection, authority)
     return _RecoveryPlan(
@@ -1261,7 +1277,11 @@ def _reset_renderer_state(
         store._meta_set(
             connection,
             "renderCheckpoint",
-            {"renderComplete": False, "renderedFeatures": 0},
+            {
+                "renderComplete": False,
+                "renderedFeatures": 0,
+                "rendererTextAudit": store._empty_renderer_text_audit(),
+            },
         )
         page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
         baseline_live_pages = int(

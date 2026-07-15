@@ -106,6 +106,8 @@ class ExactWaterwayFeature:
     parts: tuple[tuple[ExactWaterwayPoint, ...], ...]
     required_node_ids: frozenset[int]
     source_feature_sha256: bytes
+    v3_source_alternate_key: str | None = None
+    v3_source_alternate_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.source_kind not in {"way", "relation"}:
@@ -118,8 +120,47 @@ class ExactWaterwayFeature:
             raise GlobalWaterwayPackageError("waterway source type is unsupported")
         if type(self.primary_name) is not str or not self.primary_name:
             raise GlobalWaterwayPackageError("waterway source primary name is empty")
+        if type(self.name_source_key) is not str or not self.name_source_key:
+            raise GlobalWaterwayPackageError("waterway source primary-name field is empty")
         if self.english_name is not None and type(self.english_name) is not str:
             raise GlobalWaterwayPackageError("waterway English source name is malformed")
+        alternate_pair = (
+            self.v3_source_alternate_key,
+            self.v3_source_alternate_name,
+        )
+        if (alternate_pair[0] is None) != (alternate_pair[1] is None):
+            raise GlobalWaterwayPackageError(
+                "waterway V3 source alternate field and value must be paired"
+            )
+        if alternate_pair[0] is not None:
+            if (
+                type(alternate_pair[0]) is not str
+                or not alternate_pair[0]
+                or alternate_pair[0] == self.name_source_key
+                or type(alternate_pair[1]) is not str
+                or not alternate_pair[1]
+            ):
+                raise GlobalWaterwayPackageError(
+                    "waterway V3 source alternate is malformed"
+                )
+            if unicodedata.normalize("NFC", alternate_pair[1]) != alternate_pair[1]:
+                raise GlobalWaterwayPackageError(
+                    "waterway V3 source alternate must already be NFC"
+                )
+            try:
+                alternate_analysis = (
+                    sourced_text.DEFAULT_SOURCED_TEXT_POLICY.analyze_text(
+                        alternate_pair[1]
+                    )
+                )
+            except (UnicodeError, ValueError) as error:
+                raise GlobalWaterwayPackageError(
+                    "waterway V3 source alternate is not source-text compatible"
+                ) from error
+            if alternate_analysis.canonical_text != alternate_pair[1]:
+                raise GlobalWaterwayPackageError(
+                    "waterway V3 source alternate would be rewritten"
+                )
         if type(self.complete_named_relation) is not bool or (
             self.source_kind == "way" and self.complete_named_relation
         ):
@@ -140,6 +181,61 @@ class ExactWaterwayFeature:
             )
         if type(self.source_feature_sha256) is not bytes or len(self.source_feature_sha256) != 32:
             raise GlobalWaterwayPackageError("waterway source feature identity must be SHA-256 bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class _V3WaterwayTextChoice:
+    name_source_key: str
+    primary_name: str
+    english_name: str | None
+    used_source_alternate: bool
+
+
+def _v3_waterway_text_choice(
+    feature: ExactWaterwayFeature,
+) -> _V3WaterwayTextChoice | None:
+    """Choose only exact source text that the current V3 visible-text codec can carry."""
+
+    if not isinstance(feature, ExactWaterwayFeature):
+        raise GlobalWaterwayPackageError("V3 waterway text choice requires exact source")
+    if unicodedata.normalize("NFC", feature.primary_name) == feature.primary_name:
+        return _V3WaterwayTextChoice(
+            feature.name_source_key,
+            feature.primary_name,
+            feature.english_name,
+            False,
+        )
+    candidates = []
+    if feature.english_name is not None:
+        candidates.append(("name:en", feature.english_name))
+    if feature.v3_source_alternate_key is not None:
+        candidates.append(
+            (
+                feature.v3_source_alternate_key,
+                feature.v3_source_alternate_name,
+            )
+        )
+    for source_key, alternate in candidates:
+        if alternate is None or unicodedata.normalize("NFC", alternate) != alternate:
+            continue
+        try:
+            analysis = sourced_text.DEFAULT_SOURCED_TEXT_POLICY.analyze_text(alternate)
+        except (UnicodeError, ValueError):
+            continue
+        if analysis.canonical_text != alternate:
+            continue
+        declared_english = (
+            feature.english_name
+            if source_key != "name:en" and feature.english_name != alternate
+            else None
+        )
+        return _V3WaterwayTextChoice(
+            source_key,
+            alternate,
+            declared_english,
+            True,
+        )
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,19 +580,47 @@ def build_adaptive_waterway_feature(
         raise GlobalWaterwayPackageError("adaptive waterway zoom is outside [0,29]")
     if feature.source_feature_sha256 == b"\0" * 32:
         raise GlobalWaterwayPackageError("waterway source feature identity is empty")
-    if unicodedata.normalize("NFC", feature.primary_name) != feature.primary_name:
-        raise GlobalWaterwayPackageError(
-            "non-NFC primary source name cannot enter V3 without normalization"
+    text_choice = _v3_waterway_text_choice(feature)
+    subtype = _SUBTYPE_BY_WATERWAY[feature.waterway_type]
+    complete_length_m = _great_circle_length_m(feature.parts)
+    if text_choice is None:
+        primary_field_id = _u64_identity(
+            "openstreetmap.tag." + feature.name_source_key
+        )
+        context = SourceEvidenceContext(
+            source_generation_sha256=source_generation_sha256,
+            classifier_sha256=classifier_sha256,
+            source_field_id=primary_field_id,
+        )
+        facts = LabelFacts(
+            subtype=subtype,
+            evidence_context=context,
+            complete_named_relation=feature.complete_named_relation,
+            complete_relation_length_m=(
+                complete_length_m if feature.complete_named_relation else None
+            ),
+        )
+        decision = prominence_decision_for_label(facts)
+        return AdaptiveWaterwayRendererFeature(
+            source_kind=feature.source_kind,
+            source_id=feature.source_id,
+            waterway_type=feature.waterway_type,
+            semantic_subtype=subtype,
+            primary_name=feature.primary_name,
+            complete_length_m=complete_length_m,
+            prominence_tier=decision.tier,
+            prominence_decision=decision,
+            variant_point_counts_by_zoom=MappingProxyType({}),
+            tiles=MappingProxyType({}),
         )
 
     registry = identity_registry or HotIdRegistry()
-    subtype = _SUBTYPE_BY_WATERWAY[feature.waterway_type]
     primary_field_id = _u64_identity(
-        "openstreetmap.tag." + feature.name_source_key, registry
+        "openstreetmap.tag." + text_choice.name_source_key, registry
     )
     english_field_id = (
         _u64_identity("openstreetmap.tag.name:en", registry)
-        if feature.english_name is not None
+        if text_choice.english_name is not None
         else None
     )
     context = SourceEvidenceContext(
@@ -504,7 +628,6 @@ def build_adaptive_waterway_feature(
         classifier_sha256=classifier_sha256,
         source_field_id=primary_field_id,
     )
-    complete_length_m = _great_circle_length_m(feature.parts)
     facts = LabelFacts(
         subtype=subtype,
         evidence_context=context,
@@ -516,12 +639,12 @@ def build_adaptive_waterway_feature(
     decision = prominence_decision_for_label(facts)
     visibility = visibility_rule_for_label(facts)
     exact_text = create_sourced_map_text(
-        primary=feature.primary_name,
+        primary=text_choice.primary_name,
         primary_source_field_id=primary_field_id,
-        declared_english=feature.english_name,
+        declared_english=text_choice.english_name,
         english_source_field_id=english_field_id,
     )
-    if exact_text.primary_text != feature.primary_name:
+    if exact_text.primary_text != text_choice.primary_name:
         raise GlobalWaterwayPackageError(
             "sourced-text policy would alter the exact primary source name"
         )
@@ -555,7 +678,7 @@ def build_adaptive_waterway_feature(
             - owner_tile.y * geometry.world_denominator,
         )
         placement = make_normalized_placement(
-            text=feature.primary_name,
+            text=text_choice.primary_name,
             source_feature_sha256=feature.source_feature_sha256,
             placement_geometry_sha256=geometry_identity.full_sha256,
             text_evidence_kind=TextEvidenceKind.SOURCE_FIELD,
@@ -615,7 +738,7 @@ def build_adaptive_waterway_feature(
                     registry,
                 ),
             ),
-            text=feature.primary_name,
+            text=text_choice.primary_name,
             geometry=geometry,
             min_zoom_centi=visibility.min_zoom_centi,
             max_zoom_centi=LABEL_DISPLAY_MAX_ZOOM_CENTI,
@@ -650,7 +773,7 @@ def build_adaptive_waterway_feature(
         source_id=feature.source_id,
         waterway_type=feature.waterway_type,
         semantic_subtype=subtype,
-        primary_name=feature.primary_name,
+        primary_name=text_choice.primary_name,
         complete_length_m=complete_length_m,
         prominence_tier=decision.tier,
         prominence_decision=decision,

@@ -26,6 +26,7 @@ from .osm_global_waterway_renderer import (
     _simplified_indices,
     _u64_identity,
     _unwrapped_world_points,
+    _v3_waterway_text_choice,
     build_adaptive_waterway_feature,
 )
 from .reference_presentation_policy import (
@@ -67,17 +68,17 @@ from .sourced_text import create_sourced_map_text
 
 
 _JOB_MAGIC = b"FAE8WRJOB"
-_JOB_VERSION = 2
+_JOB_VERSION = 3
 _BATCH_MAGIC = b"FAE8WRBATCH"
-_BATCH_VERSION = 2
-_BATCH_SCHEMA = "flightalert.experiment8.waterway-render-batch.v2"
+_BATCH_VERSION = 3
+_BATCH_SCHEMA = "flightalert.experiment8.waterway-render-batch.v3"
 _SPOOL_OWNER_SCHEMA = "flightalert.experiment8.waterway-parallel-spool.v1"
 _SPOOL_OWNER_FILE = "owner.json"
 _SPOOL_OWNER_MAX_BYTES = 16 * 1024
 _SPOOL_INVENTORY_STABLE_ATTEMPTS = 4
 _DESTINATION_FREE_SPACE_RESERVE = 1_500_000_000
-_SOURCE_RANGE_DOMAIN = b"FAE8WRSOURCERANGE1\0"
-_SOURCE_FRAME_DOMAIN = b"FAE8WRSOURCEFRAME1\0"
+_SOURCE_RANGE_DOMAIN = b"FAE8WRSOURCERANGE2\0"
+_SOURCE_FRAME_DOMAIN = b"FAE8WRSOURCEFRAME2\0"
 _RENDER_CHECKPOINT_FEATURES = 100
 _MAX_BATCH_FEATURES = 100
 _MAX_FEATURE_PARTS = 65_536
@@ -430,6 +431,40 @@ class FeatureRenderFrame:
             self.point_count,
             "feature frame required-node count",
         )
+        expected_rendered_row = (
+            self.ordinal,
+            self.source_kind,
+            self.source_id,
+            self.waterway_type,
+            self.source_feature_sha256,
+        )
+        exact_feature_identity = (
+            "feature_ids",
+            self.source_feature_sha256[:8],
+            self.source_feature_sha256,
+        )
+        is_exact_empty_omission = (
+            self.geometry_source_witnesses == ()
+            and self.registry_claims == ()
+            and self.identity_rows == (exact_feature_identity,)
+            and self.record_rows == ()
+            and self.posting_bytes == 0
+        )
+        has_empty_omission_component = (
+            self.geometry_source_witnesses == ()
+            or self.registry_claims == ()
+            or self.identity_rows == (exact_feature_identity,)
+            or self.record_rows == ()
+            or self.posting_bytes == 0
+        )
+        if is_exact_empty_omission:
+            if self.rendered_feature_row != expected_rendered_row:
+                raise _error(
+                    "feature frame empty omission rendered row differs from its source"
+                )
+            return
+        if has_empty_omission_component:
+            raise _error("feature frame empty omission form is malformed")
         if (
             type(self.geometry_source_witnesses) is not tuple
             or not 1 <= len(self.geometry_source_witnesses) <= 30
@@ -464,13 +499,6 @@ class FeatureRenderFrame:
                 selected_points += len(indices)
             if selected_points > self.point_count:
                 raise _error("feature frame geometry witness exceeds source point count")
-        expected_rendered_row = (
-            self.ordinal,
-            self.source_kind,
-            self.source_id,
-            self.waterway_type,
-            self.source_feature_sha256,
-        )
         if (
             type(self.rendered_feature_row) is not tuple
             or self.rendered_feature_row != expected_rendered_row
@@ -721,6 +749,23 @@ def _encode_exact_feature(feature: ExactWaterwayFeature) -> bytes:
         writer.text(
             feature.english_name, _MAX_SOURCE_TEXT_BYTES, "exact English name"
         )
+    alternate_key_present = feature.v3_source_alternate_key is not None
+    alternate_name_present = feature.v3_source_alternate_name is not None
+    if alternate_key_present != alternate_name_present:
+        raise _error("exact V3 source alternate field and value must be paired")
+    writer.boolean(alternate_key_present, "exact V3 source alternate field presence")
+    writer.boolean(alternate_name_present, "exact V3 source alternate value presence")
+    if alternate_key_present:
+        writer.text(
+            feature.v3_source_alternate_key,
+            _MAX_SOURCE_KEY_BYTES,
+            "exact V3 source alternate field",
+        )
+        writer.text(
+            feature.v3_source_alternate_name,
+            _MAX_SOURCE_TEXT_BYTES,
+            "exact V3 source alternate value",
+        )
     writer.boolean(
         feature.complete_named_relation, "exact complete-relation evidence"
     )
@@ -775,6 +820,24 @@ def _decode_exact_feature(data: bytes) -> ExactWaterwayFeature:
         if reader.boolean("exact English-name presence")
         else None
     )
+    alternate_key_present = reader.boolean(
+        "exact V3 source alternate field presence"
+    )
+    alternate_name_present = reader.boolean(
+        "exact V3 source alternate value presence"
+    )
+    if alternate_key_present != alternate_name_present:
+        raise _error("exact V3 source alternate field and value must be paired")
+    v3_source_alternate_key = (
+        reader.text(_MAX_SOURCE_KEY_BYTES, "exact V3 source alternate field")
+        if alternate_key_present
+        else None
+    )
+    v3_source_alternate_name = (
+        reader.text(_MAX_SOURCE_TEXT_BYTES, "exact V3 source alternate value")
+        if alternate_name_present
+        else None
+    )
     complete_named_relation = reader.boolean("exact complete-relation evidence")
     point_count = reader.u32("exact feature point count")
     if not 2 <= point_count <= _MAX_FEATURE_POINTS:
@@ -823,6 +886,8 @@ def _decode_exact_feature(data: bytes) -> ExactWaterwayFeature:
         parts=tuple(parts),
         required_node_ids=frozenset(required_node_ids),
         source_feature_sha256=source_feature_sha256,
+        v3_source_alternate_key=v3_source_alternate_key,
+        v3_source_alternate_name=v3_source_alternate_name,
     )
 
 
@@ -1171,7 +1236,7 @@ def _decode_feature_render_frame(reader) -> FeatureRenderFrame:
     if required_node_count > point_count:
         raise _error("feature frame required-node count exceeds its point count")
     witness_count = reader.u32("feature frame geometry witness count")
-    if not 1 <= witness_count <= 30:
+    if witness_count > 30:
         raise _error("feature frame geometry witness count is outside its bound")
     geometry_source_witnesses: list[
         tuple[int, tuple[tuple[int, ...], ...]]
@@ -1245,7 +1310,7 @@ def _decode_feature_render_frame(reader) -> FeatureRenderFrame:
             )
         )
     record_count = reader.u32("feature frame record row count")
-    if not 1 <= record_count <= _MAX_RECORD_ROWS:
+    if record_count > _MAX_RECORD_ROWS:
         raise _error("feature frame record row count is outside its bound")
     record_rows = tuple(_decode_record_row(reader) for _ in range(record_count))
     posting_bytes = reader.u64("feature frame posting-byte peak")
@@ -1495,14 +1560,48 @@ def validate_and_decode_record_rows(
         "feature frame classifier SHA-256",
     )
     normalized_zooms = _normalized_validation_zooms(expected_zooms)
+    text_choice = _v3_waterway_text_choice(exact)
+    feature_hot = exact.source_feature_sha256[:8]
+    exact_feature_identity = (
+        "feature_ids",
+        feature_hot,
+        exact.source_feature_sha256,
+    )
+    expected_rendered_row = (
+        frame.ordinal,
+        exact.source_kind,
+        exact.source_id,
+        exact.waterway_type,
+        exact.source_feature_sha256,
+    )
+    if text_choice is None:
+        if (
+            frame.geometry_source_witnesses != ()
+            or frame.rendered_feature_row != expected_rendered_row
+            or frame.registry_claims != ()
+            or frame.identity_rows != (exact_feature_identity,)
+            or frame.record_rows != ()
+            or frame.posting_bytes != 0
+        ):
+            raise _error("feature frame V3 text omission is not the exact empty form")
+        return ()
+    if (
+        not frame.geometry_source_witnesses
+        or not frame.registry_claims
+        or type(frame.identity_rows) is not tuple
+        or len(frame.identity_rows) <= 1
+        or not frame.record_rows
+        or frame.posting_bytes <= 0
+    ):
+        raise _error("representable feature frame cannot use the empty omission form")
     expected_registry = RecordingHotIdRegistry()
     primary_field_id = _u64_identity(
-        "openstreetmap.tag." + exact.name_source_key,
+        "openstreetmap.tag." + text_choice.name_source_key,
         expected_registry,
     )
     english_field_id = (
         _u64_identity("openstreetmap.tag.name:en", expected_registry)
-        if exact.english_name is not None
+        if text_choice.english_name is not None
         else None
     )
     evidence_context = SourceEvidenceContext(
@@ -1534,13 +1633,12 @@ def validate_and_decode_record_rows(
         for part in exact.parts
     )
     witnesses_by_zoom = dict(frame.geometry_source_witnesses)
-    feature_hot = exact.source_feature_sha256[:8]
     feature_id = int.from_bytes(feature_hot, "big")
     try:
         expected_sourced = create_sourced_map_text(
-            primary=exact.primary_name,
+            primary=text_choice.primary_name,
             primary_source_field_id=primary_field_id,
-            declared_english=exact.english_name,
+            declared_english=text_choice.english_name,
             english_source_field_id=english_field_id,
         )
     except ValueError as error:
@@ -1594,7 +1692,7 @@ def validate_and_decode_record_rows(
             or int(row[7]) != variant.feature_kind.value
             or int(row[12]) != variant.semantic_subtype
             or variant.semantic_subtype != expected_subtype
-            or variant.text != exact.primary_name
+            or variant.text != text_choice.primary_name
             or placement.text_source_field_id != primary_field_id
         ):
             raise _error("feature frame record variant differs from its exact label")
@@ -1684,7 +1782,7 @@ def validate_and_decode_record_rows(
             - owner_tile.y * geometry.world_denominator,
         )
         expected_placement = make_normalized_placement(
-            text=exact.primary_name,
+            text=text_choice.primary_name,
             source_feature_sha256=exact.source_feature_sha256,
             placement_geometry_sha256=geometry_identity.full_sha256,
             text_evidence_kind=TextEvidenceKind.SOURCE_FIELD,
@@ -1748,7 +1846,7 @@ def validate_and_decode_record_rows(
                     expected_registry,
                 ),
             ),
-            text=exact.primary_name,
+            text=text_choice.primary_name,
             geometry=geometry,
             min_zoom_centi=visibility.min_zoom_centi,
             max_zoom_centi=LABEL_DISPLAY_MAX_ZOOM_CENTI,
@@ -2037,9 +2135,21 @@ def _build_feature_render_frame(
     registry_claims: tuple[RegistryClaim, ...],
     maximum_encoded_bytes: int,
 ) -> FeatureRenderFrame:
-    geometry_source_witnesses = _geometry_source_witnesses(
-        exact,
-        tuple(sorted({tile.z for tile in rendered.tiles})),
+    text_choice = _v3_waterway_text_choice(exact)
+    is_empty_omission = not rendered.tiles
+    if is_empty_omission != (text_choice is None):
+        raise _error(
+            "waterway worker empty rendering does not match the exact V3 text omission"
+        )
+    if is_empty_omission and registry_claims:
+        raise _error("waterway worker V3 text omission retained registry claims")
+    geometry_source_witnesses = (
+        ()
+        if is_empty_omission
+        else _geometry_source_witnesses(
+            exact,
+            tuple(sorted({tile.z for tile in rendered.tiles})),
+        )
     )
     budget = _FrameByteBudget(
         maximum_encoded_bytes,
