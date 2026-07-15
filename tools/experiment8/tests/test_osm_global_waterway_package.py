@@ -1719,6 +1719,180 @@ class GlobalWaterwayRendererTests(unittest.TestCase):
         self.assertNotEqual(features[0].source_feature_sha256, relation.source_feature_sha256)
         self.assertNotIn(101, {feature.source_id for feature in features})
 
+    def test_exact_feature_stream_uses_authenticated_direct_way_fast_path(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=Path(temporary),
+                source_binding=binding,
+                checkpoint_objects=4,
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                source_document = store._source_document_from_database(connection)
+                expected = []
+                for root_kind, root_id in connection.execute(
+                    "SELECT kind,id FROM roots ORDER BY kind,id"
+                ):
+                    analysis = store._analyze_admission_root(
+                        connection,
+                        int(root_kind),
+                        int(root_id),
+                        materialize=True,
+                        source_document=source_document,
+                    )
+                    expected.extend(store._analysis_features(analysis))
+            finally:
+                connection.close()
+
+            real_analyze = store._analyze_admission_root
+
+            def reject_direct_reanalysis(connection, root_kind, root_id, **kwargs):
+                if root_kind == 1:
+                    raise AssertionError("direct way used legacy admission reanalysis")
+                return real_analyze(connection, root_kind, root_id, **kwargs)
+
+            with patch.object(
+                store,
+                "_analyze_admission_root",
+                side_effect=reject_direct_reanalysis,
+            ):
+                connection = sqlite3.connect(result.database_path)
+                try:
+                    actual = tuple(
+                        store._iter_render_waterway_features(
+                            connection,
+                            source_binding=binding,
+                        )
+                    )
+                finally:
+                    connection.close()
+
+        self.assertEqual(tuple(expected), actual)
+        self.assertTrue(any(feature.source_kind == "way" for feature in actual))
+        self.assertTrue(any(feature.source_kind == "relation" for feature in actual))
+
+    def test_direct_way_fast_path_rejects_geometry_drift_against_admission_hashes(
+        self,
+    ) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        binding = _source_binding(CLOSURE_FIXTURE, ROOT_FIXTURE)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = store.ingest_global_waterway_closure(
+                opl_path=CLOSURE_FIXTURE,
+                root_ids_path=ROOT_FIXTURE,
+                work_directory=Path(temporary),
+                source_binding=binding,
+                checkpoint_objects=4,
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                connection.execute(
+                    "UPDATE nodes SET longitude_e7=longitude_e7+1 WHERE id=1"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                store.GlobalWaterwayPackageError,
+                "candidate.*differs",
+            ):
+                connection = sqlite3.connect(result.database_path)
+                try:
+                    tuple(
+                        store._iter_render_waterway_features(
+                            connection,
+                            source_binding=binding,
+                        )
+                    )
+                finally:
+                    connection.close()
+
+    def test_direct_way_fast_path_is_exact_across_closed_cursor_batches(self) -> None:
+        import sqlite3
+
+        from tools.experiment8 import osm_global_waterway_store as store
+
+        feature_count = 205
+        opl_raw = b"".join(
+            f"n{node} v1 t2026-06-29T00:00:00Z x-76.0 y39.0\n".encode()
+            for node in range(1, feature_count * 2 + 1)
+        ) + b"".join(
+            (
+                f"w{source_id} v1 t2026-06-29T00:00:00Z "
+                f"Twaterway=river,name=River%20%{source_id} "
+                f"Nn{source_id * 2 - 1},n{source_id * 2}\n"
+            ).encode()
+            for source_id in range(1, feature_count + 1)
+        )
+        roots_raw = b"".join(
+            f"w{source_id}\n".encode()
+            for source_id in range(1, feature_count + 1)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            opl = root / "closure.opl"
+            roots = root / "roots.txt"
+            opl.write_bytes(opl_raw)
+            roots.write_bytes(roots_raw)
+            binding = _source_binding(opl, roots)
+            result = store.ingest_global_waterway_closure(
+                opl_path=opl,
+                root_ids_path=roots,
+                work_directory=root / "work",
+                source_binding=binding,
+                checkpoint_objects=100,
+            )
+            expected = tuple(
+                store.iter_exact_waterway_features(
+                    result.database_path,
+                    source_binding=binding,
+                )
+            )
+            connection = sqlite3.connect(result.database_path)
+            try:
+                with patch.object(store, "_DIRECT_WAY_STREAM_BATCH_POINTS", 3):
+                    self.assertEqual(
+                        (1,),
+                        store._direct_way_root_id_batch(connection, 0),
+                    )
+                with patch.object(
+                    store,
+                    "_DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES",
+                    1,
+                ):
+                    self.assertEqual(
+                        (1,),
+                        store._direct_way_root_id_batch(connection, 0),
+                    )
+                stream = iter(
+                    store._iter_render_waterway_features(
+                        connection,
+                        source_binding=binding,
+                    )
+                )
+                actual = []
+                for batch_count in (100, 100, 5):
+                    actual.extend(next(stream) for _ in range(batch_count))
+                    connection.commit()
+                with self.assertRaises(StopIteration):
+                    next(stream)
+            finally:
+                connection.close()
+
+        self.assertEqual(feature_count, len(actual))
+        self.assertEqual(expected, tuple(actual))
+
     def test_typed_renderer_uses_policy_prominence_and_same_source_english(self) -> None:
         from tools.experiment8.osm_global_waterway_renderer import (
             build_adaptive_waterway_feature,

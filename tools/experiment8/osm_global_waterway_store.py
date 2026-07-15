@@ -2650,6 +2650,421 @@ def _analysis_features(analysis: _AdmissionRootAnalysis):
         )
 
 
+def _admitted_direct_way_entry(
+    raw_value: object,
+    raw_sha256: object,
+    *,
+    root_id: int,
+) -> dict[str, object]:
+    raw = _sqlite_blob(raw_value, "admitted direct-way entry")
+    expected_sha256 = _sqlite_blob(
+        raw_sha256, "admitted direct-way entry SHA-256"
+    )
+    if hashlib.sha256(raw).digest() != expected_sha256:
+        raise GlobalWaterwayPackageError(
+            "admitted direct-way entry SHA-256 differs"
+        )
+    try:
+        entry = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeError, ValueError, RecursionError) as error:
+        raise GlobalWaterwayPackageError(
+            "admitted direct-way entry is malformed"
+        ) from error
+    if not isinstance(entry, dict) or _canonical_json_no_lf_bytes(entry) != raw:
+        raise GlobalWaterwayPackageError(
+            "admitted direct-way entry is not canonical JSON"
+        )
+    root = entry.get("root")
+    if (
+        not isinstance(root, dict)
+        or root.get("kind") != "way"
+        or root.get("kindCode") != 1
+        or root.get("id") != root_id
+        or type(root.get("version")) is not int
+        or root["version"] < 0
+        or type(root.get("timestamp")) is not str
+        or not root["timestamp"]
+    ):
+        raise GlobalWaterwayPackageError(
+            "admitted direct-way root identity is malformed"
+        )
+    return entry
+
+
+_DIRECT_WAY_STREAM_BATCH_ROOTS = 100
+_DIRECT_WAY_STREAM_BATCH_POINTS = 524_288
+_DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES = 128 * 1024 * 1024
+
+
+def _closed_query_rows(
+    connection: sqlite3.Connection,
+    statement: str,
+    parameters: Sequence[object] = (),
+) -> tuple[tuple[object, ...], ...]:
+    cursor = connection.execute(statement, tuple(parameters))
+    try:
+        return tuple(cursor)
+    finally:
+        cursor.close()
+
+
+def _direct_way_root_id_batch(
+    connection: sqlite3.Connection,
+    after_root_id: int,
+) -> tuple[int, ...]:
+    rows = _closed_query_rows(
+        connection,
+        "SELECT r.id,c.point_count,length(ar.entry_json) FROM roots r "
+        "LEFT JOIN admission_roots ar "
+        "ON ar.root_kind=r.kind AND ar.root_id=r.id "
+        "LEFT JOIN admission_candidates c "
+        "ON c.root_kind=r.kind AND c.root_id=r.id AND c.feature_ordinal=0 "
+        "WHERE r.kind=1 AND r.id>? ORDER BY r.id LIMIT ?",
+        (after_root_id, _DIRECT_WAY_STREAM_BATCH_ROOTS),
+    )
+    selected = []
+    selected_points = 0
+    selected_entry_bytes = 0
+    for row in rows:
+        root_id = int(row[0])
+        point_count = 0 if row[1] is None else int(row[1])
+        entry_bytes = 0 if row[2] is None else int(row[2])
+        if point_count < 0 or entry_bytes < 0:
+            raise GlobalWaterwayPackageError(
+                "direct-way admitted point or entry count is malformed"
+            )
+        if (
+            selected
+            and (
+                selected_points + point_count
+                > _DIRECT_WAY_STREAM_BATCH_POINTS
+                or selected_entry_bytes + entry_bytes
+                > _DIRECT_WAY_STREAM_BATCH_ENTRY_BYTES
+            )
+        ):
+            break
+        selected.append(root_id)
+        selected_points += point_count
+        selected_entry_bytes += entry_bytes
+    root_ids = tuple(selected)
+    if any(
+        root_id <= after_root_id
+        or (index and root_id <= root_ids[index - 1])
+        for index, root_id in enumerate(root_ids)
+    ):
+        raise GlobalWaterwayPackageError(
+            "direct-way root batch order is malformed"
+        )
+    return root_ids
+
+
+def _iter_direct_way_evidence_rows(connection: sqlite3.Connection):
+    after_root_id = 0
+    while True:
+        root_ids = _direct_way_root_id_batch(connection, after_root_id)
+        if not root_ids:
+            return
+        first_root_id, last_root_id = root_ids[0], root_ids[-1]
+        rows = _closed_query_rows(
+            connection,
+            "SELECT r.id,ar.entry_json,ar.entry_sha,ar.candidate_stream_sha,"
+            "c.feature_ordinal,c.waterway_type,c.complete_named_relation,"
+            "c.candidate_feature_sha,c.source_feature_sha,c.part_count,c.point_count "
+            "FROM roots r LEFT JOIN admission_roots ar "
+            "ON ar.root_kind=r.kind AND ar.root_id=r.id "
+            "LEFT JOIN admission_candidates c "
+            "ON c.root_kind=r.kind AND c.root_id=r.id "
+            "WHERE r.kind=1 AND r.id>=? AND r.id<=? "
+            "ORDER BY r.id,c.feature_ordinal",
+            (first_root_id, last_root_id),
+        )
+        for row in rows:
+            yield row
+        after_root_id = last_root_id
+
+
+def _iter_direct_way_point_rows(connection: sqlite3.Connection):
+    after_root_id = 0
+    while True:
+        root_ids = _direct_way_root_id_batch(connection, after_root_id)
+        if not root_ids:
+            return
+        first_root_id, last_root_id = root_ids[0], root_ids[-1]
+        rows = _closed_query_rows(
+            connection,
+            "SELECT wn.way_id,wn.ordinal,n.id,n.longitude_e7,n.latitude_e7 "
+            "FROM roots r JOIN way_nodes wn ON wn.way_id=r.id "
+            "JOIN nodes n ON n.id=wn.node_id "
+            "WHERE r.kind=1 AND r.id>=? AND r.id<=? "
+            "ORDER BY wn.way_id,wn.ordinal",
+            (first_root_id, last_root_id),
+        )
+        for row in rows:
+            yield row
+        after_root_id = last_root_id
+
+
+def _iter_authenticated_direct_way_features(
+    connection: sqlite3.Connection,
+    *,
+    source_document: Mapping[str, object],
+):
+    """Yield direct ways from ordered admitted evidence without redoing admission."""
+
+    from .osm_global_waterway_renderer import (
+        ExactWaterwayFeature,
+        ExactWaterwayPoint,
+    )
+
+    root_rows = _iter_direct_way_evidence_rows(connection)
+    point_rows = _iter_direct_way_point_rows(connection)
+    root_row = next(root_rows, None)
+    point_row = next(point_rows, None)
+    try:
+        while root_row is not None:
+            root_id = int(root_row[0])
+            grouped = [root_row]
+            root_row = next(root_rows, None)
+            while root_row is not None and int(root_row[0]) == root_id:
+                grouped.append(root_row)
+                root_row = next(root_rows, None)
+
+            points = []
+            while point_row is not None and int(point_row[0]) < root_id:
+                raise GlobalWaterwayPackageError(
+                    "direct-way geometry precedes its admitted root"
+                )
+            while point_row is not None and int(point_row[0]) == root_id:
+                expected_ordinal = len(points)
+                if int(point_row[1]) != expected_ordinal:
+                    raise GlobalWaterwayPackageError(
+                        f"direct way {root_id} node order is malformed"
+                    )
+                points.append(
+                    ExactWaterwayPoint(
+                        int(point_row[2]),
+                        int(point_row[3]),
+                        int(point_row[4]),
+                    )
+                )
+                point_row = next(point_rows, None)
+            if len(points) < 2:
+                raise GlobalWaterwayPackageError(
+                    f"direct way {root_id} has incomplete geometry"
+                )
+
+            first = grouped[0]
+            entry = _admitted_direct_way_entry(
+                first[1], first[2], root_id=root_id
+            )
+            candidate_count = entry.get("candidateFeatureCount")
+            if type(candidate_count) is not int or candidate_count != len(grouped):
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way candidate count differs"
+                )
+            if candidate_count != 1 or first[4] is None:
+                raise GlobalWaterwayPackageError(
+                    "admitted direct way does not have exactly one candidate"
+                )
+            if len(grouped) != 1 or int(first[4]) != 0:
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way candidate order differs"
+                )
+            waterway_type = str(first[5])
+            if waterway_type not in _ALLOWED_WATERWAYS or int(first[6]) != 0:
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way candidate metadata differs"
+                )
+            candidate_sha256 = _sqlite_blob(
+                first[7], "admitted direct-way candidate SHA-256"
+            )
+            source_sha256 = _sqlite_blob(
+                first[8], "admitted direct-way source SHA-256"
+            )
+            if (
+                len(candidate_sha256) != 32
+                or len(source_sha256) != 32
+                or int(first[9]) != 1
+                or int(first[10]) != len(points)
+            ):
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way candidate geometry counts differ"
+                )
+            candidate_hashes = entry.get("candidateFeatureSha256")
+            if candidate_hashes != [candidate_sha256.hex()]:
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way candidate hash inventory differs"
+                )
+            candidate_stream = hashlib.sha256()
+            candidate_stream.update(_CANDIDATE_STREAM_DOMAIN)
+            candidate_stream.update(struct.pack(">Q", len(candidate_sha256)))
+            candidate_stream.update(candidate_sha256)
+            stored_stream_sha256 = _sqlite_blob(
+                first[3], "admitted direct-way candidate stream SHA-256"
+            )
+            if (
+                len(stored_stream_sha256) != 32
+                or candidate_stream.digest() != stored_stream_sha256
+                or entry.get("candidateStreamSha256")
+                != stored_stream_sha256.hex()
+            ):
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way candidate stream differs"
+                )
+
+            root = entry["root"]
+            name_source_key = entry.get("nameSourceKey")
+            primary_name = entry.get("primaryName")
+            english_name = entry.get("englishName")
+            dependency_evidence = entry.get("dependencyEvidence")
+            if (
+                type(name_source_key) is not str
+                or not name_source_key
+                or type(primary_name) is not str
+                or not primary_name
+                or not (
+                    english_name is None or type(english_name) is str
+                )
+                or not isinstance(dependency_evidence, dict)
+            ):
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way sourced text or dependency evidence is malformed"
+                )
+            source_path = (((1, root_id, -1),),)
+            candidate_metadata, source_metadata = _feature_metadata(
+                root=root,
+                source_document=source_document,
+                name_source_key=name_source_key,
+                primary_name=primary_name,
+                english_name=english_name,
+                waterway_type=waterway_type,
+                complete_named_relation=False,
+                required_node_ids=frozenset(),
+                source_occurrence_paths=source_path,
+                dependency_evidence=dependency_evidence,
+            )
+            parts = (tuple(points),)
+            actual_candidate_sha256, actual_source_sha256 = (
+                _hash_materialized_candidate(
+                    candidate_metadata=candidate_metadata,
+                    source_metadata=source_metadata,
+                    parts=parts,
+                )
+            )
+            if (
+                actual_candidate_sha256 != candidate_sha256
+                or actual_source_sha256 != source_sha256
+            ):
+                raise GlobalWaterwayPackageError(
+                    "admitted direct-way candidate evidence differs from exact geometry"
+                )
+            yield ExactWaterwayFeature(
+                "way",
+                root_id,
+                int(root["version"]),
+                str(root["timestamp"]),
+                waterway_type,
+                name_source_key,
+                primary_name,
+                english_name,
+                False,
+                parts,
+                frozenset(),
+                source_sha256,
+            )
+        if point_row is not None:
+            raise GlobalWaterwayPackageError(
+                "direct-way geometry has no admitted root"
+            )
+    finally:
+        root_rows.close()
+        point_rows.close()
+
+
+def _iter_render_waterway_features(
+    connection: sqlite3.Connection,
+    *,
+    source_binding: WaterwaySourceBinding,
+):
+    """Recompute and authenticate every admitted root before yielding candidates."""
+
+    run_identity = _meta_get(connection, "runIdentity")
+    admission_receipt = _meta_get(connection, "admissionReceipt")
+    if (
+        not isinstance(run_identity, dict)
+        or run_identity.get("source") != source_binding.document()
+    ):
+        raise GlobalWaterwayPackageError("waterway database source binding differs")
+    source_document = dict(run_identity["source"])
+    if (
+        not isinstance(admission_receipt, dict)
+        or admission_receipt.get("fatalCount") != 0
+        or admission_receipt.get("policy", {}).get("sha256")
+        != LINE_CANDIDATE_POLICY_SHA256
+    ):
+        raise GlobalWaterwayPackageError(
+            "waterway database lacks complete v2 admission evidence"
+        )
+    yield from _iter_authenticated_direct_way_features(
+        connection,
+        source_document=source_document,
+    )
+    previous_kind = 2
+    previous_id = 0
+    while True:
+        root_cursor = connection.execute(
+            "SELECT kind,id FROM roots "
+            "WHERE kind>? OR (kind=? AND id>?) ORDER BY kind,id LIMIT 1",
+            (previous_kind, previous_kind, previous_id),
+        )
+        root_row = root_cursor.fetchone()
+        root_cursor.close()
+        if root_row is None:
+            break
+        root_kind, root_id = int(root_row[0]), int(root_row[1])
+        previous_kind, previous_id = root_kind, root_id
+        analysis = _analyze_admission_root(
+            connection,
+            root_kind,
+            root_id,
+            materialize=True,
+            source_document=source_document,
+        )
+        stored = connection.execute(
+            "SELECT entry_json,entry_sha,candidate_stream_sha "
+            "FROM admission_roots WHERE root_kind=? AND root_id=?",
+            (root_kind, root_id),
+        ).fetchone()
+        if stored is None:
+            raise GlobalWaterwayPackageError(
+                "waterway admitted root evidence is absent"
+            )
+        expected_entry_sha = hashlib.sha256(analysis.entry_bytes).digest()
+        if (
+            _sqlite_blob(stored[0], "admitted root entry") != analysis.entry_bytes
+            or _sqlite_blob(stored[1], "admitted root entry SHA-256") != expected_entry_sha
+            or _sqlite_blob(stored[2], "admitted candidate stream SHA-256").hex()
+            != analysis.entry["candidateStreamSha256"]
+        ):
+            raise GlobalWaterwayPackageError(
+                "waterway admitted root candidate stream differs from exact source"
+            )
+        actual_candidates = tuple(
+            connection.execute(
+                "SELECT root_kind,root_id,feature_ordinal,waterway_type,"
+                "complete_named_relation,candidate_feature_sha,source_feature_sha,"
+                "part_count,point_count FROM admission_candidates "
+                "WHERE root_kind=? AND root_id=? ORDER BY feature_ordinal",
+                (root_kind, root_id),
+            )
+        )
+        if actual_candidates != _candidate_rows(analysis):
+            raise GlobalWaterwayPackageError(
+                "waterway admitted candidate feature evidence differs"
+            )
+        yield from _analysis_features(analysis)
+
+
 def _iter_exact_waterway_features(
     connection: sqlite3.Connection,
     *,
@@ -2707,7 +3122,8 @@ def _iter_exact_waterway_features(
         expected_entry_sha = hashlib.sha256(analysis.entry_bytes).digest()
         if (
             _sqlite_blob(stored[0], "admitted root entry") != analysis.entry_bytes
-            or _sqlite_blob(stored[1], "admitted root entry SHA-256") != expected_entry_sha
+            or _sqlite_blob(stored[1], "admitted root entry SHA-256")
+            != expected_entry_sha
             or _sqlite_blob(stored[2], "admitted candidate stream SHA-256").hex()
             != analysis.entry["candidateStreamSha256"]
         ):
@@ -3865,7 +4281,7 @@ def _validated_renderer_prefix_stream(
     }
     registry = HotIdRegistry()
     source = iter(
-        _iter_exact_waterway_features(connection, source_binding=source_binding)
+        _iter_render_waterway_features(connection, source_binding=source_binding)
     )
     for ordinal in range(rendered_prefix):
         try:
