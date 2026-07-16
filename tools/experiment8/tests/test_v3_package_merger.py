@@ -51,6 +51,22 @@ def _write_package(
     (directory / "tile-index.bin").write_bytes(artifacts.index_bytes)
 
 
+def _add_manifest_runtime_authority(directory: Path, key: str) -> None:
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest[key] = {
+        "records": {
+            "bytes": (directory / "records.fadictpack").stat().st_size,
+            "sha256": _sha256(directory / "records.fadictpack"),
+        },
+        "tileIndex": {
+            "bytes": (directory / "tile-index.bin").stat().st_size,
+            "sha256": _sha256(directory / "tile-index.bin"),
+        },
+    }
+    manifest_path.write_bytes(_canonical_json_bytes(manifest))
+
+
 def _read_payload(directory: Path, tile: TileKey) -> bytes | None:
     manifest = json.loads((directory / "manifest.json").read_text("utf-8"))
     ordinal = 0
@@ -1811,6 +1827,47 @@ class V3PackageMergerTests(unittest.TestCase):
                     package_id="bounded-stream",
                 )
             self.assertEqual((output / "tile-index.bin").stat().st_size, 1024 * INDEX_ENTRY_BYTES)
+
+    def test_manifest_runtime_facts_avoid_redundant_input_prehash(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        tile = TileKey(1, 0, 0)
+        payload = encode_tile_payload(
+            tile,
+            [RendererTileRecord(_line_renderer_record(tile), None)],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, supplement, output = root / "primary", root / "supplement", root / "out"
+            _write_package(primary, "primary", {tile: payload})
+            _write_package(supplement, "supplement", {tile: payload})
+            _add_manifest_runtime_authority(primary, "globalPlaceSupplement")
+            _add_manifest_runtime_authority(supplement, "globalPlaceSupplement")
+            input_runtime_files = {
+                (primary / "records.fadictpack").resolve(),
+                (primary / "tile-index.bin").resolve(),
+                (supplement / "records.fadictpack").resolve(),
+                (supplement / "tile-index.bin").resolve(),
+            }
+            original_sha256_file = v3_package_merger._sha256_file
+
+            def guarded_sha256_file(path: Path) -> str:
+                if path.resolve() in input_runtime_files:
+                    raise AssertionError("input runtime file was prehashed")
+                return original_sha256_file(path)
+
+            with mock.patch.object(
+                v3_package_merger,
+                "_sha256_file",
+                guarded_sha256_file,
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(supplement,),
+                    output_directory=output,
+                    package_id="manifest-bound-runtime",
+                )
+            self.assertTrue((output / "records.fadictpack").is_file())
 
     def test_recovered_water_receipt_is_authenticated_and_carried_forward(self) -> None:
         from tools.experiment8.v3_package_merger import merge_v3_packages

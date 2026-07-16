@@ -407,6 +407,47 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _runtime_identity_from_manifest(
+    manifest: Mapping[str, object],
+    *,
+    records_path: Path,
+    index_path: Path,
+) -> tuple[int, str, int, str] | None:
+    """Return manifest-bound runtime identity when a producer supplied one.
+
+    Final Experiment 8 producer manifests already bind the two giant runtime
+    streams in their source-specific authority section.  Reusing those facts
+    avoids a redundant full-file prehash; merge-time streaming still recomputes
+    both digests and fails closed before publication if the bytes differ.
+    """
+
+    authority = None
+    for key in ("globalPlaceSupplement", "globalWaterwaySupplement"):
+        value = manifest.get(key)
+        if value is None:
+            continue
+        if authority is not None:
+            raise V3PackageMergeError("V3 manifest carries multiple runtime authorities")
+        authority = _exact_mapping(value, "V3 manifest runtime authority")
+    if authority is None:
+        return None
+    records = _exact_fact(authority.get("records"), "V3 manifest records")
+    tile_index = _exact_fact(authority.get("tileIndex"), "V3 manifest tile index")
+    try:
+        actual_records_bytes = records_path.stat().st_size
+        actual_index_bytes = index_path.stat().st_size
+    except OSError as error:
+        raise V3PackageMergeError("V3 runtime files are not statable") from error
+    if records["bytes"] != actual_records_bytes or tile_index["bytes"] != actual_index_bytes:
+        raise V3PackageMergeError("V3 manifest runtime byte length differs")
+    return (
+        records["bytes"],
+        records["sha256"],
+        tile_index["bytes"],
+        tile_index["sha256"],
+    )
+
+
 def _load_input(directory: Path) -> _InputPackage:
     if not isinstance(directory, Path) or not directory.is_dir():
         raise V3PackageMergeError("V3 input directory is not readable")
@@ -503,8 +544,18 @@ def _load_input(directory: Path) -> _InputPackage:
         )
     ):
         raise V3PackageMergeError("V3 whole-earth claim is not full-world")
-    records_bytes = records_path.stat().st_size
-    index_bytes = index_path.stat().st_size
+    runtime_identity = _runtime_identity_from_manifest(
+        manifest,
+        records_path=records_path,
+        index_path=index_path,
+    )
+    if runtime_identity is None:
+        records_bytes = records_path.stat().st_size
+        records_sha256 = _sha256_file(records_path)
+        index_bytes = index_path.stat().st_size
+        index_sha256 = _sha256_file(index_path)
+    else:
+        records_bytes, records_sha256, index_bytes, index_sha256 = runtime_identity
     if index_bytes != tile_count * INDEX_ENTRY_BYTES:
         raise V3PackageMergeError("V3 binary index length differs from coverage")
     if index_bytes > _ANDROID_MAX_INDEX_BYTES:
@@ -514,9 +565,9 @@ def _load_input(directory: Path) -> _InputPackage:
         package_id=package_id,
         manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
         manifest_bytes=manifest_size,
-        records_sha256=_sha256_file(records_path),
+        records_sha256=records_sha256,
         records_bytes=records_bytes,
-        index_sha256=_sha256_file(index_path),
+        index_sha256=index_sha256,
         index_bytes=index_bytes,
         ranges=tuple(ranges),
         tile_count=tile_count,
