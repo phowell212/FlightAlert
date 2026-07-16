@@ -400,6 +400,12 @@ def _write_recovered_water_build_receipt(
         "packageId": manifest["packageId"],
         "peakResources": {"processPeakRssMeasured": False},
         "projection": {"publishedDirectoryBytes": 0},
+        "rendererTextAudit": {
+            "aggregateSha256": "0" * 64,
+            "eventCount": 0,
+            "schema": "fixture-renderer-text-audit.v1",
+            "stateSha256": "1" * 64,
+        },
         "rendererSemanticStreamSha256": manifest["rendererSemanticStreamSha256"],
         "schema": "flightalert.experiment8.osm-global-waterway-build.v2",
         "source": source,

@@ -1072,6 +1072,7 @@ def _load_authority_receipt(
         "packageId",
         "peakResources",
         "projection",
+        "rendererTextAudit",
         "rendererSemanticStreamSha256",
         "schema",
         "source",
@@ -1086,6 +1087,7 @@ def _load_authority_receipt(
         )
     _exact_mapping(document.get("closureAudit"), "supplement closure audit")
     _exact_mapping(document.get("peakResources"), "supplement peak resources")
+    _exact_mapping(document.get("rendererTextAudit"), "supplement renderer text audit")
     if _validate_package_id(document.get("packageId")) != package.package_id:
         raise V3PackageMergeError("supplement build receipt package does not match")
     semantic_sha256 = _exact_sha256(
