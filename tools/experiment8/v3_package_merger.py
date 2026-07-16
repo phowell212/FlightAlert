@@ -2292,7 +2292,7 @@ def _audit_output(
                             )
                             if payload is None:
                                 continue
-                            envelopes = _extract_envelopes(tile, payload)
+                            envelopes = _extract_envelopes_fast(tile, payload)
                             if list(envelopes) != sorted(
                                 envelopes, key=lambda item: item.order_key
                             ):

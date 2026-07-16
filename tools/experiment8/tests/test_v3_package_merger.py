@@ -1195,6 +1195,35 @@ class V3PackageMergerTests(unittest.TestCase):
                 ),
             )
 
+    def test_output_audit_uses_fast_raw_envelope_extraction(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        tile = TileKey(1, 0, 0)
+        payload = encode_tile_payload(
+            tile,
+            [
+                RendererTileRecord(_line_renderer_record(tile), None),
+                RendererTileRecord(_cairo_renderer_record(), _cairo_sourced_text()),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            package_directory = Path(temporary) / "package"
+            _write_package(package_directory, "fast-output-audit", {tile: payload})
+            with mock.patch.object(
+                v3_package_merger,
+                "_extract_envelopes",
+                side_effect=AssertionError("strict renderer decode is too slow here"),
+            ):
+                semantic_sha256, subtype_counts = v3_package_merger._audit_output(
+                    package_directory,
+                    (v3_package_merger._Window(1, 0, 0, 0, 0),),
+                )
+
+            self.assertRegex(semantic_sha256, r"^[0-9a-f]{64}$")
+            by_subtype = {item["semanticSubtype"]: item for item in subtype_counts}
+            self.assertEqual(by_subtype[210]["postings"], 1)
+            self.assertEqual(by_subtype[560]["postings"], 1)
+
     def test_same_tile_contributions_are_deduped_before_payload_assembly(self) -> None:
         from tools.experiment8 import v3_package_merger
 
