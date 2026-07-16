@@ -112,6 +112,19 @@ _SIZE_POLICY_DECISION_SCHEMA = (
 )
 _BUDGETED_SIZE_POLICY = "budgeted-release-v1"
 _VISUAL_SIZE_POLICY = "complete-uncompressed-visual-evaluation-v1"
+_AUTHORITY_SEMANTIC_RECOMPUTE = "recompute"
+_AUTHORITY_SEMANTIC_RECEIPT_BOUND_VISUAL = "receipt-bound-visual-evaluation"
+_AUTHORITY_SEMANTIC_MODES = frozenset(
+    {
+        _AUTHORITY_SEMANTIC_RECOMPUTE,
+        _AUTHORITY_SEMANTIC_RECEIPT_BOUND_VISUAL,
+    }
+)
+_RECEIPT_BOUND_VISUAL_AUTHORITY_SEMANTIC_VERIFICATION = {
+    "mode": _AUTHORITY_SEMANTIC_RECEIPT_BOUND_VISUAL,
+    "strictDocumentaryProofDeferred": True,
+    "runtimeFileDigestsVerifiedByMergeStream": True,
+}
 _SIZE_POLICY_DOCUMENT = {
     "constraints": {
         "contentPruningAuthorized": False,
@@ -2260,6 +2273,7 @@ def merge_v3_packages(
     output_directory: Path,
     package_id: str,
     compression_workers: int | None = None,
+    authority_semantic_mode: str = _AUTHORITY_SEMANTIC_RECOMPUTE,
 ) -> MergeResult:
     """Stream one primary and sparse supplements into one Android-readable V3 package."""
 
@@ -2268,6 +2282,8 @@ def merge_v3_packages(
     compression_worker_count = _validated_compression_workers(
         compression_workers
     )
+    if authority_semantic_mode not in _AUTHORITY_SEMANTIC_MODES:
+        raise V3PackageMergeError("authority semantic mode is invalid")
     checked_package_id = _validate_package_id(package_id)
     if type(supplement_directories) not in (tuple, list):
         raise V3PackageMergeError("supplement directories must be an ordered sequence")
@@ -2337,7 +2353,11 @@ def merge_v3_packages(
                 authority = authority_by_package_directory.get(
                     package.directory.resolve()
                 )
-                if authority is None:
+                if (
+                    authority is None
+                    or authority_semantic_mode
+                    == _AUTHORITY_SEMANTIC_RECEIPT_BOUND_VISUAL
+                ):
                     continue
                 semantic_sha256 = _input_semantic_sha256(
                     package,
@@ -2461,6 +2481,13 @@ def merge_v3_packages(
         }
         if authority_receipts:
             merge_document["authorityReceipts"] = authority_evidence
+            if (
+                authority_semantic_mode
+                == _AUTHORITY_SEMANTIC_RECEIPT_BOUND_VISUAL
+            ):
+                merge_document["authoritySemanticVerification"] = dict(
+                    _RECEIPT_BOUND_VISUAL_AUTHORITY_SEMANTIC_VERIFICATION
+                )
         manifest: dict[str, object] = {
             "packageId": checked_package_id,
             "schemaVersion": 3,
@@ -2616,6 +2643,16 @@ def _main(arguments: Sequence[str] | None = None) -> int:
             "serial fallback"
         ),
     )
+    parser.add_argument(
+        "--authority-semantic-mode",
+        choices=sorted(_AUTHORITY_SEMANTIC_MODES),
+        default=_AUTHORITY_SEMANTIC_RECOMPUTE,
+        help=(
+            "strict recompute is the documentary default; "
+            "receipt-bound-visual-evaluation skips duplicate authority semantic "
+            "pre-scan for provisional visual package cooks only"
+        ),
+    )
     parsed = parser.parse_args(arguments)
     result = merge_v3_packages(
         primary_directory=parsed.primary,
@@ -2624,6 +2661,7 @@ def _main(arguments: Sequence[str] | None = None) -> int:
         output_directory=parsed.output,
         package_id=parsed.package_id,
         compression_workers=parsed.compression_workers,
+        authority_semantic_mode=parsed.authority_semantic_mode,
     )
     print(_canonical_json_bytes(result.receipt).decode("utf-8"), end="")
     return 0

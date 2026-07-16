@@ -2158,6 +2158,45 @@ class V3PackageMergerTests(unittest.TestCase):
                     package_id="must-fail",
                 )
 
+    def test_visual_receipt_bound_mode_skips_duplicate_semantic_prescan_but_labels_it(self) -> None:
+        from tools.experiment8 import v3_package_merger
+        from tools.experiment8.v3_package_merger import merge_v3_packages
+
+        tile = TileKey(1, 0, 0)
+        payload = encode_tile_payload(
+            tile,
+            [RendererTileRecord(_line_renderer_record(tile), None)],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, water = root / "primary", root / "water"
+            _write_package(primary, "primary", {tile: payload})
+            _write_package(water, "water", {tile: payload})
+            receipt_path = _write_recovered_water_build_receipt(water)
+
+            with mock.patch.object(
+                v3_package_merger,
+                "_input_semantic_sha256",
+                side_effect=AssertionError("duplicate semantic prescan was not skipped"),
+            ):
+                result = merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(water,),
+                    supplement_build_receipts=(receipt_path,),
+                    output_directory=root / "out",
+                    package_id="visual-receipt-bound",
+                    authority_semantic_mode="receipt-bound-visual-evaluation",
+                )
+
+            self.assertEqual(
+                {
+                    "mode": "receipt-bound-visual-evaluation",
+                    "strictDocumentaryProofDeferred": True,
+                    "runtimeFileDigestsVerifiedByMergeStream": True,
+                },
+                result.manifest["merge"]["authoritySemanticVerification"],
+            )
+
     def test_semantic_authentication_uses_the_held_merge_streams(self) -> None:
         from tools.experiment8.v3_package_merger import (
             _input_semantic_sha256,
