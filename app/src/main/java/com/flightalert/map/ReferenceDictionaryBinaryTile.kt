@@ -678,7 +678,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
     private const val REFERENCE_EXTENT = 4_096.0
     private const val MAX_CENTIZOOM = 10_000
     private const val MAX_TEXT_BYTES = 4_096
-    private const val MAX_TILE_BYTES = 16 * 1024 * 1024
+    private const val MAX_TILE_BYTES = 32 * 1024 * 1024
     private const val MAX_RECORDS_PER_TILE = 65_536
     private const val MAX_RENDERER_RECORD_BYTES = 8 * 1024 * 1024
     private const val MAX_VARIANT_BYTES = 8 * 1024 * 1024

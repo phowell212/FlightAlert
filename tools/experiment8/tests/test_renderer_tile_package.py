@@ -242,6 +242,11 @@ class RendererTilePayloadGoldenTests(unittest.TestCase):
             ):
                 decode_tile_payload(TileKey(1, 0, 0), payload)
 
+    def test_tile_byte_ceiling_admits_dense_global_waterway_tiles(self) -> None:
+        from tools.experiment8.renderer_tile_package import MAX_TILE_BYTES
+
+        self.assertGreaterEqual(MAX_TILE_BYTES, 32 * 1024 * 1024)
+
     def test_label_and_nonlabel_sourced_text_presence_is_exact(self) -> None:
         from tools.experiment8.renderer_tile_package import (
             RendererTilePackageError,
