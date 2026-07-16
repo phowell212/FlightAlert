@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import struct
+import tempfile
 import unicodedata
 import zlib
 from collections import Counter, deque
@@ -1826,30 +1827,63 @@ def _input_semantic_sha256(
 ) -> str:
     digest = hashlib.sha256(_SEMANTIC_STREAM_DOMAIN)
     windows = tuple(item.window for item in package.ranges)
+    original_records_position = records_handle.tell()
+    original_index_position = index_handle.tell()
     try:
-        for tile in _tiles_semantic_order(windows):
-            payload = _read_output_payload(
-                records_handle,
-                index_handle,
-                windows,
-                tile,
-                package.records_bytes,
-            )
-            if payload is None:
-                continue
-            envelopes = _extract_envelopes(tile, payload)
-            if list(envelopes) != sorted(
-                envelopes, key=lambda item: item.order_key
-            ):
-                raise V3PackageMergeError(
-                    "supplement renderer semantic order is not canonical"
-                )
-            for record in envelopes:
-                body = struct.pack("<Q", tile.packed) + record.renderer_bytes
-                digest.update(struct.pack("<I", len(body)))
-                digest.update(body)
-        records_handle.seek(0)
-        index_handle.seek(0)
+        state = _InputState(index_handle=index_handle, records_handle=records_handle)
+        with tempfile.TemporaryDirectory(
+            prefix="flightalert-v3-semantic-",
+            dir=str(package.directory.parent),
+        ) as temporary:
+            temporary_root = Path(temporary)
+            for window_index, window in enumerate(windows):
+                bucket_paths: dict[int, Path] = {}
+                bucket_handles: dict[int, object] = {}
+                try:
+                    for tile in _tiles_index_order((window,)):
+                        present, envelopes = _read_input_tile(package, state, tile)
+                        if not present:
+                            continue
+                        if list(envelopes) != sorted(
+                            envelopes, key=lambda item: item.order_key
+                        ):
+                            raise V3PackageMergeError(
+                                "supplement renderer semantic order is not canonical"
+                            )
+                        handle = bucket_handles.get(tile.x)
+                        if handle is None:
+                            path = (
+                                temporary_root
+                                / f"window-{window_index:04d}-x-{tile.x:08x}.semantic"
+                            )
+                            handle = path.open("ab")
+                            bucket_handles[tile.x] = handle
+                            bucket_paths[tile.x] = path
+                        for record in envelopes:
+                            body = struct.pack("<Q", tile.packed) + record.renderer_bytes
+                            handle.write(struct.pack("<I", len(body)))
+                            handle.write(body)
+                finally:
+                    for handle in bucket_handles.values():
+                        handle.close()
+                for x in range(window.x_min, window.x_max + 1):
+                    path = bucket_paths.get(x)
+                    if path is None:
+                        continue
+                    with path.open("rb") as handle:
+                        while True:
+                            chunk = handle.read(_FILE_HASH_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+        _finish_input_validation(package, state)
+        state.index_digest = hashlib.sha256()
+        state.records_digest = hashlib.sha256()
+        state.next_ordinal = 0
+        state.next_record_offset = 0
+        state.present_tiles = 0
+        records_handle.seek(original_records_position)
+        index_handle.seek(original_index_position)
     except (OSError, AttributeError) as error:
         raise V3PackageMergeError(
             "supplement renderer semantic stream is unreadable"

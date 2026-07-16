@@ -2168,6 +2168,45 @@ class V3PackageMergerTests(unittest.TestCase):
                     ),
                 )
 
+    def test_semantic_authentication_does_not_random_seek_in_semantic_order(self) -> None:
+        from tools.experiment8 import v3_package_merger
+        from tools.experiment8.v3_package_merger import (
+            _input_semantic_sha256,
+            _load_input,
+        )
+
+        tiles = (TileKey(2, 0, 0), TileKey(2, 3, 0), TileKey(2, 0, 3), TileKey(2, 3, 3))
+        payloads = {
+            tile: encode_tile_payload(
+                tile,
+                [RendererTileRecord(_line_renderer_record(tile), None)],
+            )
+            for tile in tiles
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "water"
+            _write_package(package, "water", payloads, complete_declared_scope=False)
+            receipt_path = _write_recovered_water_build_receipt(package)
+            expected = json.loads(receipt_path.read_text("utf-8"))[
+                "rendererSemanticStreamSha256"
+            ]
+            loaded = _load_input(package)
+            with (package / "records.fadictpack").open("rb") as records_handle, (
+                package / "tile-index.bin"
+            ).open("rb") as index_handle, mock.patch.object(
+                v3_package_merger,
+                "_read_output_payload",
+                side_effect=AssertionError("semantic authentication used random reads"),
+            ):
+                self.assertEqual(
+                    expected,
+                    _input_semantic_sha256(
+                        loaded,
+                        records_handle=records_handle,
+                        index_handle=index_handle,
+                    ),
+                )
+
     def test_recovery_canonical_types_cannot_use_bool_integer_equality(self) -> None:
         from tools.experiment8.v3_package_merger import (
             V3PackageMergeError,
