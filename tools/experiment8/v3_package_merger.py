@@ -1819,6 +1819,39 @@ def _read_output_payload(
     return payload
 
 
+def _read_index_order_payload(
+    records_handle: object,
+    index_handle: object,
+    tile: TileKey,
+    *,
+    records_bytes: int,
+    next_record_offset: int,
+) -> tuple[bytes | None, int]:
+    entry = index_handle.read(INDEX_ENTRY_BYTES)
+    if len(entry) != INDEX_ENTRY_BYTES:
+        raise V3PackageMergeError("V3 audit index ended early")
+    if entry == _ZERO_INDEX_ENTRY:
+        return None, next_record_offset
+    offset, compressed_length, raw_length, expected_hash32, flags = struct.unpack(
+        "<QIIII", entry
+    )
+    if (
+        flags != INDEX_FLAG_PRESENT
+        or offset != next_record_offset
+        or not 0 < compressed_length <= _MAX_COMPRESSED_TILE_BYTES
+        or not 0 < raw_length <= MAX_TILE_BYTES
+        or offset + compressed_length > records_bytes
+    ):
+        raise V3PackageMergeError("V3 audit index entry is invalid")
+    compressed = records_handle.read(compressed_length)
+    if len(compressed) != compressed_length:
+        raise V3PackageMergeError("V3 audit records ended early")
+    payload = _inflate_exact(compressed, raw_length, "V3 audit")
+    if raw_hash32(payload) != expected_hash32:
+        raise V3PackageMergeError("V3 audit integrity hash differs")
+    return payload, offset + compressed_length
+
+
 def _input_semantic_sha256(
     package: _InputPackage,
     *,
@@ -1921,46 +1954,101 @@ def _audit_output(
         )
         records_bytes = records_path.stat().st_size
         with records_path.open("rb") as records_handle, index_path.open("rb") as index_handle:
-            for tile_number, tile in enumerate(_tiles_semantic_order(windows), start=1):
-                payload = _read_output_payload(
-                    records_handle, index_handle, windows, tile, records_bytes
-                )
-                if payload is None:
-                    continue
-                envelopes = _extract_envelopes(tile, payload)
-                if list(envelopes) != sorted(envelopes, key=lambda item: item.order_key):
-                    raise V3PackageMergeError("merged V3 renderer order is not canonical")
-                feature_rows: list[tuple[int, bytes]] = []
-                variant_rows: list[tuple[int, bytes]] = []
-                payload_rows: list[tuple[bytes, bytes]] = []
-                for record in envelopes:
-                    body = struct.pack("<Q", tile.packed) + record.renderer_bytes
-                    digest.update(struct.pack("<I", len(body)))
-                    digest.update(body)
-                    posting_counts[record.subtype] += 1
-                    feature_rows.append(
-                        (record.subtype.value, record.feature_id.to_bytes(8, "big"))
-                    )
-                    variant_rows.append(
-                        (record.subtype.value, record.variant_id.to_bytes(8, "big"))
-                    )
-                    payload_rows.append(
-                        (record.variant_id.to_bytes(8, "big"), record.variant_full_sha256)
-                    )
-                connection.executemany(
-                    "INSERT OR IGNORE INTO features (subtype, identity) VALUES (?, ?)",
-                    feature_rows,
-                )
-                connection.executemany(
-                    "INSERT OR IGNORE INTO variants (subtype, identity) VALUES (?, ?)",
-                    variant_rows,
-                )
-                connection.executemany(
-                    "INSERT OR IGNORE INTO variant_payloads (identity, full_sha) VALUES (?, ?)",
-                    payload_rows,
-                )
-                if tile_number % 4096 == 0:
-                    connection.commit()
+            next_record_offset = 0
+            with tempfile.TemporaryDirectory(
+                prefix="flightalert-v3-output-semantic-",
+                dir=str(partial_directory.parent),
+            ) as temporary:
+                temporary_root = Path(temporary)
+                for window_index, window in enumerate(windows):
+                    bucket_paths: dict[int, Path] = {}
+                    bucket_handles: dict[int, object] = {}
+                    try:
+                        for tile_number, tile in enumerate(
+                            _tiles_index_order((window,)), start=1
+                        ):
+                            payload, next_record_offset = _read_index_order_payload(
+                                records_handle,
+                                index_handle,
+                                tile,
+                                records_bytes=records_bytes,
+                                next_record_offset=next_record_offset,
+                            )
+                            if payload is None:
+                                continue
+                            envelopes = _extract_envelopes(tile, payload)
+                            if list(envelopes) != sorted(
+                                envelopes, key=lambda item: item.order_key
+                            ):
+                                raise V3PackageMergeError(
+                                    "merged V3 renderer order is not canonical"
+                                )
+                            handle = bucket_handles.get(tile.x)
+                            if handle is None:
+                                path = (
+                                    temporary_root
+                                    / f"window-{window_index:04d}-x-{tile.x:08x}.semantic"
+                                )
+                                handle = path.open("ab")
+                                bucket_handles[tile.x] = handle
+                                bucket_paths[tile.x] = path
+                            feature_rows: list[tuple[int, bytes]] = []
+                            variant_rows: list[tuple[int, bytes]] = []
+                            payload_rows: list[tuple[bytes, bytes]] = []
+                            for record in envelopes:
+                                body = struct.pack("<Q", tile.packed) + record.renderer_bytes
+                                handle.write(struct.pack("<I", len(body)))
+                                handle.write(body)
+                                posting_counts[record.subtype] += 1
+                                feature_rows.append(
+                                    (
+                                        record.subtype.value,
+                                        record.feature_id.to_bytes(8, "big"),
+                                    )
+                                )
+                                variant_rows.append(
+                                    (
+                                        record.subtype.value,
+                                        record.variant_id.to_bytes(8, "big"),
+                                    )
+                                )
+                                payload_rows.append(
+                                    (
+                                        record.variant_id.to_bytes(8, "big"),
+                                        record.variant_full_sha256,
+                                    )
+                                )
+                            connection.executemany(
+                                "INSERT OR IGNORE INTO features (subtype, identity) VALUES (?, ?)",
+                                feature_rows,
+                            )
+                            connection.executemany(
+                                "INSERT OR IGNORE INTO variants (subtype, identity) VALUES (?, ?)",
+                                variant_rows,
+                            )
+                            connection.executemany(
+                                "INSERT OR IGNORE INTO variant_payloads (identity, full_sha) VALUES (?, ?)",
+                                payload_rows,
+                            )
+                            if tile_number % 4096 == 0:
+                                connection.commit()
+                    finally:
+                        for handle in bucket_handles.values():
+                            handle.close()
+                    for x in range(window.x_min, window.x_max + 1):
+                        path = bucket_paths.get(x)
+                        if path is None:
+                            continue
+                        with path.open("rb") as handle:
+                            while True:
+                                chunk = handle.read(_FILE_HASH_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                digest.update(chunk)
+            if next_record_offset != records_bytes:
+                raise V3PackageMergeError("V3 audit records pack has trailing bytes")
+            if index_handle.read(1) or records_handle.read(1):
+                raise V3PackageMergeError("V3 audit runtime files have trailing bytes")
         connection.commit()
         if connection.execute(
             "SELECT identity FROM variant_payloads GROUP BY identity HAVING COUNT(*) > 1 LIMIT 1"

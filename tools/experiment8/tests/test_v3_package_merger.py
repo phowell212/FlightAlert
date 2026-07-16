@@ -1510,6 +1510,34 @@ class V3PackageMergerTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse(partial.exists())
 
+    def test_output_audit_does_not_random_seek_in_semantic_order(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        tiles = (TileKey(2, 0, 0), TileKey(2, 3, 0), TileKey(2, 0, 3), TileKey(2, 3, 3))
+        payloads = {
+            tile: encode_tile_payload(
+                tile,
+                [RendererTileRecord(_line_renderer_record(tile), None)],
+            )
+            for tile in tiles
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary, output = root / "primary", root / "out"
+            _write_package(primary, "primary", payloads, complete_declared_scope=False)
+            with mock.patch.object(
+                v3_package_merger,
+                "_read_output_payload",
+                side_effect=AssertionError("output audit used random reads"),
+            ):
+                v3_package_merger.merge_v3_packages(
+                    primary_directory=primary,
+                    supplement_directories=(),
+                    output_directory=output,
+                    package_id="sequential-output-audit",
+                )
+            self.assertTrue((output / "merge-receipt.json").is_file())
+
     def test_same_tile_merge_preserves_envelopes_orders_and_dedupes(self) -> None:
         from tools.experiment8.v3_package_merger import merge_v3_packages
 
