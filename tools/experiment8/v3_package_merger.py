@@ -24,6 +24,7 @@ from .renderer_tile_package import (
     INDEX_ENTRY_BYTES,
     INDEX_FLAG_PRESENT,
     MAX_RECORDS_PER_TILE,
+    MAX_RENDERER_RECORD_BYTES,
     MAX_SOURCED_TEXT_RECORD_BYTES,
     MAX_TILE_BYTES,
     PAYLOAD_SCHEMA,
@@ -34,7 +35,13 @@ from .renderer_tile_package import (
     raw_deflate,
     raw_hash32,
 )
-from .semantic_model import renderer_record_bytes, variant_fingerprint
+from .semantic_model import (
+    FeatureKind,
+    LayerGroup,
+    MAX_CANONICAL_TABLE_REFERENCES,
+    renderer_record_bytes,
+    variant_fingerprint,
+)
 from .sourced_text import UNICODE_SCRIPT_PROFILE_SHA256
 
 
@@ -77,6 +84,10 @@ _WATERWAY_FINAL_SEMANTIC_SCHEMA = (
     "flightalert.experiment8.osm-waterway-final-semantic-identity.v2"
 )
 _WATERWAY_FINAL_SEMANTIC_DOMAIN = b"FAE8WATERFINAL2\0"
+_CANONICAL_MAGIC = b"N8T1"
+_CANONICAL_VARIANT_PAYLOAD_TAG = 4
+_RENDERER_RECORD_TAG = 8
+_VARIANT_FINGERPRINT_DOMAIN = b"FAE8VAR1\0"
 _RECOVERY_PRESERVED_META_KEYS = {
     "admissionCheckpoint",
     "admissionReceipt",
@@ -1481,6 +1492,298 @@ def _inflate_exact(compressed: bytes, raw_length: int, label: str) -> bytes:
     return raw
 
 
+def _read_u8(data: bytes, offset: int, label: str) -> tuple[int, int]:
+    if offset + 1 > len(data):
+        raise V3PackageMergeError(f"{label} is truncated")
+    return data[offset], offset + 1
+
+
+def _read_u32(data: bytes, offset: int, label: str) -> tuple[int, int]:
+    if offset + 4 > len(data):
+        raise V3PackageMergeError(f"{label} is truncated")
+    return struct.unpack_from("<I", data, offset)[0], offset + 4
+
+
+def _read_i32(data: bytes, offset: int, label: str) -> tuple[int, int]:
+    if offset + 4 > len(data):
+        raise V3PackageMergeError(f"{label} is truncated")
+    return struct.unpack_from("<i", data, offset)[0], offset + 4
+
+
+def _read_u64(data: bytes, offset: int, label: str) -> tuple[int, int]:
+    if offset + 8 > len(data):
+        raise V3PackageMergeError(f"{label} is truncated")
+    return struct.unpack_from("<Q", data, offset)[0], offset + 8
+
+
+def _skip_blob(data: bytes, offset: int, maximum: int, label: str) -> tuple[int, int]:
+    length, offset = _read_u32(data, offset, label)
+    if length > maximum or offset + length > len(data):
+        raise V3PackageMergeError(f"{label} exceeds its bound")
+    return length, offset + length
+
+
+def _expect_n8_header(data: bytes, offset: int, tag: int, label: str) -> int:
+    if offset + len(_CANONICAL_MAGIC) + 1 > len(data):
+        raise V3PackageMergeError(f"{label} header is truncated")
+    if data[offset : offset + len(_CANONICAL_MAGIC)] != _CANONICAL_MAGIC:
+        raise V3PackageMergeError(f"{label} magic is unsupported")
+    offset += len(_CANONICAL_MAGIC)
+    actual, offset = _read_u8(data, offset, label)
+    if actual != tag:
+        raise V3PackageMergeError(f"{label} tag is unsupported")
+    return offset
+
+
+def _fast_variant_order_fields(
+    variant_payload: bytes,
+    variant_id: int,
+) -> tuple[int, int, int, int, int, bytes]:
+    offset = _expect_n8_header(
+        variant_payload,
+        0,
+        _CANONICAL_VARIANT_PAYLOAD_TAG,
+        "canonical variant payload",
+    )
+    for label in (
+        "variant dedupe ID",
+        "variant geometry ID",
+        "variant source-layer ID",
+        "variant source-scale-band ID",
+    ):
+        _, offset = _read_u64(variant_payload, offset, label)
+    layer_group, offset = _read_u8(variant_payload, offset, "variant layer group")
+    feature_kind, offset = _read_u8(variant_payload, offset, "variant feature kind")
+    try:
+        LayerGroup(layer_group)
+        FeatureKind(feature_kind)
+    except ValueError as error:
+        raise V3PackageMergeError("V3 renderer variant enum is unknown") from error
+    subtype_value, offset = _read_u32(
+        variant_payload,
+        offset,
+        "variant semantic subtype",
+    )
+    try:
+        SemanticSubtype(subtype_value)
+    except ValueError as error:
+        raise V3PackageMergeError("V3 renderer semantic subtype is unknown") from error
+
+    source_style_count, offset = _read_u32(
+        variant_payload,
+        offset,
+        "variant source-style count",
+    )
+    if (
+        source_style_count > MAX_CANONICAL_TABLE_REFERENCES
+        or source_style_count > (len(variant_payload) - offset) // 8
+    ):
+        raise V3PackageMergeError("variant source-style count exceeds canonical bounds")
+    offset += source_style_count * 8
+
+    render_token_count, offset = _read_u32(
+        variant_payload,
+        offset,
+        "variant render-token count",
+    )
+    if (
+        render_token_count > MAX_CANONICAL_TABLE_REFERENCES
+        or render_token_count > (len(variant_payload) - offset) // 8
+    ):
+        raise V3PackageMergeError("variant render-token count exceeds canonical bounds")
+    offset += render_token_count * 8
+
+    has_text, offset = _read_u8(variant_payload, offset, "variant text flag")
+    if has_text not in (0, 1):
+        raise V3PackageMergeError("variant text flag is not canonical")
+    if has_text:
+        _, offset = _skip_blob(
+            variant_payload,
+            offset,
+            len(variant_payload),
+            "variant visible text",
+        )
+    _, offset = _skip_blob(
+        variant_payload,
+        offset,
+        len(variant_payload),
+        "variant geometry",
+    )
+    for label in (
+        "variant minimum centizoom",
+        "variant maximum centizoom",
+        "variant fade-in centizoom",
+        "variant fade-out centizoom",
+    ):
+        _, offset = _read_i32(variant_payload, offset, label)
+    draw_order, offset = _read_i32(variant_payload, offset, "variant draw order")
+    priority, offset = _read_i32(variant_payload, offset, "variant priority")
+    _, offset = _skip_blob(
+        variant_payload,
+        offset,
+        len(variant_payload),
+        "variant placement",
+    )
+    _, offset = _read_u8(variant_payload, offset, "variant land evidence")
+    _, offset = _read_u8(variant_payload, offset, "variant protected status")
+    _, offset = _read_u32(variant_payload, offset, "variant flags")
+    if offset != len(variant_payload):
+        raise V3PackageMergeError("canonical variant payload has trailing bytes")
+
+    variant_full_sha256 = hashlib.sha256(
+        _VARIANT_FINGERPRINT_DOMAIN + variant_payload
+    ).digest()
+    if int.from_bytes(variant_full_sha256[:8], "big") != variant_id:
+        raise V3PackageMergeError(
+            "encoded canonical variant ID does not match its FAE8VAR1 payload"
+        )
+    return (
+        draw_order,
+        priority,
+        layer_group,
+        feature_kind,
+        subtype_value,
+        variant_full_sha256,
+    )
+
+
+def _extract_envelopes_fast(tile: TileKey, payload: bytes) -> tuple[_RawEnvelope, ...]:
+    try:
+        if not payload or len(payload) > MAX_TILE_BYTES:
+            raise V3PackageMergeError("V3 tile byte length is outside its bound")
+        offset = 0
+        if payload[: len(TILE_PAYLOAD_MAGIC)] != TILE_PAYLOAD_MAGIC:
+            raise V3PackageMergeError("V3 tile magic is unsupported")
+        offset += len(TILE_PAYLOAD_MAGIC)
+        encoded = TileKey(
+            payload[offset],
+            struct.unpack_from("<I", payload, offset + 1)[0],
+            struct.unpack_from("<I", payload, offset + 5)[0],
+        )
+        offset += struct.calcsize("<BII")
+        if encoded != tile:
+            raise V3PackageMergeError("V3 tile coordinate does not match its index entry")
+        count, offset = _read_u32(payload, offset, "V3 tile record count")
+        if count > MAX_RECORDS_PER_TILE:
+            raise V3PackageMergeError("V3 tile record count exceeds its bound")
+
+        envelopes: list[_RawEnvelope] = []
+        for _ in range(count):
+            start = offset
+            renderer_length, offset = _read_u32(payload, offset, "V3 renderer envelope")
+            if (
+                not renderer_length
+                or renderer_length > MAX_RENDERER_RECORD_BYTES
+                or offset + renderer_length > len(payload)
+            ):
+                raise V3PackageMergeError("V3 renderer envelope exceeds its bound")
+            canonical_renderer = payload[offset : offset + renderer_length]
+            offset += renderer_length
+            sourced_length, offset = _read_u32(
+                payload,
+                offset,
+                "V3 sourced-text envelope",
+            )
+            sourced_digest = b""
+            if sourced_length:
+                if (
+                    sourced_length > MAX_SOURCED_TEXT_RECORD_BYTES
+                    or offset + 32 + sourced_length > len(payload)
+                ):
+                    raise V3PackageMergeError("V3 sourced-text envelope exceeds its bound")
+                sourced_digest = payload[offset : offset + 32]
+                offset += 32 + sourced_length
+
+            renderer_offset = _expect_n8_header(
+                canonical_renderer,
+                0,
+                _RENDERER_RECORD_TAG,
+                "renderer record",
+            )
+            feature_id, renderer_offset = _read_u64(
+                canonical_renderer,
+                renderer_offset,
+                "renderer feature ID",
+            )
+            variant_id, renderer_offset = _read_u64(
+                canonical_renderer,
+                renderer_offset,
+                "renderer variant ID",
+            )
+            owner_tile_packed, renderer_offset = _read_u64(
+                canonical_renderer,
+                renderer_offset,
+                "renderer owner tile",
+            )
+            world_wrap, renderer_offset = _read_i32(
+                canonical_renderer,
+                renderer_offset,
+                "renderer world wrap",
+            )
+            variant_length, renderer_offset_after_length = _read_u32(
+                canonical_renderer,
+                renderer_offset,
+                "renderer canonical variant",
+            )
+            if (
+                not variant_length
+                or variant_length > MAX_RENDERER_RECORD_BYTES
+                or renderer_offset_after_length + variant_length > len(canonical_renderer)
+            ):
+                raise V3PackageMergeError("renderer canonical variant exceeds its bound")
+            variant_payload = canonical_renderer[
+                renderer_offset_after_length : renderer_offset_after_length + variant_length
+            ]
+            renderer_offset = renderer_offset_after_length + variant_length
+            if renderer_offset != len(canonical_renderer):
+                raise V3PackageMergeError("renderer record has trailing bytes")
+
+            (
+                draw_order,
+                priority,
+                layer_group,
+                feature_kind,
+                subtype_value,
+                variant_full_sha256,
+            ) = _fast_variant_order_fields(variant_payload, variant_id)
+            subtype = SemanticSubtype(subtype_value)
+            envelopes.append(
+                _RawEnvelope(
+                    raw=payload[start:offset],
+                    renderer_bytes=canonical_renderer,
+                    posting_key=(
+                        feature_id,
+                        variant_id,
+                        owner_tile_packed,
+                        world_wrap,
+                    ),
+                    order_key=(
+                        draw_order,
+                        priority,
+                        layer_group,
+                        feature_kind,
+                        variant_id,
+                        feature_id,
+                        canonical_renderer,
+                        sourced_digest,
+                    ),
+                    subtype=subtype,
+                    feature_id=feature_id,
+                    variant_id=variant_id,
+                    variant_full_sha256=variant_full_sha256,
+                )
+            )
+        if offset != len(payload):
+            raise V3PackageMergeError("V3 tile contains trailing envelope bytes")
+        return tuple(envelopes)
+    except (OverflowError, ValueError, struct.error) as error:
+        if isinstance(error, V3PackageMergeError):
+            raise
+        raise V3PackageMergeError(
+            f"V3 tile {tile.z}/{tile.x}/{tile.y} is not canonical: {error}"
+        ) from error
+
+
 def _extract_envelopes(tile: TileKey, payload: bytes) -> tuple[_RawEnvelope, ...]:
     try:
         decoded = decode_tile_payload(tile, payload)
@@ -1602,7 +1905,7 @@ def _read_input_tile(
     payload = _inflate_exact(compressed, raw_length, "V3 input")
     if raw_hash32(payload) != expected_hash32:
         raise V3PackageMergeError("V3 input tile integrity hash differs")
-    return True, _extract_envelopes(tile, payload)
+    return True, _extract_envelopes_fast(tile, payload)
 
 
 def _finish_input_validation(package: _InputPackage, state: _InputState) -> None:

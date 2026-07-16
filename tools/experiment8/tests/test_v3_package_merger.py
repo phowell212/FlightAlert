@@ -1152,6 +1152,49 @@ class V3PackageMergerTests(unittest.TestCase):
         with self.assertRaisesRegex(V3PackageMergeError, "compressed.*bound"):
             _read_input_tile(package, state, tile)
 
+    def test_input_tile_reader_uses_fast_raw_envelope_extraction(self) -> None:
+        from tools.experiment8 import v3_package_merger
+
+        tile = TileKey(1, 0, 0)
+        payload = encode_tile_payload(
+            tile,
+            [
+                RendererTileRecord(_line_renderer_record(tile), None),
+                RendererTileRecord(_cairo_renderer_record(), _cairo_sourced_text()),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            package_directory = Path(temporary) / "package"
+            _write_package(package_directory, "fast-input-reader", {tile: payload})
+            package = v3_package_merger._load_input(package_directory)
+            with (
+                (package_directory / "tile-index.bin").open("rb") as index_handle,
+                (package_directory / "records.fadictpack").open("rb") as records_handle,
+                mock.patch.object(
+                    v3_package_merger,
+                    "_extract_envelopes",
+                    side_effect=AssertionError("strict renderer decode is too slow here"),
+                ),
+            ):
+                state = v3_package_merger._InputState(
+                    index_handle=index_handle,
+                    records_handle=records_handle,
+                )
+                present, envelopes = v3_package_merger._read_input_tile(
+                    package,
+                    state,
+                    tile,
+                )
+
+            self.assertTrue(present)
+            self.assertEqual(
+                tuple(item.renderer_bytes for item in envelopes),
+                tuple(
+                    item.renderer_bytes
+                    for item in v3_package_merger._extract_envelopes_fast(tile, payload)
+                ),
+            )
+
     def test_same_tile_contributions_are_deduped_before_payload_assembly(self) -> None:
         from tools.experiment8 import v3_package_merger
 
@@ -2196,6 +2239,53 @@ class V3PackageMergerTests(unittest.TestCase):
                 },
                 result.manifest["merge"]["authoritySemanticVerification"],
             )
+
+    def test_fast_raw_envelope_extraction_matches_strict_renderer_decode(self) -> None:
+        from tools.experiment8.v3_package_merger import (
+            _extract_envelopes,
+            _extract_envelopes_fast,
+        )
+
+        tile = TileKey(1, 0, 0)
+        payload = encode_tile_payload(
+            tile,
+            [
+                RendererTileRecord(_line_renderer_record(tile), None),
+                RendererTileRecord(_cairo_renderer_record(), _cairo_sourced_text()),
+            ],
+        )
+
+        strict = _extract_envelopes(tile, payload)
+        fast = _extract_envelopes_fast(tile, payload)
+
+        self.assertEqual(
+            [
+                (
+                    item.raw,
+                    item.renderer_bytes,
+                    item.posting_key,
+                    item.order_key,
+                    item.subtype,
+                    item.feature_id,
+                    item.variant_id,
+                    item.variant_full_sha256,
+                )
+                for item in strict
+            ],
+            [
+                (
+                    item.raw,
+                    item.renderer_bytes,
+                    item.posting_key,
+                    item.order_key,
+                    item.subtype,
+                    item.feature_id,
+                    item.variant_id,
+                    item.variant_full_sha256,
+                )
+                for item in fast
+            ],
+        )
 
     def test_semantic_authentication_uses_the_held_merge_streams(self) -> None:
         from tools.experiment8.v3_package_merger import (
