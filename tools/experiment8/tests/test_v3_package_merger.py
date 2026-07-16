@@ -253,6 +253,8 @@ def _write_recovered_water_build_receipt(
         "referenceSizePolicy": binding["module"],
         "renderer": {"bytes": 123, "sha256": "4" * 64},
     }
+    recovered_publish_code = dict(code)
+    recovered_publish_code["renderer"] = {"bytes": 124, "sha256": "5" * 64}
     run_identity = {
         "admissionAggregateSha256": admission["aggregateSha256"],
         "admissionPolicySha256": admission_policy_sha256,
@@ -382,7 +384,7 @@ def _write_recovered_water_build_receipt(
         "attribution": attribution,
         "build": {
             "classifierSha256": run_identity["classifierSha256"],
-            "code": code,
+            "code": recovered_publish_code,
             "recovery": recovery,
             "runIdentity": run_identity,
             "runIdentitySha256": run_identity_sha256,

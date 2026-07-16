@@ -1235,7 +1235,10 @@ def _load_authority_receipt(
         or not _same_canonical_json(
             run_identity.get("source"), manifest_authority["source"]
         )
-        or not _same_canonical_json(run_identity.get("code"), code)
+        or (
+            "recovery" not in build
+            and not _same_canonical_json(run_identity.get("code"), code)
+        )
         or not _same_canonical_json(
             run_identity.get("zooms"), manifest_authority["requestedZooms"]
         )
