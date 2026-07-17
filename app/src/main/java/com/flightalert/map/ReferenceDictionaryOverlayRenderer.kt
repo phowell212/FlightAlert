@@ -830,6 +830,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 .thenBy { it.layout_feature_id }
                 .thenBy { it.encounter_order },
         )
+        val budget = label_budget(viewport)
+        var selection_threshold = ReferenceLabelAdmissionPolicy.initial_threshold(budget)
+        var last_selected_candidate_count = -1
         var record_index = 0
         while (record_index < label_record_refs.size) {
             val first_ref = label_record_refs[record_index]
@@ -878,8 +881,19 @@ internal class ReferenceDictionaryOverlayRenderer(
                     label_record_refs[record_index].record.priority == block_priority &&
                     label_record_refs[record_index].layout_feature_id == block_feature_id
             )
+            if (label_candidates.size >= selection_threshold) {
+                accept_label_candidates(viewport, label_avoid_rects)
+                last_selected_candidate_count = label_candidates.size
+                if (accepted_labels.size >= budget) break
+                selection_threshold =
+                    ReferenceLabelAdmissionPolicy.next_threshold(label_candidates.size)
+            }
+        }
+        if (
+            accepted_labels.size < budget &&
+            last_selected_candidate_count != label_candidates.size
+        ) {
             accept_label_candidates(viewport, label_avoid_rects)
-            if (accepted_labels.size >= label_budget(viewport)) break
         }
         label_record_refs.clear()
         for (index in accepted_labels.indices.reversed()) {

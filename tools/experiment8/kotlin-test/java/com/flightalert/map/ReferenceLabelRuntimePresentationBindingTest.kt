@@ -64,8 +64,12 @@ class ReferenceLabelRuntimePresentationBindingTest {
             "accept_label_candidates(viewport, label_avoid_rects)",
             blockLoopIndex.coerceAtLeast(0),
         )
+        val thresholdIndex = drawLabels.indexOf(
+            "if (label_candidates.size >= selection_threshold)",
+            blockLoopIndex.coerceAtLeast(0),
+        )
         val budgetStopIndex = drawLabels.indexOf(
-            "if (accepted_labels.size >= label_budget(viewport)) break",
+            "if (accepted_labels.size >= budget) break",
             acceptIndex.coerceAtLeast(0),
         )
         val blockContract = if (blockLoopIndex >= 0 && acceptIndex > blockLoopIndex) {
@@ -75,9 +79,18 @@ class ReferenceLabelRuntimePresentationBindingTest {
         }
         val generatesCandidates = blockContract.contains("line_label_candidates(") ||
             blockContract.contains("point_label_candidate(")
-        expectContract("complete block selects before budget stop", generatesCandidates &&
+        expectContract("complete blocks feed exponential prefix selection before budget stop", generatesCandidates &&
             Regex("\\b(?:while|do)\\b").findAll(blockContract).count() >= 2 &&
-            acceptIndex > blockLoopIndex && budgetStopIndex > acceptIndex)
+            thresholdIndex > blockLoopIndex && acceptIndex > thresholdIndex &&
+            budgetStopIndex > acceptIndex &&
+            drawLabels.contains("ReferenceLabelAdmissionPolicy.initial_threshold(budget)") &&
+            drawLabels.contains("ReferenceLabelAdmissionPolicy.next_threshold(label_candidates.size)"))
+        expectContract(
+            "the final incomplete prefix is selected once",
+            drawLabels.contains("last_selected_candidate_count != label_candidates.size") &&
+                drawLabels.lastIndexOf("accept_label_candidates(viewport, label_avoid_rects)") >
+                budgetStopIndex,
+        )
         expectContract(
             "temporary record refs are released after admission",
             "label_record_refs.clear()".toRegex(RegexOption.LITERAL)
