@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -66,6 +67,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val visible_tiles = ArrayList<VisibleDictionaryTile>(32)
     private val draw_tiles = ArrayList<DictionaryTileDrawRef>(32)
     private val label_candidates = ArrayList<DictionaryLabelCandidate>(256)
+    private val planned_label_candidate_ids = HashSet<ULong>(256)
     private val accepted_labels = ArrayList<DictionaryLabelCandidate>(128)
     private val requested_tiles = HashSet<String>()
     private val desired_tile_keys = HashSet<String>()
@@ -802,6 +804,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
     ): Int {
         label_candidates.clear()
+        planned_label_candidate_ids.clear()
         for (tile in tiles) {
             for (record in tile.tile.labels) {
                 if (!record.drawable || !record.visible_at(viewport.zoom)) continue
@@ -810,16 +813,37 @@ internal class ReferenceDictionaryOverlayRenderer(
                 }
                 val style = label_style_for(record, label_text_scale, viewport.zoom)
                 if (style.alpha <= 0 && style.halo_alpha <= 0) continue
-                if (record.line_label && record.geometry?.rings?.isNotEmpty() == true) {
-                    label_candidates += line_label_candidates(
+                if (
+                    record.line_label &&
+                    record.geometry?.rings?.any { ring -> ring.point_count >= 2 } == true
+                ) {
+                    if (
+                        record.candidate_id != null &&
+                        record.candidate_id in planned_label_candidate_ids
+                    ) {
+                        continue
+                    }
+                    val planned_candidates = line_label_candidates(
                         viewport,
                         tile,
                         record,
                         style,
+                        label_text_scale,
                         label_avoid_rects,
                     )
-                } else {
-                    point_label_candidate(viewport, tile, record, style)?.let(label_candidates::add)
+                    if (planned_candidates.isNotEmpty()) {
+                        record.candidate_id?.let(planned_label_candidate_ids::add)
+                        label_candidates += planned_candidates
+                    }
+                } else if (!record.line_label) {
+                    point_label_candidate(viewport, tile, record, style)?.let { candidate ->
+                        if (
+                            record.candidate_id == null ||
+                            planned_label_candidate_ids.add(record.candidate_id)
+                        ) {
+                            label_candidates += candidate
+                        }
+                    }
                 }
             }
         }
@@ -835,23 +859,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         tile: DictionaryTileDrawRef,
         record: DictionaryLabelRecord,
         style: DictionaryLabelStyle,
+        label_text_scale: Float,
         label_avoid_rects: List<ReferenceScreenRect>,
     ): List<DictionaryLabelCandidate> {
-        prepare_text_paint(style, style.typeface_style, style.text_size)
-        val presentation = record.sourced_text?.let {
-            SourcedMapTextPresentation.plan(it, style.text_size)
-        }
-        val primary_width = text_paint.measureText(record.text)
-        val english_width = presentation?.english?.let { english ->
-            prepare_text_paint(
-                style,
-                italic_typeface_style(style.typeface_style),
-                english.textSize,
-            )
-            text_paint.measureText(english.text)
-        } ?: 0f
-        prepare_text_paint(style, style.typeface_style, style.text_size)
-        val text_width = max(primary_width, english_width)
         val is_water = record.is_water ?: (record.source_kind == "water")
         val parts = record.geometry?.rings?.mapNotNull { ring ->
             if (ring.point_count < 2) return@mapNotNull null
@@ -866,42 +876,144 @@ internal class ReferenceDictionaryOverlayRenderer(
             }
         }.orEmpty()
         if (parts.isEmpty()) return emptyList()
-        val collision_height = presentation?.collisionHeightEm?.times(style.text_size)
-            ?: style.text_size
-        val collision_radius = collision_height / 2f +
-                dp(style.halo_width_dp) + LABEL_COLLISION_PADDING_PX
-        val policy_edge_clearance = style.text_size *
-                ReferencePresentationPolicy.label_edge_clearance_milli_em / 1_000f
         val candidate_id = record.candidate_id
             ?: (record.dedupe_key ?: record.text).hashCode().toUInt().toULong()
-        val placements = ReferencePathLabelPlanner.plan(
-            ReferencePathLabelRequest(
-                parts = parts,
-                viewport = ReferenceScreenRect(
-                    left = 0.0,
-                    top = 0.0,
-                    right = viewport.width.toDouble(),
-                    bottom = viewport.height.toDouble(),
-                ),
-                shapedAdvancePx = text_width.toDouble(),
-                endClearancePx = (
-                    style.text_size * ReferencePresentationPolicy.label_end_clearance_milli_em /
-                        1_000f
-                    ).toDouble(),
-                edgeClearancePx = max(collision_radius, policy_edge_clearance).toDouble(),
-                maxBendDegrees = (
-                    record.visibility_rule?.max_bend_centi_degrees
-                        ?: ReferencePresentationPolicy.max_line_label_bend_centi_degrees
-                    ) / 100.0,
-                candidateId = candidate_id,
-                repeatSpacingPx = record.repeat_spacing_px
-                    ?.takeIf { it > 0 }
-                    ?: ReferencePresentationPolicy.line_label_repeat_spacing_px,
-                prominenceTier = record.prominence_tier ?: ProminenceTier.LOCAL,
-                staticAvoidRects = label_avoid_rects,
-                maximumTangentOffsetPx = max(dp(48f), collision_radius * 4f).toDouble(),
-            ),
+        val minimum_water_text_size_px = sp(
+            MIN_WATER_LINE_TEXT_SIZE_SP * label_text_scale,
         )
+        val viewport_diagonal = hypot(viewport.width.toDouble(), viewport.height.toDouble())
+        var selected_style = style
+        var selected_collision_radius = 0f
+        var placements: List<ReferencePathLabelPlacement> = emptyList()
+        var tangent_fallback_style = style
+        var tangent_fallback_collision_radius = 0f
+        var tangent_fallback_request: ReferencePathLabelRequest? = null
+        var previous_text_size = -1f
+        for (attempt_index in 0 until ReferenceLineLabelFitPolicy.attemptCount(is_water)) {
+            val fitted_text_size = ReferenceLineLabelFitPolicy.textSizePx(
+                baseTextSizePx = style.text_size,
+                minimumTextSizePx = minimum_water_text_size_px,
+                isWater = is_water,
+                attemptIndex = attempt_index,
+            )
+            if (fitted_text_size == previous_text_size) continue
+            previous_text_size = fitted_text_size
+            val fitted_style = if (fitted_text_size == style.text_size) {
+                style
+            } else {
+                style.copy(text_size = fitted_text_size)
+            }
+            prepare_text_paint(
+                fitted_style,
+                fitted_style.font_weight,
+                fitted_style.italic,
+                fitted_style.text_size,
+            )
+            val presentation = record.sourced_text?.let {
+                SourcedMapTextPresentation.plan(it, fitted_style.text_size)
+            }
+            val primary_width = text_paint.measureText(record.text)
+            val english_width = presentation?.english?.let { english ->
+                prepare_text_paint(
+                    fitted_style,
+                    ENGLISH_FONT_WEIGHT,
+                    ENGLISH_ITALIC,
+                    english.textSize,
+                )
+                text_paint.measureText(english.text)
+            } ?: 0f
+            prepare_text_paint(
+                fitted_style,
+                fitted_style.font_weight,
+                fitted_style.italic,
+                fitted_style.text_size,
+            )
+            val text_width = max(primary_width, english_width)
+            val collision_height = presentation?.collisionHeightEm
+                ?.times(fitted_style.text_size)
+                ?: fitted_style.text_size
+            val collision_radius = collision_height / 2f +
+                label_halo_width_px(fitted_style, fitted_style.text_size) +
+                LABEL_COLLISION_PADDING_PX
+            val policy_edge_clearance = fitted_style.text_size *
+                ReferencePresentationPolicy.label_edge_clearance_milli_em / 1_000f
+            val attempt_request = ReferencePathLabelRequest(
+                    parts = parts,
+                    viewport = ReferenceScreenRect(
+                        left = 0.0,
+                        top = 0.0,
+                        right = viewport.width.toDouble(),
+                        bottom = viewport.height.toDouble(),
+                    ),
+                    shapedAdvancePx = text_width.toDouble(),
+                    endClearancePx = (
+                        fitted_style.text_size *
+                            ReferencePresentationPolicy.label_end_clearance_milli_em / 1_000f
+                        ).toDouble(),
+                    edgeClearancePx = max(collision_radius, policy_edge_clearance).toDouble(),
+                    maxBendDegrees = (
+                        record.visibility_rule?.max_bend_centi_degrees
+                            ?: ReferencePresentationPolicy.max_line_label_bend_centi_degrees
+                        ) / 100.0,
+                    candidateId = candidate_id,
+                    repeatSpacingPx = record.repeat_spacing_px
+                        ?.takeIf { it > 0 }
+                        ?: ReferencePresentationPolicy.line_label_repeat_spacing_px,
+                    prominenceTier = record.prominence_tier ?: ProminenceTier.LOCAL,
+                    staticAvoidRects = label_avoid_rects,
+                    maximumTangentOffsetPx = if (is_water) {
+                        0.0
+                    } else {
+                        max(dp(48f), collision_radius * 4f).toDouble()
+                    },
+                    maximumTangentSourceDistancePx = if (is_water) {
+                        collision_radius.toDouble()
+                    } else {
+                        viewport_diagonal
+                    },
+                    maximumCurvedSourceDistancePx = if (is_water) {
+                        (
+                            collision_radius * WATER_CURVED_SOURCE_DISTANCE_FRACTION
+                            ).toDouble()
+                    } else {
+                        0.0
+                    },
+                    allowTangentFallback = !is_water,
+                )
+            if (is_water) {
+                tangent_fallback_style = fitted_style
+                tangent_fallback_collision_radius = collision_radius
+                tangent_fallback_request = attempt_request.copy(
+                    allowCurvedPlacement = false,
+                    allowTangentFallback = true,
+                )
+            }
+            val attempt_placements = ReferencePathLabelPlanner.plan(
+                attempt_request,
+            )
+            val has_curved_placement = attempt_placements.any { placement ->
+                placement.mode == ReferencePathLabelPlacementMode.CURVED
+            }
+            if (
+                attempt_placements.isNotEmpty() &&
+                ReferenceLineLabelFitPolicy.acceptAttempt(is_water, has_curved_placement)
+            ) {
+                selected_style = fitted_style
+                selected_collision_radius = collision_radius
+                placements = attempt_placements
+                break
+            }
+        }
+        if (placements.isEmpty()) {
+            tangent_fallback_request?.let { fallback_request ->
+                val fallback_placements = ReferencePathLabelPlanner.plan(fallback_request)
+                if (fallback_placements.isNotEmpty()) {
+                    selected_style = tangent_fallback_style
+                    selected_collision_radius = tangent_fallback_collision_radius
+                    placements = fallback_placements
+                }
+            }
+        }
         if (placements.isEmpty()) {
             return if (record.candidate_id == null && !is_water) {
                 listOfNotNull(point_label_candidate(viewport, tile, record, style))
@@ -914,9 +1026,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 text = record.text,
                 source_kind = record.source_kind,
                 sourced_text = record.sourced_text,
-                style = style,
+                style = selected_style,
                 occurrenceId = option.occurrenceId,
-                featureId = candidate_id,
+                featureId = record.source_feature_id ?: candidate_id,
                 priority = record.priority,
                 placementRank = option.placementRank,
                 protectedArea = record.protected_area,
@@ -924,10 +1036,10 @@ internal class ReferenceDictionaryOverlayRenderer(
                 anchor = option.placement.anchor,
                 collisionShape = ReferenceLabelCollisionShape.Path(
                     points = option.placement.presentationPath,
-                    radiusPx = collision_radius.toDouble(),
+                    radiusPx = selected_collision_radius.toDouble(),
                     bounds = pathBounds(
                         option.placement.presentationPath,
-                        collision_radius.toDouble(),
+                        selected_collision_radius.toDouble(),
                     ),
                 ),
                 path_points = option.placement.presentationPath,
@@ -945,12 +1057,13 @@ internal class ReferenceDictionaryOverlayRenderer(
         val presentation = record.sourced_text?.let {
             SourcedMapTextPresentation.plan(it, style.text_size)
         }
-        prepare_text_paint(style, style.typeface_style, style.text_size)
+        prepare_text_paint(style, style.font_weight, style.italic, style.text_size)
         val primary_width = text_paint.measureText(record.text)
         val english_width = presentation?.english?.let { english ->
             prepare_text_paint(
                 style,
-                italic_typeface_style(style.typeface_style),
+                ENGLISH_FONT_WEIGHT,
+                ENGLISH_ITALIC,
                 english.textSize,
             )
             text_paint.measureText(english.text)
@@ -965,13 +1078,15 @@ internal class ReferenceDictionaryOverlayRenderer(
             width_override = max(primary_width, english_width),
             height_override = presentation?.collisionHeightEm?.times(style.text_size),
         )
+        val collision_padding =
+            label_halo_width_px(style, style.text_size) + LABEL_COLLISION_PADDING_PX
         return DictionaryLabelCandidate(
             text = record.text,
             source_kind = record.source_kind,
             sourced_text = record.sourced_text,
             style = style,
             occurrenceId = ReferenceLabelOccurrenceId(candidate_id, 0L),
-            featureId = candidate_id,
+            featureId = record.source_feature_id ?: candidate_id,
             priority = record.priority,
             placementRank = 0,
             protectedArea = record.protected_area,
@@ -979,10 +1094,10 @@ internal class ReferenceDictionaryOverlayRenderer(
             anchor = ReferencePathLabelPoint(anchor.x.toDouble(), anchor.y.toDouble()),
             collisionShape = ReferenceLabelCollisionShape.Box(
                 ReferenceScreenRect(
-                    left = label_bounds.left.toDouble() - LABEL_COLLISION_PADDING_PX,
-                    top = label_bounds.top.toDouble() - LABEL_COLLISION_PADDING_PX,
-                    right = label_bounds.right.toDouble() + LABEL_COLLISION_PADDING_PX,
-                    bottom = label_bounds.bottom.toDouble() + LABEL_COLLISION_PADDING_PX,
+                    left = label_bounds.left.toDouble() - collision_padding,
+                    top = label_bounds.top.toDouble() - collision_padding,
+                    right = label_bounds.right.toDouble() + collision_padding,
+                    bottom = label_bounds.bottom.toDouble() + collision_padding,
                 ),
             ),
             rotation = record.rotation
@@ -1006,6 +1121,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             labelBudget = label_budget(viewport),
             protectedAreaBudget = protected_area_label_budget(viewport),
             waterRepeatDistancePx = WATER_LINE_LABEL_REPEAT_DISTANCE_PX.toDouble(),
+            singleWaterLabelPerFeature = viewport.zoom <= WATER_SINGLE_LABEL_MAX_ZOOM,
         )
     }
 
@@ -1050,7 +1166,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                     line_label_path,
                     style,
                     style.text_size,
-                    style.typeface_style,
+                    style.font_weight,
+                    style.italic,
                     0f,
                 )
             } else {
@@ -1060,7 +1177,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                     line_label_path,
                     style,
                     presentation.primary.textSize,
-                    style.typeface_style,
+                    style.font_weight,
+                    style.italic,
                     presentation.primary.baselineOffset,
                 )
                 presentation.english?.let { english ->
@@ -1070,7 +1188,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                         line_label_path,
                         style,
                         english.textSize,
-                        italic_typeface_style(style.typeface_style),
+                        ENGLISH_FONT_WEIGHT,
+                        ENGLISH_ITALIC,
                         english.baselineOffset,
                     )
                 }
@@ -1089,7 +1208,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                     y,
                     style,
                     style.text_size,
-                    style.typeface_style,
+                    style.font_weight,
+                    style.italic,
                 )
             } else {
                 draw_text_with_halo(
@@ -1099,7 +1219,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                     y + presentation.primary.baselineOffset,
                     style,
                     presentation.primary.textSize,
-                    style.typeface_style,
+                    style.font_weight,
+                    style.italic,
                 )
                 presentation.english?.let { english ->
                     draw_text_with_halo(
@@ -1109,7 +1230,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                         y + english.baselineOffset,
                         style,
                         english.textSize,
-                        italic_typeface_style(style.typeface_style),
+                        ENGLISH_FONT_WEIGHT,
+                        ENGLISH_ITALIC,
                     )
                 }
             }
@@ -1122,16 +1244,17 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_path: Path,
         style: DictionaryLabelStyle,
         text_size: Float,
-        typeface_style: Int,
+        font_weight: Int,
+        italic: Boolean,
         baseline_offset: Float,
     ) {
-        prepare_text_paint(style, typeface_style, text_size)
+        prepare_text_paint(style, font_weight, italic, text_size)
         path_measure.setPath(label_path, false)
         val path_length = path_measure.length
         text_paint.textAlign = Paint.Align.LEFT
         val h_offset = ((path_length - text_paint.measureText(text)) / 2f).coerceAtLeast(0f)
         text_paint.style = Paint.Style.STROKE
-        text_paint.strokeWidth = max(dp(style.halo_width_dp), text_size * 0.22f)
+        text_paint.strokeWidth = label_halo_width_px(style, text_size)
         text_paint.color = with_alpha(style.halo_color, style.halo_alpha)
         canvas.drawTextOnPath(text, label_path, h_offset, baseline_offset, text_paint)
         text_paint.style = Paint.Style.FILL
@@ -1147,11 +1270,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         y: Float,
         style: DictionaryLabelStyle,
         text_size: Float,
-        typeface_style: Int,
+        font_weight: Int,
+        italic: Boolean,
     ) {
-        prepare_text_paint(style, typeface_style, text_size)
+        prepare_text_paint(style, font_weight, italic, text_size)
         text_paint.style = Paint.Style.STROKE
-        text_paint.strokeWidth = max(dp(style.halo_width_dp), text_size * 0.22f)
+        text_paint.strokeWidth = label_halo_width_px(style, text_size)
         text_paint.color = with_alpha(style.halo_color, style.halo_alpha)
         canvas.drawText(text, x, y, text_paint)
         text_paint.style = Paint.Style.FILL
@@ -1162,25 +1286,26 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private fun prepare_text_paint(
         style: DictionaryLabelStyle,
-        typeface_style: Int,
+        font_weight: Int,
+        italic: Boolean,
         text_size: Float,
     ) {
         text_paint.isAntiAlias = true
         text_paint.isSubpixelText = true
-        text_paint.typeface = Typeface.create(Typeface.DEFAULT, typeface_style)
+        text_paint.typeface = Typeface.create(Typeface.DEFAULT, font_weight, italic)
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.textSize = text_size
         text_paint.textScaleX = 1f
         text_paint.letterSpacing = style.letter_spacing_em
     }
 
-    private fun italic_typeface_style(typeface_style: Int): Int {
-        return if (typeface_style == Typeface.BOLD || typeface_style == Typeface.BOLD_ITALIC) {
-            Typeface.BOLD_ITALIC
-        } else {
-            Typeface.ITALIC
-        }
-    }
+    private fun label_halo_width_px(
+        style: DictionaryLabelStyle,
+        text_size: Float,
+    ): Float = max(
+        dp(style.halo_width_dp),
+        text_size * style.halo_width_milli_em / 1_000f,
+    )
 
     private fun build_ring_path(
         target: Path,
@@ -1280,6 +1405,16 @@ internal class ReferenceDictionaryOverlayRenderer(
                 is ReferenceDictionaryBinaryDrawModel.Label -> {
                     val resolved = model.resolvedStyle
                     val text_size_sp = model.visibility.textSizeMilliSp / 1_000f
+                    val presentation_subtype =
+                        ReferenceLabelRuntimePresentationPolicy.presentationSubtype(
+                            model.subtype,
+                            model.text.primaryText,
+                        )
+                    val runtime_typography = ReferenceLabelRuntimePresentationPolicy.typography(
+                        presentation_subtype,
+                        model.prominenceTier,
+                        model.completeGeometryMeasureBucket,
+                    )
                     val source_kind = binary_source_kind(model.subtype)
                     val geometry = binary_geometry(model.geometry)
                     labels += DictionaryLabelRecord(
@@ -1321,7 +1456,11 @@ internal class ReferenceDictionaryOverlayRenderer(
                         dedupe_key = model.labelCandidateId.toString(16),
                         is_water = binary_water_label(model.subtype),
                         candidate_id = model.labelCandidateId,
+                        source_feature_id = model.featureId,
+                        presentation_subtype = presentation_subtype,
                         prominence_tier = model.prominenceTier,
+                        complete_geometry_measure_bucket = model.completeGeometryMeasureBucket,
+                        runtime_typography = runtime_typography,
                         visibility_rule = model.visibilityRule,
                         repeat_spacing_px = model.repeatSpacingPx,
                     )
@@ -1771,25 +1910,64 @@ internal class ReferenceDictionaryOverlayRenderer(
         zoom: Double,
     ): DictionaryLabelStyle {
         val scale = label_text_scale.coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
-        val visibility_alpha_milli = record.visibility_rule?.let { rule ->
+        val current_centizoom = ReferencePresentationPolicy.centizoom(zoom)
+        val package_visibility_alpha_milli = record.visibility_rule?.let { rule ->
             ReferencePresentationPolicy.label_alpha_milli(
                 rule,
-                ReferencePresentationPolicy.centizoom(zoom),
+                current_centizoom,
             )
         } ?: ReferencePresentationPolicy.full_alpha_milli
+        val runtime_typography = record.runtime_typography
+        val runtime_visibility_alpha_milli = record.presentation_subtype?.let { subtype ->
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                subtype,
+                record.prominence_tier
+                    ?: ReferencePresentationPolicy.default_prominence_for_subtype(subtype),
+                current_centizoom,
+            )
+        } ?: ReferencePresentationPolicy.full_alpha_milli
+        val visibility_alpha_milli = (
+            package_visibility_alpha_milli * runtime_visibility_alpha_milli + 500
+        ) / 1_000
         fun scaled_alpha(alpha: Int): Int {
             return ((alpha * visibility_alpha_milli) + 500) / 1_000
         }
+        val text_size_sp = runtime_typography?.textSizeMilliSp?.div(1_000f)
+            ?: record.base_text_size_sp
+        val halo_width_milli_em = runtime_typography?.haloWidthMilliEm
+            ?: LEGACY_LABEL_HALO_WIDTH_MILLI_EM
         return DictionaryLabelStyle(
             color = record.color,
-            text_size = sp(record.base_text_size_sp * scale),
+            text_size = sp(text_size_sp * scale),
             alpha = scaled_alpha(record.alpha),
             halo_color = record.halo_color,
-            halo_width_dp = record.halo_width_dp,
+            halo_width_dp = if (runtime_typography == null) {
+                record.halo_width_dp
+            } else {
+                0f
+            },
+            halo_width_milli_em = halo_width_milli_em,
             halo_alpha = scaled_alpha(record.halo_alpha),
-            typeface_style = record.typeface_style,
-            letter_spacing_em = record.letter_spacing_em,
+            font_weight = runtime_typography?.fontWeight
+                ?: legacy_font_weight(record.typeface_style),
+            italic = runtime_typography?.italic ?: legacy_italic(record.typeface_style),
+            letter_spacing_em = (
+                runtime_typography?.letterSpacingMilliEm?.div(1_000f)
+                    ?: record.letter_spacing_em
+            ),
         )
+    }
+
+    private fun legacy_font_weight(typeface_style: Int): Int = when (typeface_style) {
+        Typeface.BOLD,
+        Typeface.BOLD_ITALIC -> 700
+        else -> 400
+    }
+
+    private fun legacy_italic(typeface_style: Int): Boolean = when (typeface_style) {
+        Typeface.ITALIC,
+        Typeface.BOLD_ITALIC -> true
+        else -> false
     }
 
     private fun label_style_template_for(
@@ -2308,7 +2486,11 @@ internal class ReferenceDictionaryOverlayRenderer(
         val dedupe_key: String? = null,
         val is_water: Boolean? = null,
         val candidate_id: ULong? = null,
+        val source_feature_id: ULong? = null,
+        val presentation_subtype: SemanticSubtype? = null,
         val prominence_tier: ProminenceTier? = null,
+        val complete_geometry_measure_bucket: Int = 0,
+        val runtime_typography: ReferenceLabelRuntimeTypography? = null,
         val visibility_rule: LabelVisibilityRule? = null,
         val repeat_spacing_px: Int? = null,
     ) {
@@ -2364,8 +2546,10 @@ internal class ReferenceDictionaryOverlayRenderer(
         val alpha: Int,
         val halo_color: Int,
         val halo_width_dp: Float,
+        val halo_width_milli_em: Int,
         val halo_alpha: Int,
-        val typeface_style: Int,
+        val font_weight: Int,
+        val italic: Boolean,
         val letter_spacing_em: Float,
     )
 
@@ -2486,6 +2670,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         const val MAX_LABEL_TEXT_LENGTH = 48
         const val MAP_LABEL_TEXT_SCALE_MIN = 1f
         const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
+        const val LEGACY_LABEL_HALO_WIDTH_MILLI_EM = 220
+        const val ENGLISH_FONT_WEIGHT = 400
+        const val ENGLISH_ITALIC = true
         const val LABEL_COLLISION_PADDING_PX = 4f
         const val LABEL_SCREEN_PADDING_X = 96f
         const val LABEL_SCREEN_PADDING_Y = 72f
@@ -2494,7 +2681,10 @@ internal class ReferenceDictionaryOverlayRenderer(
         const val MAX_LABELS_PER_VIEWPORT = 22
         const val MIN_LINE_LABEL_PATH_FRACTION = 0.8f
         const val MIN_WATER_LINE_LABEL_PATH_FRACTION = 0.62f
-        const val WATER_LINE_LABEL_REPEAT_DISTANCE_PX = 260f
+        const val WATER_LINE_LABEL_REPEAT_DISTANCE_PX = 520f
+        const val WATER_SINGLE_LABEL_MAX_ZOOM = 10.5
+        const val MIN_WATER_LINE_TEXT_SIZE_SP = 8.25f
+        const val WATER_CURVED_SOURCE_DISTANCE_FRACTION = 1f
         const val PADDED_TILE_PREFETCH_REQUESTS_PER_DRAW = 2
         const val RETAINED_FRAME_PADDING_FRACTION = 0.16f
         const val RETAINED_FRAME_PADDING_MIN_PX = 128

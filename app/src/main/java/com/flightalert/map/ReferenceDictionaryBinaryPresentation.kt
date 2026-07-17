@@ -28,6 +28,7 @@ internal sealed interface ReferenceDictionaryBinaryDrawModel {
         val labelCandidateId: ULong,
         val priority: Int,
         val prominenceTier: ProminenceTier,
+        val completeGeometryMeasureBucket: Int,
         val visibilityRule: LabelVisibilityRule,
         val repeatSpacingPx: Int,
     ) : ReferenceDictionaryBinaryDrawModel
@@ -104,6 +105,7 @@ internal object ReferenceDictionaryBinaryPresenter {
                 labelCandidateId = record.placement.labelCandidateId,
                 priority = record.priority,
                 prominenceTier = record.placement.prominenceTier,
+                completeGeometryMeasureBucket = record.placement.completeGeometryMeasureBucket,
                 visibilityRule = rule,
                 repeatSpacingPx = record.placement.spacingPx,
             )

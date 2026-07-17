@@ -102,6 +102,101 @@ class ReferenceLabelLayoutSelectorTest {
         }
     }
 
+    @Test
+    fun sameWaterFeatureDoesNotRepeatTwiceInsideOnePhoneMapWidth() {
+        val first = path(
+            token = 1,
+            occurrence = occurrence(50uL, repeatOrdinal = 0L),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(0.0, 0.0), point(100.0, 0.0)),
+            radius = 5.0,
+        ).copy(waterLine = true)
+        val nearbyRepeat = path(
+            token = 2,
+            occurrence = occurrence(50uL, repeatOrdinal = 1L),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(400.0, 0.0), point(500.0, 0.0)),
+            radius = 5.0,
+        ).copy(waterLine = true)
+
+        assertEquals(
+            listOf(1),
+            select(first, nearbyRepeat, repeatDistancePx = 520.0).map { it.token },
+        )
+    }
+
+    @Test
+    fun phoneOverviewKeepsOneWaterLabelPerExactSourceFeature() {
+        val first = path(
+            token = 1,
+            occurrence = occurrence(60uL, repeatOrdinal = 0L),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(-800.0, 0.0), point(-700.0, 0.0)),
+            radius = 5.0,
+        ).copy(featureId = 900uL, waterLine = true)
+        val alternateCandidateForSameSource = path(
+            token = 2,
+            occurrence = occurrence(61uL, repeatOrdinal = 0L),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(700.0, 0.0), point(800.0, 0.0)),
+            radius = 5.0,
+        ).copy(featureId = 900uL, waterLine = true)
+
+        assertEquals(
+            listOf(1),
+            select(
+                first,
+                alternateCandidateForSameSource,
+                singleWaterLabelPerFeature = true,
+            ).map { it.token },
+        )
+    }
+
+    @Test
+    fun phoneOverviewDoesNotMergeDistinctSameNamedWaterFeatures() {
+        val first = path(
+            token = 1,
+            occurrence = occurrence(70uL),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(-800.0, 0.0), point(-700.0, 0.0)),
+            radius = 5.0,
+        ).copy(featureId = 901uL, waterLine = true)
+        val genuinelyDistinctSource = path(
+            token = 2,
+            occurrence = occurrence(71uL),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(700.0, 0.0), point(800.0, 0.0)),
+            radius = 5.0,
+        ).copy(featureId = 902uL, waterLine = true)
+
+        assertEquals(
+            listOf(1, 2),
+            select(
+                first,
+                genuinelyDistinctSource,
+                singleWaterLabelPerFeature = true,
+            ).map { it.token },
+        )
+    }
+
+    @Test
+    fun labelsPartlyOutsideThePhoneViewportAreNotDrawnClipped() {
+        val clipped = box(
+            token = 1,
+            occurrence = occurrence(80uL),
+            priority = 1,
+            rect = rect(990.0, 0.0, 1_010.0, 20.0),
+        )
+
+        assertEquals(emptyList<Int>(), select(clipped).map { it.token })
+    }
+
     private fun occurrence(candidateId: ULong, repeatOrdinal: Long = 0L) =
         ReferenceLabelOccurrenceId(candidateId, repeatOrdinal)
 
@@ -160,12 +255,15 @@ class ReferenceLabelLayoutSelectorTest {
         vararg candidates: Candidate,
         budget: Int = 10,
         avoid: List<ReferenceScreenRect> = emptyList(),
+        repeatDistancePx: Double = 260.0,
+        singleWaterLabelPerFeature: Boolean = false,
     ): List<Candidate> = ReferenceLabelLayoutSelector.select(
         candidates = candidates.toList(),
         viewport = rect(-1_000.0, -1_000.0, 1_000.0, 1_000.0),
         staticAvoidRects = avoid,
         labelBudget = budget,
         protectedAreaBudget = budget,
-        waterRepeatDistancePx = 260.0,
+        waterRepeatDistancePx = repeatDistancePx,
+        singleWaterLabelPerFeature = singleWaterLabelPerFeature,
     )
 }

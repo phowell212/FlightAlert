@@ -22,6 +22,7 @@ class ReferenceDictionaryBinaryTileCodecTest {
         assertEquals(SemanticSubtype.CITY_TOWN, record.subtype)
         assertEquals(ProminenceTier.LOCAL, record.placement.prominenceTier)
         assertEquals(201uL, record.placement.textSourceFieldId)
+        assertEquals(1, record.placement.completeGeometryMeasureBucket)
         assertEquals(650, record.minimumZoomCenti)
         assertEquals(690, record.fullAlphaZoomCenti)
         assertEquals(1, record.geometry.partOffsets.size)
@@ -71,6 +72,7 @@ class ReferenceDictionaryBinaryTileCodecTest {
         assertEquals("\u0627\u0644\u0642\u0627\u0647\u0631\u0629", label.text.primaryText)
         assertEquals("Cairo", label.text.englishText)
         assertEquals(false, label.lineLabel)
+        assertEquals(1, label.completeGeometryMeasureBucket)
     }
 
     @Test

@@ -44,6 +44,7 @@ internal data class ReferenceDictionaryBinaryPlacement(
     val labelCandidateId: ULong,
     val textSourceFieldId: ULong,
     val prominenceTier: ProminenceTier,
+    val completeGeometryMeasureBucket: Int,
     val spacingPx: Int,
     val maximumAngleDegrees: Int,
     val collisionGroup: ULong,
@@ -366,6 +367,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
                     labelCandidateId = 0uL,
                     textSourceFieldId = 0uL,
                     prominenceTier = ProminenceTier.GLOBAL_MAJOR,
+                    completeGeometryMeasureBucket = 0,
                     spacingPx = 0,
                     maximumAngleDegrees = 0,
                     collisionGroup = 0uL,
@@ -416,7 +418,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
         val prominence = ProminenceTier.entries.firstOrNull { it.stable_code == prominenceCode }
             ?: fail("label prominence tier is unknown")
         if (reader.boolean("provider-rank presence")) reader.i32()
-        reader.u16()
+        val completeGeometryMeasureBucket = reader.u16()
         val prominenceRuleId = reader.u64()
         val prominenceDecision = reader.take(32)
         val avoidEdges = reader.boolean("avoid-edges flag")
@@ -439,16 +441,17 @@ internal object ReferenceDictionaryBinaryTileCodec {
         }
         return DecodedPlacement(
             publicValue = ReferenceDictionaryBinaryPlacement(
-                labelCandidateId,
-                textSourceFieldId,
-                prominence,
-                spacingPx,
-                maximumAngle,
-                collisionGroup,
-                semanticPriority,
-                avoidEdges,
-                keepUpright,
-                activeBandLimit,
+                labelCandidateId = labelCandidateId,
+                textSourceFieldId = textSourceFieldId,
+                prominenceTier = prominence,
+                completeGeometryMeasureBucket = completeGeometryMeasureBucket,
+                spacingPx = spacingPx,
+                maximumAngleDegrees = maximumAngle,
+                collisionGroup = collisionGroup,
+                semanticPriority = semanticPriority,
+                avoidEdges = avoidEdges,
+                keepUpright = keepUpright,
+                activeBandLimit = activeBandLimit,
             ),
             displayMinimumZoomCenti = displayMinimumZoom,
             displayMaximumZoomCenti = displayMaximumZoom,

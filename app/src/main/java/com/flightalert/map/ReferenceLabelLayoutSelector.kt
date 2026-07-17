@@ -42,6 +42,7 @@ internal object ReferenceLabelLayoutSelector {
         labelBudget: Int,
         protectedAreaBudget: Int,
         waterRepeatDistancePx: Double,
+        singleWaterLabelPerFeature: Boolean,
     ): List<T> {
         require(labelBudget > 0) { "label budget must be positive" }
         require(protectedAreaBudget > 0) { "protected-area budget must be positive" }
@@ -71,9 +72,16 @@ internal object ReferenceLabelLayoutSelector {
         for (group in groups) {
             if (accepted.size >= labelBudget) break
             for (candidate in group.placements) {
-                if (!strictlyOverlaps(candidate.collisionShape.bounds, viewport)) continue
+                if (!fullyContained(candidate.collisionShape.bounds, viewport)) continue
                 if (candidate.protectedArea && protectedAreaCount >= protectedAreaBudget) continue
-                if (isNearbyWaterRepeat(candidate, accepted, waterRepeatDistancePx)) continue
+                if (
+                    isNearbyWaterRepeat(
+                        candidate,
+                        accepted,
+                        waterRepeatDistancePx,
+                        singleWaterLabelPerFeature,
+                    )
+                ) continue
                 if (staticAvoidRects.any { collides(candidate.collisionShape, box = it) }) continue
                 if (accepted.any { collides(candidate.collisionShape, it.collisionShape) }) continue
 
@@ -139,17 +147,27 @@ internal object ReferenceLabelLayoutSelector {
         candidate: T,
         accepted: List<T>,
         repeatDistancePx: Double,
+        singleWaterLabelPerFeature: Boolean,
     ): Boolean {
         if (!candidate.waterLine) return false
         return accepted.any { other ->
             other.waterLine &&
                 other.featureId == candidate.featureId &&
-                hypot(
-                    other.anchor.x - candidate.anchor.x,
-                    other.anchor.y - candidate.anchor.y,
-                ) < repeatDistancePx
+                (
+                    singleWaterLabelPerFeature ||
+                        hypot(
+                            other.anchor.x - candidate.anchor.x,
+                            other.anchor.y - candidate.anchor.y,
+                        ) < repeatDistancePx
+                    )
         }
     }
+
+    private fun fullyContained(
+        inner: ReferenceScreenRect,
+        outer: ReferenceScreenRect,
+    ): Boolean = inner.left >= outer.left && inner.top >= outer.top &&
+        inner.right <= outer.right && inner.bottom <= outer.bottom
 
     private fun collides(
         shape: ReferenceLabelCollisionShape,

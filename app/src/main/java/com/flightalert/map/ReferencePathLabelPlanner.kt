@@ -1,6 +1,7 @@
 package com.flightalert.map
 
 import java.util.Collections
+import java.util.PriorityQueue
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -10,6 +11,7 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToLong
+import kotlin.math.sqrt
 
 internal data class ReferencePathLabelPoint(
     val x: Double,
@@ -50,6 +52,10 @@ internal data class ReferencePathLabelRequest(
     val prominenceTier: ProminenceTier,
     val staticAvoidRects: List<ReferenceScreenRect> = emptyList(),
     val maximumTangentOffsetPx: Double = 0.0,
+    val maximumTangentSourceDistancePx: Double = 0.0,
+    val maximumCurvedSourceDistancePx: Double = 0.0,
+    val allowCurvedPlacement: Boolean = true,
+    val allowTangentFallback: Boolean = true,
 )
 
 internal data class ReferencePathLabelPlacement(
@@ -72,6 +78,75 @@ internal object ReferencePathLabelPlanner {
     private const val epsilon = 1e-9
     private const val angleRoundingEpsilon = 1e-7
     private const val q8Scale = 256.0
+    private const val maximumCurvedCenterCandidates = 64
+    private const val maximumMajorCurvedSpanEvaluations = 64
+    private const val maximumCurvedPlacementsPerVisibleSpan = 16
+    private const val maximumTangentEvaluationsPerVisibleSpan = 32
+    private const val maximumMajorFailoverEvaluationsPerVisibleSpan = 64
+    private const val maximumMajorSourceDiversityStrata = 24
+    private const val screenScaleWiggleSmoothingPx = 8.0
+
+    private data class CurvedHalfSpanInterval(
+        val lowerQ8: Long,
+        val upperQ8: Long,
+    )
+
+    private class CurvedHalfSpanCursor(
+        private val fastSpans: List<Double>,
+        private val halfAdvance: Double,
+        private val boundedMaximum: Double,
+        private val exhaustiveFailover: Boolean,
+    ) {
+        private var fastIndex = 0
+        private var emittedCount = 0
+        private var failoverQueue: PriorityQueue<CurvedHalfSpanInterval>? = null
+
+        fun nextFast(): Double? {
+            if (fastIndex >= fastSpans.size) return null
+            emittedCount += 1
+            return fastSpans[fastIndex++]
+        }
+
+        fun nextFailover(): Double? {
+            if (!exhaustiveFailover || emittedCount >= maximumMajorCurvedSpanEvaluations) {
+                return null
+            }
+            val queue = failoverQueue ?: createFailoverQueue().also { failoverQueue = it }
+            while (queue.isNotEmpty()) {
+                val interval = queue.remove()
+                val midpointQ8 = interval.lowerQ8 +
+                    (interval.upperQ8 - interval.lowerQ8) / 2L
+                if (midpointQ8 <= interval.lowerQ8 || midpointQ8 >= interval.upperQ8) continue
+                if (midpointQ8 - interval.lowerQ8 > 1L) {
+                    queue += CurvedHalfSpanInterval(interval.lowerQ8, midpointQ8)
+                }
+                if (interval.upperQ8 - midpointQ8 > 1L) {
+                    queue += CurvedHalfSpanInterval(midpointQ8, interval.upperQ8)
+                }
+                emittedCount += 1
+                return midpointQ8.toDouble() / q8Scale
+            }
+            return null
+        }
+
+        private fun createFailoverQueue(): PriorityQueue<CurvedHalfSpanInterval> {
+            val queue = PriorityQueue<CurvedHalfSpanInterval>(
+                compareByDescending<CurvedHalfSpanInterval> {
+                    it.upperQ8 - it.lowerQ8 - 1L
+                }.thenBy { it.lowerQ8 },
+            )
+            val lowerQ8 = ceil(halfAdvance * q8Scale - epsilon).toLong()
+            val upperQ8 = floor(boundedMaximum * q8Scale + epsilon).toLong()
+            val boundaries = (
+                fastSpans.map { value -> floor(value * q8Scale + 0.5).toLong() } +
+                    listOf(lowerQ8, upperQ8)
+                ).distinct().sorted()
+            boundaries.zipWithNext().forEach { (lower, upper) ->
+                if (upper - lower > 1L) queue += CurvedHalfSpanInterval(lower, upper)
+            }
+            return queue
+        }
+    }
 
     fun plan(request: ReferencePathLabelRequest): List<ReferencePathLabelPlacement> {
         validate(request)
@@ -79,10 +154,15 @@ internal object ReferencePathLabelPlanner {
         val parts = request.parts.mapIndexedNotNull(::partGeometry)
         if (parts.isEmpty()) return emptyList()
 
-        val curved = parts.flatMap { part ->
-            visibleSpans(part, viewport).flatMap { span -> curvedPlacements(request, span) }
+        val curved = if (request.allowCurvedPlacement) {
+            parts.flatMap { part ->
+                visibleSpans(part, viewport).flatMap { span -> curvedPlacements(request, span) }
+            }
+        } else {
+            emptyList()
         }
         if (curved.isNotEmpty()) return rank(curved)
+        if (!request.allowTangentFallback) return emptyList()
         if (request.prominenceTier !in setOf(ProminenceTier.GLOBAL_MAJOR, ProminenceTier.REGIONAL_MAJOR)) {
             return emptyList()
         }
@@ -95,6 +175,9 @@ internal object ReferencePathLabelPlanner {
     }
 
     private fun validate(request: ReferencePathLabelRequest) {
+        require(request.allowCurvedPlacement || request.allowTangentFallback) {
+            "at least one path-label placement mode must be enabled"
+        }
         require(request.shapedAdvancePx.isFinite() && request.shapedAdvancePx > 0.0) {
             "shaped advance must be finite and positive"
         }
@@ -111,6 +194,14 @@ internal object ReferencePathLabelPlanner {
         require(
             request.maximumTangentOffsetPx.isFinite() && request.maximumTangentOffsetPx >= 0.0,
         ) { "maximum tangent offset must be finite and nonnegative" }
+        require(
+            request.maximumTangentSourceDistancePx.isFinite() &&
+                request.maximumTangentSourceDistancePx >= 0.0,
+        ) { "maximum tangent source distance must be finite and nonnegative" }
+        require(
+            request.maximumCurvedSourceDistancePx.isFinite() &&
+                request.maximumCurvedSourceDistancePx >= 0.0,
+        ) { "maximum curved source distance must be finite and nonnegative" }
         request.parts.flatten().forEach { point ->
             require(point.x.isFinite() && point.y.isFinite()) { "path-label coordinates must be finite" }
         }
@@ -128,6 +219,77 @@ internal object ReferencePathLabelPlanner {
         val dy: Double get() = end.y - start.y
     }
 
+    private class SupportIntervalWorkspace(initialIntervalCapacity: Int) {
+        private var values = DoubleArray(max(1, initialIntervalCapacity) * 2)
+        val bandScratch = DoubleArray(4)
+        var count: Int = 0
+            private set
+
+        fun clear() {
+            count = 0
+        }
+
+        fun add(start: Double, end: Double) {
+            val required = (count + 1) * 2
+            if (required > values.size) {
+                values = values.copyOf(max(required, values.size * 2))
+            }
+            values[count * 2] = start
+            values[count * 2 + 1] = end
+            count += 1
+        }
+
+        fun start(index: Int): Double = values[index * 2]
+        fun end(index: Int): Double = values[index * 2 + 1]
+
+        fun sort() {
+            if (count > 1) quickSort(0, count - 1)
+        }
+
+        private fun quickSort(left: Int, right: Int) {
+            var lower = left
+            var upper = right
+            val pivotIndex = (left + right) ushr 1
+            val pivotStart = start(pivotIndex)
+            val pivotEnd = end(pivotIndex)
+            while (lower <= upper) {
+                while (compareToPivot(lower, pivotStart, pivotEnd) < 0) lower += 1
+                while (compareToPivot(upper, pivotStart, pivotEnd) > 0) upper -= 1
+                if (lower <= upper) {
+                    swap(lower, upper)
+                    lower += 1
+                    upper -= 1
+                }
+            }
+            if (left < upper) quickSort(left, upper)
+            if (lower < right) quickSort(lower, right)
+        }
+
+        private fun compareToPivot(index: Int, pivotStart: Double, pivotEnd: Double): Int {
+            val currentStart = start(index)
+            if (currentStart < pivotStart) return -1
+            if (currentStart > pivotStart) return 1
+            val currentEnd = end(index)
+            return when {
+                currentEnd > pivotEnd -> -1
+                currentEnd < pivotEnd -> 1
+                else -> 0
+            }
+        }
+
+        private fun swap(first: Int, second: Int) {
+            if (first == second) return
+            val firstOffset = first * 2
+            val secondOffset = second * 2
+            val start = values[firstOffset]
+            val end = values[firstOffset + 1]
+            values[firstOffset] = values[secondOffset]
+            values[firstOffset + 1] = values[secondOffset + 1]
+            values[secondOffset] = start
+            values[secondOffset + 1] = end
+        }
+    }
+
     private data class PartGeometry(
         val partIndex: Int,
         val segments: List<SourceSegment>,
@@ -138,6 +300,20 @@ internal object ReferencePathLabelPlanner {
         val part: PartGeometry,
         val sourceStartDistance: Double,
         val sourceEndDistance: Double,
+    )
+
+    private data class CenterCandidate(
+        val sourceDistance: Double,
+        val sourceDistanceQ8: Long,
+        val viewportDistanceQ8: Long,
+    )
+
+    private data class CurvedCenterSearch(
+        val centerDistance: Double,
+        val anchor: ReferencePathLabelPoint,
+        val sourcePosition: ReferencePathSourcePosition,
+        val halfSpans: CurvedHalfSpanCursor,
+        var accepted: Boolean = false,
     )
 
     private data class ClipInterval(val startFraction: Double, val endFraction: Double)
@@ -232,47 +408,246 @@ internal object ReferencePathLabelPlanner {
 
         val centers = candidateDistances(request, span, minimumCenter, maximumCenter)
         val maximumBendCenti = floor(request.maxBendDegrees * 100.0 + angleRoundingEpsilon).toInt()
-        return centers.mapNotNull { centerDistance ->
-            val sourceStart = centerDistance - halfAdvance
-            val sourceEnd = centerDistance + halfAdvance
-            val sourcePath = extractPath(span.part, sourceStart, sourceEnd)
-            if (sourcePath.size < 2) return@mapNotNull null
-            val bendCenti = bendCentiDegrees(sourcePath)
-            if (bendCenti > maximumBendCenti) return@mapNotNull null
-            val anchor = pointAt(span.part, centerDistance)
-            val sourcePosition = sourcePositionAt(span.part, centerDistance)
-            val presentationPath = keepUpright(sourcePath)
+        val supportWorkspace = SupportIntervalWorkspace(min(span.part.segments.size * 3, 64))
+        val exhaustiveFailover = request.prominenceTier in setOf(
+            ProminenceTier.GLOBAL_MAJOR,
+            ProminenceTier.REGIONAL_MAJOR,
+        )
+        val searches = centers.mapNotNull { centerDistance ->
+            val availableHalfSpan = min(
+                centerDistance - span.sourceStartDistance - request.endClearancePx,
+                span.sourceEndDistance - request.endClearancePx - centerDistance,
+            )
+            val halfSpans = curvedHalfSpanCursor(
+                halfAdvance = halfAdvance,
+                availableHalfSpan = availableHalfSpan,
+                shapedAdvancePx = request.shapedAdvancePx,
+                maximumSourceDistancePx = request.maximumCurvedSourceDistancePx,
+                exhaustiveFailover = exhaustiveFailover,
+            ) ?: return@mapNotNull null
+            CurvedCenterSearch(
+                centerDistance = centerDistance,
+                anchor = pointAt(span.part, centerDistance),
+                sourcePosition = sourcePositionAt(span.part, centerDistance),
+                halfSpans = halfSpans,
+            )
+        }
+        val placements = ArrayList<ReferencePathLabelPlacement>(
+            min(searches.size, maximumCurvedPlacementsPerVisibleSpan),
+        )
+        for (search in searches) {
+            while (true) {
+                val sourceHalfSpan = search.halfSpans.nextFast() ?: break
+                val placement = curvedPlacementAtCenter(
+                    request = request,
+                    span = span,
+                    search = search,
+                    sourceHalfSpan = sourceHalfSpan,
+                    maximumBendCenti = maximumBendCenti,
+                    supportWorkspace = supportWorkspace,
+                ) ?: continue
+                placements += placement
+                search.accepted = true
+                if (placements.size >= maximumCurvedPlacementsPerVisibleSpan) {
+                    return placements
+                }
+                break
+            }
+        }
+        if (!exhaustiveFailover) return placements
+
+        var remainingFailover = maximumMajorFailoverEvaluationsPerVisibleSpan
+        while (
+            remainingFailover > 0 &&
+            placements.size < maximumCurvedPlacementsPerVisibleSpan
+        ) {
+            var advanced = false
+            for (search in searches) {
+                if (search.accepted) continue
+                val sourceHalfSpan = search.halfSpans.nextFailover() ?: continue
+                advanced = true
+                remainingFailover -= 1
+                val placement = curvedPlacementAtCenter(
+                    request = request,
+                    span = span,
+                    search = search,
+                    sourceHalfSpan = sourceHalfSpan,
+                    maximumBendCenti = maximumBendCenti,
+                    supportWorkspace = supportWorkspace,
+                )
+                if (placement != null) {
+                    placements += placement
+                    search.accepted = true
+                    if (placements.size >= maximumCurvedPlacementsPerVisibleSpan) break
+                }
+                if (remainingFailover == 0) break
+            }
+            if (!advanced) break
+        }
+        return placements
+    }
+
+    private fun curvedPlacementAtCenter(
+        request: ReferencePathLabelRequest,
+        span: VisibleSpan,
+        search: CurvedCenterSearch,
+        sourceHalfSpan: Double,
+        maximumBendCenti: Int,
+        supportWorkspace: SupportIntervalWorkspace,
+    ): ReferencePathLabelPlacement? {
+        val sourceStart = search.centerDistance - sourceHalfSpan
+        val sourceEnd = search.centerDistance + sourceHalfSpan
+        val sourcePath = extractPath(span.part, sourceStart, sourceEnd)
+        if (sourcePath.size < 2) return null
+        val presentationSourceDistance = request.maximumCurvedSourceDistancePx
+        val smoothingDistance = min(
+            presentationSourceDistance,
+            max(screenScaleWiggleSmoothingPx, presentationSourceDistance / 2.0),
+        )
+        val simplifiedPath = simplifyPresentationPath(
+            sourcePath,
+            smoothingDistance,
+        )
+        if (polylineLength(simplifiedPath) + epsilon < request.shapedAdvancePx) {
+            return null
+        }
+        val presentationPath = centeredSubpath(
+            simplifiedPath,
+            request.shapedAdvancePx,
+        ) ?: return null
+        val bendCenti = bendCentiDegrees(presentationPath)
+        if (bendCenti > maximumBendCenti) return null
+        val uprightPresentationPath = keepUpright(presentationPath)
+        val pathDx = uprightPresentationPath.last().x - uprightPresentationPath.first().x
+        val pathDy = uprightPresentationPath.last().y - uprightPresentationPath.first().y
+        val pathLength = hypot(pathDx, pathDy)
+        if (pathLength <= epsilon) return null
+        val normalX = -pathDy / pathLength
+        val normalY = pathDx / pathLength
+        for (normalOffset in curvedNormalOffsets(presentationSourceDistance)) {
+            val offsetX = normalX * normalOffset
+            val offsetY = normalY * normalOffset
+            val offsetPath = if (abs(normalOffset) <= epsilon) {
+                uprightPresentationPath
+            } else {
+                uprightPresentationPath.map { point ->
+                    ReferencePathLabelPoint(point.x + offsetX, point.y + offsetY)
+                }
+            }
+            if (
+                presentationSourceDistance > epsilon &&
+                !pathHasSourceSupport(
+                    presentationPath = offsetPath,
+                    sourcePath = sourcePath,
+                    maximumDistancePx = presentationSourceDistance,
+                    workspace = supportWorkspace,
+                )
+            ) {
+                continue
+            }
             val clearance = minimumClearance(
-                presentationPath,
+                offsetPath,
                 request.viewport,
                 request.staticAvoidRects,
                 request.edgeClearancePx,
-            ) ?: return@mapNotNull null
-            placement(
+            ) ?: continue
+            return placement(
                 request = request,
                 mode = ReferencePathLabelPlacementMode.CURVED,
-                path = presentationPath,
-                anchor = anchor,
-                sourcePosition = sourcePosition,
-                tangentDegrees = uprightDegrees(tangentAt(span.part, centerDistance)),
+                path = offsetPath,
+                anchor = ReferencePathLabelPoint(
+                    search.anchor.x + offsetX,
+                    search.anchor.y + offsetY,
+                ),
+                sourcePosition = search.sourcePosition,
+                tangentDegrees = uprightDegrees(tangentAt(span.part, search.centerDistance)),
                 bendCenti = bendCenti,
                 clearance = clearance,
-                centerDistance = centerDistance,
+                centerDistance = search.centerDistance,
+                normalOffset = normalOffset,
             )
         }
+        return null
+    }
+
+    private fun curvedNormalOffsets(maximum: Double): DoubleArray {
+        if (maximum <= epsilon) return doubleArrayOf(0.0)
+        val half = maximum / 2.0
+        return doubleArrayOf(0.0, half, -half, maximum, -maximum)
+    }
+
+    private fun curvedHalfSpanCursor(
+        halfAdvance: Double,
+        availableHalfSpan: Double,
+        shapedAdvancePx: Double,
+        maximumSourceDistancePx: Double,
+        exhaustiveFailover: Boolean,
+    ): CurvedHalfSpanCursor? {
+        if (availableHalfSpan + epsilon < halfAdvance) return null
+        if (maximumSourceDistancePx <= epsilon) {
+            return CurvedHalfSpanCursor(
+                fastSpans = listOf(halfAdvance),
+                halfAdvance = halfAdvance,
+                boundedMaximum = halfAdvance,
+                exhaustiveFailover = false,
+            )
+        }
+        val maximumOverscan = max(
+            maximumSourceDistancePx * 4.0,
+            shapedAdvancePx / 4.0,
+        )
+        // The fit check above deliberately accepts sub-pixel arithmetic error. Normalize
+        // that epsilon-close case before passing the bounds to coerceIn.
+        val boundedMaximum = max(
+            halfAdvance,
+            min(availableHalfSpan, halfAdvance + maximumOverscan),
+        )
+        val spans = linkedMapOf<Long, Double>()
+        fun add(value: Double) {
+            if (value > availableHalfSpan + epsilon) return
+            val canonical = value.coerceIn(halfAdvance, boundedMaximum)
+            spans.putIfAbsent(toQ8(canonical), canonical)
+        }
+        add(halfAdvance)
+        add(halfAdvance + maximumSourceDistancePx)
+        add(
+            halfAdvance + max(
+                maximumSourceDistancePx * 2.0,
+                shapedAdvancePx / 8.0,
+            ),
+        )
+        add(boundedMaximum)
+        return CurvedHalfSpanCursor(
+            fastSpans = spans.values.toList(),
+            halfAdvance = halfAdvance,
+            boundedMaximum = boundedMaximum,
+            exhaustiveFailover = exhaustiveFailover,
+        )
     }
 
     private fun tangentPlacements(
         request: ReferencePathLabelRequest,
         span: VisibleSpan,
     ): List<ReferencePathLabelPlacement> {
+        val sourcePath = extractPath(
+            span.part,
+            span.sourceStartDistance,
+            span.sourceEndDistance,
+        )
+        if (sourcePath.size < 2) return emptyList()
+        val supportWorkspace = SupportIntervalWorkspace(64)
         val centers = candidateDistances(
             request,
             span,
             span.sourceStartDistance,
             span.sourceEndDistance,
         )
-        return centers.flatMap { centerDistance ->
+        val offsets = tangentOffsets(request)
+        val placements = ArrayList<ReferencePathLabelPlacement>(
+            maximumCurvedPlacementsPerVisibleSpan,
+        )
+        var evaluations = 0
+        centerLoop@ for (centerDistance in centers) {
             val anchor = pointAt(span.part, centerDistance)
             val sourcePosition = sourcePositionAt(span.part, centerDistance)
             val sourceTangent = tangentAt(span.part, centerDistance)
@@ -281,20 +656,33 @@ internal object ReferencePathLabelPlanner {
             val dy = kotlin.math.sin(tangent) * request.shapedAdvancePx / 2.0
             val normalX = -kotlin.math.sin(tangent)
             val normalY = cos(tangent)
-            tangentOffsets(request).mapNotNull { normalOffset ->
+            for (normalOffset in offsets) {
+                if (evaluations >= maximumTangentEvaluationsPerVisibleSpan) break@centerLoop
+                evaluations += 1
                 val offsetX = normalX * normalOffset
                 val offsetY = normalY * normalOffset
                 val path = listOf(
                     ReferencePathLabelPoint(anchor.x - dx + offsetX, anchor.y - dy + offsetY),
                     ReferencePathLabelPoint(anchor.x + dx + offsetX, anchor.y + dy + offsetY),
                 )
+                if (
+                    !segmentHasSourceSupport(
+                        queryStart = path.first(),
+                        queryEnd = path.last(),
+                        sourcePath = sourcePath,
+                        maximumDistancePx = request.maximumTangentSourceDistancePx,
+                        workspace = supportWorkspace,
+                    )
+                ) {
+                    continue
+                }
                 val clearance = minimumClearance(
                     path,
                     request.viewport,
                     request.staticAvoidRects,
                     request.edgeClearancePx,
-                ) ?: return@mapNotNull null
-                placement(
+                ) ?: continue
+                placements += placement(
                     request = request,
                     mode = ReferencePathLabelPlacementMode.TANGENT_WIDE,
                     path = path,
@@ -306,8 +694,10 @@ internal object ReferencePathLabelPlanner {
                     centerDistance = centerDistance,
                     normalOffset = normalOffset,
                 )
+                if (placements.size >= maximumCurvedPlacementsPerVisibleSpan) break@centerLoop
             }
         }
+        return placements
     }
 
     private fun tangentOffsets(request: ReferencePathLabelRequest): List<Double> {
@@ -332,6 +722,227 @@ internal object ReferencePathLabelPlanner {
         return offsets.values.toList()
     }
 
+    private fun pathHasSourceSupport(
+        presentationPath: List<ReferencePathLabelPoint>,
+        sourcePath: List<ReferencePathLabelPoint>,
+        maximumDistancePx: Double,
+        workspace: SupportIntervalWorkspace,
+    ): Boolean {
+        for (index in 0 until presentationPath.lastIndex) {
+            if (
+                !segmentHasSourceSupport(
+                    queryStart = presentationPath[index],
+                    queryEnd = presentationPath[index + 1],
+                    sourcePath = sourcePath,
+                    maximumDistancePx = maximumDistancePx,
+                    workspace = workspace,
+                )
+            ) return false
+        }
+        return true
+    }
+
+    private fun segmentHasSourceSupport(
+        queryStart: ReferencePathLabelPoint,
+        queryEnd: ReferencePathLabelPoint,
+        sourcePath: List<ReferencePathLabelPoint>,
+        maximumDistancePx: Double,
+        workspace: SupportIntervalWorkspace,
+    ): Boolean {
+        workspace.clear()
+        for (index in 0 until sourcePath.lastIndex) {
+            addCapsuleSupportIntervals(
+                queryStart = queryStart,
+                queryEnd = queryEnd,
+                sourceStart = sourcePath[index],
+                sourceEnd = sourcePath[index + 1],
+                radius = maximumDistancePx,
+                workspace = workspace,
+            )
+        }
+        if (workspace.count == 0) return false
+        workspace.sort()
+        var coveredEnd = 0.0
+        for (index in 0 until workspace.count) {
+            if (workspace.start(index) > coveredEnd + epsilon) return false
+            coveredEnd = max(coveredEnd, workspace.end(index))
+            if (coveredEnd >= 1.0 - epsilon) return true
+        }
+        return false
+    }
+
+    private fun simplifyPresentationPath(
+        sourcePath: List<ReferencePathLabelPoint>,
+        maximumDistancePx: Double,
+    ): List<ReferencePathLabelPoint> {
+        if (sourcePath.size <= 2 || maximumDistancePx <= epsilon) return sourcePath
+        val keep = BooleanArray(sourcePath.size)
+        keep[0] = true
+        keep[sourcePath.lastIndex] = true
+        val stack = IntArray(sourcePath.size * 2)
+        var stackSize = 0
+        stack[stackSize++] = 0
+        stack[stackSize++] = sourcePath.lastIndex
+        while (stackSize > 0) {
+            val endIndex = stack[--stackSize]
+            val startIndex = stack[--stackSize]
+            var farthestIndex = -1
+            var farthestDistance = -1.0
+            for (index in startIndex + 1 until endIndex) {
+                val distance = pointSegmentDistance(
+                    sourcePath[index],
+                    sourcePath[startIndex],
+                    sourcePath[endIndex],
+                )
+                if (distance > farthestDistance) {
+                    farthestDistance = distance
+                    farthestIndex = index
+                }
+            }
+            if (farthestIndex >= 0 && farthestDistance > maximumDistancePx + epsilon) {
+                keep[farthestIndex] = true
+                stack[stackSize++] = startIndex
+                stack[stackSize++] = farthestIndex
+                stack[stackSize++] = farthestIndex
+                stack[stackSize++] = endIndex
+            }
+        }
+        val simplified = ArrayList<ReferencePathLabelPoint>(sourcePath.size)
+        sourcePath.forEachIndexed { index, point ->
+            if (keep[index]) simplified += point
+        }
+        return simplified
+    }
+
+    private fun polylineLength(path: List<ReferencePathLabelPoint>): Double {
+        var length = 0.0
+        for (index in 0 until path.lastIndex) {
+            length += hypot(
+                path[index + 1].x - path[index].x,
+                path[index + 1].y - path[index].y,
+            )
+        }
+        return length
+    }
+
+    private fun centeredSubpath(
+        path: List<ReferencePathLabelPoint>,
+        targetLength: Double,
+    ): List<ReferencePathLabelPoint>? {
+        val geometry = partGeometry(0, path) ?: return null
+        if (geometry.totalLength + epsilon < targetLength) return null
+        val startDistance = (geometry.totalLength - targetLength) / 2.0
+        return extractPath(
+            geometry,
+            startDistance,
+            startDistance + targetLength,
+        )
+    }
+
+    private fun addCapsuleSupportIntervals(
+        queryStart: ReferencePathLabelPoint,
+        queryEnd: ReferencePathLabelPoint,
+        sourceStart: ReferencePathLabelPoint,
+        sourceEnd: ReferencePathLabelPoint,
+        radius: Double,
+        workspace: SupportIntervalWorkspace,
+    ) {
+        addCircleSupportInterval(queryStart, queryEnd, sourceStart, radius, workspace)
+        addCircleSupportInterval(queryStart, queryEnd, sourceEnd, radius, workspace)
+
+        val sourceDx = sourceEnd.x - sourceStart.x
+        val sourceDy = sourceEnd.y - sourceStart.y
+        val sourceLengthSquared = sourceDx * sourceDx + sourceDy * sourceDy
+        if (sourceLengthSquared <= epsilon) return
+        val queryDx = queryEnd.x - queryStart.x
+        val queryDy = queryEnd.y - queryStart.y
+        val relativeX = queryStart.x - sourceStart.x
+        val relativeY = queryStart.y - sourceStart.y
+        if (!linearBandInterval(
+            offset = relativeX * sourceDx + relativeY * sourceDy,
+            slope = queryDx * sourceDx + queryDy * sourceDy,
+            lower = 0.0,
+            upper = sourceLengthSquared,
+            destination = workspace.bandScratch,
+            destinationOffset = 0,
+        )) return
+        val maximumCross = radius * sqrt(sourceLengthSquared)
+        if (!linearBandInterval(
+            offset = sourceDx * relativeY - sourceDy * relativeX,
+            slope = sourceDx * queryDy - sourceDy * queryDx,
+            lower = -maximumCross,
+            upper = maximumCross,
+            destination = workspace.bandScratch,
+            destinationOffset = 2,
+        )) return
+        addClippedSupportInterval(
+            max(workspace.bandScratch[0], workspace.bandScratch[2]),
+            min(workspace.bandScratch[1], workspace.bandScratch[3]),
+            workspace,
+        )
+    }
+
+    private fun addCircleSupportInterval(
+        queryStart: ReferencePathLabelPoint,
+        queryEnd: ReferencePathLabelPoint,
+        center: ReferencePathLabelPoint,
+        radius: Double,
+        workspace: SupportIntervalWorkspace,
+    ) {
+        val dx = queryEnd.x - queryStart.x
+        val dy = queryEnd.y - queryStart.y
+        val relativeX = queryStart.x - center.x
+        val relativeY = queryStart.y - center.y
+        val a = dx * dx + dy * dy
+        val b = 2.0 * (relativeX * dx + relativeY * dy)
+        val c = relativeX * relativeX + relativeY * relativeY - radius * radius
+        val discriminant = b * b - 4.0 * a * c
+        val tolerance = epsilon * max(1.0, abs(b * b) + abs(4.0 * a * c))
+        if (discriminant < -tolerance) return
+        val root = sqrt(max(0.0, discriminant))
+        addClippedSupportInterval(
+            (-b - root) / (2.0 * a),
+            (-b + root) / (2.0 * a),
+            workspace,
+        )
+    }
+
+    private fun linearBandInterval(
+        offset: Double,
+        slope: Double,
+        lower: Double,
+        upper: Double,
+        destination: DoubleArray,
+        destinationOffset: Int,
+    ): Boolean {
+        if (abs(slope) <= epsilon) {
+            if (offset < lower - epsilon || offset > upper + epsilon) return false
+            destination[destinationOffset] = 0.0
+            destination[destinationOffset + 1] = 1.0
+            return true
+        }
+        val first = (lower - offset) / slope
+        val second = (upper - offset) / slope
+        val start = max(0.0, min(first, second))
+        val end = min(1.0, max(first, second))
+        if (start > end + epsilon) return false
+        destination[destinationOffset] = start
+        destination[destinationOffset + 1] = end
+        return true
+    }
+
+    private fun addClippedSupportInterval(
+        start: Double,
+        end: Double,
+        workspace: SupportIntervalWorkspace,
+    ) {
+        val clippedStart = max(0.0, start)
+        val clippedEnd = min(1.0, end)
+        if (clippedStart <= clippedEnd + epsilon) {
+            workspace.add(clippedStart, clippedEnd)
+        }
+    }
+
     private fun candidateDistances(
         request: ReferencePathLabelRequest,
         span: VisibleSpan,
@@ -339,27 +950,122 @@ internal object ReferencePathLabelPlanner {
         maximumDistance: Double,
     ): List<Double> {
         if (minimumDistance > maximumDistance + epsilon) return emptyList()
-        val candidates = linkedMapOf<Long, Double>()
-        fun add(distance: Double) {
-            if (distance < minimumDistance - epsilon || distance > maximumDistance + epsilon) return
-            val canonical = distance.coerceIn(minimumDistance, maximumDistance)
-            candidates.putIfAbsent(toQ8(canonical), canonical)
+        val canonicalMinimumDistance = min(minimumDistance, maximumDistance)
+        val canonicalMaximumDistance = max(minimumDistance, maximumDistance)
+        val bestFirst = compareBy<CenterCandidate> { it.viewportDistanceQ8 }
+            .thenBy { it.sourceDistanceQ8 }
+        val selected = PriorityQueue<CenterCandidate>(
+            maximumCurvedCenterCandidates,
+            bestFirst.reversed(),
+        )
+        val reserved = ArrayList<CenterCandidate>(
+            maximumMajorSourceDiversityStrata + 8,
+        )
+        val selectedQ8 = HashSet<Long>(maximumCurvedCenterCandidates * 2)
+        val viewportCenterX = (request.viewport.left + request.viewport.right) / 2.0
+        val viewportCenterY = (request.viewport.top + request.viewport.bottom) / 2.0
+        fun add(
+            distance: Double,
+            knownAnchor: ReferencePathLabelPoint? = null,
+            reserve: Boolean = false,
+        ) {
+            if (
+                distance < canonicalMinimumDistance - epsilon ||
+                distance > canonicalMaximumDistance + epsilon
+            ) return
+            val canonical = distance.coerceIn(canonicalMinimumDistance, canonicalMaximumDistance)
+            val sourceDistanceQ8 = toQ8(canonical)
+            if (sourceDistanceQ8 in selectedQ8) return
+            val anchor = knownAnchor ?: pointAt(span.part, canonical)
+            if (request.staticAvoidRects.any { rect ->
+                    pointRectDistance(anchor, rect) <= request.edgeClearancePx + epsilon
+                }
+            ) {
+                return
+            }
+            val viewportDistanceQ8 = toQ8(
+                hypot(anchor.x - viewportCenterX, anchor.y - viewportCenterY),
+            )
+            val candidate = CenterCandidate(canonical, sourceDistanceQ8, viewportDistanceQ8)
+            if (reserve) {
+                reserved += candidate
+                selectedQ8 += sourceDistanceQ8
+                return
+            }
+            val nearestCapacity = maximumCurvedCenterCandidates - reserved.size
+            if (nearestCapacity <= 0) return
+            val worst = selected.peek()
+            if (
+                worst != null &&
+                selected.size >= nearestCapacity &&
+                (
+                    viewportDistanceQ8 > worst.viewportDistanceQ8 ||
+                    (
+                        viewportDistanceQ8 == worst.viewportDistanceQ8 &&
+                        sourceDistanceQ8 >= worst.sourceDistanceQ8
+                    )
+                )
+            ) {
+                return
+            }
+            if (selected.size >= nearestCapacity) {
+                val removed = selected.remove()
+                selectedQ8.remove(removed.sourceDistanceQ8)
+            }
+            selected += candidate
+            selectedQ8 += sourceDistanceQ8
         }
 
-        add((minimumDistance + maximumDistance) / 2.0)
-        add(minimumDistance)
-        add(maximumDistance)
-
-        val center = ReferencePathLabelPoint(
-            (request.viewport.left + request.viewport.right) / 2.0,
-            (request.viewport.top + request.viewport.bottom) / 2.0,
+        val isMajorFeature = request.prominenceTier in setOf(
+            ProminenceTier.GLOBAL_MAJOR,
+            ProminenceTier.REGIONAL_MAJOR,
         )
+        if (isMajorFeature) {
+            val sourceSpan = canonicalMaximumDistance - canonicalMinimumDistance
+            val sourceTolerance = request.maximumCurvedSourceDistancePx
+            if (sourceTolerance > epsilon) {
+                doubleArrayOf(
+                    sourceTolerance / 4.0,
+                    sourceTolerance / 2.0,
+                    sourceTolerance,
+                    sourceTolerance * 1.25,
+                ).forEach { inset ->
+                    add(canonicalMinimumDistance + inset, reserve = true)
+                    add(canonicalMaximumDistance - inset, reserve = true)
+                }
+            }
+            if (sourceSpan > epsilon) {
+                repeat(maximumMajorSourceDiversityStrata) { index ->
+                    val fraction = (index + 0.5) / maximumMajorSourceDiversityStrata.toDouble()
+                    add(
+                        canonicalMinimumDistance + sourceSpan * fraction,
+                        reserve = true,
+                    )
+                }
+            }
+        }
+
+        add((canonicalMinimumDistance + canonicalMaximumDistance) / 2.0)
+        add(canonicalMinimumDistance)
+        add(canonicalMaximumDistance)
+        val center = ReferencePathLabelPoint(viewportCenterX, viewportCenterY)
         span.part.segments.forEach { segment ->
-            val overlapStart = max(minimumDistance, segment.sourceStartDistance)
-            val overlapEnd = min(maximumDistance, segment.sourceEndDistance)
+            val overlapStart = max(canonicalMinimumDistance, segment.sourceStartDistance)
+            val overlapEnd = min(canonicalMaximumDistance, segment.sourceEndDistance)
             if (overlapStart <= overlapEnd + epsilon) {
-                val projection = projectedSourceDistance(segment, center).coerceIn(overlapStart, overlapEnd)
-                add(projection)
+                val canonicalOverlapStart = min(overlapStart, overlapEnd)
+                val canonicalOverlapEnd = max(overlapStart, overlapEnd)
+                val projection = projectedSourceDistance(segment, center)
+                    .coerceIn(canonicalOverlapStart, canonicalOverlapEnd)
+                val fraction = ((projection - segment.sourceStartDistance) / segment.length)
+                    .coerceIn(0.0, 1.0)
+                add(
+                    projection,
+                    ReferencePathLabelPoint(
+                        segment.start.x + segment.dx * fraction,
+                        segment.start.y + segment.dy * fraction,
+                    ),
+                )
             }
         }
 
@@ -374,7 +1080,7 @@ internal object ReferencePathLabelPlanner {
             distance = phase + ordinal.toDouble() * spacing
             if (!distance.isFinite()) break
         }
-        return candidates.values.toList()
+        return (reserved + selected).sortedWith(bestFirst).map { it.sourceDistance }
     }
 
     private fun projectedSourceDistance(segment: SourceSegment, point: ReferencePathLabelPoint): Double {
@@ -391,8 +1097,12 @@ internal object ReferencePathLabelPlanner {
         sourceStartDistance: Double,
         sourceEndDistance: Double,
     ): List<ReferencePathLabelPoint> {
-        val result = mutableListOf(pointAt(part, sourceStartDistance))
-        part.segments.forEach { segment ->
+        val startSegmentIndex = segmentIndexAt(part, sourceStartDistance)
+        val endSegmentIndex = segmentIndexAt(part, sourceEndDistance)
+        val result = ArrayList<ReferencePathLabelPoint>(endSegmentIndex - startSegmentIndex + 2)
+        result += pointAt(part, sourceStartDistance)
+        for (index in startSegmentIndex..endSegmentIndex) {
+            val segment = part.segments[index]
             if (
                 segment.sourceEndDistance > sourceStartDistance + epsilon &&
                 segment.sourceEndDistance < sourceEndDistance - epsilon
@@ -430,9 +1140,22 @@ internal object ReferencePathLabelPlanner {
     }
 
     private fun segmentAt(part: PartGeometry, sourceDistance: Double): SourceSegment {
+        return part.segments[segmentIndexAt(part, sourceDistance)]
+    }
+
+    private fun segmentIndexAt(part: PartGeometry, sourceDistance: Double): Int {
         val canonical = sourceDistance.coerceIn(0.0, part.totalLength)
-        return part.segments.firstOrNull { canonical <= it.sourceEndDistance + epsilon }
-            ?: part.segments.last()
+        var lower = 0
+        var upper = part.segments.lastIndex
+        while (lower < upper) {
+            val middle = lower + (upper - lower) / 2
+            if (canonical <= part.segments[middle].sourceEndDistance + epsilon) {
+                upper = middle
+            } else {
+                lower = middle + 1
+            }
+        }
+        return lower
     }
 
     private fun tangentAt(part: PartGeometry, sourceDistance: Double): Double {
