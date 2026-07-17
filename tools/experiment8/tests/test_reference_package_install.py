@@ -3112,6 +3112,14 @@ class ProductionBoundaryTest(unittest.TestCase):
             root,
         )
         self.assertEqual((101, 102), tuple(entry.inode for entry in entries))
+        pipe_entries = parser(
+            (
+                f"directory|1|201|{root}/current\n"
+                f"regular file|1|202|{root}/planet.osm.pbf\n"
+            ).encode("ascii"),
+            root,
+        )
+        self.assertEqual((201, 202), tuple(entry.inode for entry in pipe_entries))
         with self.assertRaisesRegex(ReferencePackageInstallError, "unsupported"):
             parser(
                 f"symbolic link\t1\t103\t{root}/link\n".encode("ascii"),

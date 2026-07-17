@@ -2014,7 +2014,7 @@ def parse_remote_inventory(
     for line in text.splitlines():
         if not line:
             continue
-        columns = line.split("\t")
+        columns = line.split("\t") if "\t" in line else line.split("|")
         if len(columns) != 4:
             raise ReferencePackageInstallError("remote inventory row is malformed")
         raw_kind, raw_device, raw_inode, path = columns
@@ -2559,7 +2559,7 @@ class AdbInstallDevice:
 
     def entry_identity(self, path: str) -> RemoteEntryIdentity | None:
         result = self._adb(
-            ("shell", "stat", "-c", "%F\t%d\t%i\t%n", path),
+            ("shell", "stat", "-c", "%F|%d|%i|%n", path),
             timeout=30.0,
             allow_failure=True,
         )
@@ -2589,7 +2589,7 @@ class AdbInstallDevice:
                 "-exec",
                 "stat",
                 "-c",
-                "%F\t%d\t%i\t%n",
+                "%F|%d|%i|%n",
                 "{}",
                 "+",
             ),
