@@ -165,6 +165,7 @@ import com.flightalert.traffic.TrafficOverlayStateBuilder
 import com.flightalert.traffic.TrafficOverlayStyle
 import com.flightalert.traffic.TrafficScreenProjector
 import com.flightalert.traffic.TrafficSelectionHitTester
+import com.flightalert.traffic.TrafficSpriteFootprints
 import com.flightalert.traffic.TrafficSpatialEntry
 import com.flightalert.ui.AviationLayersPanelState
 import com.flightalert.ui.FilterPanelAction
@@ -588,6 +589,8 @@ class FlightMapView(
         lat_lon_to_world = MapProjection::lat_lon_to_world,
         now_elapsed_ms = { SystemClock.elapsedRealtime() }
     )
+    private val traffic_sprite_footprints = TrafficSpriteFootprints(dp = { value -> dp(value) })
+    private val reference_label_avoid_rect_buffer = ArrayList<ReferenceScreenRect>()
 
     // Mirror persisted display and safety settings in memory so draw and tap handlers read one fast state.
     private var location_permission_granted = false
@@ -1028,12 +1031,14 @@ class FlightMapView(
                 draw_no_location_state(this, w, h)
             } else {
                 val viewport = viewport_for(location, w, h)
-                draw_map_tiles(this, viewport)
+                val traffic_state = traffic_overlay_state(viewport)
+                val traffic_draw_elapsed_ms = SystemClock.elapsedRealtime()
+                draw_map_tiles(this, viewport, traffic_state, traffic_draw_elapsed_ms)
                 request_aviation_layers_if_needed(viewport)
                 draw_aviation_layers(this, viewport, aviation_snapshot, selected_aviation)
                 draw_priority_range_circle(this, viewport, location)
                 draw_selected_flight_path(this, viewport)
-                draw_traffic_overlay(this, viewport)
+                draw_traffic_overlay(this, traffic_state, traffic_draw_elapsed_ms)
                 draw_ownship_overlay(this, viewport, location)
             }
 
@@ -1660,16 +1665,25 @@ class FlightMapView(
     }
 
     // Ask the tile renderer to draw real map imagery and return the honest map status.
-    private fun draw_map_tiles(canvas: Canvas, viewport: Viewport) {
+    private fun draw_map_tiles(
+        canvas: Canvas,
+        viewport: Viewport,
+        traffic_state: TrafficOverlayState,
+        traffic_draw_elapsed_ms: Long,
+    ) {
         map_status = map_tile_renderer.draw_tiles(
             canvas = canvas,
             viewport = viewport,
-            state = map_tile_state(viewport),
+            state = map_tile_state(viewport, traffic_state, traffic_draw_elapsed_ms),
             style = map_tile_style()
         )
     }
 
-    private fun map_tile_state(viewport: Viewport): MapTileRenderState {
+    private fun map_tile_state(
+        viewport: Viewport,
+        traffic_state: TrafficOverlayState,
+        traffic_draw_elapsed_ms: Long,
+    ): MapTileRenderState {
         return MapTileRenderState(
             map_source = map_source,
             map_labels_enabled = active_map_labels_enabled(),
@@ -1679,22 +1693,31 @@ class FlightMapView(
             water_labels_enabled = water_labels_layer_enabled,
             region_labels_enabled = region_labels_layer_enabled,
             public_lands_enabled = public_lands_layer_enabled,
-            map_label_transition_alpha = map_label_transition_alpha(SystemClock.elapsedRealtime()),
+            map_label_transition_alpha = map_label_transition_alpha(traffic_draw_elapsed_ms),
             user_agent = USER_AGENT,
-            interaction_active = map_tile_interaction_active(SystemClock.elapsedRealtime()),
+            interaction_active = map_tile_interaction_active(traffic_draw_elapsed_ms),
             reference_filter_state = reference_filter_state,
-            reference_label_avoid_rects = reference_label_avoid_rects(viewport)
+            reference_label_avoid_rects = reference_label_avoid_rects(
+                viewport,
+                traffic_state,
+                traffic_draw_elapsed_ms,
+            )
         )
     }
 
-    private fun reference_label_avoid_rects(viewport: Viewport): List<ReferenceScreenRect> {
+    private fun reference_label_avoid_rects(
+        viewport: Viewport,
+        traffic_state: TrafficOverlayState,
+        traffic_draw_elapsed_ms: Long,
+    ): List<ReferenceScreenRect> {
         val padding = dp(8f).toDouble()
-        val result = layout.map_obstacles(
+        reference_label_avoid_rect_buffer.clear()
+        for (bounds in layout.map_obstacles(
             content_width(),
             content_height(),
-            layout_state()
-        ).mapTo(mutableListOf()) { bounds ->
-            ReferenceScreenRect(
+            layout_state(),
+        )) {
+            reference_label_avoid_rect_buffer += ReferenceScreenRect(
                 bounds.left.toDouble(),
                 bounds.top.toDouble(),
                 bounds.right.toDouble(),
@@ -1706,7 +1729,7 @@ class FlightMapView(
                 GeoPoint(location.latitude, location.longitude),
                 viewport
             )
-            result += ReferenceLabelAvoidance.ownship_rect(
+            reference_label_avoid_rect_buffer += ReferenceLabelAvoidance.ownship_rect(
                 center_x = ownship.x.toDouble(),
                 center_y = ownship.y.toDouble(),
                 marker_radius_px = dp(28f).toDouble(),
@@ -1716,7 +1739,13 @@ class FlightMapView(
                 padding_px = padding
             )
         }
-        return result
+        traffic_sprite_footprints.append_reference_label_avoid_rects(
+            state = traffic_state,
+            now_elapsed_ms = traffic_draw_elapsed_ms,
+            clearance_px = padding.toFloat(),
+            output = reference_label_avoid_rect_buffer,
+        )
+        return reference_label_avoid_rect_buffer
     }
 
     private fun map_label_transition_alpha(now: Long): Float {
@@ -2379,16 +2408,20 @@ class FlightMapView(
         )
     }
 
-    private fun draw_traffic_overlay(canvas: Canvas, viewport: Viewport) {
-        val state = traffic_overlay_state(viewport)
+    private fun draw_traffic_overlay(
+        canvas: Canvas,
+        traffic_state: TrafficOverlayState,
+        traffic_draw_elapsed_ms: Long,
+    ) {
         traffic_overlay_renderer.draw_aircraft(
             canvas = canvas,
-            state = state,
-            style = TrafficOverlayStyle(visual_theme)
+            state = traffic_state,
+            style = TrafficOverlayStyle(visual_theme),
+            now_elapsed_ms = traffic_draw_elapsed_ms,
         )
         last_traffic_draw_elapsed_ms = SystemClock.elapsedRealtime()
         aircraft_details_prefetch_planner.schedule(
-            state = state,
+            state = traffic_state,
             details_open = details_session.details_open,
             pinch_in_progress = pinch_in_progress,
             drag_started = drag_started,

@@ -57,8 +57,58 @@ Open the project root in Android Studio, or build from PowerShell:
 The debug APK is written under:
 
 ```text
-app/build/outputs/apk/debug/
+build/outputs/apk/debug/Flight Alert-debug.apk
 ```
+
+## Whole-world reference preview
+
+Flight Alert can use a downloadable global places and named waterways preview.
+It contains source-backed OpenStreetMap place labels and named waterway lines.
+It is intentionally classified as
+`full-fidelity-visual-evaluation`: it is useful for worldwide visual testing,
+but it does **not** claim a complete all-feature world dictionary. The current
+uncompressed package is about 16.57 GB, so choose a destination with adequate
+free space.
+
+Use the exact manifest URL from a pinned Flight Alert GitHub release, never a
+`latest` shortcut:
+
+```powershell
+$manifestUrl = 'https://github.com/phowell212/FlightAlert/releases/download/experiment8-world-reference-v4-r15/world-experiment8-binary-v4.release-manifest.json'
+$referenceRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'FlightAlert\Reference'
+$null = New-Item -ItemType Directory -Force $referenceRoot
+$packageRoot = Join-Path $referenceRoot 'world-experiment8-binary-v4'
+$authorityRoot = Join-Path $referenceRoot 'flightalert-reference-authority'
+
+.\tools\download-reference-dictionary-experiment8.ps1 `
+  -ManifestUrl $manifestUrl `
+  -Output $packageRoot
+
+py -3.11 -m tools.experiment8.reference_release_assets materialize `
+  --manifest-url $manifestUrl `
+  --package $packageRoot `
+  --output $authorityRoot
+
+.\tools\install-reference-dictionary-experiment8.ps1 `
+  -PackageRoot $packageRoot `
+  -ApkPath "$authorityRoot\FlightAlert-reference-preview.apk" `
+  -FinalResult "$authorityRoot\final-package-result.json" `
+  -InstallPolicy full-fidelity-visual-evaluation `
+  -ValidateOnly
+```
+
+The fetch step atomically publishes exactly one six-file package root. The
+materialization step downloads the manifest-bound APK and source result, then
+creates a local result whose only changes are the current package/APK paths and
+the documented installPolicy; it revalidates all identities before publication.
+Building, fetching,
+materializing, and `-ValidateOnly` do not require a device lease helper.
+Transactional phone modes require an explicit `-LeaseHelper`, `-ThreadId`, and
+external `-EvidenceDirectory`; there is no machine-specific default.
+
+OpenStreetMap attribution, the ODbL 1.0 license, pinned source identity, build
+method, and machine-readable database offer are documented in
+[THIRD_PARTY_REFERENCE_DATA.md](THIRD_PARTY_REFERENCE_DATA.md).
 
 ## Repository Notes
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import http.server
 import io
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from unittest import mock
@@ -27,6 +29,7 @@ PACKAGE_ID = "world-experiment8-binary-v4"
 SOURCE_COMMIT = "b" * 40
 MANDATORY_RESERVE_BYTES = 1_500_000_000
 TEST_CHUNK_BYTES = 512
+PREVIEW_POLICY = "full-fidelity-visual-evaluation"
 OVERSIZED_MANIFEST_MARKER = ".oversized-manifest-test"
 GITHUB_RELEASE_DIRECTORY_URL = (
     "https://github.com/phowell212/FlightAlert/releases/download/v8/"
@@ -228,6 +231,43 @@ class _ValidReleaseFixture:
     def _tool_sha256(name: str) -> str:
         return _sha256((Path(__file__).parents[1] / name).read_bytes())
 
+    def make_honest_preview(self) -> None:
+        manifest_path = self.package / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["coverage"]["completeDeclaredScope"] = False
+        manifest["coverage"]["completeWholeEarthDictionary"] = False
+        manifest_path.write_bytes(_canonical(manifest))
+
+        merge_path = self.package / "merge-receipt.json"
+        merge = json.loads(merge_path.read_text("utf-8"))
+        merge["coverage"]["completeDeclaredScope"] = False
+        merge["coverage"]["completeWholeEarthDictionary"] = False
+        merge["coverage"]["primaryWholeEarthPreserved"] = False
+        merge_path.write_bytes(_canonical(merge))
+
+        finalization_path = (
+            self.package / "class-catalog-finalization-receipt.json"
+        )
+        finalization = json.loads(finalization_path.read_text("utf-8"))
+        manifest_raw = manifest_path.read_bytes()
+        manifest_binding = next(
+            item
+            for item in finalization["outputFiles"]
+            if item["name"] == "manifest.json"
+        )
+        manifest_binding["bytes"] = len(manifest_raw)
+        manifest_binding["sha256"] = _sha256(manifest_raw)
+        finalization_path.write_bytes(_canonical(finalization))
+
+        package_bytes = sum(path.stat().st_size for path in self.package.iterdir())
+        result = json.loads(self.result.read_text("utf-8"))
+        result["package"]["bytes"] = package_bytes
+        result["footprint"]["totalBytes"] = (
+            package_bytes + self.apk.stat().st_size + MANDATORY_RESERVE_BYTES
+        )
+        result["rebind"]["installPolicy"] = PREVIEW_POLICY
+        self.result.write_bytes(_canonical(result))
+
 
 class PrepareReleaseAssetsTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -250,6 +290,69 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
 
         manifest = json.loads(manifest_path.read_text("utf-8"))
         self.assertEqual(SOURCE_COMMIT, manifest["sourceCommit"])
+
+    def test_prepare_visual_preview_binds_v2_authority_without_claiming_completeness(
+        self,
+    ) -> None:
+        self.fixture.make_honest_preview()
+        output = self.root / "preview-assets"
+
+        manifest_path = prepare_release_assets(
+            package_directory=self.fixture.package,
+            apk_path=self.fixture.apk,
+            final_result_path=self.fixture.result,
+            output_directory=output,
+            chunk_bytes=TEST_CHUNK_BYTES,
+            install_policy=PREVIEW_POLICY,
+        )
+
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        self.assertEqual(
+            "flightalert.experiment8.reference-release-manifest.v2",
+            manifest["schema"],
+        )
+        self.assertEqual(PREVIEW_POLICY, manifest["installPolicy"])
+        self.assertEqual(
+            "© OpenStreetMap contributors",
+            manifest["referenceData"]["attribution"],
+        )
+        self.assertEqual(
+            "ODbL-1.0", manifest["referenceData"]["databaseLicense"]
+        )
+        self.assertEqual(
+            (
+                "https://github.com/phowell212/FlightAlert/blob/"
+                f"{SOURCE_COMMIT}/THIRD_PARTY_REFERENCE_DATA.md"
+            ),
+            manifest["referenceData"]["noticeUrl"],
+        )
+        self.assertIn(
+            "complete machine-readable derived database",
+            manifest["referenceData"]["sourceOffer"],
+        )
+        self.assertEqual(
+            "FlightAlert-reference-preview.apk", manifest["apk"]["asset"]
+        )
+        self.assertEqual(
+            "world-experiment8-binary-v4.source-bound-result.json",
+            manifest["finalResult"]["asset"],
+        )
+        for key, source in (
+            ("apk", self.fixture.apk),
+            ("finalResult", self.fixture.result),
+        ):
+            identity = manifest[key]
+            asset = output / identity["asset"]
+            self.assertEqual(source.read_bytes(), asset.read_bytes())
+            self.assertEqual(source.stat().st_size, identity["bytes"])
+            self.assertEqual(_sha256(source.read_bytes()), identity["sha256"])
+        package_manifest = json.loads(
+            (self.fixture.package / "manifest.json").read_text("utf-8")
+        )
+        self.assertFalse(package_manifest["coverage"]["completeDeclaredScope"])
+        self.assertFalse(
+            package_manifest["coverage"]["completeWholeEarthDictionary"]
+        )
 
     def test_prepare_requires_final_rebind_source_commit(self) -> None:
         result = json.loads(self.fixture.result.read_text("utf-8"))
@@ -291,16 +394,16 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
         with self.assertRaises(installer_module.ReferencePackageInstallError):
             self._prepare_from_result("mismatched-commit-assets")
 
-    def test_release_asset_plan_accepts_exactly_999_chunks(self) -> None:
-        sizes = (994, 1, 1, 1, 1, 1)
+    def test_release_asset_plan_accepts_exactly_997_package_chunks(self) -> None:
+        sizes = (992, 1, 1, 1, 1, 1)
 
         self.assertEqual(
-            999,
+            997,
             release_module._validate_release_asset_plan(sizes, 1),
         )
 
-    def test_release_asset_plan_rejects_1000_chunks(self) -> None:
-        sizes = (995, 1, 1, 1, 1, 1)
+    def test_release_asset_plan_rejects_998_package_chunks(self) -> None:
+        sizes = (993, 1, 1, 1, 1, 1)
 
         with self.assertRaises(installer_module.ReferencePackageInstallError):
             release_module._validate_release_asset_plan(sizes, 1)
@@ -352,9 +455,10 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
         manifest = json.loads(manifest_raw.decode("utf-8", "strict"))
         self.assertEqual(_canonical(manifest), manifest_raw)
         self.assertEqual(
-            "flightalert.experiment8.reference-release-manifest.v1",
+            "flightalert.experiment8.reference-release-manifest.v2",
             manifest["schema"],
         )
+        self.assertEqual("release", manifest["installPolicy"])
         self.assertEqual(SOURCE_COMMIT, manifest["sourceCommit"])
         self.assertEqual(PACKAGE_ID, manifest["package"]["packageId"])
         self.assertEqual(
@@ -363,6 +467,7 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
         )
         self.assertEqual(
             {
+                "asset": "FlightAlert-reference-preview.apk",
                 "bytes": self.fixture.apk.stat().st_size,
                 "sha256": _sha256(self.fixture.apk.read_bytes()),
             },
@@ -370,6 +475,9 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
         )
         self.assertEqual(
             {
+                "asset": (
+                    "world-experiment8-binary-v4.source-bound-result.json"
+                ),
                 "bytes": self.fixture.result.stat().st_size,
                 "sha256": _sha256(self.fixture.result.read_bytes()),
             },
@@ -404,7 +512,15 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
             for item in manifest["package"]["files"]
             for chunk in item["chunks"]
         }
-        self.assertEqual(asset_names | {RELEASE_MANIFEST_NAME}, set(first_files))
+        self.assertEqual(
+            asset_names
+            | {
+                RELEASE_MANIFEST_NAME,
+                "FlightAlert-reference-preview.apk",
+                "world-experiment8-binary-v4.source-bound-result.json",
+            },
+            set(first_files),
+        )
 
     def test_prepare_rejects_host_install_plan_mismatch_without_residue(
         self,
@@ -442,6 +558,41 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
                 chunk_bytes=MAX_RELEASE_ASSET_BYTES,
             )
 
+        self.assertFalse(output.exists())
+
+    def test_prepare_rejects_apk_at_asset_ceiling_before_stage_creation(
+        self,
+    ) -> None:
+        output = self.root / "oversized-apk-assets"
+        plan = installer_module.HostInstallPlan.validate(
+            package_directory=self.fixture.package,
+            apk_path=self.fixture.apk,
+            final_result_path=self.fixture.result,
+        )
+        oversized = replace(plan, apk_bytes=MAX_RELEASE_ASSET_BYTES)
+
+        with (
+            mock.patch.object(
+                release_module.HostInstallPlan,
+                "validate",
+                return_value=oversized,
+            ),
+            mock.patch.object(
+                release_module,
+                "_create_stage",
+                side_effect=AssertionError("stage must not be created"),
+            ) as create_stage,
+            self.assertRaises(installer_module.ReferencePackageInstallError),
+        ):
+            prepare_release_assets(
+                package_directory=self.fixture.package,
+                apk_path=self.fixture.apk,
+                final_result_path=self.fixture.result,
+                output_directory=output,
+                chunk_bytes=TEST_CHUNK_BYTES,
+            )
+
+        create_stage.assert_not_called()
         self.assertFalse(output.exists())
 
     def test_prepare_failure_cleans_tokenized_stage(self) -> None:
@@ -699,9 +850,12 @@ class PrepareReleaseAssetsTest(unittest.TestCase):
             stage: Path,
             file_documents: list[dict[str, object]],
             manifest_raw: bytes,
+            authority_documents: object,
         ) -> None:
             nonlocal changed
-            real_assert(stage, file_documents, manifest_raw)
+            real_assert(
+                stage, file_documents, manifest_raw, authority_documents
+            )
             records = self.fixture.package / "records.fadictpack"
             raw = records.read_bytes()
             records.write_bytes(bytes((raw[0] ^ 0xFF,)) + raw[1:])
@@ -949,6 +1103,15 @@ class FetchReleaseAssetsTest(unittest.TestCase):
     def _write_manifest(self, manifest: object) -> None:
         self.manifest_path.write_bytes(_canonical(manifest))
 
+    def _replace_release_result(self, document: object) -> None:
+        manifest = self._manifest()
+        identity = manifest["finalResult"]
+        raw = _canonical(document)
+        (self.assets / identity["asset"]).write_bytes(raw)
+        identity["bytes"] = len(raw)
+        identity["sha256"] = _sha256(raw)
+        self._write_manifest(manifest)
+
     def _assert_fetch_rejected_without_residue(self) -> None:
         with self.assertRaises(installer_module.ReferencePackageInstallError):
             fetch_release_assets(
@@ -993,12 +1156,203 @@ class FetchReleaseAssetsTest(unittest.TestCase):
             (self.output / "records.fadictpack").read_bytes(),
         )
 
+    def test_materialize_downloads_exact_authority_and_rebinds_only_local_paths(
+        self,
+    ) -> None:
+        fetch_release_assets(
+            manifest_url=self.manifest_url,
+            output_directory=self.output,
+            allow_loopback_http=True,
+        )
+        authority = self.root / "reference-authority"
+        materialize = getattr(
+            release_module, "materialize_release_authority", None
+        )
+        self.assertTrue(callable(materialize))
+
+        result_path = materialize(
+            manifest_url=self.manifest_url,
+            package_directory=self.output,
+            output_directory=authority,
+            allow_loopback_http=True,
+        )
+
+        apk_path = authority / "FlightAlert-reference-preview.apk"
+        self.assertEqual(
+            ["FlightAlert-reference-preview.apk", "final-package-result.json"],
+            sorted(path.name for path in authority.iterdir()),
+        )
+        self.assertEqual(self.fixture.apk.read_bytes(), apk_path.read_bytes())
+        result = json.loads(result_path.read_text("utf-8"))
+        self.assertEqual(str(self.output.resolve()), result["package"]["path"])
+        self.assertEqual(str(apk_path.resolve()), result["apk"]["path"])
+        self.assertEqual(
+            "release", result["rebind"].get("installPolicy", "release")
+        )
+        source = json.loads(
+            (
+                self.assets
+                / self._manifest()["finalResult"]["asset"]
+            ).read_text("utf-8")
+        )
+        expected = copy.deepcopy(source)
+        expected["package"]["path"] = str(self.output.resolve())
+        expected["apk"]["path"] = str(apk_path.resolve())
+        expected["rebind"]["installPolicy"] = "release"
+        self.assertEqual(expected, result)
+        plan = installer_module.HostInstallPlan.validate(
+            package_directory=self.output,
+            apk_path=apk_path,
+            final_result_path=result_path,
+            install_policy="release",
+        )
+        self.assertEqual("release", plan.install_policy)
+
+    def test_materialize_rejects_noncanonical_authority_asset_name(self) -> None:
+        manifest = self._manifest()
+        manifest["apk"]["asset"] = "renamed.apk"
+        self._write_manifest(manifest)
+        materialize = getattr(
+            release_module, "materialize_release_authority", None
+        )
+        self.assertTrue(callable(materialize))
+
+        with self.assertRaises(installer_module.ReferencePackageInstallError):
+            materialize(
+                manifest_url=self.manifest_url,
+                package_directory=self.fixture.package,
+                output_directory=self.root / "bad-authority",
+                allow_loopback_http=True,
+            )
+
+        self.assertFalse((self.root / "bad-authority").exists())
+
+    def test_materialize_rejects_nested_producer_local_absolute_paths(
+        self,
+    ) -> None:
+        hostile_paths = (
+            r"C:\Users\producer\reference\receipt.json",
+            r"\\server\share\reference\receipt.json",
+            "/home/producer/reference/receipt.json",
+            "file:///C:/Users/producer/reference/receipt.json",
+        )
+
+        for index, hostile_path in enumerate(hostile_paths):
+            with self.subTest(hostile_path=hostile_path):
+                result = json.loads(self.fixture.result.read_text("utf-8"))
+                result["futureProducer"] = {
+                    "nested": [{"producerLocalPath": hostile_path}]
+                }
+                self._replace_release_result(result)
+                output = self.root / f"leaking-authority-{index}"
+
+                with self.assertRaises(
+                    installer_module.ReferencePackageInstallError
+                ):
+                    release_module.materialize_release_authority(
+                        manifest_url=self.manifest_url,
+                        package_directory=self.fixture.package,
+                        output_directory=output,
+                        allow_loopback_http=True,
+                    )
+
+                self.assertFalse(output.exists())
+
+    def test_materialize_preserves_unknown_safe_urls_hashes_and_relative_names(
+        self,
+    ) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        safe_future = {
+            "downloadUrl": "https://example.com/releases/C:/reference.json",
+            "receiptSha256": "d" * 64,
+            "relativeReceipt": "receipts/reference-result.json",
+        }
+        result["futureAuthority"] = safe_future
+        self._replace_release_result(result)
+        authority = self.root / "safe-future-authority"
+
+        result_path = release_module.materialize_release_authority(
+            manifest_url=self.manifest_url,
+            package_directory=self.fixture.package,
+            output_directory=authority,
+            allow_loopback_http=True,
+        )
+
+        materialized = json.loads(result_path.read_text("utf-8"))
+        self.assertEqual(safe_future, materialized["futureAuthority"])
+
+    def test_materialize_preview_round_trip_preserves_false_completeness(
+        self,
+    ) -> None:
+        preview_root = self.root / "preview-source"
+        preview_root.mkdir()
+        preview = _ValidReleaseFixture(preview_root)
+        preview.make_honest_preview()
+        assets = self.root / "preview-release-assets"
+        prepare_release_assets(
+            package_directory=preview.package,
+            apk_path=preview.apk,
+            final_result_path=preview.result,
+            output_directory=assets,
+            chunk_bytes=TEST_CHUNK_BYTES,
+            install_policy=PREVIEW_POLICY,
+        )
+        server = _QuietThreadingHttpServer(
+            ("127.0.0.1", 0),
+            partial(_SilentFileHandler, directory=str(assets)),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        manifest_url = f"http://{host}:{port}/{RELEASE_MANIFEST_NAME}"
+        preview_download = self.root / "preview-download"
+        preview_download.mkdir()
+        package = preview_download / PACKAGE_ID
+        authority = self.root / "preview-authority"
+        try:
+            fetch_release_assets(
+                manifest_url=manifest_url,
+                output_directory=package,
+                allow_loopback_http=True,
+            )
+            result_path = release_module.materialize_release_authority(
+                manifest_url=manifest_url,
+                package_directory=package,
+                output_directory=authority,
+                allow_loopback_http=True,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        package_manifest = json.loads(
+            (package / "manifest.json").read_text("utf-8")
+        )
+        self.assertFalse(
+            package_manifest["coverage"]["completeDeclaredScope"]
+        )
+        self.assertFalse(
+            package_manifest["coverage"]["completeWholeEarthDictionary"]
+        )
+        materialized = json.loads(result_path.read_text("utf-8"))
+        self.assertEqual(
+            PREVIEW_POLICY, materialized["rebind"]["installPolicy"]
+        )
+
     def test_fetch_rejects_corrupt_chunk_and_cleans_partial_stage(self) -> None:
         manifest = self._manifest()
         chunk = manifest["package"]["files"][0]["chunks"][0]
         asset = self.assets / chunk["asset"]
         raw = asset.read_bytes()
         asset.write_bytes(bytes((raw[0] ^ 0xFF,)) + raw[1:])
+
+        self._assert_fetch_rejected_without_residue()
+
+    def test_fetch_rejects_manifest_apk_at_asset_ceiling(self) -> None:
+        manifest = self._manifest()
+        manifest["apk"]["bytes"] = MAX_RELEASE_ASSET_BYTES
+        self._write_manifest(manifest)
 
         self._assert_fetch_rejected_without_residue()
 
@@ -1334,6 +1688,36 @@ class ReleaseAssetsCliTest(unittest.TestCase):
 
         self.assertIn("unrecognized arguments: --source-commit", stderr.getvalue())
 
+    def test_prepare_cli_forwards_visual_evaluation_policy(self) -> None:
+        output = self.root / "cli-preview-assets"
+        stdout = io.StringIO()
+        self.fixture.make_honest_preview()
+
+        with redirect_stdout(stdout):
+            exit_code = _main(
+                [
+                    "prepare",
+                    "--package",
+                    str(self.fixture.package),
+                    "--apk",
+                    str(self.fixture.apk),
+                    "--final-result",
+                    str(self.fixture.result),
+                    "--output",
+                    str(output),
+                    "--chunk-bytes",
+                    str(TEST_CHUNK_BYTES),
+                    "--install-policy",
+                    PREVIEW_POLICY,
+                ]
+            )
+
+        self.assertEqual(0, exit_code)
+        manifest = json.loads(
+            (output / RELEASE_MANIFEST_NAME).read_text("utf-8")
+        )
+        self.assertEqual(PREVIEW_POLICY, manifest["installPolicy"])
+
     def test_fetch_cli_forwards_https_manifest_and_exact_output(self) -> None:
         output = self.root / PACKAGE_ID
         manifest_url = GITHUB_MANIFEST_URL
@@ -1364,6 +1748,39 @@ class ReleaseAssetsCliTest(unittest.TestCase):
         )
         self.assertEqual(str(output), stdout.getvalue().strip())
 
+    def test_materialize_cli_forwards_manifest_package_and_output(self) -> None:
+        output = self.root / "authority"
+        result = output / "final-package-result.json"
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.object(
+                release_module,
+                "materialize_release_authority",
+                return_value=result,
+            ) as materialize,
+            redirect_stdout(stdout),
+        ):
+            exit_code = _main(
+                [
+                    "materialize",
+                    "--manifest-url",
+                    GITHUB_MANIFEST_URL,
+                    "--package",
+                    str(self.fixture.package),
+                    "--output",
+                    str(output),
+                ]
+            )
+
+        self.assertEqual(0, exit_code)
+        materialize.assert_called_once_with(
+            manifest_url=GITHUB_MANIFEST_URL,
+            package_directory=self.fixture.package,
+            output_directory=output,
+        )
+        self.assertEqual(str(result), stdout.getvalue().strip())
+
     def test_powershell_wrapper_forwards_only_manifest_url_and_output(self) -> None:
         wrapper = (
             Path(__file__).parents[2]
@@ -1378,6 +1795,44 @@ class ReleaseAssetsCliTest(unittest.TestCase):
         self.assertIn("'--manifest-url'", text)
         self.assertIn("'--output'", text)
         self.assertNotIn("allow-loopback", text.lower())
+
+    def test_public_docs_bind_preview_scope_odbl_and_machine_readable_offer(
+        self,
+    ) -> None:
+        repository = Path(__file__).parents[3]
+        readme = (repository / "README.md").read_text("utf-8")
+        readme_flat = " ".join(readme.split())
+        notice = (repository / "THIRD_PARTY_REFERENCE_DATA.md").read_text(
+            "utf-8"
+        )
+        notice_flat = " ".join(notice.split())
+        license_text = (repository / "LICENSES/ODbL-1.0.txt").read_text(
+            "utf-8"
+        )
+
+        self.assertIn("global places and named waterways preview", readme)
+        self.assertIn("full-fidelity-visual-evaluation", readme)
+        self.assertIn("reference_release_assets materialize", readme)
+        self.assertIn("experiment8-world-reference-v4-r15", readme)
+        self.assertIn(
+            "[Environment]::GetFolderPath('LocalApplicationData')", readme
+        )
+        self.assertIn(
+            "New-Item -ItemType Directory -Force $referenceRoot", readme
+        )
+        self.assertNotIn("D:\\FlightAlertReference", readme)
+        self.assertNotIn("<pinned-tag>", readme)
+        self.assertIn(
+            "package/APK paths and the documented installPolicy", readme_flat
+        )
+        self.assertIn("OpenStreetMap contributors", notice)
+        self.assertIn("https://www.openstreetmap.org/copyright", notice)
+        self.assertIn(
+            "https://opendatacommons.org/licenses/odbl/1-0/", notice
+        )
+        self.assertIn("complete machine-readable derived database", notice_flat)
+        self.assertIn("Open Database License (ODbL)", license_text)
+        self.assertIn("4.6 Access to Derivative Databases", license_text)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
-"""Prepare and fetch verified Experiment 8 reference release assets."""
+"""Prepare, fetch, and materialize Experiment 8 reference release assets."""
 
 from __future__ import annotations
 
 import argparse
+import copy
 import ctypes
 import errno
 import hashlib
@@ -18,7 +19,7 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Mapping, Sequence
 
 from tools.experiment8 import reference_package_install as installer
@@ -32,10 +33,16 @@ RELEASE_MANIFEST_NAME = (
     "world-experiment8-binary-v4.release-manifest.json"
 )
 RELEASE_MANIFEST_SCHEMA = (
-    "flightalert.experiment8.reference-release-manifest.v1"
+    "flightalert.experiment8.reference-release-manifest.v2"
 )
+RELEASE_APK_ASSET_NAME = "FlightAlert-reference-preview.apk"
+RELEASE_FINAL_RESULT_ASSET_NAME = (
+    "world-experiment8-binary-v4.source-bound-result.json"
+)
+MATERIALIZED_FINAL_RESULT_NAME = "final-package-result.json"
 MAX_RELEASE_ASSET_BYTES = 2_000_000_000
-MAX_RELEASE_CHUNKS = 999
+# GitHub permits 1,000 assets: manifest + APK + result leave 997 package shards.
+MAX_RELEASE_CHUNKS = 997
 DEFAULT_CHUNK_BYTES = 1_900_000_000
 _FULL_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _DOWNLOAD_BUFFER_BYTES = 4 * 1024 * 1024
@@ -50,6 +57,24 @@ _GITHUB_RELEASE_CDN_HOSTS = frozenset(
         "release-assets.githubusercontent.com",
     }
 )
+
+
+def _reference_data_document(source_commit: str) -> dict[str, str]:
+    return {
+        "attribution": "© OpenStreetMap contributors",
+        "copyrightUrl": "https://www.openstreetmap.org/copyright",
+        "databaseLicense": "ODbL-1.0",
+        "licenseUrl": "https://opendatacommons.org/licenses/odbl/1-0/",
+        "noticeUrl": (
+            "https://github.com/phowell212/FlightAlert/blob/"
+            f"{source_commit}/THIRD_PARTY_REFERENCE_DATA.md"
+        ),
+        "sourceOffer": (
+            "The complete machine-readable derived database is the six-file "
+            "package reconstructed from the shards bound by this manifest "
+            "and offered free of charge under ODbL 1.0."
+        ),
+    }
 
 
 def _same_install_file(
@@ -291,7 +316,7 @@ def _validate_release_asset_plan(
         total_chunks += (size + chunk_bytes - 1) // chunk_bytes
         if total_chunks > MAX_RELEASE_CHUNKS:
             raise ReferencePackageInstallError(
-                "release asset plan exceeds 999 package shards"
+                "release asset plan exceeds 997 package shards"
             )
     return total_chunks
 
@@ -650,7 +675,15 @@ def _validated_manifest_files(
 ) -> list[Mapping[str, object]]:
     installer._exact_fields(
         manifest,
-        {"apk", "finalResult", "package", "schema", "sourceCommit"},
+        {
+            "apk",
+            "finalResult",
+            "installPolicy",
+            "package",
+            "referenceData",
+            "schema",
+            "sourceCommit",
+        },
         "release manifest fields",
     )
     if manifest.get("schema") != RELEASE_MANIFEST_SCHEMA:
@@ -662,19 +695,54 @@ def _validated_manifest_files(
         raise ReferencePackageInstallError(
             "release manifest source commit is malformed"
         )
+    reference_data = installer._exact_mapping(
+        manifest.get("referenceData"), "release manifest reference data"
+    )
+    installer._exact_fields(
+        reference_data,
+        set(_reference_data_document(source_commit)),
+        "release manifest reference data fields",
+    )
+    if reference_data != _reference_data_document(source_commit):
+        raise ReferencePackageInstallError(
+            "release manifest reference data notice differs"
+        )
+    install_policy = installer._validated_install_policy(
+        manifest.get("installPolicy")
+    )
     authority_bytes: dict[str, int] = {}
-    for key, label in (("apk", "APK"), ("finalResult", "final result")):
+    authority_assets: set[str] = set()
+    for key, label, expected_asset in (
+        ("apk", "APK", RELEASE_APK_ASSET_NAME),
+        (
+            "finalResult",
+            "final result",
+            RELEASE_FINAL_RESULT_ASSET_NAME,
+        ),
+    ):
         identity = installer._exact_mapping(
             manifest.get(key), f"release manifest {label}"
         )
         installer._exact_fields(
             identity,
-            {"bytes", "sha256"},
+            {"asset", "bytes", "sha256"},
             f"release manifest {label} fields",
         )
+        asset = installer._exact_string(
+            identity.get("asset"), f"release manifest {label} asset"
+        )
+        if asset != expected_asset or asset in authority_assets:
+            raise ReferencePackageInstallError(
+                f"release manifest {label} asset name differs"
+            )
+        authority_assets.add(asset)
         authority_bytes[key] = _exact_positive_integer(
             identity.get("bytes"), f"release manifest {label} bytes"
         )
+        if authority_bytes[key] >= MAX_RELEASE_ASSET_BYTES:
+            raise ReferencePackageInstallError(
+                f"release manifest {label} is not below the asset ceiling"
+            )
         installer._exact_sha256(
             identity.get("sha256"), f"release manifest {label} SHA-256"
         )
@@ -701,7 +769,10 @@ def _validated_manifest_files(
     package_bytes = _exact_positive_integer(
         package.get("bytes"), "release manifest package bytes"
     )
-    if package_bytes >= installer.HARD_PACKAGE_CEILING_BYTES:
+    if (
+        install_policy == installer.INSTALL_POLICY_RELEASE
+        and package_bytes >= installer.HARD_PACKAGE_CEILING_BYTES
+    ):
         raise ReferencePackageInstallError(
             "release manifest package is not below the package ceiling"
         )
@@ -710,7 +781,10 @@ def _validated_manifest_files(
         + authority_bytes["apk"]
         + installer.MANDATORY_RESERVE_BYTES
     )
-    if total_footprint >= installer.HARD_FOOTPRINT_CEILING_BYTES:
+    if (
+        install_policy == installer.INSTALL_POLICY_RELEASE
+        and total_footprint >= installer.HARD_FOOTPRINT_CEILING_BYTES
+    ):
         raise ReferencePackageInstallError(
             "release manifest authority footprint is not below its hard ceiling"
         )
@@ -778,7 +852,7 @@ def _validated_manifest_files(
             asset_names.add(asset)
             if len(asset_names) > MAX_RELEASE_CHUNKS:
                 raise ReferencePackageInstallError(
-                    "release manifest exceeds 999 package shards"
+                    "release manifest exceeds 997 package shards"
                 )
             size = _exact_positive_integer(
                 chunk.get("bytes"),
@@ -830,6 +904,7 @@ def _assert_prepared_stage(
     stage: Path,
     file_documents: list[dict[str, object]],
     manifest_raw: bytes,
+    authority_documents: Sequence[Mapping[str, object]],
 ) -> None:
     expected: dict[str, tuple[int, str]] = {
         RELEASE_MANIFEST_NAME: (
@@ -859,6 +934,24 @@ def _assert_prepared_stage(
                     chunk.get("sha256"), "prepared release asset SHA-256"
                 ),
             )
+    for identity in authority_documents:
+        asset = installer._exact_string(
+            identity.get("asset"), "prepared release authority asset"
+        )
+        if asset in expected:
+            raise ReferencePackageInstallError(
+                "prepared release authority asset inventory collides"
+            )
+        expected[asset] = (
+            _exact_positive_integer(
+                identity.get("bytes"),
+                f"prepared release authority asset {asset} bytes",
+            ),
+            installer._exact_sha256(
+                identity.get("sha256"),
+                f"prepared release authority asset {asset} SHA-256",
+            ),
+        )
     try:
         actual_names = tuple(sorted(path.name for path in stage.iterdir()))
     except OSError as error:
@@ -986,6 +1079,61 @@ def _stream_file_chunks(
     }
 
 
+def _copy_release_authority_asset(
+    *, source: installer.InstallFile, asset_name: str, stage: Path
+) -> dict[str, object]:
+    destination = stage / asset_name
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        with source.path.open("rb") as source_handle, destination.open(
+            "xb"
+        ) as destination_handle:
+            opened = os.fstat(source_handle.fileno())
+            if installer._identity(opened) != source.stat_identity:
+                raise ReferencePackageInstallError(
+                    f"release authority {asset_name} changed before copying"
+                )
+            while copied < source.byte_length:
+                raw = source_handle.read(
+                    min(installer.HASH_CHUNK_BYTES, source.byte_length - copied)
+                )
+                if not raw:
+                    raise ReferencePackageInstallError(
+                        f"release authority {asset_name} was truncated"
+                    )
+                destination_handle.write(raw)
+                digest.update(raw)
+                copied += len(raw)
+            if source_handle.read(1):
+                raise ReferencePackageInstallError(
+                    f"release authority {asset_name} exceeds its bound size"
+                )
+            destination_handle.flush()
+            os.fsync(destination_handle.fileno())
+            after = os.fstat(source_handle.fileno())
+    except ReferencePackageInstallError:
+        raise
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            f"release authority {asset_name} cannot be copied"
+        ) from error
+    if (
+        copied != source.byte_length
+        or digest.hexdigest() != source.sha256
+        or installer._identity(after) != source.stat_identity
+    ):
+        raise ReferencePackageInstallError(
+            f"release authority {asset_name} changed during copying"
+        )
+    installer._assert_install_file_unchanged(source)
+    return {
+        "asset": asset_name,
+        "bytes": source.byte_length,
+        "sha256": source.sha256,
+    }
+
+
 def prepare_release_assets(
     *,
     package_directory: Path,
@@ -993,6 +1141,7 @@ def prepare_release_assets(
     final_result_path: Path,
     output_directory: Path,
     chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+    install_policy: str = installer.INSTALL_POLICY_RELEASE,
 ) -> Path:
     """Validate and deterministically shard an exact Experiment 8 package."""
 
@@ -1004,6 +1153,7 @@ def prepare_release_assets(
         raise ReferencePackageInstallError(
             "release asset chunk size must be positive and below 2 GB"
         )
+    install_policy = installer._validated_install_policy(install_policy)
     output = _fresh_directory_target(
         Path(output_directory), "release asset output"
     )
@@ -1016,7 +1166,16 @@ def prepare_release_assets(
         package_directory=Path(package_directory),
         apk_path=Path(apk_path),
         final_result_path=final_result_path,
+        install_policy=install_policy,
+        require_install_policy_binding=(
+            install_policy
+            != installer.INSTALL_POLICY_RELEASE
+        ),
     )
+    if plan.apk_bytes >= MAX_RELEASE_ASSET_BYTES:
+        raise ReferencePackageInstallError(
+            "release APK is not below the asset ceiling"
+        )
     if not _same_install_file(
         result_file,
         installer._hash_regular_file(final_result_path, "final result"),
@@ -1042,20 +1201,26 @@ def prepare_release_assets(
             )
             for index, item in enumerate(plan.package_files)
         ]
+        apk_document = _copy_release_authority_asset(
+            source=installer._hash_regular_file(plan.apk_path, "release APK"),
+            asset_name=RELEASE_APK_ASSET_NAME,
+            stage=stage,
+        )
+        result_document = _copy_release_authority_asset(
+            source=result_file,
+            asset_name=RELEASE_FINAL_RESULT_ASSET_NAME,
+            stage=stage,
+        )
         manifest = {
-            "apk": {
-                "bytes": plan.apk_bytes,
-                "sha256": plan.apk_sha256,
-            },
-            "finalResult": {
-                "bytes": result_file.byte_length,
-                "sha256": result_file.sha256,
-            },
+            "apk": apk_document,
+            "finalResult": result_document,
+            "installPolicy": install_policy,
             "package": {
                 "bytes": plan.package_bytes,
                 "files": file_documents,
                 "packageId": installer.PACKAGE_ID,
             },
+            "referenceData": _reference_data_document(source_commit),
             "schema": RELEASE_MANIFEST_SCHEMA,
             "sourceCommit": source_commit,
         }
@@ -1075,7 +1240,12 @@ def prepare_release_assets(
             raise ReferencePackageInstallError(
                 "final result changed during release preparation"
             )
-        _assert_prepared_stage(stage, file_documents, manifest_raw)
+        _assert_prepared_stage(
+            stage,
+            file_documents,
+            manifest_raw,
+            (apk_document, result_document),
+        )
         _assert_validated_input_identities(plan, result_file)
         _publish_stage(
             stage,
@@ -1085,6 +1255,7 @@ def prepare_release_assets(
                 published,
                 file_documents,
                 manifest_raw,
+                (apk_document, result_document),
             ),
         )
         stage = None
@@ -1291,10 +1462,412 @@ def fetch_release_assets(
         _cleanup_owned_stage(stage, stage_identity)
 
 
+def _download_authority_asset(
+    *,
+    manifest_url: str,
+    identity: Mapping[str, object],
+    destination: Path,
+    allow_loopback_http: bool,
+) -> installer.InstallFile:
+    asset = installer._exact_string(
+        identity.get("asset"), "release authority asset"
+    )
+    expected_bytes = _exact_positive_integer(
+        identity.get("bytes"), f"release authority {asset} bytes"
+    )
+    expected_sha256 = installer._exact_sha256(
+        identity.get("sha256"), f"release authority {asset} SHA-256"
+    )
+    digest = hashlib.sha256()
+    try:
+        with destination.open("xb") as output_handle:
+            _stream_downloaded_chunk(
+                url=_asset_url(manifest_url, asset),
+                output_handle=output_handle,
+                expected_bytes=expected_bytes,
+                expected_sha256=expected_sha256,
+                file_digest=digest,
+                allow_loopback_http=allow_loopback_http,
+            )
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+    except ReferencePackageInstallError:
+        raise
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            f"release authority {asset} cannot be downloaded"
+        ) from error
+    downloaded = installer._hash_regular_file(
+        destination, f"downloaded release authority {asset}"
+    )
+    if (
+        downloaded.byte_length != expected_bytes
+        or downloaded.sha256 != expected_sha256
+        or digest.hexdigest() != expected_sha256
+    ):
+        raise ReferencePackageInstallError(
+            f"downloaded release authority {asset} differs"
+        )
+    return downloaded
+
+
+_MISSING_JSON_VALUE = object()
+
+
+def _is_absolute_local_reference(value: str) -> bool:
+    parsed = urllib.parse.urlsplit(value)
+    return (
+        parsed.scheme.lower() == "file"
+        or PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).is_absolute()
+    )
+
+
+def _assert_no_undocumented_local_paths(
+    value: object,
+    *,
+    allowed_paths: frozenset[tuple[object, ...]],
+    location: tuple[object, ...] = (),
+) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            child_location = (*location, key)
+            if (
+                isinstance(key, str)
+                and _is_absolute_local_reference(key)
+            ):
+                raise ReferencePackageInstallError(
+                    "release authority contains an undocumented local path"
+                )
+            _assert_no_undocumented_local_paths(
+                child,
+                allowed_paths=allowed_paths,
+                location=child_location,
+            )
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _assert_no_undocumented_local_paths(
+                child,
+                allowed_paths=allowed_paths,
+                location=(*location, index),
+            )
+        return
+    if (
+        isinstance(value, str)
+        and location not in allowed_paths
+        and _is_absolute_local_reference(value)
+    ):
+        raise ReferencePackageInstallError(
+            "release authority contains an undocumented local path"
+        )
+
+
+def _changed_json_paths(
+    before: object,
+    after: object,
+    location: tuple[object, ...] = (),
+) -> set[tuple[object, ...]]:
+    if isinstance(before, Mapping) and isinstance(after, Mapping):
+        changed: set[tuple[object, ...]] = set()
+        for key in before.keys() | after.keys():
+            if key not in before or key not in after:
+                changed.add((*location, key))
+            else:
+                changed.update(
+                    _changed_json_paths(
+                        before[key], after[key], (*location, key)
+                    )
+                )
+        return changed
+    if isinstance(before, list) and isinstance(after, list):
+        if len(before) != len(after):
+            return {location}
+        changed = set()
+        for index, (before_item, after_item) in enumerate(zip(before, after)):
+            changed.update(
+                _changed_json_paths(
+                    before_item, after_item, (*location, index)
+                )
+            )
+        return changed
+    return set() if before == after else {location}
+
+
+def _materialized_result_bytes(
+    *,
+    template_path: Path,
+    package_directory: Path,
+    package_bytes: int,
+    apk_path: Path,
+    apk: installer.InstallFile,
+    install_policy: str,
+    source_commit: str,
+) -> bytes:
+    if _source_commit_from_final_result(template_path) != source_commit:
+        raise ReferencePackageInstallError(
+            "release authority source commit differs from its manifest"
+        )
+    template = installer._read_strict_json(
+        template_path, "release authority final result", canonical=False
+    )
+    allowed_local_paths = frozenset({("apk", "path"), ("package", "path")})
+    _assert_no_undocumented_local_paths(
+        template,
+        allowed_paths=allowed_local_paths,
+    )
+    result = copy.deepcopy(template)
+    package = installer._exact_mapping(
+        result.get("package"), "release authority package"
+    )
+    if (
+        installer._exact_string(
+            package.get("packageId"), "release authority package ID"
+        )
+        != installer.PACKAGE_ID
+        or installer._exact_integer(
+            package.get("bytes"), "release authority package bytes"
+        )
+        != package_bytes
+    ):
+        raise ReferencePackageInstallError(
+            "release authority package identity differs"
+        )
+    apk_document = installer._exact_mapping(
+        result.get("apk"), "release authority APK"
+    )
+    if (
+        installer._exact_integer(
+            apk_document.get("bytes"), "release authority APK bytes"
+        )
+        != apk.byte_length
+        or installer._exact_sha256(
+            apk_document.get("sha256"), "release authority APK SHA-256"
+        )
+        != apk.sha256
+    ):
+        raise ReferencePackageInstallError(
+            "release authority APK identity differs"
+        )
+    rebind = installer._exact_mapping(
+        result.get("rebind"), "release authority rebind"
+    )
+    if (
+        installer._exact_string(
+            rebind.get("sourceCommit"), "release authority rebind commit"
+        )
+        != source_commit
+    ):
+        raise ReferencePackageInstallError(
+            "release authority rebind source commit differs"
+        )
+    bound_policy = rebind.get("installPolicy")
+    if bound_policy is not None and (
+        installer._validated_install_policy(bound_policy) != install_policy
+    ):
+        raise ReferencePackageInstallError(
+            "release authority install policy differs from its manifest"
+        )
+    package_path = str(package_directory.resolve(strict=True))
+    apk_local_path = str(apk_path.resolve(strict=False))
+    prior_package_path = package.get("path")
+    prior_apk_path = apk_document.get("path")
+    prior_policy = rebind.get("installPolicy", _MISSING_JSON_VALUE)
+    package["path"] = package_path
+    apk_document["path"] = apk_local_path
+    rebind["installPolicy"] = install_policy
+    expected_delta = {
+        path
+        for path, before, after in (
+            (("package", "path"), prior_package_path, package_path),
+            (("apk", "path"), prior_apk_path, apk_local_path),
+            (("rebind", "installPolicy"), prior_policy, install_policy),
+        )
+        if before != after
+    }
+    if _changed_json_paths(template, result) != expected_delta:
+        raise ReferencePackageInstallError(
+            "materialized authority changed undocumented result fields"
+        )
+    _assert_no_undocumented_local_paths(
+        result,
+        allowed_paths=allowed_local_paths,
+    )
+    return installer._canonical_json_bytes(result)
+
+
+def _assert_materialized_authority(
+    *,
+    authority_directory: Path,
+    package_directory: Path,
+    manifest: Mapping[str, object],
+) -> None:
+    try:
+        actual_names = tuple(
+            sorted(path.name for path in authority_directory.iterdir())
+        )
+    except OSError as error:
+        raise ReferencePackageInstallError(
+            "materialized authority inventory cannot be inspected"
+        ) from error
+    if actual_names != (
+        RELEASE_APK_ASSET_NAME,
+        MATERIALIZED_FINAL_RESULT_NAME,
+    ):
+        raise ReferencePackageInstallError(
+            "materialized authority inventory differs"
+        )
+    apk_identity = installer._exact_mapping(
+        manifest.get("apk"), "release manifest APK"
+    )
+    apk = installer._hash_regular_file(
+        authority_directory / RELEASE_APK_ASSET_NAME,
+        "materialized authority APK",
+    )
+    if (
+        apk.byte_length
+        != _exact_positive_integer(
+            apk_identity.get("bytes"), "release manifest APK bytes"
+        )
+        or apk.sha256
+        != installer._exact_sha256(
+            apk_identity.get("sha256"), "release manifest APK SHA-256"
+        )
+    ):
+        raise ReferencePackageInstallError(
+            "materialized authority APK differs from its manifest"
+        )
+    policy = installer._validated_install_policy(manifest.get("installPolicy"))
+    plan = HostInstallPlan.validate(
+        package_directory=package_directory,
+        apk_path=apk.path,
+        final_result_path=(
+            authority_directory / MATERIALIZED_FINAL_RESULT_NAME
+        ),
+        install_policy=policy,
+        require_install_policy_binding=(
+            policy != installer.INSTALL_POLICY_RELEASE
+        ),
+    )
+    if plan.apk_sha256 != apk.sha256:
+        raise ReferencePackageInstallError(
+            "materialized authority host plan differs"
+        )
+
+
+def materialize_release_authority(
+    *,
+    manifest_url: str,
+    package_directory: Path,
+    output_directory: Path,
+    allow_loopback_http: bool = False,
+) -> Path:
+    """Download exact release authority and bind it to one local package root."""
+
+    if type(allow_loopback_http) is not bool:
+        raise ReferencePackageInstallError(
+            "loopback HTTP test seam has the wrong exact type"
+        )
+    package = installer._real_directory(
+        Path(package_directory), "reference package"
+    )
+    output = _fresh_directory_target(
+        Path(output_directory), "materialized authority output"
+    )
+    manifest, validated_manifest_url = _download_manifest(
+        manifest_url,
+        allow_loopback_http=allow_loopback_http,
+    )
+    files = _validated_manifest_files(manifest)
+    _assert_reconstructed_stage(package, files)
+    policy = installer._validated_install_policy(manifest.get("installPolicy"))
+    source_commit = installer._exact_string(
+        manifest.get("sourceCommit"), "release manifest source commit"
+    )
+    package_document = installer._exact_mapping(
+        manifest.get("package"), "release manifest package"
+    )
+    package_bytes = _exact_positive_integer(
+        package_document.get("bytes"), "release manifest package bytes"
+    )
+
+    stage: Path | None = None
+    stage_identity: tuple[int, int] | None = None
+    try:
+        stage, stage_identity = _create_stage(output, "materialize")
+        apk = _download_authority_asset(
+            manifest_url=validated_manifest_url,
+            identity=installer._exact_mapping(
+                manifest.get("apk"), "release manifest APK"
+            ),
+            destination=stage / RELEASE_APK_ASSET_NAME,
+            allow_loopback_http=allow_loopback_http,
+        )
+        template_path = stage / RELEASE_FINAL_RESULT_ASSET_NAME
+        _download_authority_asset(
+            manifest_url=validated_manifest_url,
+            identity=installer._exact_mapping(
+                manifest.get("finalResult"), "release manifest final result"
+            ),
+            destination=template_path,
+            allow_loopback_http=allow_loopback_http,
+        )
+        stage_result = stage / MATERIALIZED_FINAL_RESULT_NAME
+        stage_raw = _materialized_result_bytes(
+            template_path=template_path,
+            package_directory=package,
+            package_bytes=package_bytes,
+            apk_path=apk.path,
+            apk=apk,
+            install_policy=policy,
+            source_commit=source_commit,
+        )
+        _write_exact_file(stage_result, stage_raw)
+        HostInstallPlan.validate(
+            package_directory=package,
+            apk_path=apk.path,
+            final_result_path=stage_result,
+            install_policy=policy,
+            require_install_policy_binding=(
+                policy != installer.INSTALL_POLICY_RELEASE
+            ),
+        )
+        template_path.unlink()
+        final_apk_path = output / RELEASE_APK_ASSET_NAME
+        final_raw = _materialized_result_bytes(
+            template_path=installer._real_file(
+                stage_result, "staged materialized result"
+            ),
+            package_directory=package,
+            package_bytes=package_bytes,
+            apk_path=final_apk_path,
+            apk=apk,
+            install_policy=policy,
+            source_commit=source_commit,
+        )
+        installer._atomic_write_bytes(stage_result, final_raw)
+        _publish_stage(
+            stage,
+            output,
+            stage_identity,
+            lambda published: _assert_materialized_authority(
+                authority_directory=published,
+                package_directory=package,
+                manifest=manifest,
+            ),
+        )
+        stage = None
+        stage_identity = None
+        return output / MATERIALIZED_FINAL_RESULT_NAME
+    finally:
+        _cleanup_owned_stage(stage, stage_identity)
+
+
 def _main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare or fetch verified Experiment 8 reference release shards."
+            "Prepare, fetch, or materialize verified Experiment 8 release "
+            "assets."
         )
     )
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -1304,6 +1877,11 @@ def _main(arguments: Sequence[str] | None = None) -> int:
     prepare.add_argument("--final-result", required=True, type=Path)
     prepare.add_argument("--output", required=True, type=Path)
     prepare.add_argument(
+        "--install-policy",
+        choices=tuple(sorted(installer.INSTALL_POLICIES)),
+        default=installer.INSTALL_POLICY_RELEASE,
+    )
+    prepare.add_argument(
         "--chunk-bytes",
         type=int,
         default=DEFAULT_CHUNK_BYTES,
@@ -1311,6 +1889,10 @@ def _main(arguments: Sequence[str] | None = None) -> int:
     fetch = subparsers.add_parser("fetch")
     fetch.add_argument("--manifest-url", required=True)
     fetch.add_argument("--output", required=True, type=Path)
+    materialize = subparsers.add_parser("materialize")
+    materialize.add_argument("--manifest-url", required=True)
+    materialize.add_argument("--package", required=True, type=Path)
+    materialize.add_argument("--output", required=True, type=Path)
     parsed = parser.parse_args(arguments)
     try:
         if parsed.operation == "prepare":
@@ -1320,10 +1902,17 @@ def _main(arguments: Sequence[str] | None = None) -> int:
                 final_result_path=parsed.final_result,
                 output_directory=parsed.output,
                 chunk_bytes=parsed.chunk_bytes,
+                install_policy=parsed.install_policy,
             )
-        else:
+        elif parsed.operation == "fetch":
             result = fetch_release_assets(
                 manifest_url=parsed.manifest_url,
+                output_directory=parsed.output,
+            )
+        else:
+            result = materialize_release_authority(
+                manifest_url=parsed.manifest_url,
+                package_directory=parsed.package,
                 output_directory=parsed.output,
             )
     except ReferencePackageInstallError as error:
@@ -1339,9 +1928,13 @@ if __name__ == "__main__":
 __all__ = [
     "DEFAULT_CHUNK_BYTES",
     "MAX_RELEASE_ASSET_BYTES",
+    "MATERIALIZED_FINAL_RESULT_NAME",
+    "RELEASE_APK_ASSET_NAME",
+    "RELEASE_FINAL_RESULT_ASSET_NAME",
     "RELEASE_MANIFEST_NAME",
     "RELEASE_MANIFEST_SCHEMA",
     "_main",
     "fetch_release_assets",
+    "materialize_release_authority",
     "prepare_release_assets",
 ]

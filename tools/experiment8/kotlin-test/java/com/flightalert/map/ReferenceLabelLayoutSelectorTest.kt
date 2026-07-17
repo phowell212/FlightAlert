@@ -197,6 +197,32 @@ class ReferenceLabelLayoutSelectorTest {
         assertEquals(emptyList<Int>(), select(clipped).map { it.token })
     }
 
+    @Test
+    fun sourcedLabelTriesItsAlternatePlacementWhenAnAircraftOccupiesTheFirst() {
+        val first = path(
+            token = 1,
+            occurrence = occurrence(81uL),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(20.0, 60.0), point(100.0, 60.0)),
+            radius = 5.0,
+        )
+        val alternate = path(
+            token = 2,
+            occurrence = occurrence(81uL),
+            priority = 1,
+            rank = 1,
+            points = listOf(point(20.0, 110.0), point(100.0, 110.0)),
+            radius = 5.0,
+        )
+        val aircraftFootprint = rect(45.0, 40.0, 75.0, 80.0)
+
+        assertEquals(
+            listOf(2),
+            select(first, alternate, avoid = listOf(aircraftFootprint)).map { it.token },
+        )
+    }
+
     private fun occurrence(candidateId: ULong, repeatOrdinal: Long = 0L) =
         ReferenceLabelOccurrenceId(candidateId, repeatOrdinal)
 

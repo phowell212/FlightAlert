@@ -15,13 +15,13 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import com.flightalert.MAP_TILE_CACHE_MAX_AGE_MS
 import com.flightalert.details.throwable_safe_https_url
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.LinkedHashMap
 import java.util.Locale
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -38,14 +38,14 @@ internal class StreetMapTileRenderer(
     private val sp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int,
     private val report_status: (String) -> Unit,
-    private val request_redraw: () -> Unit
+    private val request_redraw: () -> Unit,
+    private val map_tile_disk_cache: MapTileDiskCache,
 ) {
     private val tile_cache = LinkedHashMap<String, Bitmap>(MAX_MEMORY_TILES, 0.75f, true)
     private val label_tile_cache = LinkedHashMap<String, Bitmap>(MAX_LABEL_MEMORY_TILES, 0.75f, true)
     private val requested_tiles_lock = Any()
     private val requested_tiles = mutableSetOf<String>()
     private val worker_id = AtomicInteger()
-    private val disk_worker_id = AtomicInteger()
     private val tile_request_generation = AtomicLong()
     private val tile_task_sequence = AtomicLong()
     private val tile_executor = ThreadPoolExecutor(
@@ -56,22 +56,6 @@ internal class StreetMapTileRenderer(
         PriorityBlockingQueue()
     ) { runnable ->
         Thread(runnable, "flightalert-street-tile-${worker_id.incrementAndGet()}").apply {
-            isDaemon = true
-        }
-    }.apply {
-        allowCoreThreadTimeOut(true)
-    }
-    private val tile_disk_executor = ThreadPoolExecutor(
-        1,
-        1,
-        TILE_WORKER_KEEP_ALIVE_MS,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue()
-    ) { runnable ->
-        Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            runnable.run()
-        }, "flightalert-street-tile-disk-${disk_worker_id.incrementAndGet()}").apply {
             isDaemon = true
         }
     }.apply {
@@ -321,7 +305,6 @@ internal class StreetMapTileRenderer(
 
     fun shutdown() {
         tile_executor.shutdownNow()
-        tile_disk_executor.shutdownNow()
         clear()
     }
 
@@ -406,13 +389,15 @@ internal class StreetMapTileRenderer(
                             return@tileTask
                         }
                         val file = tile_file(z, x, y, cache_key)
-                        if (is_fresh_tile_file(file)) {
-                            val bitmap =
-                                BitmapFactory.decodeFile(file.absolutePath, decode_options())
-                            if (bitmap != null) {
-                                put_tile_in_memory(key, bitmap)
-                                return@tileTask
-                            }
+                        val bitmap = map_tile_disk_cache.read_if_fresh(
+                            file = file,
+                            max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
+                        ) { cached ->
+                            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+                        }
+                        if (bitmap != null) {
+                            put_tile_in_memory(key, bitmap)
+                            return@tileTask
                         }
                         val url =
                             https_url(tile_url(z, x, y))
@@ -456,7 +441,7 @@ internal class StreetMapTileRenderer(
     }
 
     private fun write_tile_file_async(file: File, bytes: ByteArray) {
-        write_cache_file_async(tile_disk_executor, file, bytes)
+        map_tile_disk_cache.write_async(file, bytes)
     }
 
     private fun tile_bitmap(
@@ -470,8 +455,12 @@ internal class StreetMapTileRenderer(
         memory_tile_bitmap(key)?.let { return it }
         if (!allow_disk_decode) return null
         val file = tile_file(z, x, y, cache_key)
-        if (!is_fresh_tile_file(file)) return null
-        val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options()) ?: return null
+        val bitmap = map_tile_disk_cache.read_if_fresh(
+            file = file,
+            max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
+        ) { cached ->
+            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+        } ?: return null
         val cache = memory_cache_for_key(key)
         synchronized(cache) {
             cache[key]?.let { existing ->
@@ -577,8 +566,12 @@ internal class StreetMapTileRenderer(
         memory_tile_bitmap(key)?.let { return it }
         if (!allow_disk_decode) return null
         val file = tile_file(z, x, y, cache_key)
-        if (!is_fresh_tile_file(file)) return null
-        val bitmap = BitmapFactory.decodeFile(file.absolutePath, decode_options()) ?: return null
+        val bitmap = map_tile_disk_cache.read_if_fresh(
+            file = file,
+            max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
+        ) { cached ->
+            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+        } ?: return null
         val cache = memory_cache_for_key(key)
         synchronized(cache) {
             cache[key]?.let { existing ->
@@ -709,10 +702,6 @@ internal class StreetMapTileRenderer(
             with_alpha(style.text, 170),
             sp(10f)
         )
-    }
-
-    private fun is_fresh_tile_file(file: File): Boolean {
-        return is_fresh_cache_file(file)
     }
 
     private fun tile_file(z: Int, x: Int, y: Int, cache_key: String): File {

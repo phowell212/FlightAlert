@@ -520,7 +520,7 @@ class ReferenceLabelRuntimePresentationBindingTest {
 
     private fun renderer_source(): String = File(
         "app/src/main/java/com/flightalert/map/ReferenceDictionaryOverlayRenderer.kt",
-    ).readText()
+    ).readText().replace("\r\n", "\n").replace('\r', '\n')
 
     private fun source_section(source: String, start: String, end: String): String {
         val start_index = source.indexOf(start)

@@ -16,6 +16,8 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
+import com.flightalert.MAP_TILE_CACHE_MAX_AGE_MS
+import com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES
 import com.flightalert.details.throwable_safe_https_url
 import com.flightalert.ui.smooth_step
 import java.io.File
@@ -23,7 +25,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.LinkedHashMap
 import java.util.Locale
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -62,6 +63,7 @@ internal class SatelliteBaseTileRenderer(
     private val report_status: (String) -> Unit,
     private val request_redraw: () -> Unit,
     private val map_content_revision: AtomicLong = AtomicLong(),
+    shared_map_tile_disk_cache: MapTileDiskCache? = null,
     private val overlay_drawer: SatelliteBaseOverlayDrawer = SatelliteBaseOverlayDrawer { _, _, _, _, _ ->
         TileLayerDrawStats(
             visible = 0,
@@ -72,6 +74,10 @@ internal class SatelliteBaseTileRenderer(
         )
     }
 ) {
+    private val map_tile_disk_cache = shared_map_tile_disk_cache ?: ProcessMapTileDiskCaches.cache(
+        context.cacheDir,
+        MAP_TILE_DISK_CACHE_MAX_BYTES,
+    )
     private val tile_cache = LinkedHashMap<String, Bitmap>(MAX_MEMORY_TILES, 0.75f, true)
     private val tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
     private val interim_tiles = linkedMapOf<String, InterimRasterTile>()
@@ -95,23 +101,6 @@ internal class SatelliteBaseTileRenderer(
             runnable,
             "flightalert-satellite-tiles-${satellite_tile_worker_id.incrementAndGet()}"
         ).apply {
-            isDaemon = true
-        }
-    }.apply {
-        allowCoreThreadTimeOut(true)
-    }
-    private val tile_disk_worker_id = AtomicInteger()
-    private val tile_disk_executor = ThreadPoolExecutor(
-        1,
-        1,
-        SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue()
-    ) { runnable ->
-        Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            runnable.run()
-        }, "flightalert-satellite-tile-disk-${tile_disk_worker_id.incrementAndGet()}").apply {
             isDaemon = true
         }
     }.apply {
@@ -524,7 +513,6 @@ internal class SatelliteBaseTileRenderer(
 
     fun shutdown() {
         satellite_tile_executor.shutdownNow()
-        tile_disk_executor.shutdownNow()
     }
 
     private fun draw_tile_grid_layer(
@@ -1247,13 +1235,15 @@ internal class SatelliteBaseTileRenderer(
                             return@tileTask
                         }
                         val file = tile_file(z, x, y, state)
-                        if (is_fresh_tile_file(file)) {
-                            val bitmap =
-                                BitmapFactory.decodeFile(file.absolutePath, decode_options())
-                            if (bitmap != null) {
-                                synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
-                                return@tileTask
-                            }
+                        val bitmap = map_tile_disk_cache.read_if_fresh(
+                            file = file,
+                            max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
+                        ) { cached ->
+                            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+                        }
+                        if (bitmap != null) {
+                            synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
+                            return@tileTask
                         }
                         val url = https_url(
                             TileSource.SATELLITE.tile_url(
@@ -1337,7 +1327,7 @@ internal class SatelliteBaseTileRenderer(
     }
 
     private fun write_tile_file_async(file: File, bytes: ByteArray) {
-        write_cache_file_async(tile_disk_executor, file, bytes)
+        map_tile_disk_cache.write_async(file, bytes)
     }
 
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
@@ -1368,10 +1358,6 @@ internal class SatelliteBaseTileRenderer(
 
     private fun tile_file(z: Int, x: Int, y: Int, state: MapTileRenderState): File {
         return map_tile_cache_file(context, state.cache_key, z, x, y)
-    }
-
-    private fun is_fresh_tile_file(file: File): Boolean {
-        return is_fresh_cache_file(file)
     }
 
     private fun decode_options(): BitmapFactory.Options {

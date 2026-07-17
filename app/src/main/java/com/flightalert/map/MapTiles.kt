@@ -13,26 +13,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
-import com.flightalert.MAP_TILE_CACHE_MAX_AGE_MS
+import com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES
 import java.io.File
-import java.util.concurrent.Executor
-
-internal fun write_cache_file_async(executor: Executor, file: File, bytes: ByteArray) {
-    executor.execute {
-        try {
-            file.parentFile?.mkdirs()
-            file.writeBytes(bytes)
-        } catch (_: Exception) {
-            // Persistence is best-effort; callers have already published the in-memory data.
-        }
-    }
-}
-
-internal fun is_fresh_cache_file(file: File): Boolean {
-    return file.exists() &&
-            file.length() > 0L &&
-            System.currentTimeMillis() - file.lastModified() < MAP_TILE_CACHE_MAX_AGE_MS
-}
 
 internal fun map_tile_cache_file(
     context: Context,
@@ -75,6 +57,10 @@ class MapTileRenderer(
     report_status: (String) -> Unit,
     request_redraw: () -> Unit
 ) {
+    private val map_tile_disk_cache = ProcessMapTileDiskCaches.cache(
+        context.cacheDir,
+        MAP_TILE_DISK_CACHE_MAX_BYTES,
+    )
     private val street_renderer = StreetMapTileRenderer(
         context = context,
         paint = paint,
@@ -82,7 +68,8 @@ class MapTileRenderer(
         sp = sp,
         with_alpha = with_alpha,
         report_status = report_status,
-        request_redraw = request_redraw
+        request_redraw = request_redraw,
+        map_tile_disk_cache = map_tile_disk_cache,
     )
     private val satellite_renderer = SatelliteMapTileRenderer(
         context = context,
@@ -92,7 +79,8 @@ class MapTileRenderer(
         sp = sp,
         with_alpha = with_alpha,
         report_status = report_status,
-        request_redraw = request_redraw
+        request_redraw = request_redraw,
+        shared_map_tile_disk_cache = map_tile_disk_cache,
     )
 
     fun draw_tiles(

@@ -232,7 +232,8 @@ class TrafficOverlayRenderer(
     fun draw_aircraft(
         canvas: Canvas,
         state: TrafficOverlayState,
-        style: TrafficOverlayStyle
+        style: TrafficOverlayStyle,
+        now_elapsed_ms: Long = SystemClock.elapsedRealtime(),
     ) {
         rotorcraft_animation_frame_requested = false
         state.dot_batch?.let { batch ->
@@ -261,7 +262,8 @@ class TrafficOverlayRenderer(
                     draw_internal_dot = false,
                     transform_scale = state.aircraft_transform_scale,
                     translation_x = state.aircraft_translation_x,
-                    translation_y = state.aircraft_translation_y
+                    translation_y = state.aircraft_translation_y,
+                    now_elapsed_ms = now_elapsed_ms,
                 )
             } else {
                 draw_prepared_aircraft_dot_batch(
@@ -296,7 +298,8 @@ class TrafficOverlayRenderer(
             draw_internal_dot = true,
             transform_scale = state.aircraft_transform_scale,
             translation_x = state.aircraft_translation_x,
-            translation_y = state.aircraft_translation_y
+            translation_y = state.aircraft_translation_y,
+            now_elapsed_ms = now_elapsed_ms,
         )
     }
 
@@ -312,6 +315,7 @@ class TrafficOverlayRenderer(
         transform_scale: Float,
         translation_x: Float,
         translation_y: Float,
+        now_elapsed_ms: Long,
         draw_labels: Boolean = true,
         exclude_centers_in: RectF? = null,
         exclude_aircraft_keys: Set<String>? = null
@@ -321,7 +325,7 @@ class TrafficOverlayRenderer(
         val frame_style = aircraft_icon_frame_style(marker_blend, viewport.zoom, style)
         var drawn_count = 0
         val scale = transform_scale.coerceAtLeast(0.001f)
-        val now_ms = SystemClock.elapsedRealtime()
+        val now_ms = now_elapsed_ms
         val has_selected_aircraft = normalized_selected_id != null
         val draw_any_labels = draw_labels && label_count > 0
         val max_cull_icon_scale =
@@ -380,7 +384,8 @@ class TrafficOverlayRenderer(
         draw_internal_dot: Boolean,
         transform_scale: Float,
         translation_x: Float,
-        translation_y: Float
+        translation_y: Float,
+        now_elapsed_ms: Long,
     ) {
         val cached_coverage =
             if (!draw_internal_dot && label_aircraft_count(marker_blend, viewport.zoom) == 0) {
@@ -394,7 +399,8 @@ class TrafficOverlayRenderer(
                     label_avoid_state = label_avoid_state,
                     transform_scale = transform_scale,
                     translation_x = translation_x,
-                    translation_y = translation_y
+                    translation_y = translation_y,
+                    now_elapsed_ms = now_elapsed_ms,
                 )
             } else {
                 null
@@ -411,7 +417,8 @@ class TrafficOverlayRenderer(
                 draw_internal_dot = draw_internal_dot,
                 transform_scale = transform_scale,
                 translation_x = translation_x,
-                translation_y = translation_y
+                translation_y = translation_y,
+                now_elapsed_ms = now_elapsed_ms,
             )
         } else {
             if (!symbol_overlay_has_motion_exclusions &&
@@ -431,6 +438,7 @@ class TrafficOverlayRenderer(
                 transform_scale = transform_scale,
                 translation_x = translation_x,
                 translation_y = translation_y,
+                now_elapsed_ms = now_elapsed_ms,
                 draw_labels = false,
                 exclude_centers_in = cached_coverage,
                 exclude_aircraft_keys = symbol_overlay_cached_aircraft_keys
@@ -496,7 +504,8 @@ class TrafficOverlayRenderer(
         label_avoid_state: TrafficOverlayState,
         transform_scale: Float,
         translation_x: Float,
-        translation_y: Float
+        translation_y: Float,
+        now_elapsed_ms: Long,
     ): RectF? {
         // The retained symbol bitmap is used only after the aircraft appearance bucket says full symbols are ready.
         val interaction_active = label_avoid_state.interaction_active
@@ -662,7 +671,8 @@ class TrafficOverlayRenderer(
                 marker_blend = marker_blend,
                 transform_scale = scale,
                 translation_x = cache_translation_x,
-                translation_y = cache_translation_y
+                translation_y = cache_translation_y,
+                now_elapsed_ms = now_elapsed_ms,
             )
             canvas.translate(
                 cache_translation_x - draw_padding * scale,
@@ -746,12 +756,13 @@ class TrafficOverlayRenderer(
         marker_blend: Float,
         transform_scale: Float,
         translation_x: Float,
-        translation_y: Float
+        translation_y: Float,
+        now_elapsed_ms: Long,
     ) {
         val normalized_selected_id = normalized_selected_aircraft_id(selected_aircraft_id) ?: return
         for (item in aircraft) {
             if (item.appearance_key != normalized_selected_id) continue
-            val elapsed_sec = aircraft_motion_elapsed_sec(item)
+            val elapsed_sec = traffic_motion_elapsed_seconds(item, now_elapsed_ms)
             val x =
                 (item.screen_point.x + item.screen_velocity_x_px_per_sec * elapsed_sec) * transform_scale + translation_x
             val y =
@@ -770,7 +781,8 @@ class TrafficOverlayRenderer(
                 item = item,
                 marker_blend = marker_blend,
                 viewport_zoom = viewport.zoom,
-                style = style
+                style = style,
+                now_elapsed_ms = now_elapsed_ms,
             )
             return
         }
@@ -973,7 +985,7 @@ class TrafficOverlayRenderer(
         interaction_active: Boolean = false
     ) {
         val base_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom)
-        val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
+        val batch_radius_px = chrome.dp(TrafficSpritePaintGeometry.DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
         val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
@@ -1525,7 +1537,7 @@ class TrafficOverlayRenderer(
         var selected_item: TrafficAircraftOverlayState? = null
         val normalized_selected_id = normalized_selected_aircraft_id(selected_aircraft_id)
         val base_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom)
-        val batch_radius_px = chrome.dp(BATCH_DOT_RADIUS_DP) * base_scale
+        val batch_radius_px = chrome.dp(TrafficSpritePaintGeometry.DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
         val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
@@ -1673,7 +1685,7 @@ class TrafficOverlayRenderer(
         val symbol = item.symbol
         val type_scale = item.symbol_scale
         val icon_scale = frame_style.base_icon_scale * type_scale * enter_scale *
-                if (symbol == AircraftSymbol.ROTORCRAFT) ROTORCRAFT_ICON_SCALE_MULTIPLIER else 1f
+            traffic_aircraft_icon_scale_multiplier(symbol)
         val colors = frame_style.colors
         if (draw_internal_dot && frame_style.blend >= AIRCRAFT_FAST_DOT_BLEND) {
             draw_aircraft_dot(
@@ -1719,7 +1731,8 @@ class TrafficOverlayRenderer(
                     item = item,
                     marker_blend = frame_style.blend,
                     viewport_zoom = frame_style.viewport_zoom,
-                    style = frame_style.style
+                    style = frame_style.style,
+                    now_elapsed_ms = now_ms,
                 )
             }
 
@@ -1788,9 +1801,9 @@ class TrafficOverlayRenderer(
             symbol_visibility = symbol_visibility,
             base_icon_scale = base_icon_scale,
             mask_resolution_scale = mask_resolution_scale,
-            shadow_offset_x_px = chrome.dp(2f + 1f * shape_progress),
-            shadow_offset_y_px = chrome.dp(2.5f + 1.5f * shape_progress),
-            shadow_radius_px = chrome.dp(5f + 11f * shape_progress),
+            shadow_offset_x_px = chrome.dp(TrafficSpritePaintGeometry.shadow_offset_x_dp(shape_progress)),
+            shadow_offset_y_px = chrome.dp(TrafficSpritePaintGeometry.shadow_offset_y_dp(shape_progress)),
+            shadow_radius_px = chrome.dp(TrafficSpritePaintGeometry.shadow_radius_dp(shape_progress)),
             masks = frame_symbol_masks
         )
     }
@@ -1802,10 +1815,11 @@ class TrafficOverlayRenderer(
         item: TrafficAircraftOverlayState,
         marker_blend: Float,
         viewport_zoom: Double,
-        style: TrafficOverlayStyle
+        style: TrafficOverlayStyle,
+        now_elapsed_ms: Long,
     ) {
         val blend = marker_blend.coerceIn(0f, 1f)
-        val appear = current_aircraft_appearance_progress(item)
+        val appear = current_aircraft_appearance_progress_at(item, now_elapsed_ms)
         val shape_progress = AircraftMarkerMorph.shape_progress(blend)
         val symbol_visibility = AircraftMarkerMorph.symbol_visibility(blend)
         val selected_alpha = (235 * appear * symbol_visibility).toInt().coerceIn(0, 235)
@@ -1817,8 +1831,13 @@ class TrafficOverlayRenderer(
         stroke_paint.style = Paint.Style.STROKE
         stroke_paint.color =
             Color.argb(selected_alpha, Color.red(color), Color.green(color), Color.blue(color))
-        stroke_paint.strokeWidth = chrome.dp(2.6f)
-        canvas.drawCircle(x, y, chrome.dp(11f + 13f * shape_progress) * icon_scale, stroke_paint)
+        stroke_paint.strokeWidth = chrome.dp(TrafficSpritePaintGeometry.SELECTION_RING_STROKE_WIDTH_DP)
+        canvas.drawCircle(
+            x,
+            y,
+            chrome.dp(TrafficSpritePaintGeometry.selection_ring_radius_dp(shape_progress)) * icon_scale,
+            stroke_paint,
+        )
         stroke_paint.alpha = 255
     }
 
@@ -1833,13 +1852,7 @@ class TrafficOverlayRenderer(
     private fun current_aircraft_appearance_progress_at(
         item: TrafficAircraftOverlayState,
         now_ms: Long
-    ): Float {
-        if (item.appearance_first_seen_ms <= 0L) return item.appearance_progress.coerceIn(0f, 1f)
-        val elapsed = now_ms - item.appearance_first_seen_ms - item.appearance_delay_ms
-        if (elapsed <= 0L) return 0f
-        if (elapsed >= AIRCRAFT_APPEAR_DURATION_MS) return 1f
-        return smooth_step(0f, AIRCRAFT_APPEAR_DURATION_MS.toFloat(), elapsed.toFloat())
-    }
+    ): Float = traffic_aircraft_appearance_progress_at(item, now_ms)
 
     private fun draw_cached_aircraft_symbol(
         canvas: Canvas,
@@ -2156,25 +2169,30 @@ class TrafficOverlayRenderer(
     ) {
         val alpha = (appear * 255).toInt().coerceIn(0, 255)
         if (alpha <= 4) return
-        val radius = chrome.dp(AIRCRAFT_DOT_RADIUS_DP) * icon_scale
+        val radius = chrome.dp(TrafficSpritePaintGeometry.DOT_RADIUS_DP) * icon_scale
         paint.style = Paint.Style.FILL
         paint.color = with_alpha(scrim, (112 * appear).toInt().coerceIn(0, 112))
         canvas.drawCircle(
-            x + chrome.dp(1.5f) * icon_scale,
-            y + chrome.dp(1.5f) * icon_scale,
-            radius + chrome.dp(1.3f),
+            x + chrome.dp(TrafficSpritePaintGeometry.DOT_SHADOW_OFFSET_DP) * icon_scale,
+            y + chrome.dp(TrafficSpritePaintGeometry.DOT_SHADOW_OFFSET_DP) * icon_scale,
+            radius + chrome.dp(TrafficSpritePaintGeometry.DOT_SHADOW_EXTRA_RADIUS_DP),
             paint
         )
         paint.color = with_alpha(color, alpha)
         canvas.drawCircle(x, y, radius, paint)
         stroke_paint.style = Paint.Style.STROKE
-        stroke_paint.strokeWidth = chrome.dp(1.1f)
+        stroke_paint.strokeWidth = chrome.dp(TrafficSpritePaintGeometry.DOT_STROKE_WIDTH_DP)
         stroke_paint.color = with_alpha(scrim, (230 * appear).toInt().coerceIn(0, 230))
         canvas.drawCircle(x, y, radius, stroke_paint)
         if (selected) {
-            stroke_paint.strokeWidth = chrome.dp(2.6f)
+            stroke_paint.strokeWidth = chrome.dp(TrafficSpritePaintGeometry.SELECTION_RING_STROKE_WIDTH_DP)
             stroke_paint.color = with_alpha(selected_color, (235 * appear).toInt().coerceIn(0, 235))
-            canvas.drawCircle(x, y, chrome.dp(11f) * icon_scale, stroke_paint)
+            canvas.drawCircle(
+                x,
+                y,
+                chrome.dp(TrafficSpritePaintGeometry.SELECTION_RING_BASE_RADIUS_DP) * icon_scale,
+                stroke_paint,
+            )
         }
     }
 
@@ -2598,7 +2616,7 @@ class TrafficOverlayRenderer(
     }
 
     private fun batch_dot_outline_extra_px(dot_scale: Float): Float {
-        return chrome.dp(BATCH_DOT_OUTLINE_EXTRA_DP) * AircraftMarkerMorph.batch_dot_outline_scale(
+        return chrome.dp(TrafficSpritePaintGeometry.BATCH_DOT_OUTLINE_EXTRA_DP) * AircraftMarkerMorph.batch_dot_outline_scale(
             dot_scale
         )
     }
@@ -2623,16 +2641,9 @@ class TrafficOverlayRenderer(
         max_icon_scale: Float,
         selected: Boolean
     ): Float {
-        val symbol = item.symbol
         val type_scale = item.symbol_scale
-        val shape_radius_dp = when (symbol) {
-            AircraftSymbol.GLIDER -> 31f
-            AircraftSymbol.AIRLINER -> 29f
-            AircraftSymbol.ROTORCRAFT -> 23f
-            AircraftSymbol.UAV -> 26f
-            AircraftSymbol.SURFACE -> 22f
-            AircraftSymbol.GENERAL_AVIATION -> 25f
-        }
+        val geometry = TrafficSpritePaintGeometry.symbol(item.symbol)
+        val shape_radius_dp = geometry.maximum_radius_dp * geometry.icon_scale_multiplier
         val selected_ring_dp = if (selected) 17f else 0f
         return chrome.dp((shape_radius_dp + selected_ring_dp) * type_scale * max_icon_scale + AIRCRAFT_CULL_EXTRA_DP)
     }
@@ -3004,9 +3015,9 @@ class TrafficOverlayRenderer(
             paint.color =
                 with_alpha(colors.scrim, (74 * appear * symbol_visibility).toInt().coerceIn(0, 74))
             canvas.drawCircle(
-                x + dp(2f + 1f * shape_progress) * icon_scale,
-                y + dp(2.5f + 1.5f * shape_progress) * icon_scale,
-                dp(5f + 11f * shape_progress) * icon_scale,
+                x + dp(TrafficSpritePaintGeometry.shadow_offset_x_dp(shape_progress)) * icon_scale,
+                y + dp(TrafficSpritePaintGeometry.shadow_offset_y_dp(shape_progress)) * icon_scale,
+                dp(TrafficSpritePaintGeometry.shadow_radius_dp(shape_progress)) * icon_scale,
                 paint
             )
             if (selected) {
@@ -3017,8 +3028,13 @@ class TrafficOverlayRenderer(
                     Color.green(colors.accent_green),
                     Color.blue(colors.accent_green)
                 )
-                stroke_paint.strokeWidth = dp(2.6f)
-                canvas.drawCircle(x, y, dp(11f + 13f * shape_progress) * icon_scale, stroke_paint)
+                stroke_paint.strokeWidth = dp(TrafficSpritePaintGeometry.SELECTION_RING_STROKE_WIDTH_DP)
+                canvas.drawCircle(
+                    x,
+                    y,
+                    dp(TrafficSpritePaintGeometry.selection_ring_radius_dp(shape_progress)) * icon_scale,
+                    stroke_paint,
+                )
             }
             draw_cached_aircraft_symbol(
                 canvas = canvas,
@@ -3208,14 +3224,8 @@ class TrafficOverlayRenderer(
             selected: Boolean,
             dp: (Float) -> Float
         ): Float {
-            val shape_radius_dp = when (item.symbol) {
-                AircraftSymbol.GLIDER -> 31f
-                AircraftSymbol.AIRLINER -> 29f
-                AircraftSymbol.ROTORCRAFT -> 23f
-                AircraftSymbol.UAV -> 26f
-                AircraftSymbol.SURFACE -> 22f
-                AircraftSymbol.GENERAL_AVIATION -> 25f
-            }
+            val geometry = TrafficSpritePaintGeometry.symbol(item.symbol)
+            val shape_radius_dp = geometry.maximum_radius_dp * geometry.icon_scale_multiplier
             val selected_ring_dp = if (selected) 17f else 0f
             val max_icon_scale = max(
                 AircraftMarkerMorph.aircraft_dot_scale(zoom),
@@ -3266,11 +3276,7 @@ class TrafficOverlayRenderer(
         const val AIRCRAFT_FAST_DOT_BLEND = 0.995f
         const val AIRCRAFT_BATCH_DOT_BLEND = 0.995f
         const val ROTORCRAFT_BLADE_CYCLE_MS = 288L
-        const val ROTORCRAFT_ICON_SCALE_MULTIPLIER = 0.82f
         const val MAX_BATCH_MOTION_SECONDS = 10f * 60f
-        const val AIRCRAFT_DOT_RADIUS_DP = 3.6f
-        const val BATCH_DOT_RADIUS_DP = AIRCRAFT_DOT_RADIUS_DP
-        const val BATCH_DOT_OUTLINE_EXTRA_DP = 1.25f
         const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
         const val SYMBOL_MASK_SIZE_DP = 72f
         const val SYMBOL_MASK_PROGRESS_STEPS = 96

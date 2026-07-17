@@ -3523,6 +3523,17 @@ class ProductionBoundaryTest(unittest.TestCase):
         self.assertNotIn("with -Execute", text)
         self.assertIn("with device transaction modes", text)
 
+    def test_wrapper_has_no_machine_specific_lease_helper_default(self) -> None:
+        wrapper = (
+            Path(__file__).parents[2]
+            / "install-reference-dictionary-experiment8.ps1"
+        )
+        text = wrapper.read_text("utf-8")
+
+        self.assertNotIn("C:\\Users\\Phineas", text)
+        self.assertIn("[string]$LeaseHelper", text)
+        self.assertIn("-LeaseHelper is required", text)
+
 
 class HostInstallPlanEdgeCaseTest(unittest.TestCase):
     def setUp(self) -> None:

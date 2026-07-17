@@ -175,6 +175,7 @@ object FlightAlertAppSettings {
 // Both map providers use the same disk-cache contract. Network scheduling and bitmap
 // decoding stay provider-specific because their priorities and allocation policies differ.
 internal const val MAP_TILE_CACHE_MAX_AGE_MS = 7L * 24L * 60L * 60L * 1000L
+internal const val MAP_TILE_DISK_CACHE_MAX_BYTES = 1_000_000_000L
 
 const val TILE_SIZE = FlightAlertAppSettings.MapTuning.TILE_SIZE
 const val MIN_ZOOM = FlightAlertAppSettings.MapTuning.MIN_ZOOM

@@ -17,7 +17,7 @@ param(
     [switch]$FinalizeAcceptance,
     [switch]$Rollback,
 
-    [string]$LeaseHelper = 'C:\Users\Phineas\Documents\FlightAlert-test-artifacts\coordination\device-lease.ps1',
+    [string]$LeaseHelper,
     [string]$ThreadId,
     [string]$EvidenceDirectory,
     [string]$Adb = 'adb'
@@ -31,6 +31,9 @@ if ($selectedModes -ne 1) {
     throw 'Select exactly one transaction mode.'
 }
 if (-not $ValidateOnly) {
+    if ([string]::IsNullOrWhiteSpace($LeaseHelper)) {
+        throw '-LeaseHelper is required with device transaction modes.'
+    }
     if ([string]::IsNullOrWhiteSpace($ThreadId)) {
         throw '-ThreadId is required with device transaction modes.'
     }

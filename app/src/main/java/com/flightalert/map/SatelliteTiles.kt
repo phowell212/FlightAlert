@@ -25,7 +25,6 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.LinkedHashMap
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -52,8 +51,13 @@ internal class SatelliteMapTileRenderer(
     private val sp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int,
     private val report_status: (String) -> Unit,
-    private val request_redraw: () -> Unit
+    private val request_redraw: () -> Unit,
+    shared_map_tile_disk_cache: MapTileDiskCache? = null,
 ) {
+    private val map_tile_disk_cache = shared_map_tile_disk_cache ?: ProcessMapTileDiskCaches.cache(
+        context.cacheDir,
+        com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES,
+    )
     private val map_content_revision = AtomicLong()
     private val base_renderer = SatelliteBaseTileRenderer(
         context = context,
@@ -64,25 +68,9 @@ internal class SatelliteMapTileRenderer(
         report_status = report_status,
         request_redraw = request_redraw,
         map_content_revision = map_content_revision,
-        overlay_drawer = ::draw_reference_layers
+        shared_map_tile_disk_cache = map_tile_disk_cache,
+        overlay_drawer = ::draw_reference_layers,
     )
-    private val tile_disk_worker_id = AtomicInteger()
-    private val tile_disk_executor = ThreadPoolExecutor(
-        1,
-        1,
-        SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue()
-    ) { runnable ->
-        Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            runnable.run()
-        }, "flightalert-satellite-tile-disk-${tile_disk_worker_id.incrementAndGet()}").apply {
-            isDaemon = true
-        }
-    }.apply {
-        allowCoreThreadTimeOut(true)
-    }
     private val reference_tile_cache =
         LinkedHashMap<String, Bitmap>(MAX_REFERENCE_MEMORY_TILES, 0.75f, true)
     private val reference_tile_loaded_elapsed_ms = mutableMapOf<String, Long>()
@@ -250,7 +238,6 @@ internal class SatelliteMapTileRenderer(
 
     fun shutdown() {
         base_renderer.shutdown()
-        tile_disk_executor.shutdownNow()
         reference_tile_executor.shutdownNow()
         dictionary_reference_renderer.close()
         clear()
@@ -2107,7 +2094,6 @@ internal class SatelliteMapTileRenderer(
                                     redrew_when_loaded = true
                                     request_redraw()
                                 }
-                                write_tile_file_async(file, bytes)
                             } else {
                                 bitmap?.takeIf { !it.isRecycled }?.recycle()
                             }
@@ -2260,10 +2246,6 @@ internal class SatelliteMapTileRenderer(
 
     private fun reference_tile_file(z: Int, x: Int, y: Int, cache_key: String): File {
         return File(context.cacheDir, "${cache_key}_tiles/$z/$x/$y.png")
-    }
-
-    private fun write_tile_file_async(file: File, bytes: ByteArray) {
-        write_cache_file_async(tile_disk_executor, file, bytes)
     }
 
     private fun reference_overlay_tile_is_safe(bitmap: Bitmap): Boolean {
