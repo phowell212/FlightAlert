@@ -219,6 +219,7 @@ class _AuthorityV2InstallFixture:
         root: Path,
         *,
         complete_whole_earth_dictionary: bool = True,
+        authority_semantic_mode: str = "recompute",
     ) -> None:
         from tools.experiment8.tests.test_v3_class_catalog_finalizer import (
             _write_authority_v2_merged_package,
@@ -232,6 +233,7 @@ class _AuthorityV2InstallFixture:
             complete_whole_earth_dictionary=(
                 complete_whole_earth_dictionary
             ),
+            authority_semantic_mode=authority_semantic_mode,
         )
         finalize_v3_class_catalog(self.package)
         self.apk = root / "authority-v2-Flight Alert-debug.apk"
@@ -449,6 +451,26 @@ class HostInstallPlanTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(6, len(plan.package_files))
+
+    def test_authority_v2_receipt_bound_visual_merge_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _AuthorityV2InstallFixture(
+                Path(temporary),
+                authority_semantic_mode="receipt-bound-visual-evaluation",
+            )
+
+            plan = HostInstallPlan.validate(
+                package_directory=fixture.package,
+                apk_path=fixture.apk,
+                final_result_path=fixture.result,
+                install_policy=(
+                    installer_module.
+                    INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+                ),
+                require_install_policy_binding=False,
+            )
+
+            self.assertEqual(PACKAGE_ID, plan.package_id)
 
     def test_authority_v2_visual_size_authority_cannot_cross_into_release(
         self,

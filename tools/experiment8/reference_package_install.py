@@ -79,6 +79,11 @@ AUTHORITY_MERGE_RECEIPT_SCHEMA = (
 AUTHORITY_FINALIZATION_RECEIPT_SCHEMA = (
     "flightalert.experiment8.v3-class-catalog-finalization-receipt.v2"
 )
+RECEIPT_BOUND_VISUAL_AUTHORITY_SEMANTIC_VERIFICATION = {
+    "mode": "receipt-bound-visual-evaluation",
+    "runtimeFileDigestsVerifiedByMergeStream": True,
+    "strictDocumentaryProofDeferred": True,
+}
 FINAL_SIZE_ACCOUNTING_SCOPE = (
     "final-six-file-package-after-class-catalog-finalization"
 )
@@ -97,6 +102,7 @@ WATERWAY_BUILD_RECEIPT_FIELDS = {
     "peakResources",
     "projection",
     "rendererSemanticStreamSha256",
+    "rendererTextAudit",
     "schema",
     "source",
 }
@@ -3701,6 +3707,15 @@ def _validate_receipts(
     manifest_merge_fields = {"inputs", "mergerSha256", "output", "schema"}
     if authority_v2:
         manifest_merge_fields.update({"authorityReceipts", "sizePolicy"})
+        if "authoritySemanticVerification" in merge:
+            if (
+                merge.get("authoritySemanticVerification")
+                != RECEIPT_BOUND_VISUAL_AUTHORITY_SEMANTIC_VERIFICATION
+            ):
+                raise ReferencePackageInstallError(
+                    "manifest merge semantic verification differs"
+                )
+            manifest_merge_fields.add("authoritySemanticVerification")
     _exact_fields(
         merge,
         manifest_merge_fields,
