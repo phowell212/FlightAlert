@@ -48,13 +48,9 @@ class ReferenceDictionaryPackageBinaryV3Test {
     }
 
     @Test
-    fun experiment8BinaryV4IsPreferredBeforeV3AndLegacyExperiment7() {
+    fun wholeWorldExperiment8V4IsTheOnlyAutomaticRuntimePackage() {
         assertEquals(
-            listOf(
-                "world-experiment8-binary-v4",
-                "world-experiment8-binary-v3",
-                ReferenceDictionaryPackage.DEFAULT_PACKAGE_ID,
-            ),
+            listOf("world-experiment8-binary-v4"),
             ReferenceDictionaryPackage.PREFERRED_PACKAGE_IDS,
         )
     }
@@ -89,6 +85,32 @@ class ReferenceDictionaryPackageBinaryV3Test {
                 store.package_info_if_available()?.package_id,
             )
             assertEquals(listOf("world-experiment8-binary-v4"), openedPackageIds)
+        } finally {
+            store.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun presentButUnreadableV4FailsClosedInsteadOfShowingStaleLegacyData() {
+        val root = Files.createTempDirectory("reference-package-v4-fail-closed").toFile()
+        val v4 = File(root, ReferenceDictionaryPackage.EXPERIMENT8_PACKAGE_ID).apply {
+            mkdirs()
+        }
+        val legacy = File(root, ReferenceDictionaryPackage.DEFAULT_PACKAGE_ID)
+        writeEmptyBinaryPackage(legacy)
+        val openedPackageIds = mutableListOf<String>()
+        val store = ReferenceDictionaryPackageStore(
+            candidate_provider = { listOf(v4, legacy) },
+            package_opener = { candidate ->
+                openedPackageIds += candidate.name
+                if (candidate == v4) null else ReferenceDictionaryPackage.open_if_available(candidate)
+            },
+            elapsed_realtime_ms = { 1_000L },
+        )
+        try {
+            assertEquals(null, store.package_info_if_available())
+            assertEquals(listOf(ReferenceDictionaryPackage.EXPERIMENT8_PACKAGE_ID), openedPackageIds)
         } finally {
             store.close()
             root.deleteRecursively()

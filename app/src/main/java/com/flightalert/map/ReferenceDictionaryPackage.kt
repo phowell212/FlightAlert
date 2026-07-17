@@ -261,6 +261,12 @@ internal class ReferenceDictionaryPackageStore(
                     package_ref = opened
                     return@synchronized opened
                 }
+                if (
+                    candidate.name == ReferenceDictionaryPackage.EXPERIMENT8_PACKAGE_ID &&
+                    candidate.exists()
+                ) {
+                    return@synchronized null
+                }
             }
             null
         }
@@ -356,11 +362,7 @@ internal class ReferenceDictionaryPackage private constructor(
         const val EXPERIMENT8_PACKAGE_ID = "world-experiment8-binary-v4"
         const val EXPERIMENT8_V3_PACKAGE_ID = "world-experiment8-binary-v3"
         const val DEFAULT_PACKAGE_ID = "world-z5-6-7-8-9-10-11-lossless-deflate-v1"
-        val PREFERRED_PACKAGE_IDS = listOf(
-            EXPERIMENT8_PACKAGE_ID,
-            EXPERIMENT8_V3_PACKAGE_ID,
-            DEFAULT_PACKAGE_ID
-        )
+        val PREFERRED_PACKAGE_IDS = listOf(EXPERIMENT8_PACKAGE_ID)
 
         fun package_candidates(context: Context, package_id: String? = null): List<File> {
             val roots = reference_roots(context)
@@ -368,26 +370,8 @@ internal class ReferenceDictionaryPackage private constructor(
                 return roots.map { root -> File(root, package_id) }
                     .distinctBy { it.absolutePath }
             }
-            val package_ids = PREFERRED_PACKAGE_IDS
-            val candidates = ArrayList<File>(roots.size * package_ids.size)
-            for (id in package_ids) {
-                roots.forEach { root -> candidates += File(root, id) }
-            }
-            for (root in roots) {
-                val children = root.listFiles()
-                    ?.filter { child -> child.isDirectory }
-                    ?.sortedBy { child -> child.name }
-                    ?: continue
-                for (child in children) {
-                    if (package_ids.any { id -> File(root, id).absolutePath == child.absolutePath }) {
-                        continue
-                    }
-                    if (is_compatible_package_dir(child)) {
-                        candidates += child
-                    }
-                }
-            }
-            return candidates.distinctBy { it.absolutePath }
+            return roots.map { root -> File(root, EXPERIMENT8_PACKAGE_ID) }
+                .distinctBy { it.absolutePath }
         }
 
         fun open_if_available(package_dir: File): ReferenceDictionaryPackage? {
@@ -490,12 +474,7 @@ internal class ReferenceDictionaryPackage private constructor(
         }
 
         private fun reference_roots(context: Context): List<File> {
-            return buildList {
-                context.getExternalFilesDir("reference")?.let { add(it) }
-                add(File("/storage/emulated/0/Android/data/${context.packageName}/files/reference"))
-                add(File(context.filesDir, "reference"))
-                add(File(context.noBackupFilesDir, "reference"))
-            }.distinctBy { it.absolutePath }
+            return listOfNotNull(context.getExternalFilesDir("reference"))
         }
 
         private fun is_compatible_package_dir(package_dir: File): Boolean {
