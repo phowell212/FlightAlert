@@ -1209,10 +1209,17 @@ class V3PackageMergerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             package_directory = Path(temporary) / "package"
             _write_package(package_directory, "fast-output-audit", {tile: payload})
-            with mock.patch.object(
-                v3_package_merger,
-                "_extract_envelopes",
-                side_effect=AssertionError("strict renderer decode is too slow here"),
+            with (
+                mock.patch.object(
+                    v3_package_merger,
+                    "_extract_envelopes",
+                    side_effect=AssertionError("strict renderer decode is too slow here"),
+                ),
+                mock.patch.object(
+                    v3_package_merger.sqlite3,
+                    "connect",
+                    side_effect=AssertionError("disk-backed count audit is too slow here"),
+                ),
             ):
                 semantic_sha256, subtype_counts = v3_package_merger._audit_output(
                     package_directory,

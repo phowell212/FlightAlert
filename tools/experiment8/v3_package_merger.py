@@ -2246,157 +2246,96 @@ def _audit_output(
 ) -> tuple[str, list[dict[str, object]]]:
     records_path = partial_directory / "records.fadictpack"
     index_path = partial_directory / "tile-index.bin"
-    database_path = partial_directory / "identity-counts.sqlite"
-    database_path.unlink(missing_ok=True)
     digest = hashlib.sha256(_SEMANTIC_STREAM_DOMAIN)
     posting_counts: Counter[SemanticSubtype] = Counter()
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = sqlite3.connect(database_path)
-        connection.execute("PRAGMA journal_mode=OFF")
-        connection.execute("PRAGMA synchronous=OFF")
-        connection.execute("PRAGMA temp_store=FILE")
-        connection.execute(
-            "CREATE TABLE features (subtype INTEGER NOT NULL, identity BLOB NOT NULL, "
-            "PRIMARY KEY (subtype, identity)) WITHOUT ROWID"
-        )
-        connection.execute(
-            "CREATE TABLE variants (subtype INTEGER NOT NULL, identity BLOB NOT NULL, "
-            "PRIMARY KEY (subtype, identity)) WITHOUT ROWID"
-        )
-        connection.execute(
-            "CREATE TABLE variant_payloads (identity BLOB NOT NULL, full_sha BLOB NOT NULL, "
-            "PRIMARY KEY (identity, full_sha)) WITHOUT ROWID"
-        )
-        records_bytes = records_path.stat().st_size
-        with records_path.open("rb") as records_handle, index_path.open("rb") as index_handle:
-            next_record_offset = 0
-            with tempfile.TemporaryDirectory(
-                prefix="flightalert-v3-output-semantic-",
-                dir=str(partial_directory.parent),
-            ) as temporary:
-                temporary_root = Path(temporary)
-                for window_index, window in enumerate(windows):
-                    bucket_paths: dict[int, Path] = {}
-                    bucket_handles: dict[int, object] = {}
-                    try:
-                        for tile_number, tile in enumerate(
-                            _tiles_index_order((window,)), start=1
-                        ):
-                            payload, next_record_offset = _read_index_order_payload(
-                                records_handle,
-                                index_handle,
-                                tile,
-                                records_bytes=records_bytes,
-                                next_record_offset=next_record_offset,
-                            )
-                            if payload is None:
-                                continue
-                            envelopes = _extract_envelopes_fast(tile, payload)
-                            if list(envelopes) != sorted(
-                                envelopes, key=lambda item: item.order_key
-                            ):
-                                raise V3PackageMergeError(
-                                    "merged V3 renderer order is not canonical"
-                                )
-                            handle = bucket_handles.get(tile.x)
-                            if handle is None:
-                                path = (
-                                    temporary_root
-                                    / f"window-{window_index:04d}-x-{tile.x:08x}.semantic"
-                                )
-                                handle = path.open("ab")
-                                bucket_handles[tile.x] = handle
-                                bucket_paths[tile.x] = path
-                            feature_rows: list[tuple[int, bytes]] = []
-                            variant_rows: list[tuple[int, bytes]] = []
-                            payload_rows: list[tuple[bytes, bytes]] = []
-                            for record in envelopes:
-                                body = struct.pack("<Q", tile.packed) + record.renderer_bytes
-                                handle.write(struct.pack("<I", len(body)))
-                                handle.write(body)
-                                posting_counts[record.subtype] += 1
-                                feature_rows.append(
-                                    (
-                                        record.subtype.value,
-                                        record.feature_id.to_bytes(8, "big"),
-                                    )
-                                )
-                                variant_rows.append(
-                                    (
-                                        record.subtype.value,
-                                        record.variant_id.to_bytes(8, "big"),
-                                    )
-                                )
-                                payload_rows.append(
-                                    (
-                                        record.variant_id.to_bytes(8, "big"),
-                                        record.variant_full_sha256,
-                                    )
-                                )
-                            connection.executemany(
-                                "INSERT OR IGNORE INTO features (subtype, identity) VALUES (?, ?)",
-                                feature_rows,
-                            )
-                            connection.executemany(
-                                "INSERT OR IGNORE INTO variants (subtype, identity) VALUES (?, ?)",
-                                variant_rows,
-                            )
-                            connection.executemany(
-                                "INSERT OR IGNORE INTO variant_payloads (identity, full_sha) VALUES (?, ?)",
-                                payload_rows,
-                            )
-                            if tile_number % 4096 == 0:
-                                connection.commit()
-                    finally:
-                        for handle in bucket_handles.values():
-                            handle.close()
-                    for x in range(window.x_min, window.x_max + 1):
-                        path = bucket_paths.get(x)
-                        if path is None:
+    feature_ids: dict[SemanticSubtype, set[int]] = {
+        subtype: set() for subtype in SemanticSubtype
+    }
+    variant_ids: dict[SemanticSubtype, set[int]] = {
+        subtype: set() for subtype in SemanticSubtype
+    }
+    variant_payloads: dict[int, bytes] = {}
+    records_bytes = records_path.stat().st_size
+    with records_path.open("rb") as records_handle, index_path.open("rb") as index_handle:
+        next_record_offset = 0
+        with tempfile.TemporaryDirectory(
+            prefix="flightalert-v3-output-semantic-",
+            dir=str(partial_directory.parent),
+        ) as temporary:
+            temporary_root = Path(temporary)
+            for window_index, window in enumerate(windows):
+                bucket_paths: dict[int, Path] = {}
+                bucket_handles: dict[int, object] = {}
+                try:
+                    for tile in _tiles_index_order((window,)):
+                        payload, next_record_offset = _read_index_order_payload(
+                            records_handle,
+                            index_handle,
+                            tile,
+                            records_bytes=records_bytes,
+                            next_record_offset=next_record_offset,
+                        )
+                        if payload is None:
                             continue
-                        with path.open("rb") as handle:
-                            while True:
-                                chunk = handle.read(_FILE_HASH_CHUNK_BYTES)
-                                if not chunk:
-                                    break
-                                digest.update(chunk)
-            if next_record_offset != records_bytes:
-                raise V3PackageMergeError("V3 audit records pack has trailing bytes")
-            if index_handle.read(1) or records_handle.read(1):
-                raise V3PackageMergeError("V3 audit runtime files have trailing bytes")
-        connection.commit()
-        if connection.execute(
-            "SELECT identity FROM variant_payloads GROUP BY identity HAVING COUNT(*) > 1 LIMIT 1"
-        ).fetchone() is not None:
-            raise V3PackageMergeError("divergent duplicate canonical variant identity")
-        feature_counts = {
-            int(subtype): int(count)
-            for subtype, count in connection.execute(
-                "SELECT subtype, COUNT(*) FROM features GROUP BY subtype"
-            )
+                        envelopes = _extract_envelopes_fast(tile, payload)
+                        if list(envelopes) != sorted(
+                            envelopes, key=lambda item: item.order_key
+                        ):
+                            raise V3PackageMergeError(
+                                "merged V3 renderer order is not canonical"
+                            )
+                        handle = bucket_handles.get(tile.x)
+                        if handle is None:
+                            path = (
+                                temporary_root
+                                / f"window-{window_index:04d}-x-{tile.x:08x}.semantic"
+                            )
+                            handle = path.open("ab")
+                            bucket_handles[tile.x] = handle
+                            bucket_paths[tile.x] = path
+                        for record in envelopes:
+                            body = struct.pack("<Q", tile.packed) + record.renderer_bytes
+                            handle.write(struct.pack("<I", len(body)))
+                            handle.write(body)
+                            posting_counts[record.subtype] += 1
+                            feature_ids[record.subtype].add(record.feature_id)
+                            variant_ids[record.subtype].add(record.variant_id)
+                            previous_payload = variant_payloads.setdefault(
+                                record.variant_id,
+                                record.variant_full_sha256,
+                            )
+                            if previous_payload != record.variant_full_sha256:
+                                raise V3PackageMergeError(
+                                    "divergent duplicate canonical variant identity"
+                                )
+                finally:
+                    for handle in bucket_handles.values():
+                        handle.close()
+                for x in range(window.x_min, window.x_max + 1):
+                    path = bucket_paths.get(x)
+                    if path is None:
+                        continue
+                    with path.open("rb") as handle:
+                        while True:
+                            chunk = handle.read(_FILE_HASH_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+        if next_record_offset != records_bytes:
+            raise V3PackageMergeError("V3 audit records pack has trailing bytes")
+        if index_handle.read(1) or records_handle.read(1):
+            raise V3PackageMergeError("V3 audit runtime files have trailing bytes")
+    subtype_counts = [
+        {
+            "semanticSubtype": subtype.value,
+            "semanticSubtypeName": subtype.name,
+            "distinctFeatureIds": len(feature_ids[subtype]),
+            "canonicalVariantIds": len(variant_ids[subtype]),
+            "postings": posting_counts[subtype],
         }
-        variant_counts = {
-            int(subtype): int(count)
-            for subtype, count in connection.execute(
-                "SELECT subtype, COUNT(*) FROM variants GROUP BY subtype"
-            )
-        }
-        subtype_counts = [
-            {
-                "semanticSubtype": subtype.value,
-                "semanticSubtypeName": subtype.name,
-                "distinctFeatureIds": feature_counts.get(subtype.value, 0),
-                "canonicalVariantIds": variant_counts.get(subtype.value, 0),
-                "postings": posting_counts[subtype],
-            }
-            for subtype in SemanticSubtype
-        ]
-        return digest.hexdigest(), subtype_counts
-    finally:
-        if connection is not None:
-            connection.close()
-        database_path.unlink(missing_ok=True)
+        for subtype in SemanticSubtype
+    ]
+    return digest.hexdigest(), subtype_counts
 
 
 def _merger_sha256() -> str:
