@@ -67,7 +67,6 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val draw_tiles = ArrayList<DictionaryTileDrawRef>(32)
     private val label_candidates = ArrayList<DictionaryLabelCandidate>(256)
     private val accepted_labels = ArrayList<DictionaryLabelCandidate>(128)
-    private val occupied_label_bounds = ArrayList<RectF>(128)
     private val requested_tiles = HashSet<String>()
     private val desired_tile_keys = HashSet<String>()
     private val frame_destination = RectF()
@@ -811,12 +810,17 @@ internal class ReferenceDictionaryOverlayRenderer(
                 }
                 val style = label_style_for(record, label_text_scale, viewport.zoom)
                 if (style.alpha <= 0 && style.halo_alpha <= 0) continue
-                val candidate = if (record.line_label && record.geometry?.rings?.isNotEmpty() == true) {
-                    line_label_candidate(viewport, tile, record, style, label_avoid_rects)
+                if (record.line_label && record.geometry?.rings?.isNotEmpty() == true) {
+                    label_candidates += line_label_candidates(
+                        viewport,
+                        tile,
+                        record,
+                        style,
+                        label_avoid_rects,
+                    )
                 } else {
-                    point_label_candidate(viewport, tile, record, style)
+                    point_label_candidate(viewport, tile, record, style)?.let(label_candidates::add)
                 }
-                if (candidate != null) label_candidates += candidate
             }
         }
         accept_label_candidates(viewport, label_avoid_rects)
@@ -826,13 +830,13 @@ internal class ReferenceDictionaryOverlayRenderer(
         return accepted_labels.size
     }
 
-    private fun line_label_candidate(
+    private fun line_label_candidates(
         viewport: Viewport,
         tile: DictionaryTileDrawRef,
         record: DictionaryLabelRecord,
         style: DictionaryLabelStyle,
         label_avoid_rects: List<ReferenceScreenRect>,
-    ): DictionaryLabelCandidate? {
+    ): List<DictionaryLabelCandidate> {
         prepare_text_paint(style, style.typeface_style, style.text_size)
         val presentation = record.sourced_text?.let {
             SourcedMapTextPresentation.plan(it, style.text_size)
@@ -861,14 +865,16 @@ internal class ReferenceDictionaryOverlayRenderer(
                 ReferencePathLabelPoint(point.x.toDouble(), point.y.toDouble())
             }
         }.orEmpty()
-        if (parts.isEmpty()) return null
+        if (parts.isEmpty()) return emptyList()
         val collision_height = presentation?.collisionHeightEm?.times(style.text_size)
             ?: style.text_size
         val collision_radius = collision_height / 2f +
                 dp(style.halo_width_dp) + LABEL_COLLISION_PADDING_PX
         val policy_edge_clearance = style.text_size *
                 ReferencePresentationPolicy.label_edge_clearance_milli_em / 1_000f
-        val placement = ReferencePathLabelPlanner.plan(
+        val candidate_id = record.candidate_id
+            ?: (record.dedupe_key ?: record.text).hashCode().toUInt().toULong()
+        val placements = ReferencePathLabelPlanner.plan(
             ReferencePathLabelRequest(
                 parts = parts,
                 viewport = ReferenceScreenRect(
@@ -887,8 +893,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     record.visibility_rule?.max_bend_centi_degrees
                         ?: ReferencePresentationPolicy.max_line_label_bend_centi_degrees
                     ) / 100.0,
-                candidateId = record.candidate_id
-                    ?: (record.dedupe_key ?: record.text).hashCode().toUInt().toULong(),
+                candidateId = candidate_id,
                 repeatSpacingPx = record.repeat_spacing_px
                     ?.takeIf { it > 0 }
                     ?: ReferencePresentationPolicy.line_label_repeat_spacing_px,
@@ -896,49 +901,38 @@ internal class ReferenceDictionaryOverlayRenderer(
                 staticAvoidRects = label_avoid_rects,
                 maximumTangentOffsetPx = max(dp(48f), collision_radius * 4f).toDouble(),
             ),
-        ).firstOrNull()
-        if (placement == null) {
+        )
+        if (placements.isEmpty()) {
             return if (record.candidate_id == null && !is_water) {
-                point_label_candidate(viewport, tile, record, style)
+                listOfNotNull(point_label_candidate(viewport, tile, record, style))
             } else {
-                null
+                emptyList()
             }
         }
-        line_label_path.reset()
-        placement.presentationPath.forEachIndexed { index, point ->
-            if (index == 0) {
-                line_label_path.moveTo(point.x.toFloat(), point.y.toFloat())
-            } else {
-                line_label_path.lineTo(point.x.toFloat(), point.y.toFloat())
-            }
+        return ReferenceLineLabelPlacementAdapter.fromPlanner(placements).map { option ->
+            DictionaryLabelCandidate(
+                text = record.text,
+                source_kind = record.source_kind,
+                sourced_text = record.sourced_text,
+                style = style,
+                occurrenceId = option.occurrenceId,
+                featureId = candidate_id,
+                priority = record.priority,
+                placementRank = option.placementRank,
+                protectedArea = record.protected_area,
+                waterLine = is_water,
+                anchor = option.placement.anchor,
+                collisionShape = ReferenceLabelCollisionShape.Path(
+                    points = option.placement.presentationPath,
+                    radiusPx = collision_radius.toDouble(),
+                    bounds = pathBounds(
+                        option.placement.presentationPath,
+                        collision_radius.toDouble(),
+                    ),
+                ),
+                path_points = option.placement.presentationPath,
+            )
         }
-        val min_x = placement.presentationPath.minOf { it.x }.toFloat()
-        val min_y = placement.presentationPath.minOf { it.y }.toFloat()
-        val max_x = placement.presentationPath.maxOf { it.x }.toFloat()
-        val max_y = placement.presentationPath.maxOf { it.y }.toFloat()
-        val label_bounds = RectF(
-            min_x - collision_radius,
-            min_y - collision_radius,
-            max_x + collision_radius,
-            max_y + collision_radius,
-        )
-        val anchor_x = placement.anchor.x.toFloat()
-        val anchor_y = placement.anchor.y.toFloat()
-        return DictionaryLabelCandidate(
-            text = record.text,
-            source_kind = record.source_kind,
-            sourced_text = record.sourced_text,
-            line_label = true,
-            dedupe_key = record.dedupe_key ?: "${record.source_kind}:${record.text.lowercase()}",
-            style = style,
-            priority = record.priority,
-            protected_area = record.protected_area,
-            is_water = is_water,
-            bounds = label_bounds,
-            x = anchor_x,
-            y = anchor_y,
-            path = Path(line_label_path)
-        )
     }
 
     private fun point_label_candidate(
@@ -961,26 +955,36 @@ internal class ReferenceDictionaryOverlayRenderer(
             )
             text_paint.measureText(english.text)
         } ?: 0f
+        val candidate_id = record.candidate_id
+            ?: (record.dedupe_key ?: record.text).hashCode().toUInt().toULong()
+        val label_bounds = label_bbox(
+            record.text,
+            anchor.x,
+            anchor.y,
+            style.text_size,
+            width_override = max(primary_width, english_width),
+            height_override = presentation?.collisionHeightEm?.times(style.text_size),
+        )
         return DictionaryLabelCandidate(
             text = record.text,
             source_kind = record.source_kind,
             sourced_text = record.sourced_text,
-            line_label = false,
-            dedupe_key = record.dedupe_key ?: "${record.source_kind}:${record.text.lowercase()}",
             style = style,
+            occurrenceId = ReferenceLabelOccurrenceId(candidate_id, 0L),
+            featureId = candidate_id,
             priority = record.priority,
-            protected_area = record.protected_area,
-            is_water = record.is_water ?: (record.source_kind == "water"),
-            bounds = label_bbox(
-                record.text,
-                anchor.x,
-                anchor.y,
-                style.text_size,
-                width_override = max(primary_width, english_width),
-                height_override = presentation?.collisionHeightEm?.times(style.text_size),
+            placementRank = 0,
+            protectedArea = record.protected_area,
+            waterLine = false,
+            anchor = ReferencePathLabelPoint(anchor.x.toDouble(), anchor.y.toDouble()),
+            collisionShape = ReferenceLabelCollisionShape.Box(
+                ReferenceScreenRect(
+                    left = label_bounds.left.toDouble() - LABEL_COLLISION_PADDING_PX,
+                    top = label_bounds.top.toDouble() - LABEL_COLLISION_PADDING_PX,
+                    right = label_bounds.right.toDouble() + LABEL_COLLISION_PADDING_PX,
+                    bottom = label_bounds.bottom.toDouble() + LABEL_COLLISION_PADDING_PX,
+                ),
             ),
-            x = anchor.x,
-            y = anchor.y,
             rotation = record.rotation
         )
     }
@@ -990,46 +994,19 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
     ) {
         accepted_labels.clear()
-        occupied_label_bounds.clear()
-        label_avoid_rects.forEach { rect ->
-            occupied_label_bounds += RectF(
-                rect.left.toFloat(),
-                rect.top.toFloat(),
-                rect.right.toFloat(),
-                rect.bottom.toFloat(),
-            )
-        }
-        val label_budget = label_budget(viewport)
-        var protected_area_labels = 0
-        label_candidates
-            .filter { bbox_intersects_screen(it.bounds, viewport) }
-            .sortedWith(compareBy<DictionaryLabelCandidate> { it.priority }.thenBy { it.text })
-            .forEach { candidate ->
-                if (accepted_labels.size >= label_budget) return@forEach
-                if (candidate.protected_area &&
-                    protected_area_labels >= protected_area_label_budget(viewport)
-                ) {
-                    return@forEach
-                }
-                if (candidate.line_label && candidate.is_water) {
-                    val duplicate_nearby = accepted_labels.any { accepted ->
-                        accepted.line_label &&
-                                accepted.is_water &&
-                                accepted.dedupe_key == candidate.dedupe_key &&
-                                screen_distance_squared(accepted, candidate) <
-                                WATER_LINE_LABEL_REPEAT_DISTANCE_PX *
-                                WATER_LINE_LABEL_REPEAT_DISTANCE_PX
-                    }
-                    if (duplicate_nearby) return@forEach
-                }
-                val padded = RectF(candidate.bounds).apply {
-                    inset(-LABEL_COLLISION_PADDING_PX, -LABEL_COLLISION_PADDING_PX)
-                }
-                if (occupied_label_bounds.any { RectF.intersects(padded, it) }) return@forEach
-                occupied_label_bounds += padded
-                accepted_labels += candidate
-                if (candidate.protected_area) protected_area_labels++
-            }
+        accepted_labels += ReferenceLabelLayoutSelector.select(
+            candidates = label_candidates,
+            viewport = ReferenceScreenRect(
+                0.0,
+                0.0,
+                viewport.width.toDouble(),
+                viewport.height.toDouble(),
+            ),
+            staticAvoidRects = label_avoid_rects,
+            labelBudget = label_budget(viewport),
+            protectedAreaBudget = protected_area_label_budget(viewport),
+            waterRepeatDistancePx = WATER_LINE_LABEL_REPEAT_DISTANCE_PX.toDouble(),
+        )
     }
 
     private fun label_budget(viewport: Viewport): Int {
@@ -1056,13 +1033,21 @@ internal class ReferenceDictionaryOverlayRenderer(
         val presentation = candidate.sourced_text?.let {
             SourcedMapTextPresentation.plan(it, style.text_size)
         }
-        val path_label = candidate.path
-        if (path_label != null) {
+        val path_points = candidate.path_points
+        if (path_points != null) {
+            line_label_path.reset()
+            path_points.forEachIndexed { index, point ->
+                if (index == 0) {
+                    line_label_path.moveTo(point.x.toFloat(), point.y.toFloat())
+                } else {
+                    line_label_path.lineTo(point.x.toFloat(), point.y.toFloat())
+                }
+            }
             if (presentation == null) {
                 draw_text_on_path(
                     canvas,
                     candidate.text,
-                    path_label,
+                    line_label_path,
                     style,
                     style.text_size,
                     style.typeface_style,
@@ -1072,7 +1057,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 draw_text_on_path(
                     canvas,
                     presentation.primary.text,
-                    path_label,
+                    line_label_path,
                     style,
                     presentation.primary.textSize,
                     style.typeface_style,
@@ -1082,7 +1067,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     draw_text_on_path(
                         canvas,
                         english.text,
-                        path_label,
+                        line_label_path,
                         style,
                         english.textSize,
                         italic_typeface_style(style.typeface_style),
@@ -2194,20 +2179,16 @@ internal class ReferenceDictionaryOverlayRenderer(
         )
     }
 
-    private fun screen_distance_squared(
-        first: DictionaryLabelCandidate,
-        second: DictionaryLabelCandidate
-    ): Float {
-        val dx = first.x - second.x
-        val dy = first.y - second.y
-        return dx * dx + dy * dy
-    }
-
-    private fun bbox_intersects_screen(box: RectF, viewport: Viewport): Boolean {
-        return box.right >= -LABEL_SCREEN_PADDING_X &&
-                box.left <= viewport.width + LABEL_SCREEN_PADDING_X &&
-                box.bottom >= -LABEL_SCREEN_PADDING_Y &&
-                box.top <= viewport.height + LABEL_SCREEN_PADDING_Y
+    private fun pathBounds(
+        points: List<ReferencePathLabelPoint>,
+        radiusPx: Double,
+    ): ReferenceScreenRect {
+        return ReferenceScreenRect(
+            left = points.minOf { it.x } - radiusPx,
+            top = points.minOf { it.y } - radiusPx,
+            right = points.maxOf { it.x } + radiusPx,
+            bottom = points.maxOf { it.y } + radiusPx,
+        )
     }
 
     private fun dictionary_tile_zoom(viewport_zoom: Double, zooms: Set<Int>): Int? {
@@ -2401,18 +2382,21 @@ internal class ReferenceDictionaryOverlayRenderer(
         val text: String,
         val source_kind: String,
         val sourced_text: SourcedMapText?,
-        val line_label: Boolean,
-        val dedupe_key: String,
         val style: DictionaryLabelStyle,
-        val priority: Int,
-        val protected_area: Boolean,
-        val is_water: Boolean,
-        val bounds: RectF,
-        val x: Float = 0f,
-        val y: Float = 0f,
+        override val occurrenceId: ReferenceLabelOccurrenceId,
+        override val featureId: ULong,
+        override val priority: Int,
+        override val placementRank: Int,
+        override val protectedArea: Boolean,
+        override val waterLine: Boolean,
+        override val anchor: ReferencePathLabelPoint,
+        override val collisionShape: ReferenceLabelCollisionShape,
         val rotation: Float = 0f,
-        val path: Path? = null
-    )
+        val path_points: List<ReferencePathLabelPoint>? = null,
+    ) : ReferenceLabelLayoutCandidate {
+        val x: Float get() = anchor.x.toFloat()
+        val y: Float get() = anchor.y.toFloat()
+    }
 
     private data class ReferenceDrawCounts(
         val boundaries: Int,
