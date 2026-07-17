@@ -2640,7 +2640,10 @@ class AdbInstallDevice:
         return "inactive-package"
 
     def make_directory(self, path: str) -> None:
-        self._mutating_checked(("shell", "mkdir", "-p", "--", path), timeout=30.0)
+        self._mutating_checked(
+            ("shell", "run-as", self.APP_ID, "mkdir", "-p", "--", path),
+            timeout=30.0,
+        )
         if not self.path_exists(path):
             raise ReferencePackageInstallError("device directory creation did not persist")
 
@@ -2649,7 +2652,10 @@ class AdbInstallDevice:
             raise ReferencePackageInstallError(
                 "device no-replace directory already exists"
             )
-        self._mutating_checked(("shell", "mkdir", "--", path), timeout=30.0)
+        self._mutating_checked(
+            ("shell", "run-as", self.APP_ID, "mkdir", "--", path),
+            timeout=30.0,
+        )
         entry = self.entry_identity(path)
         if entry is None or entry.kind != "directory":
             raise ReferencePackageInstallError(
@@ -2658,7 +2664,46 @@ class AdbInstallDevice:
         return entry
 
     def push_file(self, local: Path, remote: str) -> None:
-        self._mutating_checked(("push", str(local), remote), timeout=None)
+        transfer_name = hashlib.sha256(remote.encode("utf-8", "strict")).hexdigest()[:32]
+        transfer = f"/data/local/tmp/flightalert-exp8-transfer-{transfer_name}.tmp"
+        primary_error: Exception | None = None
+        try:
+            self._mutating_checked(("push", str(local), transfer), timeout=None)
+            self._mutating_checked(
+                ("shell", "chmod", "0644", transfer), timeout=30.0
+            )
+            self._mutating_checked(
+                (
+                    "shell",
+                    "run-as",
+                    self.APP_ID,
+                    "cp",
+                    "-T",
+                    "--",
+                    transfer,
+                    remote,
+                ),
+                timeout=None,
+            )
+        except Exception as error:
+            primary_error = error
+        cleanup = self._mutating_adb(
+            ("shell", "rm", "-f", "--", transfer),
+            timeout=30.0,
+            allow_failure=True,
+        )
+        if cleanup.return_code != 0:
+            cleanup_error = ReferencePackageInstallError(
+                "temporary device transfer file cleanup failed: "
+                + _bounded_error(cleanup.stderr)
+            )
+            if primary_error is not None:
+                raise ReferencePackageInstallError(
+                    f"{primary_error}; {cleanup_error}"
+                ) from primary_error
+            raise cleanup_error
+        if primary_error is not None:
+            raise primary_error
 
     def remote_file_identity(self, path: str) -> RemoteFileIdentity:
         size_result = self._checked(
@@ -4609,10 +4654,15 @@ def _assert_host_plan_unchanged(plan: HostInstallPlan) -> None:
 
 def _required_install_free_bytes(plan: HostInstallPlan) -> int:
     total = 0
+    largest_transfer_file = max(
+        (item.byte_length for item in plan.package_files),
+        default=0,
+    )
     for label, value in (
         ("package", plan.package_bytes),
         ("APK", plan.apk_bytes),
         ("mandatory reserve", MANDATORY_RESERVE_BYTES),
+        ("largest temporary transfer file", largest_transfer_file),
     ):
         if type(value) is not int or value < 0:
             raise ReferencePackageInstallError(

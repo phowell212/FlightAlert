@@ -979,11 +979,28 @@ class DeviceTransactionTest(unittest.TestCase):
 
         self.assertNotIn("mutate:disallow-listener", self.events)
 
+    def test_free_space_includes_largest_temporary_transfer_file(self) -> None:
+        largest_package_file = max(
+            item.byte_length for item in self.plan.package_files
+        )
+        required_without_transfer = (
+            self.plan.package_bytes
+            + self.plan.apk_bytes
+            + MANDATORY_RESERVE_BYTES
+        )
+        self.device.available = required_without_transfer + largest_package_file - 1
+
+        with self.assertRaisesRegex(ReferencePackageInstallError, "free space"):
+            self.install()
+
+        self.assertNotIn("mutate:disallow-listener", self.events)
+
     def test_exact_required_free_space_boundary_is_accepted(self) -> None:
         self.device.available = (
             self.plan.package_bytes
             + self.plan.apk_bytes
             + MANDATORY_RESERVE_BYTES
+            + max(item.byte_length for item in self.plan.package_files)
         )
 
         self.install()
@@ -992,7 +1009,15 @@ class DeviceTransactionTest(unittest.TestCase):
 
     def test_free_space_budget_accepts_exact_signed_64_bit_limit(self) -> None:
         maximum = installer_module.MAX_SIGNED_64
-        package_bytes = maximum - self.plan.apk_bytes - MANDATORY_RESERVE_BYTES
+        largest_package_file = max(
+            item.byte_length for item in self.plan.package_files
+        )
+        package_bytes = (
+            maximum
+            - self.plan.apk_bytes
+            - MANDATORY_RESERVE_BYTES
+            - largest_package_file
+        )
         maximum_plan = replace(self.plan, package_bytes=package_bytes)
         self.device.available = maximum
         transaction = ReferencePackageInstaller(
@@ -2209,6 +2234,8 @@ class ProductionBoundaryTest(unittest.TestCase):
             "-s",
             "SERIAL",
             "shell",
+            "run-as",
+            "com.flightalert",
             "mkdir",
             "--",
             path,
@@ -2230,6 +2257,57 @@ class ProductionBoundaryTest(unittest.TestCase):
 
         self.assertEqual(identity, actual)
         self.assertEqual([expected_command], runner.calls)
+
+    def test_package_file_transfer_copies_through_run_as_owned_stage(self) -> None:
+        remote = (
+            "/storage/emulated/0/Android/data/com.flightalert/files/reference/"
+            ".stage/manifest.json"
+        )
+        transfer = (
+            "/data/local/tmp/flightalert-exp8-transfer-"
+            + hashlib.sha256(remote.encode("utf-8", "strict")).hexdigest()[:32]
+            + ".tmp"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            local = Path(temporary) / "manifest.json"
+            local.write_bytes(b"manifest")
+            commands = [
+                ("adb.exe", "-s", "SERIAL", "push", str(local), transfer),
+                ("adb.exe", "-s", "SERIAL", "shell", "chmod", "0644", transfer),
+                (
+                    "adb.exe",
+                    "-s",
+                    "SERIAL",
+                    "shell",
+                    "run-as",
+                    "com.flightalert",
+                    "cp",
+                    "-T",
+                    "--",
+                    transfer,
+                    remote,
+                ),
+                (
+                    "adb.exe",
+                    "-s",
+                    "SERIAL",
+                    "shell",
+                    "rm",
+                    "-f",
+                    "--",
+                    transfer,
+                ),
+            ]
+            runner = _ScriptedRunner(
+                [(command, CommandResult(0, b"", b"")) for command in commands]
+            )
+            device = AdbInstallDevice(adb="adb.exe", runner=runner)
+            device.serial = "SERIAL"
+            device.set_mutation_guard(lambda: None)
+
+            device.push_file(local, remote)
+
+        self.assertEqual(commands, runner.calls)
 
     def test_atomic_lease_intent_binds_invocation_id_into_helper_identity(self) -> None:
         lease = AtomicDeviceLeaseClient(
