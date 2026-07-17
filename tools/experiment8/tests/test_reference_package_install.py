@@ -3120,6 +3120,14 @@ class ProductionBoundaryTest(unittest.TestCase):
             root,
         )
         self.assertEqual((201, 202), tuple(entry.inode for entry in pipe_entries))
+        colon_entries = parser(
+            (
+                f"directory:1:301:{root}/current\n"
+                f"regular file:1:302:{root}/planet.osm.pbf\n"
+            ).encode("ascii"),
+            root,
+        )
+        self.assertEqual((301, 302), tuple(entry.inode for entry in colon_entries))
         with self.assertRaisesRegex(ReferencePackageInstallError, "unsupported"):
             parser(
                 f"symbolic link\t1\t103\t{root}/link\n".encode("ascii"),
