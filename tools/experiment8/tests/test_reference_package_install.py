@@ -2497,7 +2497,16 @@ class ProductionBoundaryTest(unittest.TestCase):
 
     def test_each_inner_mutation_rechecks_lease_before_next_command(self) -> None:
         component = AdbInstallDevice.LISTENER_COMPONENT
-        approval = f"other.package/Listener:{component}"
+        approval = (
+            "com.google.android.projection.gearhead/"
+            "com.google.android.gearhead.notifications."
+            f"SharedNotificationListenerManager$ListenerService:{component}"
+        )
+        token = "1234567890abcdef1234567890abcdef"
+        local = str(
+            Path(tempfile.gettempdir()) / f"flightalert-exp8-listener-{token}.txt"
+        )
+        remote = f"/data/local/tmp/flightalert-exp8-listener-{token}.txt"
         allow = (
             "adb.exe",
             "-s",
@@ -2508,20 +2517,33 @@ class ProductionBoundaryTest(unittest.TestCase):
             "allow_listener",
             component,
         )
+        push = ("adb.exe", "-s", "SERIAL", "push", local, remote)
         settings = (
             "adb.exe",
             "-s",
             "SERIAL",
             "shell",
-            "settings",
-            "put",
-            "secure",
-            "enabled_notification_listeners",
-            approval,
+            f'value=$(cat {remote}); settings put secure enabled_notification_listeners "$value"',
+        )
+        cleanup = (
+            "adb.exe",
+            "-s",
+            "SERIAL",
+            "shell",
+            "rm",
+            "-f",
+            "--",
+            remote,
         )
         success = CommandResult(0, b"", b"")
         runner = _ScriptedRunner(
-            [(allow, success), (allow, success), (settings, success)]
+            [
+                (allow, success),
+                (allow, success),
+                (push, success),
+                (settings, success),
+                (cleanup, success),
+            ]
         )
         device = AdbInstallDevice(adb="adb.exe", runner=runner)
         device.serial = "SERIAL"
@@ -2531,10 +2553,12 @@ class ProductionBoundaryTest(unittest.TestCase):
         def losing_guard() -> None:
             nonlocal guard_calls
             guard_calls += 1
-            if guard_calls == 2:
+            if guard_calls >= 2:
                 raise ReferencePackageInstallError("injected lease loss")
 
-        with mock.patch.object(device, "listener_state", return_value=state):
+        with mock.patch.object(device, "listener_state", return_value=state), mock.patch.object(
+            installer_module.uuid, "uuid4", return_value=type("Uuid", (), {"hex": token})()
+        ):
             device.set_mutation_guard(losing_guard)
             with self.assertRaisesRegex(ReferencePackageInstallError, "lease loss"):
                 device.restore_listener(state)
@@ -2543,7 +2567,8 @@ class ProductionBoundaryTest(unittest.TestCase):
             device.set_mutation_guard(lambda: None)
             device.restore_listener(state)
 
-        self.assertEqual([allow, allow, settings], runner.calls)
+        self.assertEqual([allow, allow, push, settings, cleanup], runner.calls)
+        self.assertNotIn(approval, " ".join(" ".join(call) for call in runner.calls))
         self.assertEqual([], runner.steps)
 
     def test_adb_device_parser_requires_one_ready_physical_row(self) -> None:
@@ -3057,7 +3082,16 @@ class ProductionBoundaryTest(unittest.TestCase):
             runner = _ScriptedRunner(
                 [
                     (
-                        ("adb.exe", "-s", "SERIAL", "install", "-r", "-d", str(apk)),
+                        (
+                            "adb.exe",
+                            "-s",
+                            "SERIAL",
+                            "install",
+                            "-r",
+                            "-d",
+                            "-t",
+                            str(apk),
+                        ),
                         CommandResult(0, b"Success\n", b""),
                     )
                 ]

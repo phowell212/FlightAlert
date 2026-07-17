@@ -2887,17 +2887,29 @@ class AdbInstallDevice:
             timeout=30.0,
         )
         if state.approval:
-            self._mutating_checked(
-                (
-                    "shell",
-                    "settings",
-                    "put",
-                    "secure",
-                    "enabled_notification_listeners",
-                    state.approval,
-                ),
-                timeout=30.0,
-            )
+            token = uuid.uuid4().hex
+            local = Path(tempfile.gettempdir()) / f"flightalert-exp8-listener-{token}.txt"
+            remote = f"/data/local/tmp/flightalert-exp8-listener-{token}.txt"
+            try:
+                local.write_text(state.approval, encoding="utf-8", newline="")
+                self._mutating_checked(("push", str(local), remote), timeout=60.0)
+                self._mutating_checked(
+                    (
+                        "shell",
+                        f'value=$(cat {remote}); settings put secure enabled_notification_listeners "$value"',
+                    ),
+                    timeout=30.0,
+                )
+            finally:
+                try:
+                    local.unlink()
+                except FileNotFoundError:
+                    pass
+                self._mutating_adb(
+                    ("shell", "rm", "-f", "--", remote),
+                    timeout=30.0,
+                    allow_failure=True,
+                )
         else:
             self._mutating_checked(
                 (
@@ -2958,7 +2970,7 @@ class AdbInstallDevice:
     def restore_apk(self, path: Path) -> None:
         expected = _hash_regular_file(path, "prestate APK for restoration")
         result = self._mutating_checked(
-            ("install", "-r", "-d", str(path)), timeout=300.0
+            ("install", "-r", "-d", "-t", str(path)), timeout=300.0
         )
         text = _strict_ascii_text(
             result.stdout, "adb rollback install output", maximum=128 * 1024
