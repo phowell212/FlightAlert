@@ -58,6 +58,11 @@ _AUTHORITY_MERGE_SCHEMA = "flightalert.experiment8.v3-package-merge.v2"
 _AUTHORITY_MERGE_RECEIPT_SCHEMA = (
     "flightalert.experiment8.v3-package-merge-receipt.v2"
 )
+_RECEIPT_BOUND_VISUAL_AUTHORITY_SEMANTIC_VERIFICATION = {
+    "mode": "receipt-bound-visual-evaluation",
+    "runtimeFileDigestsVerifiedByMergeStream": True,
+    "strictDocumentaryProofDeferred": True,
+}
 _MERGE_RECEIPT_FILE_NAME = "merge-receipt.json"
 _FINAL_SIZE_ACCOUNTING_SCOPE = (
     "final-six-file-package-after-class-catalog-finalization"
@@ -691,14 +696,24 @@ def _load_authority_merge_receipt(
     merge = manifest.get("merge")
     if type(merge) is not dict or merge.get("schema") != _AUTHORITY_MERGE_SCHEMA:
         return None, None, (), None
-    if set(merge) != {
+    expected_merge_fields = {
         "authorityReceipts",
         "inputs",
         "mergerSha256",
         "output",
         "schema",
         "sizePolicy",
-    }:
+    }
+    if "authoritySemanticVerification" in merge:
+        if (
+            merge.get("authoritySemanticVerification")
+            != _RECEIPT_BOUND_VISUAL_AUTHORITY_SEMANTIC_VERIFICATION
+        ):
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge semantic verification differs"
+            )
+        expected_merge_fields.add("authoritySemanticVerification")
+    if set(merge) != expected_merge_fields:
         raise V3ClassCatalogFinalizationError(
             "V3 authority merge manifest fields differ"
         )

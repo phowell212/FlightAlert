@@ -121,6 +121,7 @@ def _write_authority_v2_merged_package(
     root: Path,
     *,
     complete_whole_earth_dictionary: bool = True,
+    authority_semantic_mode: str = "recompute",
 ) -> Path:
     from tools.experiment8.tests.test_v3_package_merger import (
         _write_package,
@@ -148,6 +149,7 @@ def _write_authority_v2_merged_package(
         supplement_build_receipts=(water_receipt,),
         output_directory=output,
         package_id="world-experiment8-binary-v4",
+        authority_semantic_mode=authority_semantic_mode,
     )
     return output
 
@@ -258,7 +260,10 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
         from tools.experiment8 import v3_class_catalog_finalizer
 
         with tempfile.TemporaryDirectory() as temporary:
-            package = _write_authority_v2_merged_package(Path(temporary))
+            package = _write_authority_v2_merged_package(
+                Path(temporary),
+                authority_semantic_mode="receipt-bound-visual-evaluation",
+            )
 
             with mock.patch.object(
                 v3_class_catalog_finalizer.sqlite3,
