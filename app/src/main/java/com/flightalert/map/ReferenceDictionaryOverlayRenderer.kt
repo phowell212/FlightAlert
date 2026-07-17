@@ -66,6 +66,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val line_label_position = FloatArray(2)
     private val visible_tiles = ArrayList<VisibleDictionaryTile>(32)
     private val draw_tiles = ArrayList<DictionaryTileDrawRef>(32)
+    private val label_record_refs = ArrayList<DictionaryLabelRecordRef>(512)
     private val label_candidates = ArrayList<DictionaryLabelCandidate>(256)
     private val planned_label_candidate_ids = HashSet<ULong>(256)
     private val accepted_labels = ArrayList<DictionaryLabelCandidate>(128)
@@ -144,7 +145,8 @@ internal class ReferenceDictionaryOverlayRenderer(
             if (parsed != null) {
                 draw_tiles += DictionaryTileDrawRef(
                     tile = parsed,
-                    draw_x = tile.draw_x
+                    draw_x = tile.draw_x,
+                    core_visible = tile.core_visible,
                 )
             } else {
                 missing++
@@ -803,16 +805,41 @@ internal class ReferenceDictionaryOverlayRenderer(
         filter_mask: ReferenceFilterMask,
         label_avoid_rects: List<ReferenceScreenRect>,
     ): Int {
+        label_record_refs.clear()
         label_candidates.clear()
         planned_label_candidate_ids.clear()
+        accepted_labels.clear()
+        var encounter_order = 0
         for (tile in tiles) {
+            if (!tile.core_visible) continue
             for (record in tile.tile.labels) {
-                if (!record.drawable || !record.visible_at(viewport.zoom)) continue
-                if (!filter_mask.allows(record.filter_id, groups.enabled(record.layer_group))) {
+                if (!label_record_visible_for_admission(record, viewport.zoom, groups, filter_mask)) {
                     continue
                 }
+                if (!label_record_intersects_viewport(viewport, tile, record)) continue
+                label_record_refs += DictionaryLabelRecordRef(
+                    tile = tile,
+                    record = record,
+                    layout_feature_id = layout_feature_id(record),
+                    encounter_order = encounter_order++,
+                )
+            }
+        }
+        label_record_refs.sortWith(
+            compareBy<DictionaryLabelRecordRef> { it.record.priority }
+                .thenBy { it.layout_feature_id }
+                .thenBy { it.encounter_order },
+        )
+        var record_index = 0
+        while (record_index < label_record_refs.size) {
+            val first_ref = label_record_refs[record_index]
+            val block_priority = first_ref.record.priority
+            val block_feature_id = first_ref.layout_feature_id
+            do {
+                val record_ref = label_record_refs[record_index]
+                val tile = record_ref.tile
+                val record = record_ref.record
                 val style = label_style_for(record, label_text_scale, viewport.zoom)
-                if (style.alpha <= 0 && style.halo_alpha <= 0) continue
                 if (
                     record.line_label &&
                     record.geometry?.rings?.any { ring -> ring.point_count >= 2 } == true
@@ -845,14 +872,60 @@ internal class ReferenceDictionaryOverlayRenderer(
                         }
                     }
                 }
-            }
+                record_index++
+            } while (
+                record_index < label_record_refs.size &&
+                    label_record_refs[record_index].record.priority == block_priority &&
+                    label_record_refs[record_index].layout_feature_id == block_feature_id
+            )
+            accept_label_candidates(viewport, label_avoid_rects)
+            if (accepted_labels.size >= label_budget(viewport)) break
         }
-        accept_label_candidates(viewport, label_avoid_rects)
+        label_record_refs.clear()
         for (index in accepted_labels.indices.reversed()) {
             draw_label_candidate(canvas, accepted_labels[index])
         }
         return accepted_labels.size
     }
+
+    private fun label_record_visible_for_admission(
+        record: DictionaryLabelRecord,
+        zoom: Double,
+        groups: ReferenceDictionaryLayerGroups,
+        filter_mask: ReferenceFilterMask,
+    ): Boolean {
+        if (!record.drawable || !record.visible_at(zoom)) return false
+        if (!filter_mask.allows(record.filter_id, groups.enabled(record.layer_group))) return false
+        val visibility_alpha_milli = label_visibility_alpha_milli(record, zoom)
+        return ReferenceLabelRuntimePresentationPolicy.hasVisiblePaintAlpha(
+            record.alpha,
+            record.halo_alpha,
+            visibility_alpha_milli,
+        )
+    }
+
+    private fun label_record_intersects_viewport(
+        viewport: Viewport,
+        tile: DictionaryTileDrawRef,
+        record: DictionaryLabelRecord,
+    ): Boolean {
+        record.anchor?.let { anchor ->
+            val point = project_point(viewport, tile, anchor.x, anchor.y)
+            return point.x in 0f..viewport.width && point.y in 0f..viewport.height
+        }
+        val bounds = record.geometry?.bounds ?: return true
+        val top_left = project_point(viewport, tile, bounds.min_x, bounds.min_y)
+        val bottom_right = project_point(viewport, tile, bounds.max_x, bounds.max_y)
+        return top_left.x <= viewport.width && bottom_right.x >= 0f &&
+            top_left.y <= viewport.height && bottom_right.y >= 0f
+    }
+
+    private fun layout_candidate_id(record: DictionaryLabelRecord): ULong =
+        record.candidate_id
+            ?: (record.dedupe_key ?: record.text).hashCode().toUInt().toULong()
+
+    private fun layout_feature_id(record: DictionaryLabelRecord): ULong =
+        record.source_feature_id ?: layout_candidate_id(record)
 
     private fun line_label_candidates(
         viewport: Viewport,
@@ -876,8 +949,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             }
         }.orEmpty()
         if (parts.isEmpty()) return emptyList()
-        val candidate_id = record.candidate_id
-            ?: (record.dedupe_key ?: record.text).hashCode().toUInt().toULong()
+        val candidate_id = layout_candidate_id(record)
         val minimum_water_text_size_px = sp(
             MIN_WATER_LINE_TEXT_SIZE_SP * label_text_scale,
         )
@@ -1068,8 +1140,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             )
             text_paint.measureText(english.text)
         } ?: 0f
-        val candidate_id = record.candidate_id
-            ?: (record.dedupe_key ?: record.text).hashCode().toUInt().toULong()
+        val candidate_id = layout_candidate_id(record)
         val label_bounds = label_bbox(
             record.text,
             anchor.x,
@@ -1910,25 +1981,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         zoom: Double,
     ): DictionaryLabelStyle {
         val scale = label_text_scale.coerceIn(MAP_LABEL_TEXT_SCALE_MIN, MAP_LABEL_TEXT_SCALE_MAX)
-        val current_centizoom = ReferencePresentationPolicy.centizoom(zoom)
-        val package_visibility_alpha_milli = record.visibility_rule?.let { rule ->
-            ReferencePresentationPolicy.label_alpha_milli(
-                rule,
-                current_centizoom,
-            )
-        } ?: ReferencePresentationPolicy.full_alpha_milli
         val runtime_typography = record.runtime_typography
-        val runtime_visibility_alpha_milli = record.presentation_subtype?.let { subtype ->
-            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
-                subtype,
-                record.prominence_tier
-                    ?: ReferencePresentationPolicy.default_prominence_for_subtype(subtype),
-                current_centizoom,
-            )
-        } ?: ReferencePresentationPolicy.full_alpha_milli
-        val visibility_alpha_milli = (
-            package_visibility_alpha_milli * runtime_visibility_alpha_milli + 500
-        ) / 1_000
+        val visibility_alpha_milli = label_visibility_alpha_milli(record, zoom)
         fun scaled_alpha(alpha: Int): Int {
             return ((alpha * visibility_alpha_milli) + 500) / 1_000
         }
@@ -1956,6 +2010,27 @@ internal class ReferenceDictionaryOverlayRenderer(
                     ?: record.letter_spacing_em
             ),
         )
+    }
+
+    private fun label_visibility_alpha_milli(
+        record: DictionaryLabelRecord,
+        zoom: Double,
+    ): Int {
+        val current_centizoom = ReferencePresentationPolicy.centizoom(zoom)
+        val package_visibility_alpha_milli = record.visibility_rule?.let { rule ->
+            ReferencePresentationPolicy.label_alpha_milli(rule, current_centizoom)
+        } ?: ReferencePresentationPolicy.full_alpha_milli
+        val runtime_visibility_alpha_milli = record.presentation_subtype?.let { subtype ->
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                subtype,
+                record.prominence_tier
+                    ?: ReferencePresentationPolicy.default_prominence_for_subtype(subtype),
+                current_centizoom,
+            )
+        } ?: ReferencePresentationPolicy.full_alpha_milli
+        return (
+            package_visibility_alpha_milli * runtime_visibility_alpha_milli + 500
+        ) / 1_000
     }
 
     private fun legacy_font_weight(typeface_style: Int): Int = when (typeface_style) {
@@ -2370,14 +2445,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     }
 
     private fun dictionary_tile_zoom(viewport_zoom: Double, zooms: Set<Int>): Int? {
-        if (zooms.isEmpty()) return null
-        val floor_zoom = floor(viewport_zoom).toInt()
-        val min_zoom = zooms.minOrNull() ?: return null
-        val max_zoom = zooms.maxOrNull() ?: return null
-        return floor_zoom.coerceIn(min_zoom, max_zoom)
-            .takeIf { it in zooms }
-            ?: zooms.filter { it <= floor_zoom }.maxOrNull()
-            ?: min_zoom
+        return ReferenceDictionaryLodPolicy.select(viewport_zoom, zooms)
     }
 
     private fun ready_empty_stats(): ReferenceDictionaryOverlayDrawStats {
@@ -2438,7 +2506,15 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private data class DictionaryTileDrawRef(
         val tile: ParsedDictionaryTile,
-        val draw_x: Int
+        val draw_x: Int,
+        val core_visible: Boolean,
+    )
+
+    private data class DictionaryLabelRecordRef(
+        val tile: DictionaryTileDrawRef,
+        val record: DictionaryLabelRecord,
+        val layout_feature_id: ULong,
+        val encounter_order: Int,
     )
 
     private data class ParsedDictionaryTile(

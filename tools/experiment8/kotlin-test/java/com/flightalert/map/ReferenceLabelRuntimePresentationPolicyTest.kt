@@ -7,6 +7,135 @@ import org.junit.Test
 
 class ReferenceLabelRuntimePresentationPolicyTest {
     @Test
+    fun admissionUsesTheSameRoundedByteAlphaAsPhonePaint() {
+        assertFalse(
+            ReferenceLabelRuntimePresentationPolicy.hasVisiblePaintAlpha(
+                fillAlpha = 235,
+                haloAlpha = 235,
+                visibilityAlphaMilli = 1,
+            ),
+        )
+        assertFalse(
+            ReferenceLabelRuntimePresentationPolicy.hasVisiblePaintAlpha(
+                fillAlpha = 235,
+                haloAlpha = 235,
+                visibilityAlphaMilli = 2,
+            ),
+        )
+        assertTrue(
+            ReferenceLabelRuntimePresentationPolicy.hasVisiblePaintAlpha(
+                fillAlpha = 235,
+                haloAlpha = 235,
+                visibilityAlphaMilli = 3,
+            ),
+        )
+    }
+
+    @Test
+    fun globalCountryUsesRestrainedPhoneTypography() {
+        val typography = ReferenceLabelRuntimePresentationPolicy.typography(
+            SemanticSubtype.COUNTRY_TERRITORY,
+            ProminenceTier.GLOBAL_MAJOR,
+        )
+
+        assertEquals(
+            10_500 to 600,
+            typography.textSizeMilliSp to typography.fontWeight,
+        )
+    }
+
+    @Test
+    fun globalCapitalRemainsTheStrongestPhonePlaceLabel() {
+        val typography = ReferenceLabelRuntimePresentationPolicy.typography(
+            SemanticSubtype.CAPITAL_MAJOR_CITY,
+            ProminenceTier.GLOBAL_MAJOR,
+        )
+
+        assertEquals(
+            12_000 to 700,
+            typography.textSizeMilliSp to typography.fontWeight,
+        )
+    }
+
+    @Test
+    fun regionalFirstOrderRegionIsSmallerAndLighterThanAGlobalCapital() {
+        val region = ReferenceLabelRuntimePresentationPolicy.typography(
+            SemanticSubtype.FIRST_ORDER_REGION,
+            ProminenceTier.REGIONAL_MAJOR,
+        )
+        val capital = ReferenceLabelRuntimePresentationPolicy.typography(
+            SemanticSubtype.CAPITAL_MAJOR_CITY,
+            ProminenceTier.GLOBAL_MAJOR,
+        )
+
+        assertEquals(9_750, region.textSizeMilliSp)
+        assertTrue(region.fontWeight < capital.fontWeight)
+    }
+
+    @Test
+    fun countryIsFullyVisibleAtRegionalScaleAndGoneByCityScale() {
+        assertEquals(
+            1_000,
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.COUNTRY_TERRITORY,
+                ProminenceTier.GLOBAL_MAJOR,
+                currentCentizoom = 680,
+            ),
+        )
+        assertEquals(
+            0,
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.COUNTRY_TERRITORY,
+                ProminenceTier.GLOBAL_MAJOR,
+                currentCentizoom = 920,
+            ),
+        )
+    }
+
+    @Test
+    fun fineLocalPlaceWaitsUntilClosePhoneScale() {
+        assertEquals(
+            0,
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.LOCAL_PLACE,
+                ProminenceTier.FINE,
+                currentCentizoom = 920,
+            ),
+        )
+        assertEquals(
+            1_000,
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.LOCAL_PLACE,
+                ProminenceTier.FINE,
+                currentCentizoom = 1_100,
+            ),
+        )
+    }
+
+    @Test
+    fun firstOrderRegionYieldsToCityLabelsAsThePhoneZoomsIn() {
+        val regionalScaleAlpha =
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.FIRST_ORDER_REGION,
+                ProminenceTier.REGIONAL_MAJOR,
+                currentCentizoom = 680,
+            )
+        val cityScaleAlpha =
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.FIRST_ORDER_REGION,
+                ProminenceTier.REGIONAL_MAJOR,
+                currentCentizoom = 920,
+            )
+
+        assertTrue(regionalScaleAlpha > 0)
+        assertTrue(
+            "expected first-order region alpha below $regionalScaleAlpha at zoom 9.2, " +
+                "but was $cityScaleAlpha",
+            cityScaleAlpha < regionalScaleAlpha,
+        )
+    }
+
+    @Test
     fun fineRiversWaitUntilACloserPhoneScaleWhileRegionalRiversRemainVisible() {
         val fineAtKent = ReferenceLabelRuntimePresentationPolicy.resolve(
             SemanticSubtype.RIVER,

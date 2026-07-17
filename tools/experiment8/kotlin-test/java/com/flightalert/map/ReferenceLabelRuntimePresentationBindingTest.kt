@@ -8,6 +8,108 @@ import org.junit.Test
 
 class ReferenceLabelRuntimePresentationBindingTest {
     @Test
+    fun rendererAdmitsOnlyCoreVisibleLabelRefsInCompletePriorityFeatureBlocks() {
+        val source = renderer_source()
+        val drawLabels = source_section(source, "private fun draw_labels", "private fun line_label_candidates")
+        val drawReferenceContent =
+            source_section(source, "private fun draw_reference_content", "private fun draw_path_record")
+        val missingContracts = mutableListOf<String>()
+        fun expectContract(description: String, satisfied: Boolean) {
+            if (!satisfied) missingContracts += description
+        }
+
+        expectContract(
+            "draw refs carry core_visible",
+            source.contains("core_visible = tile.core_visible"),
+        )
+        val tileLoopIndex = drawLabels.indexOf("for (tile in tiles)")
+        val coreOnlyIndex = drawLabels.indexOf("if (!tile.core_visible) continue", tileLoopIndex)
+        val recordLoopIndex = drawLabels.indexOf("for (record in tile.tile.labels)", tileLoopIndex)
+        expectContract("labels skip padded refs before records", tileLoopIndex >= 0 &&
+            coreOnlyIndex > tileLoopIndex && recordLoopIndex > coreOnlyIndex)
+        expectContract("boundaries keep padded refs", !drawReferenceContent.contains("core_visible"))
+
+        val admissionPolicyIndex = drawLabels.indexOf("label_record_visible_for_admission(")
+        val viewportGuardIndex = drawLabels.indexOf("label_record_intersects_viewport(")
+        val recordRefIndex = drawLabels.indexOf("DictionaryLabelRecordRef(")
+        expectContract("cheap guards precede record refs", admissionPolicyIndex >= 0 &&
+            viewportGuardIndex >= 0 && recordRefIndex > admissionPolicyIndex &&
+            recordRefIndex > viewportGuardIndex)
+        expectContract(
+            "admission uses final rounded paint alpha",
+            drawLabels.contains("ReferenceLabelRuntimePresentationPolicy.hasVisiblePaintAlpha("),
+        )
+
+        val lowerDrawLabels = drawLabels.lowercase()
+        val sortIndex = listOf("sortwith(", "sortedwith(")
+            .map(lowerDrawLabels::indexOf)
+            .firstOrNull { it >= 0 } ?: -1
+        val blockLoopIndex = if (sortIndex >= 0) {
+            Regex("\\bwhile\\s*\\(").find(lowerDrawLabels, sortIndex)?.range?.first ?: -1
+        } else {
+            -1
+        }
+        val sortContract = if (sortIndex >= 0 && blockLoopIndex > sortIndex) {
+            lowerDrawLabels.substring(sortIndex, blockLoopIndex)
+        } else {
+            ""
+        }
+        val priorityIndex = sortContract.indexOf("priority")
+        val featureIndex = sortContract.indexOf("feature", priorityIndex.coerceAtLeast(0))
+        val encounterIndex = sortContract.indexOf("encounter", featureIndex.coerceAtLeast(0))
+        expectContract("sort is priority/feature/encounter", priorityIndex >= 0 &&
+            featureIndex > priorityIndex && encounterIndex > featureIndex)
+
+        val acceptIndex = drawLabels.indexOf(
+            "accept_label_candidates(viewport, label_avoid_rects)",
+            blockLoopIndex.coerceAtLeast(0),
+        )
+        val budgetStopIndex = drawLabels.indexOf(
+            "if (accepted_labels.size >= label_budget(viewport)) break",
+            acceptIndex.coerceAtLeast(0),
+        )
+        val blockContract = if (blockLoopIndex >= 0 && acceptIndex > blockLoopIndex) {
+            lowerDrawLabels.substring(blockLoopIndex, acceptIndex)
+        } else {
+            ""
+        }
+        val generatesCandidates = blockContract.contains("line_label_candidates(") ||
+            blockContract.contains("point_label_candidate(")
+        expectContract("complete block selects before budget stop", generatesCandidates &&
+            Regex("\\b(?:while|do)\\b").findAll(blockContract).count() >= 2 &&
+            acceptIndex > blockLoopIndex && budgetStopIndex > acceptIndex)
+        expectContract(
+            "temporary record refs are released after admission",
+            "label_record_refs.clear()".toRegex(RegexOption.LITERAL)
+                .findAll(drawLabels)
+                .count() >= 2,
+        )
+
+        assertTrue(
+            "missing renderer label-admission contracts:\n - " +
+                missingContracts.joinToString("\n - "),
+            missingContracts.isEmpty(),
+        )
+    }
+
+    @Test
+    fun rendererDelegatesDictionaryLodSelectionToThePurePolicy() {
+        val source = renderer_source()
+        val dictionaryLodSelection = source_section(
+            source,
+            "private fun dictionary_tile_zoom",
+            "private fun ready_empty_stats",
+        )
+
+        assertTrue(
+            "dictionary_tile_zoom must delegate to the pure LOD policy",
+            dictionaryLodSelection.contains(
+                "ReferenceDictionaryLodPolicy.select(viewport_zoom, zooms)",
+            ),
+        )
+    }
+
+    @Test
     fun binaryLabelsCarrySemanticInputsIntoThePhonePresentationPolicy() {
         val source = renderer_source()
         val binary_mapping = source_section(
@@ -180,4 +282,5 @@ class ReferenceLabelRuntimePresentationBindingTest {
         assertTrue("missing section end: $end", end_index > start_index)
         return source.substring(start_index, end_index)
     }
+
 }

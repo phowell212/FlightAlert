@@ -96,11 +96,29 @@ internal object ReferenceLabelRuntimePresentationPolicy {
         require(currentCentizoom >= 0) { "current centizoom must be nonnegative" }
         val band = visibility_band_by_subtype_tier[subtype.ordinal][tier.ordinal]
             ?: return FULL_ALPHA_MILLI
-        if (currentCentizoom <= band.minimum) return 0
-        if (currentCentizoom >= band.fullAlpha) return FULL_ALPHA_MILLI
-        val elapsed = currentCentizoom - band.minimum
-        val duration = band.fullAlpha - band.minimum
-        return (elapsed * FULL_ALPHA_MILLI + duration / 2) / duration
+        var alpha = FULL_ALPHA_MILLI
+        if (band.fadeInStart != null && band.fadeInEnd != null) {
+            alpha = when {
+                currentCentizoom <= band.fadeInStart -> 0
+                currentCentizoom >= band.fadeInEnd -> FULL_ALPHA_MILLI
+                else -> interpolate_alpha(
+                    currentCentizoom - band.fadeInStart,
+                    band.fadeInEnd - band.fadeInStart,
+                )
+            }
+        }
+        if (band.fadeOutStart != null && band.fadeOutEnd != null) {
+            val fade_out_alpha = when {
+                currentCentizoom <= band.fadeOutStart -> FULL_ALPHA_MILLI
+                currentCentizoom >= band.fadeOutEnd -> 0
+                else -> FULL_ALPHA_MILLI - interpolate_alpha(
+                    currentCentizoom - band.fadeOutStart,
+                    band.fadeOutEnd - band.fadeOutStart,
+                )
+            }
+            alpha = minOf(alpha, fade_out_alpha)
+        }
+        return alpha
     }
 
     fun resolve(
@@ -117,6 +135,18 @@ internal object ReferenceLabelRuntimePresentationPolicy {
             italic = typography.italic,
             letterSpacingMilliEm = typography.letterSpacingMilliEm,
         )
+    }
+
+    fun hasVisiblePaintAlpha(
+        fillAlpha: Int,
+        haloAlpha: Int,
+        visibilityAlphaMilli: Int,
+    ): Boolean {
+        require(fillAlpha in 0..255 && haloAlpha in 0..255)
+        require(visibilityAlphaMilli in 0..FULL_ALPHA_MILLI)
+        fun scaled(alpha: Int): Int =
+            (alpha * visibilityAlphaMilli + FULL_ALPHA_MILLI / 2) / FULL_ALPHA_MILLI
+        return scaled(fillAlpha) > 0 || scaled(haloAlpha) > 0
     }
 
     private fun create_typography(
@@ -140,8 +170,8 @@ internal object ReferenceLabelRuntimePresentationPolicy {
 
     private fun text_size_milli_sp(subtype: SemanticSubtype, tier: ProminenceTier): Int =
         when (subtype) {
-            SemanticSubtype.COUNTRY_TERRITORY -> tier_value(tier, 12_500, 11_000, 9_750, 9_000)
-            SemanticSubtype.FIRST_ORDER_REGION -> tier_value(tier, 11_500, 10_500, 9_250, 8_750)
+            SemanticSubtype.COUNTRY_TERRITORY -> tier_value(tier, 10_500, 10_000, 9_500, 9_000)
+            SemanticSubtype.FIRST_ORDER_REGION -> tier_value(tier, 10_250, 9_750, 9_000, 8_500)
             SemanticSubtype.SECOND_LOCAL_REGION -> tier_value(tier, 10_500, 9_750, 9_000, 8_500)
             SemanticSubtype.CAPITAL_MAJOR_CITY -> tier_value(tier, 12_000, 11_000, 10_000, 9_250)
             SemanticSubtype.CITY_TOWN -> tier_value(tier, 11_000, 10_250, 9_500, 8_750)
@@ -212,37 +242,54 @@ internal object ReferenceLabelRuntimePresentationPolicy {
     private fun interpolate_delta(value: Int, span: Int, sizeSpan: Int): Int =
         ((value.toLong() * sizeSpan + span / 2L) / span).toInt()
 
+    private fun interpolate_alpha(value: Int, span: Int): Int =
+        ((value.toLong() * FULL_ALPHA_MILLI + span / 2L) / span).toInt()
+
     private fun create_visibility_band(
         subtype: SemanticSubtype,
         tier: ProminenceTier,
     ): ZoomFadeBand? = when (subtype) {
+            SemanticSubtype.COUNTRY_TERRITORY -> ZoomFadeBand(
+                fadeOutStart = 820,
+                fadeOutEnd = 920,
+            )
+            SemanticSubtype.FIRST_ORDER_REGION -> ZoomFadeBand(
+                fadeOutStart = 850,
+                fadeOutEnd = 975,
+            )
+            SemanticSubtype.LOCAL_PLACE -> when (tier) {
+                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(fadeInStart = 750, fadeInEnd = 800)
+                ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(fadeInStart = 850, fadeInEnd = 900)
+                ProminenceTier.LOCAL -> ZoomFadeBand(fadeInStart = 975, fadeInEnd = 1_025)
+                ProminenceTier.FINE -> ZoomFadeBand(fadeInStart = 1_050, fadeInEnd = 1_100)
+            }
             SemanticSubtype.RIVER -> when (tier) {
-                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(550, 585)
-                ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(593, 628)
-                ProminenceTier.LOCAL -> ZoomFadeBand(950, 985)
-                ProminenceTier.FINE -> ZoomFadeBand(1_075, 1_110)
+                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(fadeInStart = 550, fadeInEnd = 585)
+                ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(fadeInStart = 593, fadeInEnd = 628)
+                ProminenceTier.LOCAL -> ZoomFadeBand(fadeInStart = 950, fadeInEnd = 985)
+                ProminenceTier.FINE -> ZoomFadeBand(fadeInStart = 1_075, fadeInEnd = 1_110)
             }
             SemanticSubtype.STREAM_CREEK,
             SemanticSubtype.UNSPECIFIED_WATERCOURSE -> when (tier) {
-                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(975, 1_010)
-                ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(1_050, 1_085)
-                ProminenceTier.LOCAL -> ZoomFadeBand(1_125, 1_160)
-                ProminenceTier.FINE -> ZoomFadeBand(1_200, 1_235)
+                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(fadeInStart = 975, fadeInEnd = 1_010)
+                ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(fadeInStart = 1_050, fadeInEnd = 1_085)
+                ProminenceTier.LOCAL -> ZoomFadeBand(fadeInStart = 1_125, fadeInEnd = 1_160)
+                ProminenceTier.FINE -> ZoomFadeBand(fadeInStart = 1_200, fadeInEnd = 1_235)
             }
             SemanticSubtype.CANAL_CHANNEL -> when (tier) {
-                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(900, 935)
-                ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(1_000, 1_035)
-                ProminenceTier.LOCAL -> ZoomFadeBand(1_100, 1_135)
-                ProminenceTier.FINE -> ZoomFadeBand(1_200, 1_235)
+                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(fadeInStart = 900, fadeInEnd = 935)
+                ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(fadeInStart = 1_000, fadeInEnd = 1_035)
+                ProminenceTier.LOCAL -> ZoomFadeBand(fadeInStart = 1_100, fadeInEnd = 1_135)
+                ProminenceTier.FINE -> ZoomFadeBand(fadeInStart = 1_200, fadeInEnd = 1_235)
             }
             else -> null
         }
 
     private fun font_weight(subtype: SemanticSubtype): Int = when (subtype) {
-        SemanticSubtype.COUNTRY_TERRITORY,
         SemanticSubtype.CAPITAL_MAJOR_CITY -> 700
-        SemanticSubtype.FIRST_ORDER_REGION,
+        SemanticSubtype.COUNTRY_TERRITORY,
         SemanticSubtype.CITY_TOWN -> 600
+        SemanticSubtype.FIRST_ORDER_REGION -> 500
         SemanticSubtype.SECOND_LOCAL_REGION,
         SemanticSubtype.LOCAL_PLACE,
         SemanticSubtype.ISLAND_ISLET,
@@ -299,7 +346,19 @@ internal object ReferenceLabelRuntimePresentationPolicy {
         ProminenceTier.FINE -> fine
     }
 
-    private data class ZoomFadeBand(val minimum: Int, val fullAlpha: Int)
+    private data class ZoomFadeBand(
+        val fadeInStart: Int? = null,
+        val fadeInEnd: Int? = null,
+        val fadeOutStart: Int? = null,
+        val fadeOutEnd: Int? = null,
+    ) {
+        init {
+            require((fadeInStart == null) == (fadeInEnd == null))
+            require((fadeOutStart == null) == (fadeOutEnd == null))
+            if (fadeInStart != null && fadeInEnd != null) require(fadeInStart < fadeInEnd)
+            if (fadeOutStart != null && fadeOutEnd != null) require(fadeOutStart < fadeOutEnd)
+        }
+    }
 
     private val LOCAL_RIVER_MEASURE_BUCKET = ReferencePresentationPolicy
         .complete_geometry_measure_bucket(ReferenceProminencePolicy.localRiverLength, verified = true)
