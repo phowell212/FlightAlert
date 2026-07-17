@@ -3887,9 +3887,13 @@ def _validate_receipts(
     tile_count = _exact_integer(manifest_coverage.get("tileCount"), "declared tile count")
     if tile_count <= 0:
         raise ReferencePackageInstallError("merge coverage tile count is empty")
-    if _exact_integer(
+    present_tile_count = _exact_integer(
         merge_coverage.get("presentTileCount"), "merge present tile count"
-    ) != tile_count:
+    )
+    if (
+        present_tile_count != tile_count
+        and install_policy != INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+    ):
         raise ReferencePackageInstallError("merge coverage does not contain every tile")
     primary_whole_earth_preserved = _exact_bool(
         merge_coverage.get("primaryWholeEarthPreserved"),
@@ -4124,13 +4128,16 @@ def _validate_receipts(
         final_coverage.get("declaredTileCount"), "finalization declared tile count"
     ) != tile_count:
         raise ReferencePackageInstallError("finalization declared tile count differs")
-    if _exact_integer(
+    final_present_tile_count = _exact_integer(
         final_coverage.get("presentTileCount"), "finalization present tile count"
-    ) != tile_count:
+    )
+    if final_present_tile_count != present_tile_count:
         raise ReferencePackageInstallError("finalization present tile count differs")
-    if _exact_integer(
+    final_missing_tile_count = _exact_integer(
         final_coverage.get("missingTileCount"), "finalization missing tile count"
-    ) != 0:
+    )
+    expected_missing_tile_count = tile_count - present_tile_count
+    if final_missing_tile_count != expected_missing_tile_count:
         raise ReferencePackageInstallError("final package has missing declared tiles")
     if _exact_integer(
         final_coverage.get("rendererRecordCount"),
