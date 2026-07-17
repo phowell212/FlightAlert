@@ -2122,6 +2122,13 @@ def _parse_active_app_services(raw: bytes) -> tuple[str, ...]:
 
 
 def _app_state_equivalent(actual: AppProcessState, expected: AppProcessState) -> bool:
+    if not actual.running and not expected.running:
+        return (
+            actual.resumed_component == expected.resumed_component
+            and actual.focused_component == expected.focused_component
+            and actual.screen_interactive is expected.screen_interactive
+            and actual.device_locked is expected.device_locked
+        )
     return (
         actual.running is expected.running
         and actual.resumed_component == expected.resumed_component

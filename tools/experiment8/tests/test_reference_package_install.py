@@ -2589,6 +2589,46 @@ class ProductionBoundaryTest(unittest.TestCase):
                 with self.assertRaises(ReferencePackageInstallError):
                     parse_adb_devices(raw)
 
+    def test_stopped_process_equivalence_ignores_stale_service_records(self) -> None:
+        expected = installer_module.AppProcessState(
+            pids=(),
+            resumed_component=None,
+            focused_component="com.teslacoilsw.launcher/.NovaLauncher",
+            screen_interactive=True,
+            device_locked=False,
+            active_services=(),
+        )
+        actual = installer_module.AppProcessState(
+            pids=(),
+            resumed_component=None,
+            focused_component="com.teslacoilsw.launcher/.NovaLauncher",
+            screen_interactive=True,
+            device_locked=False,
+            active_services=("com.flightalert/.alerts.AircraftAlertService",),
+        )
+
+        self.assertTrue(installer_module._app_state_equivalent(actual, expected))
+
+    def test_running_process_equivalence_keeps_service_identity_exact(self) -> None:
+        expected = installer_module.AppProcessState(
+            pids=("123",),
+            resumed_component=None,
+            focused_component=None,
+            screen_interactive=True,
+            device_locked=False,
+            active_services=("com.flightalert/.alerts.AircraftAlertService",),
+        )
+        actual = installer_module.AppProcessState(
+            pids=("123",),
+            resumed_component=None,
+            focused_component=None,
+            screen_interactive=True,
+            device_locked=False,
+            active_services=(),
+        )
+
+        self.assertFalse(installer_module._app_state_equivalent(actual, expected))
+
     def test_atomic_lease_client_uses_exact_json_token_and_releases(self) -> None:
         helper = Path("C:/coordination/device-lease.ps1")
         token = "a" * 32
