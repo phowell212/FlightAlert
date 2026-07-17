@@ -1,6 +1,7 @@
 package com.flightalert.map
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ReferenceLabelLayoutSelectorTest {
@@ -84,6 +85,23 @@ class ReferenceLabelLayoutSelectorTest {
         )
     }
 
+    @Test
+    fun undersizedDeclaredPathBoundsFailClosed() {
+        val malformed = path(
+            token = 1,
+            occurrence = occurrence(30uL),
+            priority = 1,
+            rank = 0,
+            points = listOf(point(20.0, 20.0), point(80.0, 20.0)),
+            radius = 5.0,
+            bounds = rect(20.0, 15.0, 80.0, 25.0),
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            select(malformed)
+        }
+    }
+
     private fun occurrence(candidateId: ULong, repeatOrdinal: Long = 0L) =
         ReferenceLabelOccurrenceId(candidateId, repeatOrdinal)
 
@@ -116,6 +134,7 @@ class ReferenceLabelLayoutSelectorTest {
         rank: Int,
         points: List<ReferencePathLabelPoint>,
         radius: Double,
+        bounds: ReferenceScreenRect? = null,
     ) = Candidate(
         token = token,
         occurrenceId = occurrence,
@@ -128,7 +147,7 @@ class ReferenceLabelLayoutSelectorTest {
         collisionShape = ReferenceLabelCollisionShape.Path(
             points = points,
             radiusPx = radius,
-            bounds = rect(
+            bounds = bounds ?: rect(
                 left = points.minOf { it.x } - radius,
                 top = points.minOf { it.y } - radius,
                 right = points.maxOf { it.x } + radius,

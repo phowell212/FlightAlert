@@ -106,9 +106,26 @@ internal object ReferenceLabelLayoutSelector {
                     require(point.x.isFinite() && point.y.isFinite()) {
                         "collision path coordinates must be finite"
                     }
+                    require(boundsEncloseExpandedPoint(shape.bounds, point, shape.radiusPx)) {
+                        "collision path bounds must enclose every radius-expanded point"
+                    }
                 }
             }
         }
+    }
+
+    private fun boundsEncloseExpandedPoint(
+        bounds: ReferenceScreenRect,
+        point: ReferencePathLabelPoint,
+        radiusPx: Double,
+    ): Boolean {
+        val left = point.x - radiusPx
+        val top = point.y - radiusPx
+        val right = point.x + radiusPx
+        val bottom = point.y + radiusPx
+        return left.isFinite() && top.isFinite() && right.isFinite() && bottom.isFinite() &&
+            bounds.left <= left && bounds.top <= top &&
+            bounds.right >= right && bounds.bottom >= bottom
     }
 
     private fun validateRect(rect: ReferenceScreenRect) {
@@ -172,22 +189,54 @@ internal object ReferenceLabelLayoutSelector {
     private fun pathCollidesWithBox(
         path: ReferenceLabelCollisionShape.Path,
         box: ReferenceScreenRect,
-    ): Boolean = path.points.zipWithNext().any { (start, end) ->
-        segmentRectDistance(start, end, box) <= path.radiusPx
+    ): Boolean {
+        if (!touchesOrOverlaps(path.bounds, box)) return false
+        var index = 0
+        while (index < path.points.lastIndex) {
+            if (
+                segmentRectDistance(path.points[index], path.points[index + 1], box) <=
+                path.radiusPx
+            ) {
+                return true
+            }
+            index++
+        }
+        return false
     }
 
     private fun pathsCollide(
         first: ReferenceLabelCollisionShape.Path,
         second: ReferenceLabelCollisionShape.Path,
     ): Boolean {
+        if (!touchesOrOverlaps(first.bounds, second.bounds)) return false
         val combinedRadius = first.radiusPx + second.radiusPx
         if (!combinedRadius.isFinite()) return true
-        return first.points.zipWithNext().any { (firstStart, firstEnd) ->
-            second.points.zipWithNext().any { (secondStart, secondEnd) ->
-                segmentDistance(firstStart, firstEnd, secondStart, secondEnd) <= combinedRadius
+        var firstIndex = 0
+        while (firstIndex < first.points.lastIndex) {
+            var secondIndex = 0
+            while (secondIndex < second.points.lastIndex) {
+                if (
+                    segmentDistance(
+                        first.points[firstIndex],
+                        first.points[firstIndex + 1],
+                        second.points[secondIndex],
+                        second.points[secondIndex + 1],
+                    ) <= combinedRadius
+                ) {
+                    return true
+                }
+                secondIndex++
             }
+            firstIndex++
         }
+        return false
     }
+
+    private fun touchesOrOverlaps(
+        first: ReferenceScreenRect,
+        second: ReferenceScreenRect,
+    ): Boolean = first.left <= second.right && second.left <= first.right &&
+        first.top <= second.bottom && second.top <= first.bottom
 
     private fun segmentRectDistance(
         start: ReferencePathLabelPoint,
