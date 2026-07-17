@@ -256,6 +256,240 @@ class ReferenceLabelRuntimePresentationBindingTest {
     }
 
     @Test
+    fun duplicateLineMembershipCannotSkipTheRecordCursorAdvance() {
+        val source = renderer_source()
+        val drawLabels = source_section(
+            source,
+            "private fun draw_labels",
+            "private fun line_label_candidates",
+        )
+        val duplicateGate = drawLabels.indexOf("record.candidate_id in planned_label_candidate_ids")
+        val cursorAdvance = drawLabels.indexOf("record_index++", startIndex = duplicateGate)
+
+        assertTrue("missing duplicate line-membership gate", duplicateGate >= 0)
+        assertTrue("missing record cursor advance after duplicate gate", cursorAdvance > duplicateGate)
+        assertFalse(
+            "duplicate line membership must not continue before advancing the record cursor",
+            drawLabels.substring(duplicateGate, cursorAdvance).contains("continue"),
+        )
+    }
+
+    @Test
+    fun lineGeometryIsPreparedOnceBeforeTextFitAttempts() {
+        val source = renderer_source()
+        val lineCandidates = source_section(
+            source,
+            "private fun line_label_candidates",
+            "private fun point_label_candidate",
+        )
+        val preparation = lineCandidates.indexOf("ReferenceVisiblePathProjector.prepare(")
+        val attemptLoop = lineCandidates.indexOf("for (attempt_index in 0 until")
+
+        assertTrue("missing visible-path preparation", preparation >= 0)
+        assertTrue("visible path must be prepared before text-fit attempts", preparation < attemptLoop)
+        assertFalse(lineCandidates.contains("List(ring.point_count)"))
+        assertTrue(lineCandidates.contains("ReferencePathLabelPlanner.planPrepared("))
+    }
+
+    @Test
+    fun rawPathProjectionMaterializesPointsOnlyAfterAVisibleSegmentIsFound() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferenceVisiblePathProjector.kt",
+        ).readText()
+        val preparePart = source_section(
+            source,
+            "private fun preparePart",
+            "private fun prepareProjectedPart",
+        )
+        val visibleClip = preparePart.indexOf(
+            "if (length * (clip.endFraction - clip.startFraction) > epsilon)",
+        )
+        val firstPointMaterialization = preparePart.indexOf("ReferencePathLabelPoint(")
+
+        assertTrue("missing retained visible-segment branch", visibleClip >= 0)
+        assertTrue(
+            "raw vertices must stay primitive until a visible segment is retained",
+            firstPointMaterialization > visibleClip,
+        )
+        assertFalse("raw projection must not allocate through a per-vertex point helper", preparePart.contains("fun point("))
+    }
+
+    @Test
+    fun curvedSubpathExtractionDoesNotRebuildPreparedSegmentsPerPlacement() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val centeredSubpath = source_section(
+            source,
+            "private fun centeredSubpath",
+            "private fun addCapsuleSupportIntervals",
+        )
+
+        assertTrue(centeredSubpath.contains("fullLength: Double"))
+        assertFalse(centeredSubpath.contains("completePartGeometry("))
+        assertFalse(centeredSubpath.contains("ReferencePreparedPathSegment("))
+    }
+
+    @Test
+    fun curvedFailoverQueueBuildsExactBoundariesWithoutCollectionPipelines() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val queueBuilder = source_section(
+            source,
+            "private fun createFailoverQueue",
+            "fun plan(request:",
+        )
+
+        assertTrue(queueBuilder.contains("LongArray("))
+        assertTrue(queueBuilder.contains("java.util.Arrays.sort(boundaries)"))
+        assertFalse(queueBuilder.contains("fastSpans.map"))
+        assertFalse(queueBuilder.contains("listOf(lowerQ8, upperQ8)"))
+        assertFalse(queueBuilder.contains(".distinct()"))
+        assertFalse(queueBuilder.contains(".sorted()"))
+    }
+
+    @Test
+    fun curvedClearanceChecksSegmentsAndRectangleCornersWithoutTemporaryCollections() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val clearance = source_section(
+            source,
+            "private fun minimumClearance",
+            "private fun placement(",
+        )
+
+        assertTrue(clearance.contains("for (segmentIndex in 0 until path.lastIndex)"))
+        assertTrue(clearance.contains("rect.left, rect.top"))
+        assertFalse(clearance.contains("zipWithNext"))
+        assertFalse(clearance.contains("val corners = listOf"))
+        assertFalse(clearance.contains("ReferencePathLabelPoint(rect."))
+    }
+
+    @Test
+    fun sourceSupportQueriesUseThePreparedExactSegmentIndex() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val sourceSupport = source_section(
+            source,
+            "private fun segmentHasSourceSupport",
+            "private fun simplifyPresentationPath",
+        )
+
+        assertTrue(sourceSupport.contains("part.supportIndex.queryInto("))
+        assertTrue(sourceSupport.contains("part.supportIndex.matchAt("))
+        assertTrue(sourceSupport.contains("workspace.segmentQueryScratch"))
+        assertFalse(sourceSupport.contains("part.supportIndex.query("))
+        assertFalse(sourceSupport.contains("sourceStart = ReferencePathLabelPoint("))
+        assertFalse(sourceSupport.contains("sourceEnd = ReferencePathLabelPoint("))
+        assertFalse(sourceSupport.contains("for (index in 0 until sourcePath.lastIndex)"))
+    }
+
+    @Test
+    fun sourceSupportMergesIntervalsOnlineAndStopsAtExactWholeCoverage() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val sourceSupport = source_section(
+            source,
+            "private fun segmentHasSourceSupport",
+            "private fun simplifyPresentationPath",
+        )
+
+        assertTrue(sourceSupport.contains("if (workspace.coversWholeOnline()) return true"))
+        assertTrue(sourceSupport.contains("return workspace.coversWholeAfterAll()"))
+        assertFalse(sourceSupport.contains("workspace.sort()"))
+    }
+
+    @Test
+    fun tangentFallbackUsesPrimitiveChecksBeforeMaterializingAnAcceptedPath() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val tangent = source_section(
+            source,
+            "private fun tangentPlacements",
+            "private fun tangentOffsets",
+        )
+        val clearance = tangent.indexOf("minimumClearanceForSegment(")
+        val support = tangent.indexOf("segmentHasSourceSupport(")
+        val materialization = tangent.indexOf("val path = listOf(")
+
+        assertTrue("tangent clearance must be checked before source support", clearance >= 0 && clearance < support)
+        assertTrue("accepted tangent path must be materialized only after primitive checks", support < materialization)
+        assertTrue(tangent.contains("ReferenceTangentViewportSupport.isGuaranteed(request)"))
+    }
+
+    @Test
+    fun sourceSupportPrunesTreeBranchesByTheExactSourceOrdinalWindow() {
+        val planner = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val sourceSupport = source_section(
+            planner,
+            "private fun segmentHasSourceSupport",
+            "private fun simplifyPresentationPath",
+        )
+        val index = File(
+            "app/src/main/java/com/flightalert/map/ReferenceScreenSegmentAabbIndex.kt",
+        ).readText()
+
+        assertTrue(sourceSupport.contains("ReferenceSourceSegmentOrdinalWindow.startInclusive("))
+        assertTrue(sourceSupport.contains("ReferenceSourceSegmentOrdinalWindow.endExclusive("))
+        assertTrue(sourceSupport.contains("sourceOrdinalStartInclusive = sourceOrdinalStartInclusive"))
+        assertTrue(sourceSupport.contains("sourceOrdinalEndExclusive = sourceOrdinalEndExclusive"))
+        assertTrue(index.contains("minimumSourceOrdinal"))
+        assertTrue(index.contains("maximumSourceOrdinal"))
+        val ordinalPrune = index.indexOf("node.maximumSourceOrdinal < sourceOrdinalStartInclusive")
+        val spatialPrune = index.indexOf("!node.bounds.intersects")
+        assertTrue("ordinal-disjoint nodes must be pruned before spatial work", ordinalPrune >= 0)
+        assertTrue("ordinal pruning must precede spatial pruning", ordinalPrune < spatialPrune)
+    }
+
+    @Test
+    fun curvedOffsetsRejectClearanceBeforeRunningExactSourceSupport() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val curved = source_section(
+            source,
+            "private fun curvedPlacementAtCenter",
+            "private fun curvedNormalOffsets",
+        )
+        val clearance = curved.indexOf("minimumClearance(")
+        val support = curved.indexOf("pathHasSourceSupport(")
+
+        assertTrue("curved clearance must be checked before source support", clearance >= 0)
+        assertTrue("curved clearance must precede source support", clearance < support)
+    }
+
+    @Test
+    fun tangentViewportGuaranteeIsHoistedAndAccountsForClearanceTolerance() {
+        val source = File(
+            "app/src/main/java/com/flightalert/map/ReferencePathLabelPlanner.kt",
+        ).readText()
+        val tangent = source_section(
+            source,
+            "private fun tangentPlacements",
+            "private fun tangentOffsets",
+        )
+        val guarantee = source_section(
+            source,
+            "internal object ReferenceTangentViewportSupport",
+            "internal object ReferenceLocalPathBend",
+        )
+
+        val hoisted = tangent.indexOf("val sourceSupportGuaranteedByViewport =")
+        val centerLoop = tangent.indexOf("centerLoop@ for")
+        assertTrue("viewport guarantee must be computed once", hoisted >= 0 && hoisted < centerLoop)
+        assertTrue(guarantee.contains("request.edgeClearancePx - Epsilon"))
+        assertTrue(guarantee.contains("request.maximumTangentSourceDistancePx >= hypot"))
+        assertFalse(guarantee.contains("request.maximumTangentSourceDistancePx + Epsilon"))
+    }
+
+    @Test
     fun waterPathsRetrySmallerReadableTextButNeverFloatAwayFromTheirSource() {
         val source = renderer_source()
         val line_candidates = source_section(

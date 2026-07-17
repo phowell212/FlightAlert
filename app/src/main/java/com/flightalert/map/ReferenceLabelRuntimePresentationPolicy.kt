@@ -271,7 +271,11 @@ internal object ReferenceLabelRuntimePresentationPolicy {
             }
             SemanticSubtype.STREAM_CREEK,
             SemanticSubtype.UNSPECIFIED_WATERCOURSE -> when (tier) {
-                ProminenceTier.GLOBAL_MAJOR -> ZoomFadeBand(fadeInStart = 975, fadeInEnd = 1_010)
+                ProminenceTier.GLOBAL_MAJOR -> if (subtype == SemanticSubtype.STREAM_CREEK) {
+                    ZoomFadeBand(fadeInStart = 1_035, fadeInEnd = 1_070)
+                } else {
+                    ZoomFadeBand(fadeInStart = 975, fadeInEnd = 1_010)
+                }
                 ProminenceTier.REGIONAL_MAJOR -> ZoomFadeBand(fadeInStart = 1_050, fadeInEnd = 1_085)
                 ProminenceTier.LOCAL -> ZoomFadeBand(fadeInStart = 1_125, fadeInEnd = 1_160)
                 ProminenceTier.FINE -> ZoomFadeBand(fadeInStart = 1_200, fadeInEnd = 1_235)

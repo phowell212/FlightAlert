@@ -842,36 +842,35 @@ internal class ReferenceDictionaryOverlayRenderer(
                 val record_ref = label_record_refs[record_index]
                 val tile = record_ref.tile
                 val record = record_ref.record
-                val style = label_style_for(record, label_text_scale, viewport.zoom)
-                if (
-                    record.line_label &&
-                    record.geometry?.rings?.any { ring -> ring.point_count >= 2 } == true
-                ) {
+                val line_candidate_already_planned = record.line_label &&
+                    record.candidate_id != null &&
+                    record.candidate_id in planned_label_candidate_ids
+                if (!line_candidate_already_planned) {
+                    val style = label_style_for(record, label_text_scale, viewport.zoom)
                     if (
-                        record.candidate_id != null &&
-                        record.candidate_id in planned_label_candidate_ids
+                        record.line_label &&
+                        record.geometry?.rings?.any { ring -> ring.point_count >= 2 } == true
                     ) {
-                        continue
-                    }
-                    val planned_candidates = line_label_candidates(
-                        viewport,
-                        tile,
-                        record,
-                        style,
-                        label_text_scale,
-                        label_avoid_rects,
-                    )
-                    if (planned_candidates.isNotEmpty()) {
-                        record.candidate_id?.let(planned_label_candidate_ids::add)
-                        label_candidates += planned_candidates
-                    }
-                } else if (!record.line_label) {
-                    point_label_candidate(viewport, tile, record, style)?.let { candidate ->
-                        if (
-                            record.candidate_id == null ||
-                            planned_label_candidate_ids.add(record.candidate_id)
-                        ) {
-                            label_candidates += candidate
+                        val planned_candidates = line_label_candidates(
+                            viewport,
+                            tile,
+                            record,
+                            style,
+                            label_text_scale,
+                            label_avoid_rects,
+                        )
+                        if (planned_candidates.isNotEmpty()) {
+                            record.candidate_id?.let(planned_label_candidate_ids::add)
+                            label_candidates += planned_candidates
+                        }
+                    } else if (!record.line_label) {
+                        point_label_candidate(viewport, tile, record, style)?.let { candidate ->
+                            if (
+                                record.candidate_id == null ||
+                                planned_label_candidate_ids.add(record.candidate_id)
+                            ) {
+                                label_candidates += candidate
+                            }
                         }
                     }
                 }
@@ -950,19 +949,29 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
     ): List<DictionaryLabelCandidate> {
         val is_water = record.is_water ?: (record.source_kind == "water")
-        val parts = record.geometry?.rings?.mapNotNull { ring ->
-            if (ring.point_count < 2) return@mapNotNull null
-            List(ring.point_count) { index ->
-                val point = project_point(
-                    viewport = viewport,
-                    tile = tile,
-                    local_x = ring.points[index * 2],
-                    local_y = ring.points[index * 2 + 1],
-                )
-                ReferencePathLabelPoint(point.x.toDouble(), point.y.toDouble())
-            }
-        }.orEmpty()
-        if (parts.isEmpty()) return emptyList()
+        val geometry = record.geometry ?: return emptyList()
+        val scale = 2.0.pow(viewport.zoom - tile.tile.coordinate.z)
+        val local_to_screen = (MAP_TILE_SIZE / DICTIONARY_EXTENT) * scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val prepared_path = ReferenceVisiblePathProjector.prepare(
+            parts = geometry.rings.mapIndexed { part_index, ring ->
+                ReferenceRawPathPart(part_index, ring.points, ring.point_count)
+            },
+            transform = ReferencePathProjectionTransform(
+                scaleX = local_to_screen,
+                scaleY = local_to_screen,
+                translateX = tile.draw_x * MAP_TILE_SIZE * scale - left_world,
+                translateY = tile.tile.coordinate.y * MAP_TILE_SIZE * scale - top_world,
+            ),
+            viewport = ReferenceScreenRect(
+                left = 0.0,
+                top = 0.0,
+                right = viewport.width.toDouble(),
+                bottom = viewport.height.toDouble(),
+            ),
+        )
+        if (prepared_path.parts.isEmpty()) return emptyList()
         val candidate_id = layout_candidate_id(record)
         val minimum_water_text_size_px = sp(
             MIN_WATER_LINE_TEXT_SIZE_SP * label_text_scale,
@@ -1024,7 +1033,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             val policy_edge_clearance = fitted_style.text_size *
                 ReferencePresentationPolicy.label_edge_clearance_milli_em / 1_000f
             val attempt_request = ReferencePathLabelRequest(
-                    parts = parts,
+                    parts = emptyList(),
                     viewport = ReferenceScreenRect(
                         left = 0.0,
                         top = 0.0,
@@ -1074,8 +1083,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                     allowTangentFallback = true,
                 )
             }
-            val attempt_placements = ReferencePathLabelPlanner.plan(
+            val attempt_placements = ReferencePathLabelPlanner.planPrepared(
                 attempt_request,
+                prepared_path,
             )
             val has_curved_placement = attempt_placements.any { placement ->
                 placement.mode == ReferencePathLabelPlacementMode.CURVED
@@ -1092,7 +1102,10 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
         if (placements.isEmpty()) {
             tangent_fallback_request?.let { fallback_request ->
-                val fallback_placements = ReferencePathLabelPlanner.plan(fallback_request)
+                val fallback_placements = ReferencePathLabelPlanner.planPrepared(
+                    fallback_request,
+                    prepared_path,
+                )
                 if (fallback_placements.isNotEmpty()) {
                     selected_style = tangent_fallback_style
                     selected_collision_radius = tangent_fallback_collision_radius

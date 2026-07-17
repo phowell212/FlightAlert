@@ -3,6 +3,7 @@ package com.flightalert.map
 import kotlin.math.abs
 import kotlin.math.hypot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -695,6 +696,75 @@ class ReferencePathLabelPlannerTest {
         )
 
         assertTrue(placements.isEmpty())
+    }
+
+    @Test
+    fun viewportSupportShortcutRequiresTheWholeToleranceExpandedDistance() {
+        val edgeClearance = 10.0
+        val expandedDistance = hypot(
+            viewport.right - viewport.left - (edgeClearance - 1e-9),
+            viewport.bottom - viewport.top - (edgeClearance - 1e-9),
+        )
+        val base = request(
+            parts = listOf(listOf(point(20.0, 150.0), point(280.0, 150.0))),
+            edgeClearancePx = edgeClearance,
+        )
+
+        assertFalse(
+            ReferenceTangentViewportSupport.isGuaranteed(
+                base.copy(maximumTangentSourceDistancePx = expandedDistance - 0.5e-9),
+            ),
+        )
+        assertTrue(
+            ReferenceTangentViewportSupport.isGuaranteed(
+                base.copy(maximumTangentSourceDistancePx = expandedDistance),
+            ),
+        )
+    }
+
+    @Test
+    fun localTangentBendNeverBridgesAnOffscreenSourceGap() {
+        val separated = ReferencePreparedPathPart(
+            partIndex = 0,
+            segments = listOf(
+                ReferencePreparedPathSegment(
+                    sourceIndex = 0,
+                    start = point(0.0, 0.0),
+                    end = point(10.0, 0.0),
+                    sourceStartDistance = 0.0,
+                    length = 10.0,
+                    visibleStartFraction = 0.0,
+                    visibleEndFraction = 1.0,
+                ),
+                ReferencePreparedPathSegment(
+                    sourceIndex = 2,
+                    start = point(100.0, 100.0),
+                    end = point(100.0, 110.0),
+                    sourceStartDistance = 210.0,
+                    length = 10.0,
+                    visibleStartFraction = 0.0,
+                    visibleEndFraction = 1.0,
+                ),
+            ),
+            fullLength = 220.0,
+        )
+        val contiguousAcrossSkippedZeroLengthSourcePoint = separated.copy(
+            segments = listOf(
+                separated.segments[0],
+                separated.segments[1].copy(
+                    start = point(10.0, 0.0),
+                    end = point(10.0, 10.0),
+                    sourceStartDistance = 10.0,
+                ),
+            ),
+            fullLength = 20.0,
+        )
+
+        assertEquals(0, ReferenceLocalPathBend.centiDegrees(separated, 10.0))
+        assertEquals(
+            9_000,
+            ReferenceLocalPathBend.centiDegrees(contiguousAcrossSkippedZeroLengthSourcePoint, 10.0),
+        )
     }
 
     @Test

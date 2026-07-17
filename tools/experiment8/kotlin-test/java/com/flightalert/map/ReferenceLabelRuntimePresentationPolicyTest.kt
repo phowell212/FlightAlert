@@ -192,6 +192,37 @@ class ReferenceLabelRuntimePresentationPolicyTest {
     }
 
     @Test
+    fun globalMajorCreeksWaitPastKentScaleThenFadeInContinuously() {
+        fun alphaAt(centizoom: Int): Int =
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.STREAM_CREEK,
+                ProminenceTier.GLOBAL_MAJOR,
+                currentCentizoom = centizoom,
+            )
+
+        assertEquals(0, alphaAt(1_032))
+        assertEquals(0, alphaAt(1_035))
+        assertEquals(29, alphaAt(1_036))
+        assertEquals(486, alphaAt(1_052))
+        assertEquals(971, alphaAt(1_069))
+        assertEquals(1_000, alphaAt(1_070))
+    }
+
+    @Test
+    fun unspecifiedWatercourseKeepsItsExistingGlobalMajorVisibilityBand() {
+        fun alphaAt(centizoom: Int): Int =
+            ReferenceLabelRuntimePresentationPolicy.visibilityAlphaMilli(
+                SemanticSubtype.UNSPECIFIED_WATERCOURSE,
+                ProminenceTier.GLOBAL_MAJOR,
+                currentCentizoom = centizoom,
+            )
+
+        assertEquals(0, alphaAt(975))
+        assertEquals(486, alphaAt(992))
+        assertEquals(1_000, alphaAt(1_010))
+    }
+
+    @Test
     fun phoneTypographyIsFeatureSpecificAndUsesTheSharedThinHalo() {
         val river = ReferenceLabelRuntimePresentationPolicy.resolve(
             SemanticSubtype.RIVER,
