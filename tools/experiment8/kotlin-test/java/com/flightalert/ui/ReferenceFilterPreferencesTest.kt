@@ -53,6 +53,11 @@ class ReferenceFilterPreferencesTest {
     }
 
     @Test
+    fun mapLabelsDefaultToThePhoneSizedBaseline() {
+        assertEquals(1f, FlightAlertSettings.DEFAULT_MAP_LABEL_TEXT_SCALE)
+    }
+
+    @Test
     fun appDefaultsKeepOnlyCoastlinesAndDefaultProtectedLandRowsOff() {
         val defaults = ReferenceFilterPreferences.app_defaults()
 

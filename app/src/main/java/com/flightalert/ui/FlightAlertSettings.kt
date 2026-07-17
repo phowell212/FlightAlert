@@ -71,7 +71,7 @@ object FlightAlertSettings {
     const val DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE = true
     const val DEFAULT_MAP_LABELS_ENABLED = false
     const val DEFAULT_MAP_BORDERS_ENABLED = true
-    const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1.35f
+    const val DEFAULT_MAP_LABEL_TEXT_SCALE = 1f
     const val DEFAULT_LAYER_PLACE_LABELS_ENABLED = true
     const val DEFAULT_LAYER_WATER_LABELS_ENABLED = true
     const val DEFAULT_LAYER_REGION_LABELS_ENABLED = true
