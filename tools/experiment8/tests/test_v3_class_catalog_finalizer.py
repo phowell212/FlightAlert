@@ -153,6 +153,32 @@ def _write_authority_v2_merged_package(
 
 
 class V3ClassCatalogFinalizerTests(unittest.TestCase):
+    def test_package_audit_uses_fast_raw_envelope_extraction(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer
+
+        tile = TileKey(1, 0, 0)
+        record = _line_renderer_record(tile)
+        payload = encode_tile_payload(tile, [RendererTileRecord(record, None)])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_directory = root / "package"
+            _write_v3_package(package_directory, {tile: payload}, (record,))
+            package = v3_class_catalog_finalizer._load_package(package_directory)
+            with mock.patch.object(
+                v3_class_catalog_finalizer,
+                "decode_tile_payload",
+                side_effect=AssertionError("strict renderer decode is too slow here"),
+            ):
+                audit = v3_class_catalog_finalizer._audit_package(package)
+
+            self.assertEqual(audit.renderer_record_count, 1)
+            self.assertEqual(
+                audit.subtype_counts[
+                    SemanticSubtype(record.variant.semantic_subtype)
+                ].posting_count,
+                1,
+            )
+
     def test_authority_v2_receipt_and_final_six_file_accounting_are_preserved(
         self,
     ) -> None:
@@ -226,6 +252,29 @@ class V3ClassCatalogFinalizerTests(unittest.TestCase):
             self.assertEqual(
                 _canonical_json_bytes(receipt),
                 (package / RECEIPT_FILE_NAME).read_bytes(),
+            )
+
+    def test_authority_v2_finalization_uses_authenticated_merge_audit(self) -> None:
+        from tools.experiment8 import v3_class_catalog_finalizer
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _write_authority_v2_merged_package(Path(temporary))
+
+            with mock.patch.object(
+                v3_class_catalog_finalizer.sqlite3,
+                "connect",
+                side_effect=AssertionError(
+                    "authority merge receipt already binds semantic audit"
+                ),
+            ):
+                result = v3_class_catalog_finalizer.finalize_v3_class_catalog(
+                    package
+                )
+
+            self.assertEqual(
+                "flightalert.experiment8."
+                "v3-class-catalog-finalization-receipt.v2",
+                result.receipt["schema"],
             )
 
     def test_authority_v2_merge_receipt_tamper_fails_before_publication(self) -> None:

@@ -44,6 +44,7 @@ from .renderer_tile_package import (
 )
 from .semantic_model import renderer_order_key, renderer_record_bytes, variant_fingerprint
 from .sourced_text import UNICODE_SCRIPT_PROFILE_SHA256
+from .v3_package_merger import _extract_envelopes_fast
 
 
 CATALOG_FILE_NAME = "class-catalog.bin"
@@ -76,6 +77,7 @@ _WATERWAY_BUILD_RECEIPT_FIELDS = {
     "peakResources",
     "projection",
     "rendererSemanticStreamSha256",
+    "rendererTextAudit",
     "schema",
     "source",
 }
@@ -1224,6 +1226,104 @@ def _inflate_exact(compressed: bytes, raw_length: int, tile: TileKey) -> bytes:
     return raw
 
 
+def _audit_from_authority_merge_receipt(package: _Package) -> _Audit | None:
+    receipt = package.authority_merge_receipt
+    if receipt is None:
+        return None
+    coverage = _exact_mapping(
+        receipt.get("coverage"), "V3 authority merge coverage"
+    )
+    present_tile_count = _exact_int(
+        coverage.get("presentTileCount"),
+        "V3 authority merge present tile count",
+        0,
+        package.tile_count,
+    )
+    tile_count = _exact_int(
+        coverage.get("tileCount"),
+        "V3 authority merge tile count",
+        package.tile_count,
+        package.tile_count,
+    )
+    subtype_counts_value = receipt.get("subtypeCounts")
+    if type(subtype_counts_value) is not list:
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge subtype counts must be a list"
+        )
+    counts: dict[SemanticSubtype, SubtypeCatalogCounts] = {}
+    for index, item in enumerate(subtype_counts_value):
+        count = _exact_mapping(
+            item, f"V3 authority merge subtypeCounts[{index}]"
+        )
+        if set(count) != {
+            "canonicalVariantIds",
+            "distinctFeatureIds",
+            "postings",
+            "semanticSubtype",
+            "semanticSubtypeName",
+        }:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge subtype count fields differ"
+            )
+        subtype_value = _exact_int(
+            count.get("semanticSubtype"),
+            "V3 authority merge semantic subtype",
+            0,
+            (1 << 31) - 1,
+        )
+        try:
+            subtype = SemanticSubtype(subtype_value)
+        except ValueError as error:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge semantic subtype is unknown"
+            ) from error
+        if count.get("semanticSubtypeName") != subtype.name:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge semantic subtype name differs"
+            )
+        if subtype in counts:
+            raise V3ClassCatalogFinalizationError(
+                "V3 authority merge subtype count repeats"
+            )
+        counts[subtype] = SubtypeCatalogCounts(
+            distinct_feature_count=_exact_int(
+                count.get("distinctFeatureIds"),
+                "V3 authority merge distinct feature count",
+                0,
+                _ANDROID_MAX_RECORD_OFFSET,
+            ),
+            canonical_variant_count=_exact_int(
+                count.get("canonicalVariantIds"),
+                "V3 authority merge canonical variant count",
+                0,
+                _ANDROID_MAX_RECORD_OFFSET,
+            ),
+            posting_count=_exact_int(
+                count.get("postings"),
+                "V3 authority merge posting count",
+                0,
+                _ANDROID_MAX_RECORD_OFFSET,
+            ),
+        )
+    if set(counts) != set(SemanticSubtype):
+        raise V3ClassCatalogFinalizationError(
+            "V3 authority merge subtype counts are incomplete"
+        )
+    renderer_record_count = sum(
+        item.posting_count for item in counts.values()
+    )
+    return _Audit(
+        semantic_sha256=_sha256_text(
+            receipt.get("rendererSemanticStreamSha256"),
+            "V3 authority merge renderer semantic stream SHA-256",
+        ),
+        subtype_counts=counts,
+        present_tile_count=present_tile_count,
+        missing_tile_count=tile_count - present_tile_count,
+        renderer_record_count=renderer_record_count,
+    )
+
+
 def _audit_package(package: _Package) -> _Audit:
     present_tiles, missing_tiles = _validate_index(package)
     semantic_digest = hashlib.sha256()
@@ -1298,45 +1398,35 @@ def _audit_package(package: _Package) -> _Audit:
                             f"V3 tile {tile.z}/{tile.x}/{tile.y} integrity hash differs"
                         )
                     try:
-                        decoded = decode_tile_payload(tile, payload)
+                        ordered = sorted(
+                            _extract_envelopes_fast(tile, payload),
+                            key=lambda item: item.order_key,
+                        )
                     except ValueError as error:
                         raise V3ClassCatalogFinalizationError(
                             f"V3 tile {tile.z}/{tile.x}/{tile.y} is not canonical: {error}"
                         ) from error
-                    ordered = sorted(
-                        (item.renderer_record for item in decoded.records),
-                        key=renderer_order_key,
-                    )
                     feature_rows: list[tuple[int, bytes]] = []
                     variant_rows: list[tuple[int, bytes]] = []
                     address_rows: list[tuple[bytes, bytes]] = []
                     for record in ordered:
-                        try:
-                            subtype = SemanticSubtype(record.variant.semantic_subtype)
-                        except ValueError as error:
-                            raise V3ClassCatalogFinalizationError(
-                                "V3 renderer semantic subtype is outside the 23-class policy"
-                            ) from error
-                        canonical = renderer_record_bytes(record)
-                        body = struct.pack("<Q", tile.packed) + canonical
+                        body = struct.pack("<Q", tile.packed) + record.renderer_bytes
                         if len(body) > (1 << 32) - 1:
                             raise V3ClassCatalogFinalizationError(
                                 "V3 semantic stream item exceeds its u32 bound"
                             )
                         semantic_digest.update(struct.pack("<I", len(body)))
                         semantic_digest.update(body)
-                        posting_counts[subtype] += 1
+                        posting_counts[record.subtype] += 1
                         renderer_record_count += 1
-                        feature_identity = record.posting.feature_id.to_bytes(8, "big")
-                        variant_identity = record.variant.canonical_variant_id.to_bytes(
-                            8, "big"
-                        )
-                        feature_rows.append((subtype.value, feature_identity))
-                        variant_rows.append((subtype.value, variant_identity))
+                        feature_identity = record.feature_id.to_bytes(8, "big")
+                        variant_identity = record.variant_id.to_bytes(8, "big")
+                        feature_rows.append((record.subtype.value, feature_identity))
+                        variant_rows.append((record.subtype.value, variant_identity))
                         address_rows.append(
                             (
                                 variant_identity,
-                                variant_fingerprint(record.variant).full_sha256,
+                                record.variant_full_sha256,
                             )
                         )
                     connection.executemany(
@@ -2462,7 +2552,7 @@ def finalize_v3_class_catalog(
     if publication_hook is not None and not callable(publication_hook):
         raise V3ClassCatalogFinalizationError("publication hook must be callable")
     package = _load_package(package_directory)
-    audit = _audit_package(package)
+    audit = _audit_from_authority_merge_receipt(package) or _audit_package(package)
     if audit.semantic_sha256 != package.renderer_semantic_stream_sha256:
         raise V3ClassCatalogFinalizationError(
             "V3 renderer semantic stream SHA-256 differs from the manifest"
