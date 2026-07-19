@@ -223,6 +223,27 @@ class ReferenceLabelLayoutSelectorTest {
         )
     }
 
+    @Test
+    fun canonicalCandidateIdBreaksEqualSemanticTiesRegardlessOfDecodeOrder() {
+        val higherCandidateId = box(
+            token = 2,
+            occurrence = occurrence(92uL),
+            priority = 10,
+            rect = rect(100.0, 100.0, 180.0, 140.0),
+        ).copy(featureId = 900uL)
+        val lowerCandidateId = box(
+            token = 1,
+            occurrence = occurrence(91uL),
+            priority = 10,
+            rect = rect(100.0, 100.0, 180.0, 140.0),
+        ).copy(featureId = 900uL)
+
+        assertEquals(
+            listOf(1),
+            select(higherCandidateId, lowerCandidateId).map { it.token },
+        )
+    }
+
     private fun occurrence(candidateId: ULong, repeatOrdinal: Long = 0L) =
         ReferenceLabelOccurrenceId(candidateId, repeatOrdinal)
 

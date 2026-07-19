@@ -518,6 +518,38 @@ class ReferenceLabelRuntimePresentationBindingTest {
         assertTrue(line_candidates.contains("viewport_diagonal"))
     }
 
+    @Test
+    fun retainedFrameStoresTheRevisionCapturedBeforeItsTileSnapshot() {
+        val source = renderer_source()
+        val draw = source_section(source, "    fun draw(", "    fun content_revision()")
+        val snapshotRevision =
+            draw.indexOf("val draw_content_revision = content_revision.get()")
+        val tileSnapshot = draw.indexOf("for (tile in visible_tiles)")
+        val renderCall = draw.indexOf("val rendered = render_retained_frame(")
+
+        assertTrue("revision must be captured before cached tiles", snapshotRevision >= 0)
+        assertTrue("tile snapshot must follow revision capture", tileSnapshot > snapshotRevision)
+        assertTrue("retained render must follow the tile snapshot", renderCall > tileSnapshot)
+        assertTrue(
+            "retained render must receive the tile snapshot revision",
+            draw.substring(renderCall).contains(
+                "content_revision_snapshot = draw_content_revision",
+            ),
+        )
+
+        val render = source_section(
+            source,
+            "private fun render_retained_frame",
+            "private fun draw_live_labels",
+        )
+        assertTrue(render.contains("content_revision_snapshot: Long"))
+        assertTrue(render.contains("content_revision = content_revision_snapshot"))
+        assertFalse(
+            "a revision read after drawing can bless a stale retained bitmap",
+            render.contains("content_revision = content_revision.get()"),
+        )
+    }
+
     private fun renderer_source(): String = File(
         "app/src/main/java/com/flightalert/map/ReferenceDictionaryOverlayRenderer.kt",
     ).readText().replace("\r\n", "\n").replace('\r', '\n')

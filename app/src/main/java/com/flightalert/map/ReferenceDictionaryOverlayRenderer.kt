@@ -66,6 +66,8 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val line_label_position = FloatArray(2)
     private val visible_tiles = ArrayList<VisibleDictionaryTile>(32)
     private val draw_tiles = ArrayList<DictionaryTileDrawRef>(32)
+    private val boundary_record_refs = ArrayList<DictionaryLineRecordRef>(256)
+    private val boundary_occurrence_ids = HashSet<ReferenceBoundaryOccurrenceKey>(256)
     private val label_record_refs = ArrayList<DictionaryLabelRecordRef>(512)
     private val label_candidates = ArrayList<DictionaryLabelCandidate>(256)
     private val planned_label_candidate_ids = HashSet<ULong>(256)
@@ -74,6 +76,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val desired_tile_keys = HashSet<String>()
     private val frame_destination = RectF()
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+    private val typeface_cache = HashMap<Int, Typeface>(8)
     private val content_revision = AtomicLong()
     private val request_generation = AtomicLong()
     private val tile_cache =
@@ -135,6 +138,10 @@ internal class ReferenceDictionaryOverlayRenderer(
         val generation = update_desired_tile_keys()
 
         draw_tiles.clear()
+        // Capture before reading the cache. Any worker publication after this point advances
+        // content_revision, so a frame built from this snapshot cannot bless stale content as
+        // exact even if that publication races the bitmap render.
+        val draw_content_revision = content_revision.get()
         var requested = 0
         var missing = 0
         var core_missing = 0
@@ -233,7 +240,12 @@ internal class ReferenceDictionaryOverlayRenderer(
 
         if (ready && !interaction_active) {
             val exact = retained_frame
-            if (exact != null && exact.matches_exact(viewport, options)) {
+            if (exact != null && exact.matches_exact(
+                    viewport,
+                    options,
+                    content_revision.get(),
+                )
+            ) {
                 draw_retained_frame_with_transition(canvas, viewport, exact, now_ms)
                 val labels_drawn = draw_live_labels(
                     canvas = canvas,
@@ -271,7 +283,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                 region_labels_enabled = region_labels_enabled,
                 public_lands_enabled = public_lands_enabled,
                 filter_mask = filter_mask,
-                options = options
+                options = options,
+                content_revision_snapshot = draw_content_revision,
             )
             if (rendered != null) {
                 replace_retained_frame(rendered, fade_from_previous = true, now_ms = now_ms)
@@ -516,7 +529,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         region_labels_enabled: Boolean,
         public_lands_enabled: Boolean,
         filter_mask: ReferenceFilterMask,
-        options: RetainedReferenceOptions
+        options: RetainedReferenceOptions,
+        content_revision_snapshot: Long,
     ): RetainedReferenceFrame? {
         val width = ceil(viewport.width).toInt().coerceAtLeast(1)
         val height = ceil(viewport.height).toInt().coerceAtLeast(1)
@@ -554,7 +568,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             visible_width = width,
             visible_height = height,
             options = options,
-            content_revision = content_revision.get(),
+            content_revision = content_revision_snapshot,
             boundaries_drawn = counts.boundaries,
             labels_drawn = counts.labels
         )
@@ -741,16 +755,59 @@ internal class ReferenceDictionaryOverlayRenderer(
         )
         var boundaries_drawn = 0
         if (borders_enabled) {
+            boundary_record_refs.clear()
+            boundary_occurrence_ids.clear()
+            val current_centizoom = ReferencePresentationPolicy.centizoom(viewport.zoom)
             for (tile in tiles) {
                 for (record in tile.tile.boundaries) {
                     if (!filter_mask.allows(record.filter_id, groups.enabled(record.layer_group))) {
                         continue
                     }
-                    if (draw_path_record(canvas, viewport, tile, record.geometry, record.style)) {
-                        boundaries_drawn++
+                    val visibility_alpha_milli = record.visibility_rule?.let { rule ->
+                        ReferencePresentationPolicy.outline_alpha_milli(rule, current_centizoom)
+                    } ?: ReferencePresentationPolicy.full_alpha_milli
+                    if (visibility_alpha_milli <= 0) continue
+                    val rendered_world_copy =
+                        ReferenceBoundaryOccurrenceSelector.renderedWorldCopy(
+                            zoom = tile.tile.coordinate.z,
+                            requestedTileX = tile.tile.coordinate.x,
+                            drawTileX = tile.draw_x,
+                            postingWorldWrap = record.posting_world_wrap,
+                        )
+                    if (!ReferenceBoundaryOccurrenceSelector.admit(
+                            boundary_occurrence_ids,
+                            record.dedupe_id,
+                            rendered_world_copy,
+                        )
+                    ) {
+                        continue
                     }
+                    boundary_record_refs += DictionaryLineRecordRef(
+                        tile = tile,
+                        record = record,
+                        visibility_alpha_milli = visibility_alpha_milli,
+                    )
                 }
             }
+            boundary_record_refs.sortWith(
+                compareBy<DictionaryLineRecordRef> { it.record.draw_order }
+                    .thenBy { it.record.priority }
+                    .thenBy { it.record.source_feature_id },
+            )
+            for (reference in boundary_record_refs) {
+                if (draw_path_record(
+                        canvas = canvas,
+                        viewport = viewport,
+                        tile = reference.tile,
+                        geometry = reference.record.geometry,
+                        style = reference.record.style,
+                        visibility_alpha_milli = reference.visibility_alpha_milli,
+                    )
+                ) {
+                    boundaries_drawn++
+                }
+            }
+            boundary_record_refs.clear()
         }
         val labels_drawn = if (labels_enabled) {
             draw_labels(
@@ -773,7 +830,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         viewport: Viewport,
         tile: DictionaryTileDrawRef,
         geometry: DictionaryGeometry?,
-        style: DictionaryLineStyle
+        style: DictionaryLineStyle,
+        visibility_alpha_milli: Int,
     ): Boolean {
         val rings = geometry?.rings ?: return false
         var drew = false
@@ -785,10 +843,16 @@ internal class ReferenceDictionaryOverlayRenderer(
             paint.strokeCap = style.stroke_cap
             paint.pathEffect = style.path_effect
             paint.strokeWidth = dp(style.stroke_width_dp + style.halo_width_dp)
-            paint.color = with_alpha(style.halo_color, style.halo_alpha)
+            paint.color = with_alpha(
+                style.halo_color,
+                scaled_alpha_byte(style.halo_alpha, visibility_alpha_milli),
+            )
             canvas.drawPath(path, paint)
             paint.strokeWidth = dp(style.stroke_width_dp)
-            paint.color = with_alpha(style.color, style.alpha)
+            paint.color = with_alpha(
+                style.color,
+                scaled_alpha_byte(style.alpha, visibility_alpha_milli),
+            )
             canvas.drawPath(path, paint)
             paint.pathEffect = null
             drew = true
@@ -1390,7 +1454,10 @@ internal class ReferenceDictionaryOverlayRenderer(
     ) {
         text_paint.isAntiAlias = true
         text_paint.isSubpixelText = true
-        text_paint.typeface = Typeface.create(Typeface.DEFAULT, font_weight, italic)
+        val typeface_key = font_weight * 2 + if (italic) 1 else 0
+        text_paint.typeface = typeface_cache.getOrPut(typeface_key) {
+            Typeface.create(Typeface.DEFAULT, font_weight, italic)
+        }
         text_paint.textAlign = Paint.Align.CENTER
         text_paint.textSize = text_size
         text_paint.textScaleX = 1f
@@ -1574,6 +1641,12 @@ internal class ReferenceDictionaryOverlayRenderer(
                         layer_group = binary_layer_group(model.filterId),
                         filter_id = model.filterId,
                         geometry = binary_geometry(model.geometry),
+                        visibility_rule = model.visibility,
+                        draw_order = model.drawOrder,
+                        priority = model.priority,
+                        source_feature_id = model.featureId,
+                        dedupe_id = model.dedupeId,
+                        posting_world_wrap = record.postingWorldWrap,
                         style = DictionaryLineStyle(
                             color = resolved.color_argb.toInt(),
                             stroke_width_dp = model.style.line_width_milli_dp / 1_000f,
@@ -1705,6 +1778,12 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private fun alpha_milli_to_byte(value: Int): Int {
         return ((value.coerceIn(0, 1_000) * 255) + 500) / 1_000
+    }
+
+    private fun scaled_alpha_byte(base_alpha: Int, visibility_alpha_milli: Int): Int {
+        return (
+            base_alpha.coerceIn(0, 255) * visibility_alpha_milli.coerceIn(0, 1_000) + 500
+            ) / 1_000
     }
 
     private fun parse_line_records(
@@ -2537,6 +2616,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         val core_visible: Boolean,
     )
 
+    private data class DictionaryLineRecordRef(
+        val tile: DictionaryTileDrawRef,
+        val record: DictionaryLineRecord,
+        val visibility_alpha_milli: Int,
+    )
+
     private data class DictionaryLabelRecordRef(
         val tile: DictionaryTileDrawRef,
         val record: DictionaryLabelRecord,
@@ -2558,6 +2643,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         val layer_group: ReferenceDictionaryLayerGroup,
         val filter_id: FilterId? = null,
         val geometry: DictionaryGeometry,
+        val visibility_rule: OutlineVisibilityRule? = null,
+        val draw_order: Int = 0,
+        val priority: Int = 0,
+        val source_feature_id: ULong = 0uL,
+        val dedupe_id: ULong? = null,
+        val posting_world_wrap: Int = 0,
         val style: DictionaryLineStyle
     )
 
@@ -2750,8 +2841,13 @@ internal class ReferenceDictionaryOverlayRenderer(
             return options == next
         }
 
-        fun matches_exact(viewport: Viewport, next: RetainedReferenceOptions): Boolean {
+        fun matches_exact(
+            viewport: Viewport,
+            next: RetainedReferenceOptions,
+            current_content_revision: Long,
+        ): Boolean {
             return matches_options(next) &&
+                    content_revision == current_content_revision &&
                     visible_width == ceil(viewport.width).toInt().coerceAtLeast(1) &&
                     visible_height == ceil(viewport.height).toInt().coerceAtLeast(1) &&
                     kotlin.math.abs(zoom - viewport.zoom) < EXACT_VIEWPORT_EPSILON &&

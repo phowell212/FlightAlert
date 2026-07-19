@@ -64,6 +64,7 @@ internal object ReferenceLabelLayoutSelector {
             .sortedWith(
                 compareBy<CandidateGroup<T>> { it.first.priority }
                     .thenBy { it.first.featureId }
+                    .thenBy { it.first.occurrenceId.candidateId }
                     .thenBy { it.first.occurrenceId.repeatOrdinal },
             )
 

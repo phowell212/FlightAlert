@@ -110,6 +110,22 @@ class ReferenceDictionaryBinaryTileCodecTest {
         assertEquals("label placement limits are invalid", labelError.message)
     }
 
+    @Test
+    fun postingWorldWrapSurvivesBinaryDecodeForRuntimeOccurrenceOwnership() {
+        val wrapped = lineTileBytes.copyOf()
+        val rendererStart = TILE_HEADER_BYTES + Int.SIZE_BYTES
+        val worldWrapOffset =
+            rendererStart + N8_HEADER_BYTES + ULong.SIZE_BYTES * 3
+        repeat(Int.SIZE_BYTES) { offset -> wrapped[worldWrapOffset + offset] = 0xff.toByte() }
+
+        val record = ReferenceDictionaryBinaryTileCodec.decode(
+            ReferenceDictionaryTileCoordinate(z = 1, x = 0, y = 0),
+            wrapped,
+        ).records.single()
+
+        assertEquals(-1, record.postingWorldWrap)
+    }
+
     private val cairoTileBytes = hex(
         "4641453854494c453100010000000000000000010000000b0200004e385431081122334455667788" +
             "da1772533acb1e46000000000000000400000000e60100004e385431040807060504030201d6b39d" +

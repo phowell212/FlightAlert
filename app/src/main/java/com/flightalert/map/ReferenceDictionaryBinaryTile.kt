@@ -70,6 +70,7 @@ internal data class ReferenceDictionaryBinaryRecord(
     val maximumZoomCenti: Int,
     val drawOrder: Int,
     val priority: Int,
+    val postingWorldWrap: Int = 0,
 )
 
 internal data class ReferenceDictionaryBinaryTile(
@@ -202,6 +203,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
             maximumZoomCenti = variant.maximumZoomCenti,
             drawOrder = variant.drawOrder,
             priority = variant.priority,
+            postingWorldWrap = worldWrap,
         )
     }
 

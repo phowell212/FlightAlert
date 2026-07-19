@@ -10,7 +10,6 @@ package com.flightalert.map
 
 import android.content.Context
 import android.os.SystemClock
-import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
@@ -281,7 +280,7 @@ internal class ReferenceDictionaryPackage private constructor(
     val info: ReferenceDictionaryPackageInfo,
     val reference_class_catalog: ReferenceClassCatalog,
     private val records_channel: FileChannel,
-    private val index_bytes: ByteArray,
+    private val index_reader: ReferenceDictionaryIndexReader,
     private val zoom_ranges: List<ReferenceDictionaryZoomRange>
 ) : Closeable {
     fun read_tile_payload(
@@ -300,6 +299,9 @@ internal class ReferenceDictionaryPackage private constructor(
         val entry = read_index_entry(ordinal) ?: return null
         if (entry.compressed_length <= 0 || entry.raw_length <= 0) {
             return null
+        }
+        if (entry.raw_length > MAX_RAW_TILE_BYTES) {
+            throw IOException("Reference dictionary tile exceeds its raw byte ceiling")
         }
         val compressed = read_record_bytes(entry.offset, entry.compressed_length)
         val raw_bytes = inflate_raw_deflate(
@@ -322,21 +324,15 @@ internal class ReferenceDictionaryPackage private constructor(
     }
 
     override fun close() {
-        records_channel.close()
+        try {
+            index_reader.close()
+        } finally {
+            records_channel.close()
+        }
     }
 
-    private fun read_index_entry(ordinal: Long): IndexEntry? {
-        val byte_offset = ordinal * INDEX_ENTRY_BYTES.toLong()
-        if (byte_offset < 0L || byte_offset + INDEX_ENTRY_BYTES > index_bytes.size) return null
-        val offset = byte_offset.toInt()
-        return IndexEntry(
-            offset = little_endian_long(index_bytes, offset),
-            compressed_length = little_endian_int(index_bytes, offset + 8),
-            raw_length = little_endian_int(index_bytes, offset + 12),
-            raw_hash32 = little_endian_int(index_bytes, offset + 16),
-            flags = little_endian_int(index_bytes, offset + 20)
-        )
-    }
+    private fun read_index_entry(ordinal: Long): ReferenceDictionaryIndexEntry? =
+        index_reader.read(ordinal)
 
     private fun read_record_bytes(offset: Long, length: Int): ByteArray {
         val bytes = ByteArray(length)
@@ -349,14 +345,6 @@ internal class ReferenceDictionaryPackage private constructor(
         }
         return bytes
     }
-
-    private data class IndexEntry(
-        val offset: Long,
-        val compressed_length: Int,
-        val raw_length: Int,
-        val raw_hash32: Int,
-        val flags: Int
-    )
 
     companion object {
         const val EXPERIMENT8_PACKAGE_ID = "world-experiment8-binary-v4"
@@ -456,19 +444,23 @@ internal class ReferenceDictionaryPackage private constructor(
                 presentation_policy_sha256 = manifest.presentation_policy_sha256,
                 read_catalog_bytes = read_catalog_bytes,
             )
+            val index_reader = ReferenceDictionaryIndexReader.open(
+                index_file = index_file,
+                expectedByteCount = expected_index_bytes,
+            )
             var opened_records: FileChannel? = null
             try {
-                val index_bytes = read_index_bytes(index_file, expected_index_bytes)
                 opened_records = FileInputStream(records_file).channel
                 return ReferenceDictionaryPackage(
                     info = manifest.info,
                     reference_class_catalog = reference_class_catalog,
                     records_channel = opened_records,
-                    index_bytes = index_bytes,
+                    index_reader = index_reader,
                     zoom_ranges = manifest.zoom_ranges,
                 )
             } catch (exception: Exception) {
                 opened_records?.close()
+                index_reader.close()
                 throw exception
             }
         }
@@ -529,37 +521,6 @@ internal class ReferenceDictionaryPackage private constructor(
 
         private fun JSONObject.exact_string(key: String): String? = opt(key) as? String
 
-        private fun read_index_bytes(index_file: File, expected_index_bytes: Long): ByteArray {
-            if (expected_index_bytes > Int.MAX_VALUE) {
-                throw IOException("Reference dictionary index is too large to load")
-            }
-            val bytes = ByteArray(expected_index_bytes.toInt())
-            FileInputStream(index_file).use { input ->
-                var offset = 0
-                while (offset < bytes.size) {
-                    val count = input.read(bytes, offset, bytes.size - offset)
-                    if (count < 0) throw IOException("Reference dictionary index ended early")
-                    offset += count
-                }
-            }
-            return bytes
-        }
-
-        private fun little_endian_int(bytes: ByteArray, offset: Int): Int {
-            return (bytes[offset].toInt() and 0xff) or
-                    ((bytes[offset + 1].toInt() and 0xff) shl 8) or
-                    ((bytes[offset + 2].toInt() and 0xff) shl 16) or
-                    ((bytes[offset + 3].toInt() and 0xff) shl 24)
-        }
-
-        private fun little_endian_long(bytes: ByteArray, offset: Int): Long {
-            var value = 0L
-            for (index in 0 until 8) {
-                value = value or ((bytes[offset + index].toLong() and 0xffL) shl (index * 8))
-            }
-            return value
-        }
-
         private fun parse_zoom_ranges(manifest: JSONObject): List<ReferenceDictionaryZoomRange> {
             val coverage = manifest.getJSONObject("coverage")
             val ranges = coverage.getJSONArray("zoomRanges")
@@ -588,28 +549,33 @@ internal class ReferenceDictionaryPackage private constructor(
             expected_size: Int
         ): ByteArray {
             val inflater = Inflater(true)
-            val output = ByteArrayOutputStream(expected_size.coerceAtLeast(256))
-            val buffer = ByteArray(INFLATE_BUFFER_BYTES)
+            val output = ByteArray(expected_size)
+            var output_offset = 0
+            var finished = false
             try {
                 inflater.setInput(compressed)
-                while (!inflater.finished()) {
-                    val count = inflater.inflate(buffer)
+                while (!inflater.finished() && output_offset < output.size) {
+                    val count = inflater.inflate(
+                        output,
+                        output_offset,
+                        output.size - output_offset,
+                    )
                     if (count > 0) {
-                        output.write(buffer, 0, count)
+                        output_offset += count
                     } else if (inflater.needsInput()) {
                         break
                     } else {
                         throw DataFormatException("Reference dictionary deflate stream stalled")
                     }
                 }
+                finished = inflater.finished()
             } finally {
                 inflater.end()
             }
-            val raw = output.toByteArray()
-            if (raw.size != expected_size) {
+            if (!finished || output_offset != expected_size) {
                 throw IOException("Reference dictionary tile length mismatch")
             }
-            return raw
+            return output
         }
 
         private fun raw_hash32(raw: ByteArray): Int {
@@ -621,6 +587,6 @@ internal class ReferenceDictionaryPackage private constructor(
         }
 
         private const val INDEX_ENTRY_BYTES = 24
-        private const val INFLATE_BUFFER_BYTES = 16 * 1024
+        private const val MAX_RAW_TILE_BYTES = 32 * 1024 * 1024
     }
 }
