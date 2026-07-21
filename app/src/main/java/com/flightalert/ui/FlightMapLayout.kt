@@ -529,38 +529,6 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         )
     }
 
-    fun filter_place_labels_button_bounds(panel: RectF): RectF {
-        return filter_button_bounds(
-            panel,
-            row = if (is_compact_settings_panel(panel)) 3 else 6,
-            right_column = false
-        )
-    }
-
-    fun filter_water_labels_button_bounds(panel: RectF): RectF {
-        return filter_button_bounds(
-            panel,
-            row = if (is_compact_settings_panel(panel)) 3 else 7,
-            right_column = is_compact_settings_panel(panel)
-        )
-    }
-
-    fun filter_region_labels_button_bounds(panel: RectF): RectF {
-        return filter_button_bounds(
-            panel,
-            row = if (is_compact_settings_panel(panel)) 4 else 8,
-            right_column = false
-        )
-    }
-
-    fun filter_public_lands_button_bounds(panel: RectF): RectF {
-        return filter_button_bounds(
-            panel,
-            row = if (is_compact_settings_panel(panel)) 4 else 9,
-            right_column = is_compact_settings_panel(panel)
-        )
-    }
-
     fun filter_reset_button_bounds(panel: RectF): RectF {
         return if (is_compact_settings_panel(panel)) {
             filter_button_bounds(panel, row = 5, right_column = true)

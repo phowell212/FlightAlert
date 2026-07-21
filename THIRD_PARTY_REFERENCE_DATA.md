@@ -4,9 +4,9 @@
 
 The downloadable `world-experiment8-binary-v4` reference package contains
 information derived from OpenStreetMap. It is a geographically global preview
-of place labels and named waterway lines; it is not a complete all-feature
-world map or a completeness claim for islands, coastlines, borders, oceans,
-lakes, or every OpenStreetMap feature class.
+of place labels, named waterways, and administrative boundaries; it is not a
+complete all-feature world map or a completeness claim for every island,
+coastline, border, ocean, lake, or OpenStreetMap feature class.
 
 **Attribution:** © OpenStreetMap contributors
 
@@ -21,11 +21,12 @@ The source snapshot is the OpenStreetMap planet file dated 2026-06-29:
 - Bytes: `93,653,630,756`
 - SHA-256: `cd5113a1ac905fc33eef8f2a7d1276b31036b06aa07b65aa3b3fa86cc0fcc96f`
 
-Flight Alert deterministically selects source-backed place labels and named
-`river`, `stream`, `canal`, `tidal_channel`, and `wadi` line features, then
-encodes them into the app's six-file reference package. The transformation
-code is under `tools/experiment8/`, and exact source/build receipts remain
-embedded in the package receipts.
+Flight Alert deterministically selects source-backed place labels, named
+`river`, `stream`, `canal`, `tidal_channel`, and `wadi` line features, and
+administrative boundary geometry, then encodes them into the app's six-file
+reference package. The package is 19,495,741,202 bytes. Transformation code is
+under `tools/experiment8/`, and exact source/build receipts remain embedded in
+the package receipts.
 
 ### ODbL source offer
 

@@ -132,11 +132,6 @@ data class MapTileRenderState(
     val reference_label_avoid_rects: List<ReferenceScreenRect> = emptyList()
 ) {
     val cache_key: String = map_source.cache_key(map_labels_enabled)
-    val reference_overlay_layers: List<ReferenceTileOverlay> =
-        map_source.reference_overlay_layers(
-            map_labels_enabled,
-            map_borders_enabled
-        )
 }
 
 data class MapTileRenderStyle(
@@ -173,53 +168,4 @@ internal data class TileLayerDrawStats(
     val requested: Int,
     val fallback_drawn: Int,
     val fading: Boolean
-)
-
-internal data class ReferenceTileCoverage(
-    val visible: Int,
-    val loaded: Int,
-    val ready: Int,
-    val fallback_ready: Int,
-    val center_visible: Int = 0,
-    val center_loaded: Int = 0,
-    val center_ready: Int = 0,
-    val center_fallback_ready: Int = 0
-) {
-    val loaded_ratio: Float
-        get() = if (visible <= 0) 1f else loaded.toFloat() / visible.toFloat()
-    val ready_ratio: Float
-        get() = if (visible <= 0) 1f else ready.toFloat() / visible.toFloat()
-    val visual_ready: Int
-        get() = (ready + fallback_ready).coerceAtMost(visible)
-    val visual_ratio: Float
-        get() = if (visible <= 0) 1f else visual_ready.toFloat() / visible.toFloat()
-    val center_loaded_ratio: Float
-        get() = if (center_visible <= 0) 1f else center_loaded.toFloat() / center_visible.toFloat()
-    val center_ready_ratio: Float
-        get() = if (center_visible <= 0) 1f else center_ready.toFloat() / center_visible.toFloat()
-    val center_visual_ready: Int
-        get() = (center_ready + center_fallback_ready).coerceAtMost(center_visible)
-    val center_visual_ratio: Float
-        get() = if (center_visible <= 0) 1f else center_visual_ready.toFloat() / center_visible.toFloat()
-}
-
-internal data class ReferenceOverlayDrawPlan(
-    val draw_tile_zoom: Int,
-    val prefetch_tile_zooms: List<Int>,
-    val coverage: ReferenceTileCoverage
-)
-
-internal data class ReferencePrefetchGridPlan(
-    val epoch: Long,
-    val overlay: ReferenceTileOverlay,
-    val cache_key: String,
-    val user_agent: String,
-    val tile_zoom: Int,
-    val first_tile_x: Int,
-    val first_tile_y: Int,
-    val last_tile_x: Int,
-    val last_tile_y: Int,
-    val max_tile: Int,
-    val request_priority: Int,
-    val request_generation: Long
 )

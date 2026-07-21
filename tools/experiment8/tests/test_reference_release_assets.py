@@ -1813,7 +1813,7 @@ class ReleaseAssetsCliTest(unittest.TestCase):
         self.assertIn("global places and named waterways preview", readme)
         self.assertIn("full-fidelity-visual-evaluation", readme)
         self.assertIn("reference_release_assets materialize", readme)
-        self.assertIn("experiment8-world-reference-v4-r15", readme)
+        self.assertIn("experiment8-world-reference-v4-r16", readme)
         self.assertIn(
             "[Environment]::GetFolderPath('LocalApplicationData')", readme
         )

@@ -76,24 +76,6 @@ internal fun is_inside_viewport(x: Float, y: Float, viewport: Viewport, padding:
 private const val LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION =
     "Local whole-world OpenStreetMap-derived reference data, © OpenStreetMap contributors"
 
-enum class ReferenceTileOverlay(
-    val cache_key: String,
-    val attribution: String
-) {
-    WORLD_TRANSPORTATION(
-        cache_key = "local_reference_transportation_disabled",
-        attribution = LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION
-    ),
-    WORLD_BOUNDARIES_AND_PLACES(
-        cache_key = "local_reference_boundaries_places_disabled",
-        attribution = LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION
-    );
-
-    fun tile_url(z: Int, x: Int, y: Int): String {
-        return ""
-    }
-}
-
 enum class TileSource(
     val base_cache_key: String,
     val display_name: String,
@@ -109,13 +91,6 @@ enum class TileSource(
             STREET -> if (labels_enabled) base_cache_key else "carto_voyager_nolabels"
             SATELLITE -> base_cache_key
         }
-    }
-
-    fun reference_overlay_layers(
-        @Suppress("UNUSED_PARAMETER") street_labels_enabled: Boolean,
-        @Suppress("UNUSED_PARAMETER") borders_enabled: Boolean
-    ): List<ReferenceTileOverlay> {
-        return emptyList()
     }
 
     fun attribution_text(

@@ -2,7 +2,7 @@
 
 Flight Alert is a Kotlin Android app for drone pilots who want live, map-first awareness of nearby aircraft. It is supplemental situational awareness only, not a certified detect-and-avoid system.
 
-Current version: **1.9**
+Current version: **1.10**
 
 ## What It Does
 
@@ -48,9 +48,11 @@ That applies to aircraft, maps, routes, photos, alerts, altitude, location, mili
 
 ## Build From Source
 
-Open the project root in Android Studio, or build from PowerShell:
+Clone the repository, open its root in Android Studio, or build from PowerShell:
 
 ```powershell
+git clone https://github.com/phowell212/FlightAlert.git
+Set-Location FlightAlert
 .\gradlew.bat assembleDebug
 ```
 
@@ -62,19 +64,21 @@ build/outputs/apk/debug/Flight Alert-debug.apk
 
 ## Whole-world reference preview
 
-Flight Alert can use a downloadable global places and named waterways preview.
-It contains source-backed OpenStreetMap place labels and named waterway lines.
+Flight Alert can use a downloadable whole-world reference preview containing
+source-backed OpenStreetMap labels, waterways, and administrative boundaries.
+This global places and named waterways preview now also renders administrative
+boundaries from the same source-bound package.
 It is intentionally classified as
 `full-fidelity-visual-evaluation`: it is useful for worldwide visual testing,
 but it does **not** claim a complete all-feature world dictionary. The current
-uncompressed package is about 16.57 GB, so choose a destination with adequate
-free space.
+six-file package is 19,495,741,202 bytes (about 19.50 GB / 18.16 GiB), so choose
+a destination with adequate free space.
 
 Use the exact manifest URL from a pinned Flight Alert GitHub release, never a
 `latest` shortcut:
 
 ```powershell
-$manifestUrl = 'https://github.com/phowell212/FlightAlert/releases/download/experiment8-world-reference-v4-r15/world-experiment8-binary-v4.release-manifest.json'
+$manifestUrl = 'https://github.com/phowell212/FlightAlert/releases/download/experiment8-world-reference-v4-r16/world-experiment8-binary-v4.release-manifest.json'
 $referenceRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'FlightAlert\Reference'
 $null = New-Item -ItemType Directory -Force $referenceRoot
 $packageRoot = Join-Path $referenceRoot 'world-experiment8-binary-v4'
@@ -106,12 +110,20 @@ materializing, and `-ValidateOnly` do not require a device lease helper.
 Transactional phone modes require an explicit `-LeaseHelper`, `-ThreadId`, and
 external `-EvidenceDirectory`; there is no machine-specific default.
 
+The 19.50 GB database is attached to the pinned GitHub release in transport
+chunks because GitHub cannot store it as one Git object. The downloader verifies
+and reconstructs the exact original files. The APK remains one ordinary APK,
+and compiling the app does not download or embed the database.
+
 OpenStreetMap attribution, the ODbL 1.0 license, pinned source identity, build
 method, and machine-readable database offer are documented in
 [THIRD_PARTY_REFERENCE_DATA.md](THIRD_PARTY_REFERENCE_DATA.md).
 
 ## Repository Notes
 
-The app repo is for source code, durable documentation, and small project tooling. Generated data products, screenshots, videos, traces, large diagnostics, caches, and temporary run output should live outside the repo.
+The Git tree contains source code, durable documentation, and small project
+tooling. The large reference database is published as release assets;
+screenshots, videos, traces, diagnostics, caches, and temporary run output stay
+outside the Git history.
 
 Agent and contributor methodology lives in [AGENTS.md](AGENTS.md).

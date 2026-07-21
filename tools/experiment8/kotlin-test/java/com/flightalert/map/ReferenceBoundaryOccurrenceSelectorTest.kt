@@ -63,7 +63,7 @@ class ReferenceBoundaryOccurrenceSelectorTest {
         ).readText().replace("\r\n", "\n").replace('\r', '\n')
         val draw = source.substring(
             source.indexOf("private fun draw_reference_content"),
-            source.indexOf("private fun draw_path_record"),
+            source.indexOf("private fun draw_boundary_records"),
         )
         val clear = draw.indexOf("boundary_occurrence_ids.clear()")
         val tileLoop = draw.indexOf("for (tile in tiles)")
