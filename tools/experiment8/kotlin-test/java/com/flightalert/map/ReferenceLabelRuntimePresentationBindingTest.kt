@@ -12,7 +12,7 @@ class ReferenceLabelRuntimePresentationBindingTest {
         val source = renderer_source()
         val drawLabels = source_section(source, "private fun draw_labels", "private fun line_label_candidates")
         val drawReferenceContent =
-            source_section(source, "private fun draw_reference_content", "private fun draw_path_record")
+            source_section(source, "private fun draw_reference_content", "private fun draw_boundary_records")
         val missingContracts = mutableListOf<String>()
         fun expectContract(description: String, satisfied: Boolean) {
             if (!satisfied) missingContracts += description
@@ -548,6 +548,120 @@ class ReferenceLabelRuntimePresentationBindingTest {
             "a revision read after drawing can bless a stale retained bitmap",
             render.contains("content_revision = content_revision.get()"),
         )
+    }
+
+    @Test
+    fun boundaryFragmentsAreBatchedBeforeCanvasStrokes() {
+        val source = renderer_source()
+        val content = source_section(
+            source,
+            "private fun draw_reference_content",
+            "private fun draw_labels",
+        )
+        assertTrue(content.contains("draw_boundary_records("))
+
+        val batches = source_section(
+            source,
+            "private fun draw_boundary_records",
+            "private fun draw_labels",
+        )
+        assertTrue(batches.contains("BoundaryPathBatchKey("))
+        assertTrue(batches.contains("append_ring_path("))
+        assertEquals(2, Regex("canvas\\.drawPath\\(").findAll(batches).count())
+
+        val append = source_section(
+            source,
+            "private fun append_ring_path",
+            "private fun draw_labels",
+        )
+        val pointLoop = source_section(
+            append,
+            "for (index in 0 until ring.point_count)",
+            "return true",
+        )
+        assertFalse(pointLoop.contains("project_point("))
+    }
+
+    @Test
+    fun motionReusesTheSettledLabelLayoutInsteadOfReplanningIt() {
+        val source = renderer_source()
+        val live = source_section(
+            source,
+            "private fun draw_live_labels",
+            "private fun draw_retained_labels",
+        )
+        val reuse = live.indexOf("if (reuse_only")
+        val planning = live.indexOf("draw_labels(")
+        assertTrue("motion reuse must be checked before label planning", reuse >= 0)
+        assertTrue("label planning must remain the settled fallback", planning > reuse)
+        assertTrue(live.contains("retained_labels"))
+
+        val retained = source_section(
+            source,
+            "private fun draw_retained_labels",
+            "private fun draw_retained_label_candidate",
+        )
+        assertFalse("motion drawing must not run label selection", retained.contains("draw_labels("))
+        assertTrue(retained.contains("zoom_scale"))
+    }
+
+    @Test
+    fun motionDoesNotShrinkAnOldLabelLayoutAcrossWideZoomChanges() {
+        val source = renderer_source()
+        val live = source_section(
+            source,
+            "private fun draw_live_labels",
+            "private fun draw_retained_labels",
+        )
+
+        assertTrue(live.contains("MAX_RETAINED_LABEL_ZOOM_DELTA"))
+        assertTrue(live.contains("kotlin.math.abs(retained.viewport.zoom - viewport.zoom)"))
+        assertTrue(source.contains("const val MAX_RETAINED_LABEL_ZOOM_DELTA = 1.25"))
+    }
+
+    @Test
+    fun settledIncompleteWideViewportsPlanLabelsOnceThenRefreshWhenComplete() {
+        val source = renderer_source()
+        val draw = source_section(source, "    fun draw(", "    fun content_revision()")
+        val incompleteLabels = draw.indexOf("complete = false")
+        val settledRender = draw.indexOf("if (ready && !interaction_active)")
+        val directRender = draw.indexOf("val counts = draw_reference_content(")
+
+        assertTrue("settled incomplete wide views must publish a partial label layout", incompleteLabels >= 0)
+        assertTrue("partial labels must not trigger a partial border render", incompleteLabels < settledRender)
+        assertTrue("partial labels must return before direct reference drawing", incompleteLabels < directRender)
+        assertTrue(draw.contains("val plan_partial_point_labels"))
+        assertTrue("the first loaded core tile must be allowed to publish labels", draw.contains("core_tiles_loaded > 0"))
+        assertTrue("labels must not wait for half the viewport tiles", !draw.contains("core_tiles_loaded * 2 >= core_tiles_total"))
+
+        val live = source_section(
+            source,
+            "private fun draw_live_labels",
+            "private fun draw_retained_labels",
+        )
+        assertTrue("an empty early snapshot must not freeze labels until full readiness", live.contains("if (complete || count > 0)"))
+
+        val retained = source_section(
+            source,
+            "private data class RetainedReferenceLabels",
+            "private data class RetainedReferenceFade",
+        )
+        assertTrue(retained.contains("val complete: Boolean"))
+        assertTrue(retained.contains("complete: Boolean"))
+        assertTrue("a partial layout must be invalidated once every core tile is ready", retained.contains("!complete || this.complete"))
+    }
+
+    @Test
+    fun wideViewportsDoNotRunTheExpensivePathLabelPlanner() {
+        val source = renderer_source()
+        val admission = source_section(
+            source,
+            "private fun label_record_visible_for_admission",
+            "private fun label_record_intersects_viewport",
+        )
+
+        assertTrue(admission.contains("record.line_label && zoom < MIN_PATH_LABEL_ZOOM"))
+        assertTrue(source.contains("const val MIN_PATH_LABEL_ZOOM = 10.0"))
     }
 
     private fun renderer_source(): String = File(

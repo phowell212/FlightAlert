@@ -198,24 +198,75 @@ class TrafficSpriteFootprintsTest {
     }
 
     @Test
-    fun unbatchedWideDotsEachAvoidReferenceLabels() {
+    fun denseBatchTransitionOnlyReservesTheSelectedAircraftForReferenceLabels() {
         val footprints = TrafficSpriteFootprints(dp = { it }, deadband_dp = 4f)
+        val selected = aircraft_state()
         val output = mutableListOf<ReferenceScreenRect>()
 
         footprints.append_reference_label_avoid_rects(
             state = overlay_state(
                 aircraft = listOf(
-                    aircraft_state(appearance_key = "hex:a", screen_x = 100f),
-                    aircraft_state(appearance_key = "hex:b", screen_x = 200f),
+                    selected,
+                    aircraft_state(appearance_key = "hex:def456", screen_x = 200f),
                 ),
-                viewport = viewport(zoom = 2.0),
+                viewport = viewport(zoom = 8.0),
+                selected_aircraft_id = "abc123",
+                dot_batch = dot_batch(selected = selected),
             ),
             now_elapsed_ms = 1_000L,
             clearance_px = 8f,
             output = output,
         )
 
-        assertEquals(2, output.size)
+        assertEquals(1, output.size)
+    }
+
+    @Test
+    fun denseUnbatchedSymbolsOnlyReserveTheSelectedAircraftForReferenceLabels() {
+        val footprints = TrafficSpriteFootprints(dp = { it }, deadband_dp = 4f)
+        val selected = aircraft_state()
+        val traffic = listOf(selected) + (1..64).map { index ->
+            aircraft_state(
+                appearance_key = "hex:traffic$index",
+                screen_x = 100f + index,
+            )
+        }
+        val output = mutableListOf<ReferenceScreenRect>()
+
+        footprints.append_reference_label_avoid_rects(
+            state = overlay_state(
+                aircraft = traffic,
+                viewport = viewport(zoom = 9.0),
+                selected_aircraft_id = "abc123",
+            ),
+            now_elapsed_ms = 1_000L,
+            clearance_px = 8f,
+            output = output,
+        )
+
+        assertEquals(1, output.size)
+    }
+
+    @Test
+    fun unbatchedWideDotsOnlyReserveTheSelectedAircraftForReferenceLabels() {
+        val footprints = TrafficSpriteFootprints(dp = { it }, deadband_dp = 4f)
+        val output = mutableListOf<ReferenceScreenRect>()
+
+        footprints.append_reference_label_avoid_rects(
+            state = overlay_state(
+                aircraft = listOf(
+                    aircraft_state(appearance_key = "hex:abc123", screen_x = 100f),
+                    aircraft_state(appearance_key = "hex:b", screen_x = 200f),
+                ),
+                viewport = viewport(zoom = 2.0),
+                selected_aircraft_id = "abc123",
+            ),
+            now_elapsed_ms = 1_000L,
+            clearance_px = 8f,
+            output = output,
+        )
+
+        assertEquals(1, output.size)
     }
 
     @Test

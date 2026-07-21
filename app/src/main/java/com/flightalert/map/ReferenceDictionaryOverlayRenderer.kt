@@ -17,7 +17,6 @@ import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PathMeasure
-import android.graphics.PathEffect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.SystemClock
@@ -59,7 +58,6 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val request_redraw: () -> Unit
 ) : Closeable {
     private val package_store = ReferenceDictionaryPackageStore(context)
-    private val path = Path()
     private val line_label_path = Path()
     private val path_measure = PathMeasure()
     private val line_label_bounds = RectF()
@@ -96,6 +94,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     }
     private var retained_frame: RetainedReferenceFrame? = null
     private var retained_fade: RetainedReferenceFade? = null
+    private var retained_labels: RetainedReferenceLabels? = null
 
     fun draw(
         canvas: Canvas,
@@ -169,6 +168,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
 
         val ready = core_missing == 0
+        val core_tiles_loaded = draw_tiles.count { it.core_visible }
+        val plan_partial_point_labels =
+            !interaction_active &&
+                !ready &&
+                viewport.zoom < MIN_PATH_LABEL_ZOOM &&
+                core_tiles_loaded > 0
         if (retained_drawn_for_interaction) {
             val labels_drawn = draw_live_labels(
                 canvas = canvas,
@@ -182,6 +187,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 public_lands_enabled = public_lands_enabled,
                 filter_mask = filter_mask,
                 label_avoid_rects = label_avoid_rects,
+                options = options,
+                complete = ready,
+                reuse_only = true,
             )
             return ReferenceDictionaryOverlayDrawStats(
                 available = true,
@@ -210,6 +218,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 public_lands_enabled = public_lands_enabled,
                 filter_mask = filter_mask,
                 label_avoid_rects = label_avoid_rects,
+                options = options,
+                complete = ready,
+                reuse_only = !plan_partial_point_labels,
             )
             return ReferenceDictionaryOverlayDrawStats(
                 available = true,
@@ -238,6 +249,51 @@ internal class ReferenceDictionaryOverlayRenderer(
             )
         }
 
+        // Never rebuild a partial boundary frame. At settled wide zooms, publish one cheap
+        // point-label layout from the tiles already present, then reuse it until ready flips.
+        if (interaction_active || (!ready && !plan_partial_point_labels)) {
+            return ReferenceDictionaryOverlayDrawStats(
+                available = true,
+                ready = ready,
+                visible_tiles = visible_tiles.size,
+                loaded_tiles = draw_tiles.size,
+                requested_tiles = maxOf(requested, missing),
+                boundaries_drawn = 0,
+                labels_drawn = 0,
+                retained_frame_drawn = false,
+                fading = true,
+            )
+        }
+        if (!ready) {
+            val labels_drawn = draw_live_labels(
+                canvas = canvas,
+                viewport = viewport,
+                tiles = draw_tiles,
+                labels_enabled = labels_enabled,
+                label_text_scale = label_text_scale,
+                place_labels_enabled = place_labels_enabled,
+                water_labels_enabled = water_labels_enabled,
+                region_labels_enabled = region_labels_enabled,
+                public_lands_enabled = public_lands_enabled,
+                filter_mask = filter_mask,
+                label_avoid_rects = label_avoid_rects,
+                options = options,
+                complete = false,
+                reuse_only = false,
+            )
+            return ReferenceDictionaryOverlayDrawStats(
+                available = true,
+                ready = false,
+                visible_tiles = visible_tiles.size,
+                loaded_tiles = draw_tiles.size,
+                requested_tiles = maxOf(requested, missing),
+                boundaries_drawn = 0,
+                labels_drawn = labels_drawn,
+                retained_frame_drawn = false,
+                fading = true,
+            )
+        }
+
         if (ready && !interaction_active) {
             val exact = retained_frame
             if (exact != null && exact.matches_exact(
@@ -259,6 +315,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                     public_lands_enabled = public_lands_enabled,
                     filter_mask = filter_mask,
                     label_avoid_rects = label_avoid_rects,
+                    options = options,
+                    complete = true,
+                    reuse_only = false,
                 )
                 return ReferenceDictionaryOverlayDrawStats(
                     available = true,
@@ -301,6 +360,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                     public_lands_enabled = public_lands_enabled,
                     filter_mask = filter_mask,
                     label_avoid_rects = label_avoid_rects,
+                    options = options,
+                    complete = true,
+                    reuse_only = false,
                 )
                 return ReferenceDictionaryOverlayDrawStats(
                     available = true,
@@ -320,7 +382,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             canvas = canvas,
             viewport = viewport,
             tiles = draw_tiles,
-            labels_enabled = labels_enabled,
+            labels_enabled = false,
             borders_enabled = borders_enabled,
             label_text_scale = label_text_scale,
             place_labels_enabled = place_labels_enabled,
@@ -330,6 +392,22 @@ internal class ReferenceDictionaryOverlayRenderer(
             filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
         )
+        val labels_drawn = draw_live_labels(
+            canvas = canvas,
+            viewport = viewport,
+            tiles = draw_tiles,
+            labels_enabled = labels_enabled,
+            label_text_scale = label_text_scale,
+            place_labels_enabled = place_labels_enabled,
+            water_labels_enabled = water_labels_enabled,
+            region_labels_enabled = region_labels_enabled,
+            public_lands_enabled = public_lands_enabled,
+            filter_mask = filter_mask,
+            label_avoid_rects = label_avoid_rects,
+            options = options,
+            complete = ready,
+            reuse_only = interaction_active || !ready,
+        )
         return ReferenceDictionaryOverlayDrawStats(
             available = true,
             ready = ready,
@@ -337,7 +415,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             loaded_tiles = draw_tiles.size,
             requested_tiles = if (ready) 0 else maxOf(requested, missing),
             boundaries_drawn = counts.boundaries,
-            labels_drawn = counts.labels,
+            labels_drawn = labels_drawn,
             retained_frame_drawn = false,
             fading = !ready
         )
@@ -358,12 +436,14 @@ internal class ReferenceDictionaryOverlayRenderer(
             desired_tile_keys.clear()
         }
         replace_retained_frame(null)
+        retained_labels = null
         content_revision.incrementAndGet()
         package_store.close()
     }
 
     fun reset_retained_frame() {
         replace_retained_frame(null)
+        retained_labels = null
     }
 
     override fun close() {
@@ -586,9 +666,21 @@ internal class ReferenceDictionaryOverlayRenderer(
         public_lands_enabled: Boolean,
         filter_mask: ReferenceFilterMask,
         label_avoid_rects: List<ReferenceScreenRect>,
+        options: RetainedReferenceOptions,
+        complete: Boolean,
+        reuse_only: Boolean,
     ): Int {
-        if (!labels_enabled || tiles.isEmpty()) return 0
-        return draw_labels(
+        if (!labels_enabled) return 0
+        val retained = retained_labels
+        if (retained != null && retained.matches_options(options) &&
+            kotlin.math.abs(retained.viewport.zoom - viewport.zoom) <=
+                MAX_RETAINED_LABEL_ZOOM_DELTA &&
+            (reuse_only || retained.matches_exact(viewport, options, complete))
+        ) {
+            return draw_retained_labels(canvas, viewport, retained)
+        }
+        if (reuse_only || tiles.isEmpty()) return 0
+        val count = draw_labels(
             canvas = canvas,
             viewport = viewport,
             tiles = tiles,
@@ -601,6 +693,61 @@ internal class ReferenceDictionaryOverlayRenderer(
             ),
             filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
+        )
+        if (complete || count > 0) {
+            retained_labels = RetainedReferenceLabels(
+                viewport = viewport,
+                options = options,
+                candidates = accepted_labels.toList(),
+                complete = complete,
+            )
+        }
+        return count
+    }
+
+    private fun draw_retained_labels(
+        canvas: Canvas,
+        viewport: Viewport,
+        retained: RetainedReferenceLabels,
+    ): Int {
+        val retained_zoom_scale = 2.0.pow(retained.viewport.zoom)
+        val viewport_zoom_scale = 2.0.pow(viewport.zoom)
+        val zoom_scale = 2.0.pow(viewport.zoom - retained.viewport.zoom)
+        val retained_left_zero =
+            (retained.viewport.center_x - retained.viewport.width / 2.0) / retained_zoom_scale
+        val retained_top_zero =
+            (retained.viewport.center_y - retained.viewport.height / 2.0) / retained_zoom_scale
+        val viewport_left_zero =
+            (viewport.center_x - viewport.width / 2.0) / viewport_zoom_scale
+        val viewport_top_zero =
+            (viewport.center_y - viewport.height / 2.0) / viewport_zoom_scale
+        val translate_x = (retained_left_zero - viewport_left_zero) * viewport_zoom_scale
+        val translate_y = (retained_top_zero - viewport_top_zero) * viewport_zoom_scale
+        for (index in retained.candidates.indices.reversed()) {
+            draw_retained_label_candidate(
+                canvas = canvas,
+                candidate = retained.candidates[index],
+                zoom_scale = zoom_scale,
+                translate_x = translate_x,
+                translate_y = translate_y,
+            )
+        }
+        return retained.candidates.size
+    }
+
+    private fun draw_retained_label_candidate(
+        canvas: Canvas,
+        candidate: DictionaryLabelCandidate,
+        zoom_scale: Double,
+        translate_x: Double,
+        translate_y: Double,
+    ) {
+        draw_label_candidate(
+            canvas = canvas,
+            candidate = candidate,
+            zoom_scale = zoom_scale,
+            translate_x = translate_x,
+            translate_y = translate_y,
         )
     }
 
@@ -794,19 +941,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     .thenBy { it.record.priority }
                     .thenBy { it.record.source_feature_id },
             )
-            for (reference in boundary_record_refs) {
-                if (draw_path_record(
-                        canvas = canvas,
-                        viewport = viewport,
-                        tile = reference.tile,
-                        geometry = reference.record.geometry,
-                        style = reference.record.style,
-                        visibility_alpha_milli = reference.visibility_alpha_milli,
-                    )
-                ) {
-                    boundaries_drawn++
-                }
-            }
+            boundaries_drawn = draw_boundary_records(canvas, viewport, boundary_record_refs)
             boundary_record_refs.clear()
         }
         val labels_drawn = if (labels_enabled) {
@@ -825,39 +960,85 @@ internal class ReferenceDictionaryOverlayRenderer(
         return ReferenceDrawCounts(boundaries = boundaries_drawn, labels = labels_drawn)
     }
 
-    private fun draw_path_record(
+    private fun draw_boundary_records(
         canvas: Canvas,
         viewport: Viewport,
-        tile: DictionaryTileDrawRef,
-        geometry: DictionaryGeometry?,
-        style: DictionaryLineStyle,
-        visibility_alpha_milli: Int,
-    ): Boolean {
-        val rings = geometry?.rings ?: return false
-        var drew = false
-        for (ring in rings) {
-            if (!build_ring_path(path, viewport, tile, ring)) continue
+        records: List<DictionaryLineRecordRef>,
+    ): Int {
+        val batches = LinkedHashMap<BoundaryPathBatchKey, BoundaryPathBatch>()
+        for (reference in records) {
+            val record = reference.record
+            val key = BoundaryPathBatchKey(
+                draw_order = record.draw_order,
+                priority = record.priority,
+                style = record.style,
+                visibility_alpha_milli = reference.visibility_alpha_milli,
+            )
+            val batch = batches.getOrPut(key) {
+                BoundaryPathBatch(
+                    path = Path(),
+                    style = record.style,
+                    visibility_alpha_milli = reference.visibility_alpha_milli,
+                )
+            }
+            var appended = false
+            for (ring in record.geometry.rings) {
+                appended = append_ring_path(batch.path, viewport, reference.tile, ring) || appended
+            }
+            if (appended) batch.boundaries++
+        }
+
+        var boundaries_drawn = 0
+        for (batch in batches.values) {
+            val style = batch.style
             paint.isAntiAlias = true
             paint.style = Paint.Style.STROKE
             paint.strokeJoin = style.stroke_join
             paint.strokeCap = style.stroke_cap
-            paint.pathEffect = style.path_effect
+            paint.pathEffect = style.dash_pattern_dp.takeIf { it.isNotEmpty() }
+                ?.toFloatArray()
+                ?.let { DashPathEffect(it, style.dash_phase_dp) }
             paint.strokeWidth = dp(style.stroke_width_dp + style.halo_width_dp)
             paint.color = with_alpha(
                 style.halo_color,
-                scaled_alpha_byte(style.halo_alpha, visibility_alpha_milli),
+                scaled_alpha_byte(style.halo_alpha, batch.visibility_alpha_milli),
             )
-            canvas.drawPath(path, paint)
+            canvas.drawPath(batch.path, paint)
             paint.strokeWidth = dp(style.stroke_width_dp)
             paint.color = with_alpha(
                 style.color,
-                scaled_alpha_byte(style.alpha, visibility_alpha_milli),
+                scaled_alpha_byte(style.alpha, batch.visibility_alpha_milli),
             )
-            canvas.drawPath(path, paint)
+            canvas.drawPath(batch.path, paint)
             paint.pathEffect = null
-            drew = true
+            boundaries_drawn += batch.boundaries
         }
-        return drew
+        return boundaries_drawn
+    }
+
+    private fun append_ring_path(
+        target: Path,
+        viewport: Viewport,
+        tile: DictionaryTileDrawRef,
+        ring: DictionaryRing,
+    ): Boolean {
+        if (ring.point_count < 2) return false
+        val scale = 2.0.pow(viewport.zoom - tile.tile.coordinate.z)
+        val local_to_screen = (MAP_TILE_SIZE / DICTIONARY_EXTENT) * scale
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val translate_x = tile.draw_x * MAP_TILE_SIZE * scale - left_world
+        val translate_y = tile.tile.coordinate.y * MAP_TILE_SIZE * scale - top_world
+        for (index in 0 until ring.point_count) {
+            val x = (translate_x + ring.points[index * 2] * local_to_screen).toFloat()
+            val y = (translate_y + ring.points[index * 2 + 1] * local_to_screen).toFloat()
+            if (index == 0) {
+                target.moveTo(x, y)
+            } else {
+                target.lineTo(x, y)
+            }
+        }
+        return true
     }
 
     private fun draw_labels(
@@ -972,6 +1153,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         filter_mask: ReferenceFilterMask,
     ): Boolean {
         if (!record.drawable || !record.visible_at(zoom)) return false
+        if (record.line_label && zoom < MIN_PATH_LABEL_ZOOM) return false
         if (!filter_mask.allows(record.filter_id, groups.enabled(record.layer_group))) return false
         val visibility_alpha_milli = label_visibility_alpha_milli(record, zoom)
         return ReferenceLabelRuntimePresentationPolicy.hasVisiblePaintAlpha(
@@ -1306,7 +1488,13 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
     }
 
-    private fun draw_label_candidate(canvas: Canvas, candidate: DictionaryLabelCandidate) {
+    private fun draw_label_candidate(
+        canvas: Canvas,
+        candidate: DictionaryLabelCandidate,
+        zoom_scale: Double = 1.0,
+        translate_x: Double = 0.0,
+        translate_y: Double = 0.0,
+    ) {
         val style = candidate.style
         val presentation = candidate.sourced_text?.let {
             SourcedMapTextPresentation.plan(it, style.text_size)
@@ -1315,10 +1503,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         if (path_points != null) {
             line_label_path.reset()
             path_points.forEachIndexed { index, point ->
+                val x = (translate_x + point.x * zoom_scale).toFloat()
+                val y = (translate_y + point.y * zoom_scale).toFloat()
                 if (index == 0) {
-                    line_label_path.moveTo(point.x.toFloat(), point.y.toFloat())
+                    line_label_path.moveTo(x, y)
                 } else {
-                    line_label_path.lineTo(point.x.toFloat(), point.y.toFloat())
+                    line_label_path.lineTo(x, y)
                 }
             }
             if (presentation == null) {
@@ -1358,8 +1548,8 @@ internal class ReferenceDictionaryOverlayRenderer(
             }
             return
         }
-        val x = candidate.x
-        val y = candidate.y
+        val x = (translate_x + candidate.anchor.x * zoom_scale).toFloat()
+        val y = (translate_y + candidate.anchor.y * zoom_scale).toFloat()
         canvas.withSave {
             if (candidate.rotation != 0f) rotate(candidate.rotation, x, y)
             if (presentation == null) {
@@ -1471,30 +1661,6 @@ internal class ReferenceDictionaryOverlayRenderer(
         dp(style.halo_width_dp),
         text_size * style.halo_width_milli_em / 1_000f,
     )
-
-    private fun build_ring_path(
-        target: Path,
-        viewport: Viewport,
-        tile: DictionaryTileDrawRef,
-        ring: DictionaryRing
-    ): Boolean {
-        if (ring.point_count < 2) return false
-        target.reset()
-        for (index in 0 until ring.point_count) {
-            val point = project_point(
-                viewport = viewport,
-                tile = tile,
-                local_x = ring.points[index * 2],
-                local_y = ring.points[index * 2 + 1]
-            )
-            if (index == 0) {
-                target.moveTo(point.x, point.y)
-            } else {
-                target.lineTo(point.x, point.y)
-            }
-        }
-        return true
-    }
 
     private fun label_anchor(
         viewport: Viewport,
@@ -1654,10 +1820,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                             alpha = alpha_milli_to_byte(resolved.alpha_milli),
                             halo_alpha = alpha_milli_to_byte(resolved.halo_alpha_milli),
                             halo_color = resolved.halo_argb.toInt(),
-                            path_effect = resolved.dash_milli_dp.takeIf { it.isNotEmpty() }
-                                ?.map { it / 1_000f }
-                                ?.toFloatArray()
-                                ?.let { DashPathEffect(it, resolved.dash_phase_milli_dp / 1_000f) },
+                            dash_pattern_dp = resolved.dash_milli_dp.map { it / 1_000f },
+                            dash_phase_dp = resolved.dash_phase_milli_dp / 1_000f,
                             stroke_cap = if (resolved.line_cap == "butt") {
                                 Paint.Cap.BUTT
                             } else {
@@ -2622,6 +2786,20 @@ internal class ReferenceDictionaryOverlayRenderer(
         val visibility_alpha_milli: Int,
     )
 
+    private data class BoundaryPathBatchKey(
+        val draw_order: Int,
+        val priority: Int,
+        val style: DictionaryLineStyle,
+        val visibility_alpha_milli: Int,
+    )
+
+    private data class BoundaryPathBatch(
+        val path: Path,
+        val style: DictionaryLineStyle,
+        val visibility_alpha_milli: Int,
+        var boundaries: Int = 0,
+    )
+
     private data class DictionaryLabelRecordRef(
         val tile: DictionaryTileDrawRef,
         val record: DictionaryLabelRecord,
@@ -2729,7 +2907,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         val alpha: Int,
         val halo_alpha: Int,
         val halo_color: Int = Color.rgb(4, 10, 14),
-        val path_effect: PathEffect? = null,
+        val dash_pattern_dp: List<Float> = emptyList(),
+        val dash_phase_dp: Float = 0f,
         val stroke_cap: Paint.Cap = Paint.Cap.ROUND,
         val stroke_join: Paint.Join = Paint.Join.ROUND,
     )
@@ -2856,6 +3035,29 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
     }
 
+    private data class RetainedReferenceLabels(
+        val viewport: Viewport,
+        val options: RetainedReferenceOptions,
+        val candidates: List<DictionaryLabelCandidate>,
+        val complete: Boolean,
+    ) {
+        fun matches_options(next: RetainedReferenceOptions): Boolean = options == next
+
+        fun matches_exact(
+            viewport: Viewport,
+            next: RetainedReferenceOptions,
+            complete: Boolean,
+        ): Boolean {
+            return matches_options(next) &&
+                (!complete || this.complete) &&
+                this.viewport.width == viewport.width &&
+                this.viewport.height == viewport.height &&
+                kotlin.math.abs(this.viewport.zoom - viewport.zoom) < EXACT_VIEWPORT_EPSILON &&
+                kotlin.math.abs(this.viewport.center_x - viewport.center_x) < EXACT_VIEWPORT_EPSILON &&
+                kotlin.math.abs(this.viewport.center_y - viewport.center_y) < EXACT_VIEWPORT_EPSILON
+        }
+    }
+
     private data class RetainedReferenceFade(
         val previous: RetainedReferenceFrame,
         val start_ms: Long
@@ -2869,6 +3071,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         const val MAX_LABEL_TEXT_LENGTH = 48
         const val MAP_LABEL_TEXT_SCALE_MIN = 1f
         const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
+        const val MAX_RETAINED_LABEL_ZOOM_DELTA = 1.25
+        const val MIN_PATH_LABEL_ZOOM = 10.0
         const val LEGACY_LABEL_HALO_WIDTH_MILLI_EM = 220
         const val ENGLISH_FONT_WEIGHT = 400
         const val ENGLISH_ITALIC = true

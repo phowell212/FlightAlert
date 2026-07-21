@@ -89,6 +89,7 @@ internal class TrafficSpriteFootprints(
         val selected_key = normalized_selected_aircraft_key(state.selected_aircraft_id)
         val batch = state.dot_batch
         val draw_symbols = state.aircraft.isNotEmpty() && marker_blend < SYMBOL_DRAW_BLEND_LIMIT
+        val selected_only = batch != null || state.viewport.zoom < ALL_TRAFFIC_AVOID_MIN_ZOOM
         when {
             batch != null && draw_symbols -> append_symbol_footprints(
                 state,
@@ -96,7 +97,8 @@ internal class TrafficSpriteFootprints(
                 clearance_px,
                 selected_key,
                 marker_blend,
-                output,
+                selected_only = selected_only,
+                output = output,
             )
 
             batch != null -> append_selected_batch_dot(
@@ -110,6 +112,7 @@ internal class TrafficSpriteFootprints(
                 state,
                 clearance_px,
                 selected_key,
+                selected_only,
                 output,
             )
 
@@ -119,7 +122,8 @@ internal class TrafficSpriteFootprints(
                 clearance_px,
                 selected_key,
                 marker_blend,
-                output,
+                selected_only = selected_only,
+                output = output,
             )
         }
         prune_unseen()
@@ -131,11 +135,14 @@ internal class TrafficSpriteFootprints(
         clearance_px: Float,
         selected_key: String?,
         marker_blend: Float,
+        selected_only: Boolean,
         output: MutableList<ReferenceScreenRect>,
     ) {
         val scale = state.aircraft_transform_scale.coerceAtLeast(0.001f)
         val symbol_visibility = AircraftMarkerMorph.symbol_visibility(marker_blend)
         for (item in state.aircraft) {
+            val selected = item.appearance_key == selected_key
+            if (selected_only && !selected) continue
             val appearance = traffic_aircraft_appearance_progress_at(item, now_elapsed_ms)
             if ((appearance * 255f).toInt() <= MIN_VISIBLE_ALPHA ||
                 (appearance * symbol_visibility * 255f).toInt() <= MIN_VISIBLE_ALPHA
@@ -149,7 +156,6 @@ internal class TrafficSpriteFootprints(
             val center_y =
                 (item.screen_point.y + item.screen_velocity_y_px_per_sec * elapsed_seconds) * scale +
                     state.aircraft_translation_y
-            val selected = item.appearance_key == selected_key
             append_footprint(
                 key = item.appearance_key,
                 mode = PaintMode.SYMBOL,
@@ -205,11 +211,13 @@ internal class TrafficSpriteFootprints(
         state: TrafficOverlayState,
         clearance_px: Float,
         selected_key: String?,
+        selected_only: Boolean,
         output: MutableList<ReferenceScreenRect>,
     ) {
         val base_radius = traffic_unbatched_dot_painted_radius_px(state.viewport.zoom, dp)
         for (item in state.aircraft) {
             val selected = item.appearance_key == selected_key
+            if (selected_only && !selected) continue
             val selected_radius = if (selected) {
                 traffic_selected_dot_painted_radius_px(
                     item = item,
@@ -310,6 +318,7 @@ internal class TrafficSpriteFootprints(
         const val DEFAULT_DEADBAND_DP = 4f
         const val MIN_VISIBLE_ALPHA = 4
         const val SYMBOL_DRAW_BLEND_LIMIT = 0.995f
+        const val ALL_TRAFFIC_AVOID_MIN_ZOOM = 10.0
     }
 }
 

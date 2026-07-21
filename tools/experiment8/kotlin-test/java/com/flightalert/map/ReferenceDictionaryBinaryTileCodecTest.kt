@@ -3,10 +3,42 @@ package com.flightalert.map
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.lang.management.ManagementFactory
 import java.security.MessageDigest
+import com.sun.management.ThreadMXBean
 
 class ReferenceDictionaryBinaryTileCodecTest {
+    @Test
+    fun decodingDoesNotAllocateAByteArrayForEachPrimitiveByte() {
+        val allocationBean = ManagementFactory.getThreadMXBean() as ThreadMXBean
+        allocationBean.isThreadAllocatedMemoryEnabled = true
+        repeat(100) {
+            ReferenceDictionaryBinaryTileCodec.decode(
+                ReferenceDictionaryTileCoordinate(z = 1, x = 0, y = 0),
+                cairoTileBytes,
+            )
+        }
+
+        @Suppress("DEPRECATION")
+        val threadId = Thread.currentThread().id
+        val allocatedBefore = allocationBean.getThreadAllocatedBytes(threadId)
+        repeat(200) {
+            ReferenceDictionaryBinaryTileCodec.decode(
+                ReferenceDictionaryTileCoordinate(z = 1, x = 0, y = 0),
+                cairoTileBytes,
+            )
+        }
+        val allocatedPerDecode =
+            (allocationBean.getThreadAllocatedBytes(threadId) - allocatedBefore) / 200L
+
+        assertTrue(
+            "binary tile decode allocated $allocatedPerDecode bytes per small tile",
+            allocatedPerDecode < cairoTileBytes.size * 52L,
+        )
+    }
+
     @Test
     fun pythonGoldenTileDecodesTypedRendererRecordAndSourcedText() {
         val coordinate = ReferenceDictionaryTileCoordinate(z = 1, x = 0, y = 0)

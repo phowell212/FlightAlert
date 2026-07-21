@@ -612,7 +612,10 @@ internal object ReferenceDictionaryBinaryTileCodec {
             requireBinary(u8() == tag) { "$label canonical tag is unsupported" }
         }
 
-        fun u8(): Int = take(1)[0].toUByte().toInt()
+        fun u8(): Int {
+            requireBinary(remaining > 0) { "binary reference bytes are truncated" }
+            return bytes[offset++].toUByte().toInt()
+        }
 
         fun boolean(label: String): Boolean = when (val value = u8()) {
             0 -> false
