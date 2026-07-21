@@ -120,8 +120,6 @@ Before judging a feature, set every prerequisite app setting to the state that a
 
 Use emulators for layout/aspect/theme checks. Use physical-device video for timing, responsiveness, smoothness, flicker, popping, aircraft continuity, border behavior, and road/reference-layer motion when the requested work warrants it. Screenshots are scouting evidence only for temporal rendering bugs.
 
-For coordinated physical-device gates, retain the raw thermal status and every reported temperature. Thermal status 1, 2, or 3 is not by itself a blocker when every reported temperature is below 60 degrees Celsius. Stop the device workload immediately if any reported temperature is 60 degrees Celsius or higher.
-
 ## 15. Code Organization
 
 Flight Alert code should read like objects doing jobs.

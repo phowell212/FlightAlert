@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
+import tempfile
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -53,6 +55,7 @@ _UNICODE_SCRIPT_PROFILE_IDENTITY = bytes.fromhex(UNICODE_SCRIPT_PROFILE_SHA256)
 _END_TRIM_SCALARS = frozenset(END_TRIM_SCALARS)
 _ENCODED_CANONICAL_VARIANT_TAG = 7
 _RENDERER_RECORD_TAG = 8
+_ANDROID_MAX_INDEX_BYTES = (1 << 31) - 1
 
 
 class RendererTilePackageError(ValueError):
@@ -96,6 +99,16 @@ class PackageArtifacts:
     manifest_bytes: bytes
     records_bytes: bytes
     index_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class StreamingPackageResult:
+    manifest_sha256: str
+    records_sha256: str
+    index_sha256: str
+    records_bytes: int
+    index_bytes: int
+    present_tile_count: int
 
 
 def encode_tile_payload(
@@ -346,46 +359,12 @@ def build_package(
             )
         )
         records_output.extend(compressed)
-    range_documents = []
-    tile_count = 0
-    for zoom, x_min, x_max, y_min, y_max in zoom_ranges:
-        count = (x_max - x_min + 1) * (y_max - y_min + 1)
-        tile_count += count
-        range_documents.append(
-            {
-                "z": zoom,
-                "xMin": x_min,
-                "xMax": x_max,
-                "yMin": y_min,
-                "yMax": y_max,
-                "tileCount": count,
-            }
-        )
-    manifest = {
-        "packageId": package_id,
-        "schemaVersion": 3,
-        "payloadSchema": PAYLOAD_SCHEMA,
-        "presentationPolicySha256": PRESENTATION_POLICY_SHA256,
-        "sourcedTextPolicySha256": SOURCED_TEXT_POLICY_SHA256,
-        "unicodeScriptProfileSha256": UNICODE_SCRIPT_PROFILE_SHA256,
-        "compatibility": {"emptyPresentTilesSharePayload": False},
-        "coverage": {
-            "tileCount": tile_count,
-            "completeDeclaredScope": complete_declared_scope,
-            "completeWholeEarthDictionary": complete_whole_earth_dictionary,
-            "zoomRanges": range_documents,
-        },
-    }
-    manifest_bytes = (
-        json.dumps(
-            manifest,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8", "strict")
+    manifest_bytes = _manifest_bytes(
+        package_id,
+        zoom_ranges,
+        complete_declared_scope=complete_declared_scope,
+        complete_whole_earth_dictionary=complete_whole_earth_dictionary,
+    )
     return PackageArtifacts(
         manifest_bytes,
         bytes(records_output),
@@ -425,6 +404,171 @@ def write_package(
     return artifacts
 
 
+def write_streaming_package(
+    output_directory: Path,
+    package_id: str,
+    zoom_ranges: Iterable[tuple[int, int, int, int, int]],
+    tile_records: Iterable[tuple[TileKey, Iterable[RendererTileRecord]]],
+    *,
+    complete_declared_scope: bool = False,
+    complete_whole_earth_dictionary: bool = False,
+    max_records_bytes: int | None = None,
+) -> StreamingPackageResult:
+    """Write schema-v3 files while retaining at most one raw tile and 1 MiB of index."""
+
+    if not isinstance(output_directory, Path):
+        raise RendererTilePackageError("package output directory must be a pathlib.Path")
+    _validate_package_id(package_id)
+    ranges = _validate_zoom_ranges(tuple(zoom_ranges))
+    if type(complete_declared_scope) is not bool:
+        raise RendererTilePackageError("complete-declared-scope flag must be Boolean")
+    if type(complete_whole_earth_dictionary) is not bool:
+        raise RendererTilePackageError(
+            "complete-whole-earth-dictionary flag must be Boolean"
+        )
+    if max_records_bytes is not None and (
+        type(max_records_bytes) is not int or max_records_bytes < 0
+    ):
+        raise RendererTilePackageError(
+            "streaming records byte quota must be a nonnegative integer"
+        )
+    if complete_whole_earth_dictionary and (
+        not complete_declared_scope
+        or any(
+            x_min != 0
+            or y_min != 0
+            or x_max != (1 << zoom) - 1
+            or y_max != (1 << zoom) - 1
+            for zoom, x_min, x_max, y_min, y_max in ranges
+        )
+    ):
+        raise RendererTilePackageError(
+            "whole-earth dictionary claim requires complete full-world zoom ranges"
+        )
+
+    manifest = _manifest_bytes(
+        package_id,
+        ranges,
+        complete_declared_scope=complete_declared_scope,
+        complete_whole_earth_dictionary=complete_whole_earth_dictionary,
+    )
+    iterator = iter(tile_records)
+    previous_key: tuple[int, int, int] | None = None
+
+    def next_group() -> tuple[TileKey, Iterable[RendererTileRecord]] | None:
+        nonlocal previous_key
+        try:
+            value = next(iterator)
+        except StopIteration:
+            return None
+        if type(value) is not tuple or len(value) != 2 or type(value[0]) is not TileKey:
+            raise RendererTilePackageError(
+                "streaming package groups must be (TileKey, records) tuples"
+            )
+        coordinate, records = value
+        key = (coordinate.z, coordinate.y, coordinate.x)
+        if previous_key is not None and key <= previous_key:
+            raise RendererTilePackageError(
+                "streaming package tile groups are not unique z/y/x order"
+            )
+        previous_key = key
+        return coordinate, records
+
+    try:
+        output_directory.parent.mkdir(parents=True, exist_ok=True)
+        if output_directory.exists():
+            raise RendererTilePackageError(
+                "runtime package output directory already exists"
+            )
+        records_digest = hashlib.sha256()
+        index_digest = hashlib.sha256()
+        records_bytes = 0
+        index_bytes = 0
+        present_tile_count = 0
+        current = next_group()
+        index_buffer = bytearray()
+        with tempfile.TemporaryDirectory(
+            prefix=f".{output_directory.name}.partial-",
+            dir=output_directory.parent,
+        ) as temporary:
+            staging_directory = Path(temporary)
+            with (staging_directory / "records.fadictpack").open(
+                "xb"
+            ) as records_handle, (staging_directory / "tile-index.bin").open(
+                "xb"
+            ) as index_handle:
+                for zoom, x_min, x_max, y_min, y_max in ranges:
+                    for y in range(y_min, y_max + 1):
+                        for x in range(x_min, x_max + 1):
+                            coordinate = TileKey(zoom, x, y)
+                            expected_key = (zoom, y, x)
+                            if current is not None:
+                                actual_key = (
+                                    current[0].z,
+                                    current[0].y,
+                                    current[0].x,
+                                )
+                                if actual_key < expected_key:
+                                    raise RendererTilePackageError(
+                                        "streaming package tile lies outside declared coverage"
+                                    )
+                            if current is not None and current[0] == coordinate:
+                                payload = encode_tile_payload(coordinate, current[1])
+                                compressed = raw_deflate(payload)
+                                if (
+                                    max_records_bytes is not None
+                                    and records_bytes + len(compressed) > max_records_bytes
+                                ):
+                                    raise RendererTilePackageError(
+                                        "streaming records byte quota would be exceeded"
+                                    )
+                                entry = encode_index_entry(
+                                    offset=records_bytes,
+                                    compressed_length=len(compressed),
+                                    raw_length=len(payload),
+                                    raw_hash32=raw_hash32(payload),
+                                )
+                                records_handle.write(compressed)
+                                records_digest.update(compressed)
+                                records_bytes += len(compressed)
+                                present_tile_count += 1
+                                current = next_group()
+                            else:
+                                if complete_declared_scope:
+                                    raise RendererTilePackageError(
+                                        "complete declared package scope contains an unencoded tile"
+                                    )
+                                entry = b"\0" * INDEX_ENTRY_BYTES
+                            index_buffer.extend(entry)
+                            if len(index_buffer) >= 1024 * 1024:
+                                index_handle.write(index_buffer)
+                                index_digest.update(index_buffer)
+                                index_bytes += len(index_buffer)
+                                index_buffer.clear()
+                if current is not None:
+                    raise RendererTilePackageError(
+                        "streaming package tile lies outside declared coverage"
+                    )
+                if index_buffer:
+                    index_handle.write(index_buffer)
+                    index_digest.update(index_buffer)
+                    index_bytes += len(index_buffer)
+            (staging_directory / "manifest.json").write_bytes(manifest)
+            os.rename(staging_directory, output_directory)
+    except OSError as error:
+        raise RendererTilePackageError(
+            f"runtime package could not be written: {error}"
+        ) from error
+    return StreamingPackageResult(
+        manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+        records_sha256=records_digest.hexdigest(),
+        index_sha256=index_digest.hexdigest(),
+        records_bytes=records_bytes,
+        index_bytes=index_bytes,
+        present_tile_count=present_tile_count,
+    )
+
+
 def _validate_package_id(package_id: str) -> None:
     if (
         type(package_id) is not str
@@ -433,6 +577,84 @@ def _validate_package_id(package_id: str) -> None:
         or any(character in package_id for character in ("/", "\\", "\0"))
     ):
         raise RendererTilePackageError("package ID is empty or path-unsafe")
+
+
+def _validate_zoom_ranges(
+    ranges: tuple[tuple[int, int, int, int, int], ...],
+) -> tuple[tuple[int, int, int, int, int], ...]:
+    if not ranges:
+        raise RendererTilePackageError("package zoom ranges must be nonempty")
+    previous_zoom = -1
+    tile_count = 0
+    for value in ranges:
+        if type(value) is not tuple or len(value) != 5 or any(
+            type(item) is not int for item in value
+        ):
+            raise RendererTilePackageError("package zoom range is malformed")
+        zoom, x_min, x_max, y_min, y_max = value
+        if not 0 <= zoom <= 29 or zoom <= previous_zoom:
+            raise RendererTilePackageError(
+                "package zoom ranges must use unique ascending zooms inside [0,29]"
+            )
+        limit = (1 << zoom) - 1
+        if not (0 <= x_min <= x_max <= limit and 0 <= y_min <= y_max <= limit):
+            raise RendererTilePackageError("package zoom range lies outside its tile domain")
+        tile_count += (x_max - x_min + 1) * (y_max - y_min + 1)
+        previous_zoom = zoom
+    if tile_count * INDEX_ENTRY_BYTES > _ANDROID_MAX_INDEX_BYTES:
+        raise RendererTilePackageError(
+            "package Android index exceeds its byte-array bound"
+        )
+    return ranges
+
+
+def _manifest_bytes(
+    package_id: str,
+    zoom_ranges: tuple[tuple[int, int, int, int, int], ...],
+    *,
+    complete_declared_scope: bool,
+    complete_whole_earth_dictionary: bool,
+) -> bytes:
+    range_documents = []
+    tile_count = 0
+    for zoom, x_min, x_max, y_min, y_max in zoom_ranges:
+        count = (x_max - x_min + 1) * (y_max - y_min + 1)
+        tile_count += count
+        range_documents.append(
+            {
+                "z": zoom,
+                "xMin": x_min,
+                "xMax": x_max,
+                "yMin": y_min,
+                "yMax": y_max,
+                "tileCount": count,
+            }
+        )
+    manifest = {
+        "packageId": package_id,
+        "schemaVersion": 3,
+        "payloadSchema": PAYLOAD_SCHEMA,
+        "presentationPolicySha256": PRESENTATION_POLICY_SHA256,
+        "sourcedTextPolicySha256": SOURCED_TEXT_POLICY_SHA256,
+        "unicodeScriptProfileSha256": UNICODE_SCRIPT_PROFILE_SHA256,
+        "compatibility": {"emptyPresentTilesSharePayload": False},
+        "coverage": {
+            "tileCount": tile_count,
+            "completeDeclaredScope": complete_declared_scope,
+            "completeWholeEarthDictionary": complete_whole_earth_dictionary,
+            "zoomRanges": range_documents,
+        },
+    }
+    return (
+        json.dumps(
+            manifest,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8", "strict")
 
 
 def _package_zoom_ranges(

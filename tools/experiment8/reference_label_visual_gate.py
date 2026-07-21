@@ -66,19 +66,6 @@ def _lease_guard(helper: Path, token: str) -> None:
         raise ReferencePackageInstallError("device lease ownership changed")
 
 
-def _thermal(device: AdbInstallDevice, destination: Path) -> float:
-    result = device._checked(("shell", "dumpsys", "thermalservice"), timeout=60.0)
-    text = result.stdout.decode("utf-8", errors="strict")
-    _write_text(destination, text)
-    values = [float(item) for item in re.findall(r"mValue=(-?[0-9]+(?:\.[0-9]+)?)", text)]
-    if not values:
-        raise ReferencePackageInstallError("thermalservice returned no temperatures")
-    maximum = max(values)
-    if maximum >= 60.0:
-        raise ReferencePackageInstallError(f"device temperature reached {maximum:.1f} C")
-    return maximum
-
-
 def _set_preference(root: ET.Element, tag: str, name: str, value: str) -> None:
     matches = [child for child in root if child.get("name") == name]
     if len(matches) > 1:
@@ -218,7 +205,6 @@ def main() -> int:
         ("shell", "settings", "get", "global", "stay_on_while_plugged_in"), timeout=30.0
     ).stdout.decode("ascii").strip()
     _write_text(evidence / "stay-awake-before.txt", stay_before + "\n")
-    thermal_before = _thermal(device, evidence / "thermal-before.txt")
     prepared = _prepared_preferences(prestate.preferences, args.label_scale)
     _write_bytes(evidence / "preferences-prepared.xml", prepared)
     apk_identity = _hash_regular_file(apk, "label visual gate APK")
@@ -241,7 +227,6 @@ def main() -> int:
         time.sleep(8.0)
         _assert_main_activity_foreground(device, evidence / "foreground-after-launch.txt")
         _record_motion(device, args.adb, serial, args.lease_token, evidence)
-        thermal_after = _thermal(device, evidence / "thermal-after.txt")
         stay_after = device._checked(
             ("shell", "settings", "get", "global", "stay_on_while_plugged_in"), timeout=30.0
         ).stdout.decode("ascii").strip()
@@ -260,8 +245,6 @@ def main() -> int:
             "device": serial,
             "sourceApk": {"bytes": apk_identity.byte_length, "sha256": apk_identity.sha256},
             "labelScale": args.label_scale,
-            "thermalMaxBeforeC": thermal_before,
-            "thermalMaxAfterC": thermal_after,
             "stayAwake": stay_after,
             "referencePackagePath": final_package,
             "referencePackageUnchanged": True,

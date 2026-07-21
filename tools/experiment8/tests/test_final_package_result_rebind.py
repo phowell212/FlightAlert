@@ -266,18 +266,50 @@ class FinalPackageResultRebindTest(unittest.TestCase):
         self.final_apk.parent.mkdir(parents=True)
         self.final_apk.write_bytes(STALE_FINAL_APK)
         (self.repository / "tracked.txt").write_text("clean\n", "utf-8")
-        (self.repository / ".gitignore").write_text("/build/\n", "utf-8")
+        (self.repository / ".gitignore").write_text(
+            "/build/\n/app/src/main/assets/payload.apk\n/local.properties\n",
+            "utf-8",
+        )
         (self.repository / "test-gradle-output.apk").write_bytes(BUILT_FINAL_APK)
+        wrapper_properties = self.repository / "gradle" / "wrapper"
+        wrapper_properties.mkdir(parents=True)
+        (wrapper_properties / "gradle-wrapper.properties").write_text(
+            "distributionUrl=https\\://services.gradle.org/distributions/"
+            "gradle-9.4.1-bin.zip\n",
+            "utf-8",
+        )
         self.gradle_wrapper = self.repository / "gradlew.bat"
+        self.gradle_wrapper.write_text("@exit /b 99\n", "utf-8")
+        self.gradle_user_home = self.root / "gradle-home"
+        self.cached_gradle = (
+            self.gradle_user_home
+            / "wrapper"
+            / "dists"
+            / "gradle-9.4.1-bin"
+            / "fixture-cache-key"
+            / "gradle-9.4.1"
+            / "bin"
+            / ("gradle.bat" if os.name == "nt" else "gradle")
+        )
+        self.cached_gradle.parent.mkdir(parents=True)
         if os.name == "nt":
-            self.gradle_wrapper.write_text(
+            self.cached_gradle.write_text(
                 "\r\n".join(
                     (
                         "@echo off",
+                        'if "%~1"=="--version" (',
+                        "  if defined FLIGHT_ALERT_TEST_GRADLE_VERSION (",
+                        "    echo Gradle %FLIGHT_ALERT_TEST_GRADLE_VERSION%",
+                        "  ) else (",
+                        "    echo Gradle 9.4.1",
+                        "  )",
+                        "  exit /b 0",
+                        ")",
                         'if not "%~1"=="clean" exit /b 41',
                         'if not "%~2"=="assembleDebug" exit /b 42',
                         'if not "%~3"=="--no-daemon" exit /b 43',
-                        'if not "%~4"=="" exit /b 44',
+                        'if not "%~4"=="--offline" exit /b 44',
+                        'if not "%~5"=="" exit /b 49',
                         'if "%FLIGHT_ALERT_TEST_GRADLE_FAIL%"=="1" exit /b 45',
                         'if exist "build" rmdir /s /q "build"',
                         'mkdir "build\\outputs\\apk\\debug" || exit /b 46',
@@ -294,14 +326,19 @@ class FinalPackageResultRebindTest(unittest.TestCase):
                 newline="",
             )
         else:
-            self.gradle_wrapper.write_text(
+            self.cached_gradle.write_text(
                 "\n".join(
                     (
                         "#!/bin/sh",
-                        '[ "$#" -eq 3 ] || exit 40',
+                        'if [ "$1" = --version ]; then',
+                        '  echo "Gradle ${FLIGHT_ALERT_TEST_GRADLE_VERSION:-9.4.1}"',
+                        "  exit 0",
+                        "fi",
+                        '[ "$#" -eq 4 ] || exit 40',
                         '[ "$1" = clean ] || exit 41',
                         '[ "$2" = assembleDebug ] || exit 42',
                         '[ "$3" = --no-daemon ] || exit 43',
+                        '[ "$4" = --offline ] || exit 44',
                         '[ "${FLIGHT_ALERT_TEST_GRADLE_FAIL:-}" != 1 ] || exit 45',
                         'rm -rf -- "build" || exit 46',
                         'mkdir -p -- "build/outputs/apk/debug" || exit 47',
@@ -315,7 +352,12 @@ class FinalPackageResultRebindTest(unittest.TestCase):
                 ),
                 "utf-8",
             )
-            self.gradle_wrapper.chmod(0o755)
+            self.cached_gradle.chmod(0o755)
+        environment = mock.patch.dict(
+            os.environ, {"GRADLE_USER_HOME": str(self.gradle_user_home)}
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
         self._git("init", "-q")
         self._git("config", "user.email", "flight-alert-test@example.invalid")
         self._git("config", "user.name", "Flight Alert Test")
@@ -340,7 +382,11 @@ class FinalPackageResultRebindTest(unittest.TestCase):
         return completed.stdout.strip()
 
     def _rebind(
-        self, *, apk: Path | None = None, install_policy: str | None = None
+        self,
+        *,
+        apk: Path | None = None,
+        install_policy: str | None = None,
+        trusted_planning_result_sha256: str | None = None,
     ) -> None:
         arguments: dict[str, object] = {
             "package_directory": self.fixture.package,
@@ -351,6 +397,10 @@ class FinalPackageResultRebindTest(unittest.TestCase):
         }
         if install_policy is not None:
             arguments["install_policy"] = install_policy
+        if trusted_planning_result_sha256 is not None:
+            arguments["trusted_planning_result_sha256"] = (
+                trusted_planning_result_sha256
+            )
         rebind_final_package_result(
             **arguments,  # type: ignore[arg-type]
         )
@@ -498,6 +548,68 @@ class FinalPackageResultRebindTest(unittest.TestCase):
         self.assertEqual(len(BUILT_FINAL_APK), rebound["apk"]["bytes"])
         self.assertEqual(_sha256(BUILT_FINAL_APK), rebound["apk"]["sha256"])
 
+    def test_rejects_missing_cached_gradle_distribution(self) -> None:
+        shutil.rmtree(self.cached_gradle.parents[3])
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "cached Gradle distribution is missing"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_ambiguous_cached_gradle_distribution(self) -> None:
+        alternate = (
+            self.cached_gradle.parents[3]
+            / "another-cache-key"
+            / "gradle-9.4.1"
+            / "bin"
+            / self.cached_gradle.name
+        )
+        alternate.parent.mkdir(parents=True)
+        shutil.copy2(self.cached_gradle, alternate)
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "cached Gradle distribution is ambiguous"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_reparse_cached_gradle_distribution(self) -> None:
+        cache_entry = self.cached_gradle.parents[2]
+        real_stat = Path.stat
+
+        def marked_stat(
+            path: Path, *, follow_symlinks: bool = True
+        ) -> os.stat_result:
+            information = real_stat(path, follow_symlinks=follow_symlinks)
+            if Path(path) == cache_entry and not follow_symlinks:
+                marked = mock.Mock(wraps=information)
+                marked.st_mode = information.st_mode
+                marked.st_file_attributes = (
+                    getattr(information, "st_file_attributes", 0)
+                    | installer_module.FILE_ATTRIBUTE_REPARSE_POINT
+                )
+                return marked
+            return information
+
+        with mock.patch.object(
+            Path, "stat", autospec=True, side_effect=marked_stat
+        ), self.assertRaisesRegex(
+            ReferencePackageInstallError,
+            "cached Gradle cache entry is not one real directory",
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_cached_gradle_version_mismatch(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"FLIGHT_ALERT_TEST_GRADLE_VERSION": "9.4.0"}
+        ), self.assertRaisesRegex(
+            ReferencePackageInstallError, "cached Gradle version differs"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
     def test_rejects_nonzero_gradle_build_without_publishing(self) -> None:
         with mock.patch.dict(
             os.environ, {"FLIGHT_ALERT_TEST_GRADLE_FAIL": "1"}
@@ -612,6 +724,26 @@ class FinalPackageResultRebindTest(unittest.TestCase):
 
         self._assert_rejected_without_output()
 
+    def test_rejects_assume_unchanged_tracked_source_change(self) -> None:
+        self._git("update-index", "--assume-unchanged", "tracked.txt")
+        (self.repository / "tracked.txt").write_text("hidden-dirty\n", "utf-8")
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "hidden tracked file state"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_skip_worktree_tracked_source_change(self) -> None:
+        self._git("update-index", "--skip-worktree", "tracked.txt")
+        (self.repository / "tracked.txt").write_text("hidden-dirty\n", "utf-8")
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "hidden tracked file state"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
     def test_rejects_noncanonical_apk_location(self) -> None:
         alternate = self.repository / "Flight Alert-debug.apk"
         alternate.write_bytes(self.final_apk.read_bytes())
@@ -629,20 +761,269 @@ class FinalPackageResultRebindTest(unittest.TestCase):
 
         self._assert_rejected_without_output()
 
-    def test_rejects_planning_result_with_existing_rebind_provenance(self) -> None:
+    def test_rejects_malformed_base_apk_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["apk"]["sourceCommit"] = "not-a-commit"
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError,
+            "planning result APK source commit is malformed",
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_missing_base_apk_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        del result["apk"]["sourceCommit"]
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "planning result APK source commit"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_chains_only_the_explicitly_trusted_immediate_planning_result(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "originalResultSha256": "0" * 64,
+            "sourceCommit": ORIGINAL_SOURCE_COMMIT,
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+        previous_raw = self.fixture.result.read_bytes()
+
+        exit_code = _main(
+            [
+                "--package",
+                str(self.fixture.package),
+                "--apk",
+                str(self.final_apk),
+                "--source-repository",
+                str(self.repository),
+                "--planning-result",
+                str(self.fixture.result),
+                "--trusted-planning-result-sha256",
+                _sha256(previous_raw),
+                "--output",
+                str(self.output),
+            ]
+        )
+
+        rebound = json.loads(self.output.read_text("utf-8"))
+        self.assertEqual(0, exit_code)
+        self.assertEqual(
+            {
+                "sourceCommit": self.head,
+                "trustedPlanningResultSha256": _sha256(previous_raw),
+            },
+            rebound["rebind"],
+        )
+
+    def test_existing_rebind_requires_explicit_trusted_planning_hash(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "originalResultSha256": "1" * 64,
+            "sourceCommit": ORIGINAL_SOURCE_COMMIT,
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError,
+            "trusted planning result SHA-256 is required",
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_existing_rebind_rejects_mismatched_trusted_planning_hash(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "originalResultSha256": "1" * 64,
+            "sourceCommit": ORIGINAL_SOURCE_COMMIT,
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError,
+            "trusted planning result SHA-256 differs",
+        ):
+            self._rebind(trusted_planning_result_sha256="f" * 64)
+        self.assertFalse(self.output.exists())
+
+    def test_subsequent_rebind_trusts_only_its_immediate_input(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "sourceCommit": ORIGINAL_SOURCE_COMMIT,
+            "trustedPlanningResultSha256": "opaque-prior-claim",
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+        previous_raw = self.fixture.result.read_bytes()
+
+        self._rebind(
+            trusted_planning_result_sha256=_sha256(previous_raw)
+        )
+
+        rebound = json.loads(self.output.read_text("utf-8"))
+        self.assertEqual(
+            {
+                "sourceCommit": self.head,
+                "trustedPlanningResultSha256": _sha256(previous_raw),
+            },
+            rebound["rebind"],
+        )
+
+    def test_visual_evaluation_chain_preserves_policy_binding(self) -> None:
+        policy = installer_module.INSTALL_POLICY_FULL_FIDELITY_VISUAL_EVALUATION
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "installPolicy": policy,
+            "originalResultSha256": "1" * 64,
+            "sourceCommit": ORIGINAL_SOURCE_COMMIT,
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+        previous_raw = self.fixture.result.read_bytes()
+
+        self._rebind(
+            install_policy=policy,
+            trusted_planning_result_sha256=_sha256(previous_raw),
+        )
+
+        rebound = json.loads(self.output.read_text("utf-8"))
+        self.assertEqual(policy, rebound["rebind"]["installPolicy"])
+        self.assertEqual(
+            _sha256(previous_raw),
+            rebound["rebind"]["trustedPlanningResultSha256"],
+        )
+
+    def test_rejects_malformed_prior_source_commit(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "originalResultSha256": "0" * 64,
+            "sourceCommit": "not-a-commit",
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rebind source commit is malformed"
+        ):
+            self._rebind(
+                trusted_planning_result_sha256=_sha256(
+                    self.fixture.result.read_bytes()
+                )
+            )
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_prior_source_commit_tampering(self) -> None:
         result = json.loads(self.fixture.result.read_text("utf-8"))
         result["rebind"] = {
             "originalResultSha256": "0" * 64,
             "sourceCommit": "b" * 40,
         }
         self.fixture.result.write_bytes(_canonical(result))
-        HostInstallPlan.validate(
-            package_directory=self.fixture.package,
-            apk_path=self.fixture.apk,
-            final_result_path=self.fixture.result,
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError,
+            "rebind source commit differs from APK source commit",
+        ):
+            self._rebind(
+                trusted_planning_result_sha256=_sha256(
+                    self.fixture.result.read_bytes()
+                )
+            )
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_prior_rebind_bound_to_another_install_policy(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "installPolicy": "full-fidelity-visual-evaluation",
+            "originalResultSha256": "0" * 64,
+            "sourceCommit": ORIGINAL_SOURCE_COMMIT,
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rebind install policy binding differs"
+        ):
+            self._rebind(
+                trusted_planning_result_sha256=_sha256(
+                    self.fixture.result.read_bytes()
+                )
+            )
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_explicit_null_rebind_install_policy(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "installPolicy": None,
+            "originalResultSha256": "0" * 64,
+            "sourceCommit": ORIGINAL_SOURCE_COMMIT,
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rebind install policy cannot be null"
+        ):
+            self._rebind(
+                trusted_planning_result_sha256=_sha256(
+                    self.fixture.result.read_bytes()
+                )
+            )
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_tampered_rebind_field_set(self) -> None:
+        result = json.loads(self.fixture.result.read_text("utf-8"))
+        result["rebind"] = {
+            "originalResultSha256": "0" * 64,
+            "sourceCommit": "b" * 40,
+            "unboundClaim": "tampered",
+        }
+        self.fixture.result.write_bytes(_canonical(result))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "rebind provenance fields"
+        ):
+            self._rebind(
+                trusted_planning_result_sha256=_sha256(
+                    self.fixture.result.read_bytes()
+                )
+            )
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_untracked_source_files(self) -> None:
+        (self.repository / "untracked-source.kt").write_text(
+            "fun untrackedBuildInput() = Unit\n", "utf-8"
         )
 
-        self._assert_rejected_without_output()
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "untracked source files"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_ignored_untracked_app_payload(self) -> None:
+        payload = self.repository / "app" / "src" / "main" / "assets" / "payload.apk"
+        payload.parent.mkdir(parents=True)
+        payload.write_bytes(b"ignored-build-input")
+        self.assertEqual("", self._git("check-ignore", "--quiet", payload))
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "untracked build input files"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_ignored_local_properties(self) -> None:
+        local_properties = self.repository / "local.properties"
+        local_properties.write_text("sdk.dir=C:/alternate-sdk\n", "utf-8")
+        self.assertEqual(
+            "", self._git("check-ignore", "--quiet", local_properties)
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePackageInstallError, "untracked build input files"
+        ):
+            self._rebind()
+        self.assertFalse(self.output.exists())
 
     def test_rejects_original_result_changed_after_initial_validation(self) -> None:
         original_raw = self.fixture.result.read_bytes()

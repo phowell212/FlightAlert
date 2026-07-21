@@ -457,6 +457,28 @@ class RendererTilePackageWriterTests(unittest.TestCase):
                 {TileKey(1, 1, 0): CAIRO_TILE_BYTES},
             )
 
+    def test_streaming_writer_enforces_records_byte_quota_without_publication(self) -> None:
+        from tools.experiment8.renderer_tile_package import (
+            RendererTilePackageError,
+            RendererTileRecord,
+            write_streaming_package,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "quota-package"
+            record = RendererTileRecord(_line_renderer_record(), None)
+
+            with self.assertRaisesRegex(RendererTilePackageError, "records byte quota"):
+                write_streaming_package(
+                    output,
+                    "quota-package",
+                    ((1, 0, 0, 0, 0),),
+                    ((TileKey(1, 0, 0), (record,)),),
+                    max_records_bytes=1,
+                )
+
+            self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
