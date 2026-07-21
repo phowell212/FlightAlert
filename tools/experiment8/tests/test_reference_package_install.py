@@ -3974,6 +3974,28 @@ class HostInstallPlanEdgeCaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ReferencePackageInstallError, "subtype counts"):
             self.validate()
 
+    def test_legacy_receipts_accept_current_canonical_subtype_counts(self) -> None:
+        counts = [
+            {
+                "canonicalVariantIds": 0,
+                "distinctFeatureIds": 0,
+                "postings": 0,
+                "semanticSubtype": 100,
+                "semanticSubtypeName": "COUNTRY_TERRITORY",
+            }
+        ]
+        for name in (
+            "merge-receipt.json",
+            "class-catalog-finalization-receipt.json",
+        ):
+            self._rewrite_package_json(
+                name,
+                lambda document: document.__setitem__("subtypeCounts", counts),
+            )
+        self._refresh_manifest_and_result_bindings()
+
+        self.assertEqual(PACKAGE_ID, self.validate().package_id)
+
     def test_lf_and_crlf_tool_checkouts_have_one_accepted_source_identity(self) -> None:
         merger = Path(installer_module.__file__).parent / "v3_package_merger.py"
         finalizer = Path(installer_module.__file__).parent / "v3_class_catalog_finalizer.py"

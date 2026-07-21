@@ -4160,7 +4160,10 @@ def _validate_receipts(
     ) != semantic:
         raise ReferencePackageInstallError("merge semantic stream differs")
 
-    if authority_v2:
+    canonical_subtype_counts = authority_v2 or type(
+        merge_receipt.get("subtypeCounts")
+    ) is list
+    if canonical_subtype_counts:
         merge_counts = _authority_subtype_counts(
             merge_receipt.get("subtypeCounts"), "merge subtype counts"
         )
