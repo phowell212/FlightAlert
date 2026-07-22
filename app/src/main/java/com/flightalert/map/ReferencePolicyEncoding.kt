@@ -17,6 +17,17 @@ internal fun hex_bytes(value: String): ByteArray {
 
 internal fun sha256_bytes(value: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(value)
 
+internal fun sha256_bytes(
+    digest: MessageDigest,
+    domain: ByteArray,
+    canonical: ByteArray,
+): ByteArray {
+    digest.reset()
+    digest.update(domain)
+    digest.update(canonical)
+    return digest.digest()
+}
+
 internal fun sha256_hex(value: ByteArray): String = sha256_bytes(value).joinToString("") {
     "%02x".format(it.toInt() and 0xff)
 }

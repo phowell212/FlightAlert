@@ -134,6 +134,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
         requireBinary(count <= MAX_RECORDS_PER_TILE) {
             "binary reference tile record count exceeds its bound"
         }
+        val identityDigest = MessageDigest.getInstance("SHA-256")
         val records = ArrayList<ReferenceDictionaryBinaryRecord>(count)
         repeat(count) {
             val rendererBytes = reader.blob(MAX_RENDERER_RECORD_BYTES, "renderer record")
@@ -147,12 +148,12 @@ internal object ReferenceDictionaryBinaryTileCodec {
                 val expectedDigest = reader.take(32)
                 val canonical = reader.take(sourcedLength)
                 try {
-                    SourcedMapTextBinaryCodec.decode(canonical, expectedDigest.toLowerHex())
+                    SourcedMapTextBinaryCodec.decode(canonical, expectedDigest, identityDigest)
                 } catch (error: SourcedMapTextException) {
                     throw ReferenceDictionaryBinaryTileException(error.message ?: "sourced text is invalid")
                 }
             }
-            records += decodeRendererRecord(coordinate, rendererBytes, sourced)
+            records += decodeRendererRecord(coordinate, rendererBytes, sourced, identityDigest)
         }
         reader.finish("binary reference tile has trailing bytes")
         return ReferenceDictionaryBinaryTile(coordinate, records)
@@ -162,6 +163,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
         coordinate: ReferenceDictionaryTileCoordinate,
         bytes: ByteArray,
         sourcedText: SourcedMapText?,
+        identityDigest: MessageDigest,
     ): ReferenceDictionaryBinaryRecord {
         val reader = BinaryReader(bytes)
         reader.n8Header(8, n8Magic, "renderer record")
@@ -171,10 +173,10 @@ internal object ReferenceDictionaryBinaryTileCodec {
         val worldWrap = reader.i32()
         val variantBytes = reader.blob(MAX_VARIANT_BYTES, "canonical variant")
         reader.finish("renderer record has trailing bytes")
-        requireBinary(hotId(variantDomain, variantBytes) == canonicalVariantId) {
+        requireBinary(hotId(identityDigest, variantDomain, variantBytes) == canonicalVariantId) {
             "canonical variant ID does not match FAE8VAR1 bytes"
         }
-        val variant = decodeVariant(coordinate, worldWrap, variantBytes)
+        val variant = decodeVariant(coordinate, worldWrap, variantBytes, identityDigest)
         val isLabel = variant.featureKind == ReferenceDictionaryBinaryFeatureKind.LABEL
         requireBinary(isLabel == (sourcedText != null)) {
             "labels require sourced text and non-label records forbid it"
@@ -211,6 +213,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
         coordinate: ReferenceDictionaryTileCoordinate,
         worldWrap: Int,
         bytes: ByteArray,
+        identityDigest: MessageDigest,
     ): DecodedVariant {
         val reader = BinaryReader(bytes)
         reader.n8Header(4, n8Magic, "canonical variant")
@@ -236,7 +239,7 @@ internal object ReferenceDictionaryBinaryTileCodec {
             null
         }
         val geometryBytes = reader.blob(MAX_GEOMETRY_BYTES, "renderer geometry")
-        requireBinary(hotId(geometryDomain, geometryBytes) == geometryId) {
+        requireBinary(hotId(identityDigest, geometryDomain, geometryBytes) == geometryId) {
             "renderer geometry ID does not match its canonical bytes"
         }
         val geometry = decodeGeometry(coordinate, worldWrap, geometryBytes)
@@ -541,9 +544,12 @@ internal object ReferenceDictionaryBinaryTileCodec {
         ).also(::validateCoordinate)
     }
 
-    private fun hotId(domain: ByteArray, canonical: ByteArray): ULong {
-        val digest = MessageDigest.getInstance("SHA-256").digest(domain + canonical)
-        return firstU64BigEndian(digest)
+    private fun hotId(
+        digest: MessageDigest,
+        domain: ByteArray,
+        canonical: ByteArray,
+    ): ULong {
+        return firstU64BigEndian(sha256_bytes(digest, domain, canonical))
     }
 
     private fun firstU64BigEndian(bytes: ByteArray): ULong {

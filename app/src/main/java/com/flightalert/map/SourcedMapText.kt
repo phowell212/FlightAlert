@@ -2,6 +2,7 @@ package com.flightalert.map
 
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.security.MessageDigest
 
 enum class SourcedTextErrorCode {
     PRIMARY_WRONG_TYPE,
@@ -175,8 +176,22 @@ object SourcedMapTextBinaryCodec {
         if (canonicalBytes.isEmpty() || canonicalBytes.size > maximumCanonicalRecordBytes) {
             throw SourcedMapTextException("sourced-text record byte length is outside its bound")
         }
-        val expectedDigest = decodeLowerHex(expectedFullSha256)
-        val actualDigest = sha256_bytes(identityDomain + canonicalBytes)
+        return decode(
+            canonicalBytes = canonicalBytes,
+            expectedDigest = decodeLowerHex(expectedFullSha256),
+            identityDigest = MessageDigest.getInstance("SHA-256"),
+        )
+    }
+
+    internal fun decode(
+        canonicalBytes: ByteArray,
+        expectedDigest: ByteArray,
+        identityDigest: MessageDigest,
+    ): SourcedMapText {
+        if (canonicalBytes.isEmpty() || canonicalBytes.size > maximumCanonicalRecordBytes) {
+            throw SourcedMapTextException("sourced-text record byte length is outside its bound")
+        }
+        val actualDigest = sha256_bytes(identityDigest, identityDomain, canonicalBytes)
         if (!actualDigest.contentEquals(expectedDigest)) {
             throw SourcedMapTextException("sourced-text record full SHA-256 does not match")
         }

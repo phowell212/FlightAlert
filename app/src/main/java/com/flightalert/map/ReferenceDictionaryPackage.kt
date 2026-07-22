@@ -230,13 +230,15 @@ internal class ReferenceDictionaryPackageStore(
         z: Int,
         x: Int,
         y: Int,
-        verify_hash: Boolean = false
+        verify_hash: Boolean = false,
+        request_is_relevant: () -> Boolean,
     ): ReferenceDictionaryTilePayload? {
         return open_package_if_available()?.read_tile_payload(
             z = z,
             x = x,
             y = y,
-            verify_hash = verify_hash
+            verify_hash = verify_hash,
+            request_is_relevant = request_is_relevant,
         )
     }
 
@@ -291,7 +293,8 @@ internal class ReferenceDictionaryPackage private constructor(
         z: Int,
         x: Int,
         y: Int,
-        verify_hash: Boolean = false
+        verify_hash: Boolean = false,
+        request_is_relevant: () -> Boolean,
     ): ReferenceDictionaryTilePayload? {
         val range = zoom_ranges.firstOrNull { it.z == z } ?: return null
         if (x < range.x_min || x > range.x_max || y < range.y_min || y > range.y_max) {
@@ -308,6 +311,7 @@ internal class ReferenceDictionaryPackage private constructor(
             throw IOException("Reference dictionary tile exceeds its raw byte ceiling")
         }
         val compressed = read_record_bytes(entry.offset, entry.compressed_length)
+        if (!request_is_relevant()) return null
         val raw_bytes = inflate_raw_deflate(
             compressed = compressed,
             expected_size = entry.raw_length

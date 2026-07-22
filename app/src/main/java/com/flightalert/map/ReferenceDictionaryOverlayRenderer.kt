@@ -555,21 +555,36 @@ internal class ReferenceDictionaryOverlayRenderer(
             if (!requested_tiles.add(cache_key)) return 0
         }
         tile_executor.execute {
+            var request_became_obsolete = false
+            val keep_loading = {
+                if (request_became_obsolete) {
+                    false
+                } else {
+                    val relevant = tile_request_still_relevant(cache_key, generation)
+                    if (!relevant) request_became_obsolete = true
+                    relevant
+                }
+            }
+            var published = false
             try {
-                if (!tile_request_still_relevant(cache_key, generation)) return@execute
+                if (!keep_loading()) return@execute
                 val payload = package_store.read_tile_payload(
                     z = tile.z,
                     x = tile.x,
-                    y = tile.y
+                    y = tile.y,
+                    request_is_relevant = keep_loading,
                 )
+                if (!keep_loading()) return@execute
                 val parsed = if (payload != null) {
                     parse_tile_payload(payload = payload)
                 } else {
                     empty_parsed_tile(tile)
                 }
                 synchronized(tile_cache) {
+                    if (!keep_loading()) return@synchronized
                     tile_cache[cache_key] = parsed
                     content_revision.incrementAndGet()
+                    published = true
                 }
             } catch (_: Exception) {
                 // Missing or corrupt baked reference data is treated as unavailable real data.
@@ -577,7 +592,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 synchronized(tile_cache) {
                     requested_tiles.remove(cache_key)
                 }
-                request_redraw()
+                if (published || keep_loading()) {
+                    request_redraw()
+                }
             }
         }
         return 1
