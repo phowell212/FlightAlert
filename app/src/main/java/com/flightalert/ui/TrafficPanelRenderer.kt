@@ -24,40 +24,6 @@ import com.flightalert.traffic.FilterStats
 import java.util.Locale
 import kotlin.math.min
 
-data class TrafficPanelStyle(val visual_theme: VisualTheme)
-
-data class TrafficPanelState(
-    val title: String,
-    val title_color: Int,
-    val content: TrafficPanelContent
-)
-
-sealed interface TrafficPanelContent
-
-data class TrafficPanelAircraftState(
-    val callsign: String,
-    val model_label: String,
-    val distance_label: String,
-    val distance_color: Int,
-    val wide_rows: List<TrafficPanelRow>,
-    val compact_rows: List<TrafficPanelRow>
-) : TrafficPanelContent
-
-data class TrafficPanelEmptyState(
-    val headline: String,
-    val message: String,
-    val data_time_label: String?
-) : TrafficPanelContent
-
-data class TrafficPanelRow(val label: String, val value: String)
-
-interface TrafficPanelChrome {
-    fun dp(value: Float): Float
-    fun sp(value: Float): Float
-    fun ellipsize(value: String, max_width: Float): String
-    fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int)
-}
-
 class TrafficPanelRenderer(
     private val text_paint: Paint,
     private val stroke_paint: Paint,
@@ -498,6 +464,40 @@ class TrafficPanelRenderer(
     private fun sp(value: Int): Float = sp(value.toFloat())
 
     private fun sp(value: Float): Float = chrome.sp(value)
+}
+
+data class TrafficPanelStyle(val visual_theme: VisualTheme)
+
+data class TrafficPanelState(
+    val title: String,
+    val title_color: Int,
+    val content: TrafficPanelContent
+)
+
+sealed interface TrafficPanelContent
+
+data class TrafficPanelAircraftState(
+    val callsign: String,
+    val model_label: String,
+    val distance_label: String,
+    val distance_color: Int,
+    val wide_rows: List<TrafficPanelRow>,
+    val compact_rows: List<TrafficPanelRow>
+) : TrafficPanelContent
+
+data class TrafficPanelEmptyState(
+    val headline: String,
+    val message: String,
+    val data_time_label: String?
+) : TrafficPanelContent
+
+data class TrafficPanelRow(val label: String, val value: String)
+
+interface TrafficPanelChrome {
+    fun dp(value: Float): Float
+    fun sp(value: Float): Float
+    fun ellipsize(value: String, max_width: Float): String
+    fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int)
 }
 
 internal class TrafficPanelStateBuilder(

@@ -35,85 +35,6 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-data class AircraftDetailsPanelStyle(val visual_theme: VisualTheme)
-
-data class AircraftDetailsRow(
-    val label: String,
-    val value: String,
-    val section: Boolean = false
-) {
-    companion object {
-        fun section(label: String, value: String = ""): AircraftDetailsRow =
-            AircraftDetailsRow(label, value, section = true)
-    }
-}
-
-data class AircraftDetailsPhotoState(
-    val bitmap: Bitmap?,
-    val status: String,
-    val previous_bitmap: Bitmap? = null,
-    val transition_progress: Float = 1f
-)
-
-data class AircraftDetailsPanelState(
-    val content: AircraftDetailsPanelContent,
-    val photo: AircraftDetailsPhotoState,
-    val scroll_y: Float,
-    val wide_layout: Boolean
-)
-
-sealed interface AircraftDetailsPanelContent
-
-data class AircraftDetailsMainState(
-    val title: String,
-    val rows: List<AircraftDetailsRow>,
-    val has_aircraft: Boolean,
-    val has_usage_trace: Boolean
-) : AircraftDetailsPanelContent
-
-data class AircraftImpactPanelState(
-    val selected_aircraft_available: Boolean,
-    val status: String,
-    val show_trace_co2: Boolean,
-    val co2_text: String,
-    val score_label: String,
-    val score_text: String,
-    val score_color: Int,
-    val rows: List<AircraftDetailsRow>
-) : AircraftDetailsPanelContent
-
-data class AircraftUsagePanelState(
-    val selected_aircraft_available: Boolean,
-    val status: String,
-    val unavailable_message: String?,
-    val stat_rows: List<AircraftDetailsRow>,
-    val stats: UsageStats?
-) : AircraftDetailsPanelContent
-
-data class AircraftPhotoEvidencePanelState(
-    val evidence: PhotoEvidence?
-) : AircraftDetailsPanelContent
-
-data class AircraftPhotoGalleryPanelState(
-    val items: List<AircraftPhotoGalleryItem>,
-    val status: String,
-    val loading: Boolean
-) : AircraftDetailsPanelContent
-
-data class AircraftDetailsDrawResult(
-    val scroll_y: Float,
-    val max_scroll_y: Float
-)
-
-interface AircraftDetailsPanelChrome {
-    fun dp(value: Float): Float
-    fun sp(value: Float): Float
-    fun ellipsize(value: String, max_width: Float): String
-    fun control_radius(): Float
-    fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int)
-    fun draw_choice_button(canvas: Canvas, rect: RectF, label: String, selected: Boolean)
-}
-
 // Draws the selected-aircraft modal; FlightMapView provides state and this object owns all panel geometry.
 class AircraftDetailsPanelRenderer(
     private val paint: Paint,
@@ -1540,4 +1461,82 @@ class AircraftDetailsPanelRenderer(
         const val DETAILS_EVIDENCE_LINE_MAX_LINES = 4
         const val DETAILS_PROOF_QUOTE_LINES = 12
     }
+}
+data class AircraftDetailsPanelStyle(val visual_theme: VisualTheme)
+
+data class AircraftDetailsRow(
+    val label: String,
+    val value: String,
+    val section: Boolean = false
+) {
+    companion object {
+        fun section(label: String, value: String = ""): AircraftDetailsRow =
+            AircraftDetailsRow(label, value, section = true)
+    }
+}
+
+data class AircraftDetailsPhotoState(
+    val bitmap: Bitmap?,
+    val status: String,
+    val previous_bitmap: Bitmap? = null,
+    val transition_progress: Float = 1f
+)
+
+data class AircraftDetailsPanelState(
+    val content: AircraftDetailsPanelContent,
+    val photo: AircraftDetailsPhotoState,
+    val scroll_y: Float,
+    val wide_layout: Boolean
+)
+
+sealed interface AircraftDetailsPanelContent
+
+data class AircraftDetailsMainState(
+    val title: String,
+    val rows: List<AircraftDetailsRow>,
+    val has_aircraft: Boolean,
+    val has_usage_trace: Boolean
+) : AircraftDetailsPanelContent
+
+data class AircraftImpactPanelState(
+    val selected_aircraft_available: Boolean,
+    val status: String,
+    val show_trace_co2: Boolean,
+    val co2_text: String,
+    val score_label: String,
+    val score_text: String,
+    val score_color: Int,
+    val rows: List<AircraftDetailsRow>
+) : AircraftDetailsPanelContent
+
+data class AircraftUsagePanelState(
+    val selected_aircraft_available: Boolean,
+    val status: String,
+    val unavailable_message: String?,
+    val stat_rows: List<AircraftDetailsRow>,
+    val stats: UsageStats?
+) : AircraftDetailsPanelContent
+
+data class AircraftPhotoEvidencePanelState(
+    val evidence: PhotoEvidence?
+) : AircraftDetailsPanelContent
+
+data class AircraftPhotoGalleryPanelState(
+    val items: List<AircraftPhotoGalleryItem>,
+    val status: String,
+    val loading: Boolean
+) : AircraftDetailsPanelContent
+
+data class AircraftDetailsDrawResult(
+    val scroll_y: Float,
+    val max_scroll_y: Float
+)
+
+interface AircraftDetailsPanelChrome {
+    fun dp(value: Float): Float
+    fun sp(value: Float): Float
+    fun ellipsize(value: String, max_width: Float): String
+    fun control_radius(): Float
+    fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int)
+    fun draw_choice_button(canvas: Canvas, rect: RectF, label: String, selected: Boolean)
 }

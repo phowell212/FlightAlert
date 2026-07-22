@@ -56,7 +56,7 @@ import com.flightalert.aircraft.TrafficDisplay
 import com.flightalert.aircraft.aircraft_identity_key
 import com.flightalert.alerts.AlertAircraft
 import com.flightalert.alerts.AlertAircraftClassifier
-import com.flightalert.alerts.AlertMonitoringController
+import com.flightalert.alerts.AircraftAlertService
 import com.flightalert.alerts.AlertPositionProjector
 import com.flightalert.alerts.MonitoringNotificationHiderService
 import com.flightalert.alerts.ProjectedAlertPosition
@@ -365,7 +365,6 @@ class FlightMapView(
         }
     )
     private val executor = Executors.newFixedThreadPool(4)
-    private val alert_monitoring_controller = AlertMonitoringController(context)
     private val measurement_formatter = MapMeasurementFormatter { units }
     private val telemetry_formatter = AircraftTelemetryFormatter(
         measurement_formatter = measurement_formatter,
@@ -4118,7 +4117,11 @@ class FlightMapView(
     }
 
     private fun update_monitoring_service() {
-        alert_monitoring_controller.apply(alerts_enabled, priority_tracking_enabled)
+        if (alerts_enabled || priority_tracking_enabled) {
+            AircraftAlertService.start(context)
+        } else {
+            AircraftAlertService.stop(context)
+        }
     }
 
     private fun apply_initial_mavic_range_zoom_if_needed() {
@@ -4327,7 +4330,7 @@ class FlightMapView(
         if (!force && signature == last_priority_notification_snapshot_signature) return
         if (signature.isEmpty() && last_priority_notification_snapshot_signature == null) return
         last_priority_notification_snapshot_signature = signature
-        alert_monitoring_controller.publish_priority_snapshot(priority_aircraft)
+        AircraftAlertService.publish_priority_snapshot(context, priority_aircraft)
     }
 
     private fun projected_extreme_priority_alerts(): List<AlertAircraft> {

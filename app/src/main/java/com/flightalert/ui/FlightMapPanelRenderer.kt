@@ -45,418 +45,6 @@ import kotlin.math.floor
 import kotlin.math.round
 import kotlin.math.sqrt
 
-private const val MAP_LABEL_TEXT_SCALE_MIN = 1f
-private const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
-
-internal fun map_label_text_scale_for_x(x: Float, bounds: RectF): Float {
-    val progress = ((x - bounds.left) / bounds.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
-    return MAP_LABEL_TEXT_SCALE_MIN + progress * (MAP_LABEL_TEXT_SCALE_MAX - MAP_LABEL_TEXT_SCALE_MIN)
-}
-
-data class FlightMapPanelStyle(val visual_theme: VisualTheme)
-
-data class MapLabelsPanelState(
-    val street_labels_enabled: Boolean,
-    val borders_enabled: Boolean,
-    val label_text_scale: Float
-)
-
-data class AviationLayersPanelState(
-    val status_text: String,
-    val snapshot: AviationLayerSnapshot?,
-    val fetch_in_flight: Boolean,
-    val atc_boundaries_enabled: Boolean,
-    val restricted_airspaces_enabled: Boolean,
-    val oceanic_tracks_enabled: Boolean,
-    val airport_labels_enabled: Boolean
-)
-
-data class ImpactMethodologyPanelState(
-    val source_labels: List<String>
-)
-
-data class FiltersPanelState(
-    val filter_search_query: String,
-    val filter_search_focused: Boolean,
-    val aircraft_type_filter: AircraftTypeFilter,
-    val altitude_filter: AltitudeFilter,
-    val distance_filter: DistanceFilter,
-    val flight_status_filter: FlightStatusFilter,
-    val report_age_filter: ReportAgeFilter,
-    val alert_volume_filter: Boolean,
-    val filters_active: Boolean,
-    val stats_summary: String,
-    val reference_panel_plan: ReferenceFiltersPanelPlan,
-    val reference_focused_action_id: String?,
-    val pixels_per_dp: Float,
-) {
-    init {
-        require(pixels_per_dp.isFinite() && pixels_per_dp > 0f) {
-            "filter panel pixel density must be positive"
-        }
-    }
-}
-
-data class PriorityAircraftPanelRow(
-    val title: String,
-    val altitude: String,
-    val detail: String,
-    val is_extreme: Boolean
-)
-
-data class PriorityTrackerPanelState(
-    val priority_tracking_enabled: Boolean,
-    val priority_range_circle_visible: Boolean,
-    val alert_distance_label: String,
-    val alert_altitude_label: String,
-    val aircraft_rows: List<PriorityAircraftPanelRow>,
-    val long_press_fill: PriorityRangeButtonFillState? = null
-)
-
-enum class PriorityRangeAdjustButton {
-    DISTANCE_MINUS,
-    DISTANCE_PLUS,
-    ALTITUDE_MINUS,
-    ALTITUDE_PLUS
-}
-
-data class PriorityRangeButtonFillState(
-    val button: PriorityRangeAdjustButton,
-    val press_x: Float,
-    val press_y: Float,
-    val started_ms: Long,
-    val duration_ms: Long
-)
-
-internal data class SettingsPanelHitState(
-    val impact_methodology_open: Boolean,
-    val aviation_layers_open: Boolean,
-    val map_labels_open: Boolean,
-    val display_settings_open: Boolean,
-    val map_settings_open: Boolean,
-    val alert_settings_open: Boolean,
-    val impact_source_count: Int
-)
-
-internal data class SettingsPanelHitResult(
-    val action: SettingsPanelAction,
-    val index: Int = -1
-)
-
-internal data class SettingsPanelTarget(
-    val bounds: RectF,
-    val action: SettingsPanelAction,
-    val index: Int = -1
-)
-
-internal enum class SettingsPanelAction {
-    CLOSE_SUBPAGE,
-    CLOSE_SETTINGS,
-    OPEN_IMPACT_SOURCE,
-    TOGGLE_ATC_BOUNDARIES,
-    TOGGLE_RESTRICTED_AIRSPACES,
-    TOGGLE_OCEANIC_TRACKS,
-    TOGGLE_AIRPORT_LABELS,
-    TOGGLE_MAP_LABELS,
-    TOGGLE_MAP_BORDERS,
-    SET_UNITS_IMPERIAL,
-    SET_UNITS_METRIC,
-    NEXT_THEME,
-    TOGGLE_MAP_SOURCE,
-    OPEN_MAP_LABELS,
-    OPEN_AVIATION_LAYERS,
-    TOGGLE_ALERTS,
-    OPEN_NOTIFICATION_ACCESS,
-    OPEN_PRIORITY_TRACKER,
-    OPEN_DISPLAY_SETTINGS,
-    OPEN_MAP_SETTINGS,
-    OPEN_ALERT_SETTINGS,
-    OPEN_IMPACT_METHODOLOGY
-}
-
-internal data class FilterPanelTarget(
-    val bounds: RectF,
-    val action: FilterPanelAction
-)
-
-internal sealed interface FilterPanelAction {
-    data object FOCUS_SEARCH : FilterPanelAction
-    data object SUBMIT_SEARCH : FilterPanelAction
-    data object CLEAR_SEARCH : FilterPanelAction
-    data object NEXT_AIRCRAFT_TYPE : FilterPanelAction
-    data object NEXT_ALTITUDE : FilterPanelAction
-    data object NEXT_DISTANCE : FilterPanelAction
-    data object NEXT_STATUS : FilterPanelAction
-    data object NEXT_AGE : FilterPanelAction
-    data object TOGGLE_ALERT_VOLUME : FilterPanelAction
-    data object RESET : FilterPanelAction
-    data object CLEAR_SEARCH_FOCUS : FilterPanelAction
-    data object NONE : FilterPanelAction
-    data class ReferenceIntent(val intent: ReferencePanelIntent) : FilterPanelAction
-}
-
-internal data class PriorityTrackerPanelTarget(
-    val bounds: RectF,
-    val action: PriorityTrackerPanelAction,
-    val adjust_button: PriorityRangeAdjustButton? = null
-)
-
-internal data class PriorityTrackerPanelHitResult(
-    val action: PriorityTrackerPanelAction,
-    val adjust_button: PriorityRangeAdjustButton? = null
-)
-
-internal enum class PriorityTrackerPanelAction {
-    CLOSE,
-    TOGGLE_TRACKING,
-    TOGGLE_RANGE_RING,
-    ADJUST_RANGE
-}
-
-internal fun FlightMapLayout.settings_panel_targets(
-    panel: RectF,
-    state: SettingsPanelHitState
-): List<SettingsPanelTarget> {
-    val targets = ArrayList<SettingsPanelTarget>(8)
-    fun add(bounds: RectF, action: SettingsPanelAction, index: Int = -1) {
-        targets.add(SettingsPanelTarget(bounds, action, index))
-    }
-    if (state.impact_methodology_open) {
-        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
-        for (index in 0 until state.impact_source_count) {
-            add(
-                impact_source_button_bounds(panel, index, state.impact_source_count),
-                SettingsPanelAction.OPEN_IMPACT_SOURCE,
-                index
-            )
-        }
-        return targets
-    }
-    if (state.aviation_layers_open) {
-        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
-        add(layer_atc_button_bounds(panel), SettingsPanelAction.TOGGLE_ATC_BOUNDARIES)
-        add(layer_restricted_button_bounds(panel), SettingsPanelAction.TOGGLE_RESTRICTED_AIRSPACES)
-        add(layer_oceanic_button_bounds(panel), SettingsPanelAction.TOGGLE_OCEANIC_TRACKS)
-        add(layer_airport_labels_button_bounds(panel), SettingsPanelAction.TOGGLE_AIRPORT_LABELS)
-        return targets
-    }
-    if (state.map_labels_open) {
-        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
-        add(map_borders_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_BORDERS)
-        return targets
-    }
-    if (state.display_settings_open) {
-        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
-        add(imperial_button_bounds(panel), SettingsPanelAction.SET_UNITS_IMPERIAL)
-        add(metric_button_bounds(panel), SettingsPanelAction.SET_UNITS_METRIC)
-        add(theme_button_bounds(panel), SettingsPanelAction.NEXT_THEME)
-        return targets
-    }
-    if (state.map_settings_open) {
-        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
-        add(map_source_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_SOURCE)
-        add(map_labels_button_bounds(panel), SettingsPanelAction.OPEN_MAP_LABELS)
-        add(aviation_layers_button_bounds(panel), SettingsPanelAction.OPEN_AVIATION_LAYERS)
-        return targets
-    }
-    if (state.alert_settings_open) {
-        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
-        add(alerts_toggle_bounds(panel), SettingsPanelAction.TOGGLE_ALERTS)
-        add(monitoring_notification_hider_button_bounds(panel), SettingsPanelAction.OPEN_NOTIFICATION_ACCESS)
-        add(priority_tracker_button_bounds(panel), SettingsPanelAction.OPEN_PRIORITY_TRACKER)
-        return targets
-    }
-    add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SETTINGS)
-    add(settings_display_button_bounds(panel), SettingsPanelAction.OPEN_DISPLAY_SETTINGS)
-    add(settings_map_button_bounds(panel), SettingsPanelAction.OPEN_MAP_SETTINGS)
-    add(settings_alerts_button_bounds(panel), SettingsPanelAction.OPEN_ALERT_SETTINGS)
-    add(settings_info_button_bounds(panel), SettingsPanelAction.OPEN_IMPACT_METHODOLOGY)
-    return targets
-}
-
-internal fun FlightMapLayout.settings_panel_hit_result(
-    panel: RectF,
-    x: Float,
-    y: Float,
-    state: SettingsPanelHitState
-): SettingsPanelHitResult? {
-    return settings_panel_targets(panel, state)
-        .firstOrNull { it.bounds.contains(x, y) }
-        ?.let { SettingsPanelHitResult(it.action, it.index) }
-}
-
-internal fun FlightMapLayout.filter_panel_targets(
-    panel: RectF,
-    state: FiltersPanelState
-): List<FilterPanelTarget> {
-    return buildList {
-        val plan = state.reference_panel_plan
-        val contentViewport = plan.contentViewport.to_pixel_rect(panel, state.pixels_per_dp)
-        plan.controls.forEach { control ->
-            val bounds = control.bounds.to_pixel_rect(panel, state.pixels_per_dp)
-            val targetBounds = if (control.kind == ReferenceControlKind.SWITCH) {
-                bounds.intersection_or_null(contentViewport)
-            } else {
-                bounds
-            }
-            targetBounds?.let {
-                add(
-                    FilterPanelTarget(it, FilterPanelAction.ReferenceIntent(control.intent))
-                )
-            }
-        }
-        if (plan.content == ReferenceFiltersPanelContent.TRAFFIC_SLOT) {
-            val legacyPanel = legacy_traffic_panel_bounds(panel, state)
-            val trafficTargets = listOf(
-                FilterPanelTarget(filter_search_box_bounds(legacyPanel), FilterPanelAction.FOCUS_SEARCH),
-                FilterPanelTarget(filter_search_find_button_bounds(legacyPanel), FilterPanelAction.SUBMIT_SEARCH),
-                FilterPanelTarget(filter_search_clear_button_bounds(legacyPanel), FilterPanelAction.CLEAR_SEARCH),
-                FilterPanelTarget(filter_aircraft_type_button_bounds(legacyPanel), FilterPanelAction.NEXT_AIRCRAFT_TYPE),
-                FilterPanelTarget(filter_altitude_button_bounds(legacyPanel), FilterPanelAction.NEXT_ALTITUDE),
-                FilterPanelTarget(filter_distance_button_bounds(legacyPanel), FilterPanelAction.NEXT_DISTANCE),
-                FilterPanelTarget(filter_status_button_bounds(legacyPanel), FilterPanelAction.NEXT_STATUS),
-                FilterPanelTarget(filter_age_button_bounds(legacyPanel), FilterPanelAction.NEXT_AGE),
-                FilterPanelTarget(filter_alert_button_bounds(legacyPanel), FilterPanelAction.TOGGLE_ALERT_VOLUME),
-                FilterPanelTarget(filter_reset_button_bounds(legacyPanel), FilterPanelAction.RESET),
-            )
-            trafficTargets.forEach { target ->
-                target.bounds.intersection_or_null(contentViewport)?.let { clipped ->
-                    add(target.copy(bounds = clipped))
-                }
-            }
-        }
-    }
-}
-
-internal fun FlightMapLayout.filter_panel_action_at(
-    panel: RectF,
-    x: Float,
-    y: Float,
-    state: FiltersPanelState
-): FilterPanelAction {
-    return filter_panel_targets(panel, state)
-        .firstOrNull { it.bounds.contains(x, y) }
-        ?.action
-        ?: if (state.reference_panel_plan.content == ReferenceFiltersPanelContent.TRAFFIC_SLOT) {
-            FilterPanelAction.CLEAR_SEARCH_FOCUS
-        } else {
-            FilterPanelAction.NONE
-        }
-}
-
-private fun FlightMapLayout.legacy_traffic_panel_bounds(
-    panel: RectF,
-    state: FiltersPanelState,
-): RectF {
-    val density = state.pixels_per_dp
-    val plan = state.reference_panel_plan
-    val legacySearchTopDp = if (is_compact_settings_panel(panel)) 62f else 74f
-    val top = panel.top +
-        (plan.contentViewport.top - legacySearchTopDp - plan.appliedScrollOffsetDp) * density
-    return RectF(panel.left, top, panel.right, top + panel.height())
-}
-
-private fun ReferenceDpRect.to_pixel_rect(panel: RectF, density: Float): RectF = RectF(
-    panel.left + left * density,
-    panel.top + top * density,
-    panel.left + right * density,
-    panel.top + bottom * density,
-)
-
-private fun RectF.intersection_or_null(other: RectF): RectF? {
-    val clippedLeft = maxOf(left, other.left)
-    val clippedTop = maxOf(top, other.top)
-    val clippedRight = minOf(right, other.right)
-    val clippedBottom = minOf(bottom, other.bottom)
-    return if (clippedRight > clippedLeft && clippedBottom > clippedTop) {
-        RectF(clippedLeft, clippedTop, clippedRight, clippedBottom)
-    } else {
-        null
-    }
-}
-
-internal fun FlightMapLayout.priority_tracker_panel_targets(panel: RectF): List<PriorityTrackerPanelTarget> {
-    return listOf(
-        PriorityTrackerPanelTarget(priority_close_button_bounds(panel), PriorityTrackerPanelAction.CLOSE),
-        PriorityTrackerPanelTarget(priority_tracking_toggle_bounds(panel), PriorityTrackerPanelAction.TOGGLE_TRACKING),
-        PriorityTrackerPanelTarget(priority_ring_toggle_bounds(panel), PriorityTrackerPanelAction.TOGGLE_RANGE_RING),
-        PriorityTrackerPanelTarget(
-            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.DISTANCE_MINUS),
-            PriorityTrackerPanelAction.ADJUST_RANGE,
-            PriorityRangeAdjustButton.DISTANCE_MINUS
-        ),
-        PriorityTrackerPanelTarget(
-            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.DISTANCE_PLUS),
-            PriorityTrackerPanelAction.ADJUST_RANGE,
-            PriorityRangeAdjustButton.DISTANCE_PLUS
-        ),
-        PriorityTrackerPanelTarget(
-            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.ALTITUDE_MINUS),
-            PriorityTrackerPanelAction.ADJUST_RANGE,
-            PriorityRangeAdjustButton.ALTITUDE_MINUS
-        ),
-        PriorityTrackerPanelTarget(
-            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.ALTITUDE_PLUS),
-            PriorityTrackerPanelAction.ADJUST_RANGE,
-            PriorityRangeAdjustButton.ALTITUDE_PLUS
-        )
-    )
-}
-
-internal fun FlightMapLayout.priority_tracker_panel_hit_result(
-    panel: RectF,
-    x: Float,
-    y: Float
-): PriorityTrackerPanelHitResult? {
-    return priority_tracker_panel_targets(panel)
-        .firstOrNull { it.bounds.contains(x, y) }
-        ?.let { PriorityTrackerPanelHitResult(it.action, it.adjust_button) }
-}
-
-internal fun FlightMapLayout.priority_adjust_button_bounds(
-    panel: RectF,
-    button: PriorityRangeAdjustButton
-): RectF {
-    return when (button) {
-        PriorityRangeAdjustButton.DISTANCE_MINUS -> alert_distance_minus_bounds(panel)
-        PriorityRangeAdjustButton.DISTANCE_PLUS -> alert_distance_plus_bounds(panel)
-        PriorityRangeAdjustButton.ALTITUDE_MINUS -> alert_altitude_minus_bounds(panel)
-        PriorityRangeAdjustButton.ALTITUDE_PLUS -> alert_altitude_plus_bounds(panel)
-    }
-}
-
-internal fun FlightMapLayout.priority_adjust_button_at(
-    panel: RectF,
-    x: Float,
-    y: Float
-): PriorityRangeAdjustButton? {
-    return PriorityRangeAdjustButton.entries.firstOrNull {
-        priority_adjust_button_bounds(panel, it).contains(x, y)
-    }
-}
-
-interface FlightMapPanelChrome {
-    val layout: FlightMapLayout
-
-    fun dp(value: Float): Float
-    fun sp(value: Float): Float
-    fun ellipsize(value: String, max_width: Float): String
-    fun control_radius(): Float
-    fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int)
-    fun draw_choice_button(canvas: Canvas, rect: RectF, label: String, selected: Boolean)
-    fun draw_control_surface(canvas: Canvas, rect: RectF, fill: Int, stroke: Int, selected: Boolean)
-    fun draw_wrapped_text(
-        canvas: Canvas,
-        value: String,
-        x: Float,
-        y: Float,
-        width: Float,
-        max_lines: Int
-    ): Float
-
-    fun request_animation_frame()
-}
-
 // Draws settings, filters, layers, methodology, and priority panels from prepared state snapshots.
 class FlightMapPanelRenderer(
     private val paint: Paint,
@@ -2034,6 +1622,418 @@ class FlightMapPanelRenderer(
 
     private companion object {
         const val PRIORITY_PANEL_ROWS = 5
+    }
+}
+
+data class FlightMapPanelStyle(val visual_theme: VisualTheme)
+
+data class MapLabelsPanelState(
+    val street_labels_enabled: Boolean,
+    val borders_enabled: Boolean,
+    val label_text_scale: Float
+)
+
+data class AviationLayersPanelState(
+    val status_text: String,
+    val snapshot: AviationLayerSnapshot?,
+    val fetch_in_flight: Boolean,
+    val atc_boundaries_enabled: Boolean,
+    val restricted_airspaces_enabled: Boolean,
+    val oceanic_tracks_enabled: Boolean,
+    val airport_labels_enabled: Boolean
+)
+
+data class ImpactMethodologyPanelState(
+    val source_labels: List<String>
+)
+
+data class FiltersPanelState(
+    val filter_search_query: String,
+    val filter_search_focused: Boolean,
+    val aircraft_type_filter: AircraftTypeFilter,
+    val altitude_filter: AltitudeFilter,
+    val distance_filter: DistanceFilter,
+    val flight_status_filter: FlightStatusFilter,
+    val report_age_filter: ReportAgeFilter,
+    val alert_volume_filter: Boolean,
+    val filters_active: Boolean,
+    val stats_summary: String,
+    val reference_panel_plan: ReferenceFiltersPanelPlan,
+    val reference_focused_action_id: String?,
+    val pixels_per_dp: Float,
+) {
+    init {
+        require(pixels_per_dp.isFinite() && pixels_per_dp > 0f) {
+            "filter panel pixel density must be positive"
+        }
+    }
+}
+
+data class PriorityAircraftPanelRow(
+    val title: String,
+    val altitude: String,
+    val detail: String,
+    val is_extreme: Boolean
+)
+
+data class PriorityTrackerPanelState(
+    val priority_tracking_enabled: Boolean,
+    val priority_range_circle_visible: Boolean,
+    val alert_distance_label: String,
+    val alert_altitude_label: String,
+    val aircraft_rows: List<PriorityAircraftPanelRow>,
+    val long_press_fill: PriorityRangeButtonFillState? = null
+)
+
+enum class PriorityRangeAdjustButton {
+    DISTANCE_MINUS,
+    DISTANCE_PLUS,
+    ALTITUDE_MINUS,
+    ALTITUDE_PLUS
+}
+
+data class PriorityRangeButtonFillState(
+    val button: PriorityRangeAdjustButton,
+    val press_x: Float,
+    val press_y: Float,
+    val started_ms: Long,
+    val duration_ms: Long
+)
+
+internal data class SettingsPanelHitState(
+    val impact_methodology_open: Boolean,
+    val aviation_layers_open: Boolean,
+    val map_labels_open: Boolean,
+    val display_settings_open: Boolean,
+    val map_settings_open: Boolean,
+    val alert_settings_open: Boolean,
+    val impact_source_count: Int
+)
+
+internal data class SettingsPanelHitResult(
+    val action: SettingsPanelAction,
+    val index: Int = -1
+)
+
+internal data class SettingsPanelTarget(
+    val bounds: RectF,
+    val action: SettingsPanelAction,
+    val index: Int = -1
+)
+
+internal enum class SettingsPanelAction {
+    CLOSE_SUBPAGE,
+    CLOSE_SETTINGS,
+    OPEN_IMPACT_SOURCE,
+    TOGGLE_ATC_BOUNDARIES,
+    TOGGLE_RESTRICTED_AIRSPACES,
+    TOGGLE_OCEANIC_TRACKS,
+    TOGGLE_AIRPORT_LABELS,
+    TOGGLE_MAP_LABELS,
+    TOGGLE_MAP_BORDERS,
+    SET_UNITS_IMPERIAL,
+    SET_UNITS_METRIC,
+    NEXT_THEME,
+    TOGGLE_MAP_SOURCE,
+    OPEN_MAP_LABELS,
+    OPEN_AVIATION_LAYERS,
+    TOGGLE_ALERTS,
+    OPEN_NOTIFICATION_ACCESS,
+    OPEN_PRIORITY_TRACKER,
+    OPEN_DISPLAY_SETTINGS,
+    OPEN_MAP_SETTINGS,
+    OPEN_ALERT_SETTINGS,
+    OPEN_IMPACT_METHODOLOGY
+}
+
+internal data class FilterPanelTarget(
+    val bounds: RectF,
+    val action: FilterPanelAction
+)
+
+internal sealed interface FilterPanelAction {
+    data object FOCUS_SEARCH : FilterPanelAction
+    data object SUBMIT_SEARCH : FilterPanelAction
+    data object CLEAR_SEARCH : FilterPanelAction
+    data object NEXT_AIRCRAFT_TYPE : FilterPanelAction
+    data object NEXT_ALTITUDE : FilterPanelAction
+    data object NEXT_DISTANCE : FilterPanelAction
+    data object NEXT_STATUS : FilterPanelAction
+    data object NEXT_AGE : FilterPanelAction
+    data object TOGGLE_ALERT_VOLUME : FilterPanelAction
+    data object RESET : FilterPanelAction
+    data object CLEAR_SEARCH_FOCUS : FilterPanelAction
+    data object NONE : FilterPanelAction
+    data class ReferenceIntent(val intent: ReferencePanelIntent) : FilterPanelAction
+}
+
+internal data class PriorityTrackerPanelTarget(
+    val bounds: RectF,
+    val action: PriorityTrackerPanelAction,
+    val adjust_button: PriorityRangeAdjustButton? = null
+)
+
+internal data class PriorityTrackerPanelHitResult(
+    val action: PriorityTrackerPanelAction,
+    val adjust_button: PriorityRangeAdjustButton? = null
+)
+
+internal enum class PriorityTrackerPanelAction {
+    CLOSE,
+    TOGGLE_TRACKING,
+    TOGGLE_RANGE_RING,
+    ADJUST_RANGE
+}
+
+interface FlightMapPanelChrome {
+    val layout: FlightMapLayout
+
+    fun dp(value: Float): Float
+    fun sp(value: Float): Float
+    fun ellipsize(value: String, max_width: Float): String
+    fun control_radius(): Float
+    fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int)
+    fun draw_choice_button(canvas: Canvas, rect: RectF, label: String, selected: Boolean)
+    fun draw_control_surface(canvas: Canvas, rect: RectF, fill: Int, stroke: Int, selected: Boolean)
+    fun draw_wrapped_text(
+        canvas: Canvas,
+        value: String,
+        x: Float,
+        y: Float,
+        width: Float,
+        max_lines: Int
+    ): Float
+
+    fun request_animation_frame()
+}
+
+private const val MAP_LABEL_TEXT_SCALE_MIN = 1f
+private const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
+
+internal fun map_label_text_scale_for_x(x: Float, bounds: RectF): Float {
+    val progress = ((x - bounds.left) / bounds.width().coerceAtLeast(1f)).coerceIn(0f, 1f)
+    return MAP_LABEL_TEXT_SCALE_MIN + progress * (MAP_LABEL_TEXT_SCALE_MAX - MAP_LABEL_TEXT_SCALE_MIN)
+}
+
+internal fun FlightMapLayout.settings_panel_targets(
+    panel: RectF,
+    state: SettingsPanelHitState
+): List<SettingsPanelTarget> {
+    val targets = ArrayList<SettingsPanelTarget>(8)
+    fun add(bounds: RectF, action: SettingsPanelAction, index: Int = -1) {
+        targets.add(SettingsPanelTarget(bounds, action, index))
+    }
+    if (state.impact_methodology_open) {
+        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
+        for (index in 0 until state.impact_source_count) {
+            add(
+                impact_source_button_bounds(panel, index, state.impact_source_count),
+                SettingsPanelAction.OPEN_IMPACT_SOURCE,
+                index
+            )
+        }
+        return targets
+    }
+    if (state.aviation_layers_open) {
+        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
+        add(layer_atc_button_bounds(panel), SettingsPanelAction.TOGGLE_ATC_BOUNDARIES)
+        add(layer_restricted_button_bounds(panel), SettingsPanelAction.TOGGLE_RESTRICTED_AIRSPACES)
+        add(layer_oceanic_button_bounds(panel), SettingsPanelAction.TOGGLE_OCEANIC_TRACKS)
+        add(layer_airport_labels_button_bounds(panel), SettingsPanelAction.TOGGLE_AIRPORT_LABELS)
+        return targets
+    }
+    if (state.map_labels_open) {
+        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
+        add(map_borders_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_BORDERS)
+        return targets
+    }
+    if (state.display_settings_open) {
+        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
+        add(imperial_button_bounds(panel), SettingsPanelAction.SET_UNITS_IMPERIAL)
+        add(metric_button_bounds(panel), SettingsPanelAction.SET_UNITS_METRIC)
+        add(theme_button_bounds(panel), SettingsPanelAction.NEXT_THEME)
+        return targets
+    }
+    if (state.map_settings_open) {
+        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
+        add(map_source_button_bounds(panel), SettingsPanelAction.TOGGLE_MAP_SOURCE)
+        add(map_labels_button_bounds(panel), SettingsPanelAction.OPEN_MAP_LABELS)
+        add(aviation_layers_button_bounds(panel), SettingsPanelAction.OPEN_AVIATION_LAYERS)
+        return targets
+    }
+    if (state.alert_settings_open) {
+        add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SUBPAGE)
+        add(alerts_toggle_bounds(panel), SettingsPanelAction.TOGGLE_ALERTS)
+        add(monitoring_notification_hider_button_bounds(panel), SettingsPanelAction.OPEN_NOTIFICATION_ACCESS)
+        add(priority_tracker_button_bounds(panel), SettingsPanelAction.OPEN_PRIORITY_TRACKER)
+        return targets
+    }
+    add(close_button_bounds(panel), SettingsPanelAction.CLOSE_SETTINGS)
+    add(settings_display_button_bounds(panel), SettingsPanelAction.OPEN_DISPLAY_SETTINGS)
+    add(settings_map_button_bounds(panel), SettingsPanelAction.OPEN_MAP_SETTINGS)
+    add(settings_alerts_button_bounds(panel), SettingsPanelAction.OPEN_ALERT_SETTINGS)
+    add(settings_info_button_bounds(panel), SettingsPanelAction.OPEN_IMPACT_METHODOLOGY)
+    return targets
+}
+
+internal fun FlightMapLayout.settings_panel_hit_result(
+    panel: RectF,
+    x: Float,
+    y: Float,
+    state: SettingsPanelHitState
+): SettingsPanelHitResult? {
+    return settings_panel_targets(panel, state)
+        .firstOrNull { it.bounds.contains(x, y) }
+        ?.let { SettingsPanelHitResult(it.action, it.index) }
+}
+
+internal fun FlightMapLayout.filter_panel_targets(
+    panel: RectF,
+    state: FiltersPanelState
+): List<FilterPanelTarget> {
+    return buildList {
+        val plan = state.reference_panel_plan
+        val contentViewport = plan.contentViewport.to_pixel_rect(panel, state.pixels_per_dp)
+        plan.controls.forEach { control ->
+            val bounds = control.bounds.to_pixel_rect(panel, state.pixels_per_dp)
+            val targetBounds = if (control.kind == ReferenceControlKind.SWITCH) {
+                bounds.intersection_or_null(contentViewport)
+            } else {
+                bounds
+            }
+            targetBounds?.let {
+                add(
+                    FilterPanelTarget(it, FilterPanelAction.ReferenceIntent(control.intent))
+                )
+            }
+        }
+        if (plan.content == ReferenceFiltersPanelContent.TRAFFIC_SLOT) {
+            val legacyPanel = legacy_traffic_panel_bounds(panel, state)
+            val trafficTargets = listOf(
+                FilterPanelTarget(filter_search_box_bounds(legacyPanel), FilterPanelAction.FOCUS_SEARCH),
+                FilterPanelTarget(filter_search_find_button_bounds(legacyPanel), FilterPanelAction.SUBMIT_SEARCH),
+                FilterPanelTarget(filter_search_clear_button_bounds(legacyPanel), FilterPanelAction.CLEAR_SEARCH),
+                FilterPanelTarget(filter_aircraft_type_button_bounds(legacyPanel), FilterPanelAction.NEXT_AIRCRAFT_TYPE),
+                FilterPanelTarget(filter_altitude_button_bounds(legacyPanel), FilterPanelAction.NEXT_ALTITUDE),
+                FilterPanelTarget(filter_distance_button_bounds(legacyPanel), FilterPanelAction.NEXT_DISTANCE),
+                FilterPanelTarget(filter_status_button_bounds(legacyPanel), FilterPanelAction.NEXT_STATUS),
+                FilterPanelTarget(filter_age_button_bounds(legacyPanel), FilterPanelAction.NEXT_AGE),
+                FilterPanelTarget(filter_alert_button_bounds(legacyPanel), FilterPanelAction.TOGGLE_ALERT_VOLUME),
+                FilterPanelTarget(filter_reset_button_bounds(legacyPanel), FilterPanelAction.RESET),
+            )
+            trafficTargets.forEach { target ->
+                target.bounds.intersection_or_null(contentViewport)?.let { clipped ->
+                    add(target.copy(bounds = clipped))
+                }
+            }
+        }
+    }
+}
+
+internal fun FlightMapLayout.filter_panel_action_at(
+    panel: RectF,
+    x: Float,
+    y: Float,
+    state: FiltersPanelState
+): FilterPanelAction {
+    return filter_panel_targets(panel, state)
+        .firstOrNull { it.bounds.contains(x, y) }
+        ?.action
+        ?: if (state.reference_panel_plan.content == ReferenceFiltersPanelContent.TRAFFIC_SLOT) {
+            FilterPanelAction.CLEAR_SEARCH_FOCUS
+        } else {
+            FilterPanelAction.NONE
+        }
+}
+
+private fun FlightMapLayout.legacy_traffic_panel_bounds(
+    panel: RectF,
+    state: FiltersPanelState,
+): RectF {
+    val density = state.pixels_per_dp
+    val plan = state.reference_panel_plan
+    val legacySearchTopDp = if (is_compact_settings_panel(panel)) 62f else 74f
+    val top = panel.top +
+        (plan.contentViewport.top - legacySearchTopDp - plan.appliedScrollOffsetDp) * density
+    return RectF(panel.left, top, panel.right, top + panel.height())
+}
+
+private fun ReferenceDpRect.to_pixel_rect(panel: RectF, density: Float): RectF = RectF(
+    panel.left + left * density,
+    panel.top + top * density,
+    panel.left + right * density,
+    panel.top + bottom * density,
+)
+
+private fun RectF.intersection_or_null(other: RectF): RectF? {
+    val clippedLeft = maxOf(left, other.left)
+    val clippedTop = maxOf(top, other.top)
+    val clippedRight = minOf(right, other.right)
+    val clippedBottom = minOf(bottom, other.bottom)
+    return if (clippedRight > clippedLeft && clippedBottom > clippedTop) {
+        RectF(clippedLeft, clippedTop, clippedRight, clippedBottom)
+    } else {
+        null
+    }
+}
+
+internal fun FlightMapLayout.priority_tracker_panel_targets(panel: RectF): List<PriorityTrackerPanelTarget> {
+    return listOf(
+        PriorityTrackerPanelTarget(priority_close_button_bounds(panel), PriorityTrackerPanelAction.CLOSE),
+        PriorityTrackerPanelTarget(priority_tracking_toggle_bounds(panel), PriorityTrackerPanelAction.TOGGLE_TRACKING),
+        PriorityTrackerPanelTarget(priority_ring_toggle_bounds(panel), PriorityTrackerPanelAction.TOGGLE_RANGE_RING),
+        PriorityTrackerPanelTarget(
+            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.DISTANCE_MINUS),
+            PriorityTrackerPanelAction.ADJUST_RANGE,
+            PriorityRangeAdjustButton.DISTANCE_MINUS
+        ),
+        PriorityTrackerPanelTarget(
+            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.DISTANCE_PLUS),
+            PriorityTrackerPanelAction.ADJUST_RANGE,
+            PriorityRangeAdjustButton.DISTANCE_PLUS
+        ),
+        PriorityTrackerPanelTarget(
+            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.ALTITUDE_MINUS),
+            PriorityTrackerPanelAction.ADJUST_RANGE,
+            PriorityRangeAdjustButton.ALTITUDE_MINUS
+        ),
+        PriorityTrackerPanelTarget(
+            priority_adjust_button_bounds(panel, PriorityRangeAdjustButton.ALTITUDE_PLUS),
+            PriorityTrackerPanelAction.ADJUST_RANGE,
+            PriorityRangeAdjustButton.ALTITUDE_PLUS
+        )
+    )
+}
+
+internal fun FlightMapLayout.priority_tracker_panel_hit_result(
+    panel: RectF,
+    x: Float,
+    y: Float
+): PriorityTrackerPanelHitResult? {
+    return priority_tracker_panel_targets(panel)
+        .firstOrNull { it.bounds.contains(x, y) }
+        ?.let { PriorityTrackerPanelHitResult(it.action, it.adjust_button) }
+}
+
+internal fun FlightMapLayout.priority_adjust_button_bounds(
+    panel: RectF,
+    button: PriorityRangeAdjustButton
+): RectF {
+    return when (button) {
+        PriorityRangeAdjustButton.DISTANCE_MINUS -> alert_distance_minus_bounds(panel)
+        PriorityRangeAdjustButton.DISTANCE_PLUS -> alert_distance_plus_bounds(panel)
+        PriorityRangeAdjustButton.ALTITUDE_MINUS -> alert_altitude_minus_bounds(panel)
+        PriorityRangeAdjustButton.ALTITUDE_PLUS -> alert_altitude_plus_bounds(panel)
+    }
+}
+
+internal fun FlightMapLayout.priority_adjust_button_at(
+    panel: RectF,
+    x: Float,
+    y: Float
+): PriorityRangeAdjustButton? {
+    return PriorityRangeAdjustButton.entries.firstOrNull {
+        priority_adjust_button_bounds(panel, it).contains(x, y)
     }
 }
 

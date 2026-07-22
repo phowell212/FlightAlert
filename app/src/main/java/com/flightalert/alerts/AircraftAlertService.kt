@@ -876,17 +876,3 @@ object PriorityNotificationPresenter {
     private const val MAX_LISTED_AIRCRAFT =
         FlightAlertAppSettings.PriorityNotification.MAX_LISTED_AIRCRAFT
 }
-
-class AlertMonitoringController(private val context: Context) {
-    fun apply(alerts_enabled: Boolean, priority_tracking_enabled: Boolean) {
-        if (alerts_enabled || priority_tracking_enabled) {
-            AircraftAlertService.start(context)
-        } else {
-            AircraftAlertService.stop(context)
-        }
-    }
-
-    fun publish_priority_snapshot(priority_aircraft: List<AlertAircraft>) {
-        AircraftAlertService.publish_priority_snapshot(context, priority_aircraft)
-    }
-}

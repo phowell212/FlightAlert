@@ -20,145 +20,6 @@ import kotlin.math.max
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal fun https_url(value: String): URL? {
-    return try {
-        URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }
-    } catch (_: Exception) {
-        null
-    }
-}
-
-// Tile loading previously used runCatching, which catches Throwable rather than only Exception.
-internal fun throwable_safe_https_url(value: String): URL? {
-    return runCatching {
-        URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }
-    }.getOrNull()
-}
-
-internal fun fetch_json_object(url: String, user_agent: String): JSONObject? {
-    val safe_url = https_url(url) ?: return null
-    var connection: HttpURLConnection? = null
-    return try {
-        connection = (safe_url.openConnection() as HttpURLConnection).apply {
-            connectTimeout = 5000
-            readTimeout = 9000
-            requestMethod = "GET"
-            setRequestProperty("User-Agent", user_agent)
-        }
-        if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-            connection.errorStream?.close()
-            return null
-        }
-        JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-    } catch (_: Exception) {
-        null
-    } finally {
-        connection?.disconnect()
-    }
-}
-
-internal fun String.clean_seed_value(): String? {
-    val cleaned = trim().trim('-').trim()
-    return cleaned.takeIf {
-        it.isNotBlank() &&
-                !it.equals("null", ignoreCase = true) &&
-                !it.equals("n/a", ignoreCase = true) &&
-                !it.equals("unavailable", ignoreCase = true)
-    }
-}
-
-internal fun normalized_photo_registration(value: String?): String? {
-    return value
-        ?.uppercase(Locale.US)
-        ?.replace("PHOTOS", "")
-        ?.replace(Regex("[^A-Z0-9-]"), "")
-        ?.trim('-')
-        ?.takeIf { it.isNotBlank() && it != "NA" }
-}
-
-internal fun JSONArray.json_number_or_null(index: Int): Double? {
-    if (index >= length() || isNull(index)) return null
-    return optDouble(index)
-}
-
-internal fun JSONObject.json_number_or_null(key: String): Double? {
-    if (!has(key) || isNull(key)) return null
-    return when (val raw = opt(key)) {
-        is Number -> raw.toDouble()
-        is String -> raw.toDoubleOrNull()
-        else -> null
-    }
-}
-
-internal fun JSONArray.json_int_or_null(index: Int): Int? {
-    if (index >= length() || isNull(index)) return null
-    return optInt(index)
-}
-
-internal fun max_epoch(first: Double?, second: Double?): Double? {
-    return when {
-        first == null -> second
-        second == null -> first
-        else -> max(first, second)
-    }
-}
-
-internal fun plain_text_from_html(html: String): String {
-    return html
-        .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), " ")
-        .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), " ")
-        .replace(Regex("<[^>]+>"), " ")
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&#39;", "'")
-        .replace("&quot;", "\"")
-        .replace(Regex("\\s+"), " ")
-        .trim()
-}
-
-data class FaaRegistryRecord(
-    val registration: String,
-    val manufacturer: String?,
-    val model: String?,
-    val manufactured_year: String?,
-    val registered_owner: String?,
-    val source_name: String
-)
-
-data class AircraftDetails(
-    val icao24: String,
-    val registration: String?,
-    val manufacturer: String?,
-    val type: String?,
-    val type_code: String?,
-    val owner: String?,
-    val manufactured_year: String?,
-    val registry_source: String?,
-    val operator_code: String?,
-    val route: String?,
-    val route_updated_epoch_sec: Long?,
-    val route_source: String?,
-    val origin_airport: AirportDetails?,
-    val destination_airport: AirportDetails?,
-    val telemetry: AircraftTelemetry? = null
-)
-
-object AircraftRouteSource {
-    const val ADSBDB_CALLSIGN = "ADSBdb callsign"
-    const val ADSBIM_ROUTESET = "adsb.im routeset"
-    const val HEXDB_CALLSIGN = "HexDB callsign"
-}
-
-data class AirportDetails(
-    val icao: String,
-    val iata: String?,
-    val name: String?,
-    val country_code: String?,
-    val region_name: String?,
-    val latitude: Double?,
-    val longitude: Double?
-)
-
 class AircraftDetailsClient(private val user_agent: String) {
     private val details_cache = linkedMapOf<String, CachedDetails>()
     private val static_aircraft_db_cache = linkedMapOf<String, JSONObject?>()
@@ -741,6 +602,209 @@ class AircraftDetailsClient(private val user_agent: String) {
 
 }
 
+data class FaaRegistryRecord(
+    val registration: String,
+    val manufacturer: String?,
+    val model: String?,
+    val manufactured_year: String?,
+    val registered_owner: String?,
+    val source_name: String
+)
+
+data class AircraftDetails(
+    val icao24: String,
+    val registration: String?,
+    val manufacturer: String?,
+    val type: String?,
+    val type_code: String?,
+    val owner: String?,
+    val manufactured_year: String?,
+    val registry_source: String?,
+    val operator_code: String?,
+    val route: String?,
+    val route_updated_epoch_sec: Long?,
+    val route_source: String?,
+    val origin_airport: AirportDetails?,
+    val destination_airport: AirportDetails?,
+    val telemetry: AircraftTelemetry? = null
+)
+
+object AircraftRouteSource {
+    const val ADSBDB_CALLSIGN = "ADSBdb callsign"
+    const val ADSBIM_ROUTESET = "adsb.im routeset"
+    const val HEXDB_CALLSIGN = "HexDB callsign"
+}
+
+data class AirportDetails(
+    val icao: String,
+    val iata: String?,
+    val name: String?,
+    val country_code: String?,
+    val region_name: String?,
+    val latitude: Double?,
+    val longitude: Double?
+)
+
+internal data class AdsbDbAircraftRecord(
+    val registration: String?,
+    val manufacturer: String?,
+    val type: String?,
+    val icao_type: String?,
+    val registered_owner: String?,
+    val operator_code: String?
+)
+
+internal data class AirplanesLiveMetadata(
+    val source_name: String,
+    val registration: String?,
+    val type_code: String?,
+    val description: String?,
+    val owner_operator: String?,
+    val operator_code: String?,
+    val year: String?
+) {
+    val has_metadata: Boolean
+        get() = listOf(
+            registration,
+            type_code,
+            description,
+            owner_operator,
+            operator_code,
+            year
+        ).any { !it.isNullOrBlank() }
+
+    val has_core_metadata: Boolean
+        get() = listOf(
+            registration,
+            type_code,
+            description,
+            owner_operator,
+            operator_code,
+            year
+        ).all { !it.isNullOrBlank() }
+
+    val has_aircraft_identity: Boolean
+        get() = listOf(registration, type_code, description).all { !it.isNullOrBlank() }
+}
+
+internal data class InternetAircraftMetadata(
+    val manufacturer: String?,
+    val model: String?,
+    val source_name: String
+)
+
+internal data class WikipediaSummary(
+    val title: String,
+    val extract: String
+)
+
+internal data class CachedDetails(
+    val details: AircraftDetails,
+    val stored_at_ms: Long
+)
+
+internal data class RouteLookup(
+    val route: String?,
+    val origin: AirportDetails?,
+    val destination: AirportDetails?
+)
+
+internal fun https_url(value: String): URL? {
+    return try {
+        URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+// Tile loading previously used runCatching, which catches Throwable rather than only Exception.
+internal fun throwable_safe_https_url(value: String): URL? {
+    return runCatching {
+        URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }
+    }.getOrNull()
+}
+
+internal fun fetch_json_object(url: String, user_agent: String): JSONObject? {
+    val safe_url = https_url(url) ?: return null
+    var connection: HttpURLConnection? = null
+    return try {
+        connection = (safe_url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 5000
+            readTimeout = 9000
+            requestMethod = "GET"
+            setRequestProperty("User-Agent", user_agent)
+        }
+        if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+            connection.errorStream?.close()
+            return null
+        }
+        JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+    } catch (_: Exception) {
+        null
+    } finally {
+        connection?.disconnect()
+    }
+}
+
+internal fun String.clean_seed_value(): String? {
+    val cleaned = trim().trim('-').trim()
+    return cleaned.takeIf {
+        it.isNotBlank() &&
+                !it.equals("null", ignoreCase = true) &&
+                !it.equals("n/a", ignoreCase = true) &&
+                !it.equals("unavailable", ignoreCase = true)
+    }
+}
+
+internal fun normalized_photo_registration(value: String?): String? {
+    return value
+        ?.uppercase(Locale.US)
+        ?.replace("PHOTOS", "")
+        ?.replace(Regex("[^A-Z0-9-]"), "")
+        ?.trim('-')
+        ?.takeIf { it.isNotBlank() && it != "NA" }
+}
+
+internal fun JSONArray.json_number_or_null(index: Int): Double? {
+    if (index >= length() || isNull(index)) return null
+    return optDouble(index)
+}
+
+internal fun JSONObject.json_number_or_null(key: String): Double? {
+    if (!has(key) || isNull(key)) return null
+    return when (val raw = opt(key)) {
+        is Number -> raw.toDouble()
+        is String -> raw.toDoubleOrNull()
+        else -> null
+    }
+}
+
+internal fun JSONArray.json_int_or_null(index: Int): Int? {
+    if (index >= length() || isNull(index)) return null
+    return optInt(index)
+}
+
+internal fun max_epoch(first: Double?, second: Double?): Double? {
+    return when {
+        first == null -> second
+        second == null -> first
+        else -> max(first, second)
+    }
+}
+
+internal fun plain_text_from_html(html: String): String {
+    return html
+        .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("<[^>]+>"), " ")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&#39;", "'")
+        .replace("&quot;", "\"")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
 internal fun details_registered_owner_table_section(html: String): String? {
     val caption_regex = Regex(
         "<caption[^>]*>\\s*Registered Owner\\s*</caption>",
@@ -915,70 +979,6 @@ internal fun details_n_number_suffix(offset: Int): String {
 internal fun details_n_number_single_suffix(offset: Int): String {
     return if (offset <= 0) "" else DETAILS_N_NUMBER_ALPHABET[offset - 1].toString()
 }
-
-internal data class AdsbDbAircraftRecord(
-    val registration: String?,
-    val manufacturer: String?,
-    val type: String?,
-    val icao_type: String?,
-    val registered_owner: String?,
-    val operator_code: String?
-)
-
-internal data class AirplanesLiveMetadata(
-    val source_name: String,
-    val registration: String?,
-    val type_code: String?,
-    val description: String?,
-    val owner_operator: String?,
-    val operator_code: String?,
-    val year: String?
-) {
-    val has_metadata: Boolean
-        get() = listOf(
-            registration,
-            type_code,
-            description,
-            owner_operator,
-            operator_code,
-            year
-        ).any { !it.isNullOrBlank() }
-
-    val has_core_metadata: Boolean
-        get() = listOf(
-            registration,
-            type_code,
-            description,
-            owner_operator,
-            operator_code,
-            year
-        ).all { !it.isNullOrBlank() }
-
-    val has_aircraft_identity: Boolean
-        get() = listOf(registration, type_code, description).all { !it.isNullOrBlank() }
-}
-
-internal data class InternetAircraftMetadata(
-    val manufacturer: String?,
-    val model: String?,
-    val source_name: String
-)
-
-internal data class WikipediaSummary(
-    val title: String,
-    val extract: String
-)
-
-internal data class CachedDetails(
-    val details: AircraftDetails,
-    val stored_at_ms: Long
-)
-
-internal data class RouteLookup(
-    val route: String?,
-    val origin: AirportDetails?,
-    val destination: AirportDetails?
-)
 
 internal fun JSONObject.details_to_adsb_db_airport(): AirportDetails {
     return AirportDetails(
