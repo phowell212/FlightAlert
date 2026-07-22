@@ -26,9 +26,11 @@ import org.json.JSONObject
 import java.io.Closeable
 import java.util.LinkedHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -80,8 +82,9 @@ internal class ReferenceDictionaryOverlayRenderer(
     private var package_snapshot: PackageSnapshot? = null
     @Volatile
     private var package_retry_after_ms = 0L
-    private val package_probe_pending = AtomicBoolean()
+    private val package_probe_pending = AtomicReference<PackageProbe?>()
     private val package_generation = AtomicLong()
+    private val package_lifecycle_lock = ReentrantLock()
     private val content_revision = AtomicLong()
     private val request_generation = AtomicLong()
     private val tile_cache =
@@ -444,19 +447,23 @@ internal class ReferenceDictionaryOverlayRenderer(
     }
 
     fun clear() {
-        synchronized(tile_cache) {
-            package_generation.incrementAndGet()
-            package_snapshot = null
-            package_retry_after_ms = 0L
-            tile_cache.clear()
-            requested_tiles.clear()
-            desired_tile_keys.clear()
-        }
-        replace_retained_frame(null)
-        retained_labels = null
-        content_revision.incrementAndGet()
-        synchronized(package_store) {
+        package_lifecycle_lock.lock()
+        try {
+            synchronized(tile_cache) {
+                package_generation.incrementAndGet()
+                package_snapshot = null
+                package_retry_after_ms = 0L
+                tile_cache.clear()
+                requested_tiles.clear()
+                desired_tile_keys.clear()
+            }
+            package_probe_pending.set(null)
+            replace_retained_frame(null)
+            retained_labels = null
+            content_revision.incrementAndGet()
             package_store.close()
+        } finally {
+            package_lifecycle_lock.unlock()
         }
     }
 
@@ -472,28 +479,41 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private fun request_package_probe_if_due() {
         if (package_snapshot != null) return
-        val now_ms = SystemClock.elapsedRealtime()
-        if (now_ms < package_retry_after_ms) return
-        if (!package_probe_pending.compareAndSet(false, true)) return
-        val generation = package_generation.get()
-        tile_executor.execute {
-            probe_package(generation)
+        if (!package_lifecycle_lock.tryLock()) return
+        try {
+            if (package_snapshot != null) return
+            val now_ms = SystemClock.elapsedRealtime()
+            if (now_ms < package_retry_after_ms) return
+            val probe = PackageProbe(package_generation.get())
+            if (!package_probe_pending.compareAndSet(null, probe)) return
+            enqueue_package_probe(probe)
+        } finally {
+            package_lifecycle_lock.unlock()
         }
     }
 
-    private fun probe_package(generation: Long) {
-        var published = false
+    private fun enqueue_package_probe(probe: PackageProbe) {
         try {
-            val loaded = synchronized(package_store) {
-                if (generation != package_generation.get()) return@synchronized null
-                val info = package_store.package_info_if_available()
-                    ?: return@synchronized null
-                val catalog = package_store.reference_class_catalog_if_available()
-                    ?: return@synchronized null
-                PackageSnapshot(info, catalog)
+            tile_executor.execute(probe)
+        } catch (_: RejectedExecutionException) {
+            package_probe_pending.compareAndSet(probe, null)
+        }
+    }
+
+    private fun probe_package(probe: PackageProbe) {
+        var published = false
+        package_lifecycle_lock.lock()
+        try {
+            if (!package_probe_is_current(probe)) return
+            val info = package_store.package_info_if_available()
+            val catalog = if (info != null) {
+                package_store.reference_class_catalog_if_available()
+            } else {
+                null
             }
+            val loaded = if (info != null && catalog != null) PackageSnapshot(info, catalog) else null
             synchronized(tile_cache) {
-                if (generation != package_generation.get()) return
+                if (!package_probe_is_current(probe)) return
                 if (loaded == null) {
                     package_retry_after_ms = SystemClock.elapsedRealtime() +
                         ReferenceDictionaryPackageStore.PACKAGE_MISSING_RETRY_MS
@@ -505,15 +525,24 @@ internal class ReferenceDictionaryOverlayRenderer(
             }
         } catch (_: Exception) {
             synchronized(tile_cache) {
-                if (generation == package_generation.get()) {
+                if (package_probe_is_current(probe)) {
                     package_retry_after_ms = SystemClock.elapsedRealtime() +
                         ReferenceDictionaryPackageStore.PACKAGE_MISSING_RETRY_MS
                 }
             }
         } finally {
-            package_probe_pending.set(false)
-            if (published || generation != package_generation.get()) request_redraw()
+            package_probe_pending.compareAndSet(probe, null)
+            try {
+                if (published) request_redraw()
+            } finally {
+                package_lifecycle_lock.unlock()
+            }
         }
+    }
+
+    private fun package_probe_is_current(probe: PackageProbe): Boolean {
+        return package_probe_pending.get() === probe &&
+            package_generation.get() == probe.generation
     }
 
     private fun request_tile_if_needed(
@@ -2882,6 +2911,14 @@ internal class ReferenceDictionaryOverlayRenderer(
         val info: ReferenceDictionaryPackageInfo,
         val catalog: ReferenceClassCatalog,
     )
+
+    private inner class PackageProbe(
+        val generation: Long,
+    ) : Runnable {
+        override fun run() {
+            probe_package(this)
+        }
+    }
 
     private data class DictionaryLineRecord(
         val source_layer: String,
