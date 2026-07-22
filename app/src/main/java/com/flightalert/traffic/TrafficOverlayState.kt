@@ -97,20 +97,6 @@ data class OwnshipOverlayState(
     val heading_degrees: Float?
 )
 
-internal fun traffic_motion_elapsed_seconds(
-    item: TrafficAircraftOverlayState,
-    now_ms: Long
-): Float {
-    if (item.motion_built_elapsed_ms <= 0L ||
-        item.motion_limit_sec <= 0f ||
-        (item.screen_velocity_x_px_per_sec == 0f && item.screen_velocity_y_px_per_sec == 0f)
-    ) {
-        return 0f
-    }
-    val elapsed_ms = (now_ms - item.motion_built_elapsed_ms).coerceAtLeast(0L)
-    return min(elapsed_ms / 1000f, item.motion_limit_sec)
-}
-
 internal data class TrafficOverlaySelection(
     val selected_aircraft_id: String?,
     val selected_aircraft_key: String?,
@@ -1366,4 +1352,18 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_SYMBOL_CACHE_INTERACTION_ZOOM_STEPS = 3.4
         const val MAX_ESTIMATION_SECONDS = 10.0 * 60.0
     }
+}
+
+internal fun traffic_motion_elapsed_seconds(
+    item: TrafficAircraftOverlayState,
+    now_ms: Long
+): Float {
+    if (item.motion_built_elapsed_ms <= 0L ||
+        item.motion_limit_sec <= 0f ||
+        (item.screen_velocity_x_px_per_sec == 0f && item.screen_velocity_y_px_per_sec == 0f)
+    ) {
+        return 0f
+    }
+    val elapsed_ms = (now_ms - item.motion_built_elapsed_ms).coerceAtLeast(0L)
+    return min(elapsed_ms / 1000f, item.motion_limit_sec)
 }
