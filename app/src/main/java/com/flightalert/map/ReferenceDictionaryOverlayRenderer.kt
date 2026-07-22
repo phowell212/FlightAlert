@@ -26,6 +26,7 @@ import org.json.JSONObject
 import java.io.Closeable
 import java.util.LinkedHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.atan2
@@ -75,6 +76,12 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val frame_destination = RectF()
     private val bitmap_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val typeface_cache = HashMap<Int, Typeface>(8)
+    @Volatile
+    private var package_snapshot: PackageSnapshot? = null
+    @Volatile
+    private var package_retry_after_ms = 0L
+    private val package_probe_pending = AtomicBoolean()
+    private val package_generation = AtomicLong()
     private val content_revision = AtomicLong()
     private val request_generation = AtomicLong()
     private val tile_cache =
@@ -113,8 +120,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         if (!labels_enabled && !borders_enabled) {
             return ready_empty_stats()
         }
-        val package_info = package_store.package_info_if_available()
-            ?: return unavailable_stats()
+        val snapshot = package_snapshot
+        if (snapshot == null) {
+            request_package_probe_if_due()
+            return unavailable_stats()
+        }
+        val package_info = snapshot.info
         val filter_mask = ReferenceFilterMask.from(filter_state)
         val tile_zoom = dictionary_tile_zoom(viewport.zoom, package_info.zooms)
             ?: return unavailable_stats()
@@ -426,11 +437,17 @@ internal class ReferenceDictionaryOverlayRenderer(
     }
 
     fun reference_class_catalog(): ReferenceClassCatalog? {
-        return package_store.reference_class_catalog_if_available()
+        val snapshot = package_snapshot
+        if (snapshot != null) return snapshot.catalog
+        request_package_probe_if_due()
+        return null
     }
 
     fun clear() {
         synchronized(tile_cache) {
+            package_generation.incrementAndGet()
+            package_snapshot = null
+            package_retry_after_ms = 0L
             tile_cache.clear()
             requested_tiles.clear()
             desired_tile_keys.clear()
@@ -438,7 +455,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         replace_retained_frame(null)
         retained_labels = null
         content_revision.incrementAndGet()
-        package_store.close()
+        synchronized(package_store) {
+            package_store.close()
+        }
     }
 
     fun reset_retained_frame() {
@@ -449,6 +468,52 @@ internal class ReferenceDictionaryOverlayRenderer(
     override fun close() {
         tile_executor.shutdownNow()
         clear()
+    }
+
+    private fun request_package_probe_if_due() {
+        if (package_snapshot != null) return
+        val now_ms = SystemClock.elapsedRealtime()
+        if (now_ms < package_retry_after_ms) return
+        if (!package_probe_pending.compareAndSet(false, true)) return
+        val generation = package_generation.get()
+        tile_executor.execute {
+            probe_package(generation)
+        }
+    }
+
+    private fun probe_package(generation: Long) {
+        var published = false
+        try {
+            val loaded = synchronized(package_store) {
+                if (generation != package_generation.get()) return@synchronized null
+                val info = package_store.package_info_if_available()
+                    ?: return@synchronized null
+                val catalog = package_store.reference_class_catalog_if_available()
+                    ?: return@synchronized null
+                PackageSnapshot(info, catalog)
+            }
+            synchronized(tile_cache) {
+                if (generation != package_generation.get()) return
+                if (loaded == null) {
+                    package_retry_after_ms = SystemClock.elapsedRealtime() +
+                        ReferenceDictionaryPackageStore.PACKAGE_MISSING_RETRY_MS
+                } else {
+                    package_snapshot = loaded
+                    package_retry_after_ms = 0L
+                    published = true
+                }
+            }
+        } catch (_: Exception) {
+            synchronized(tile_cache) {
+                if (generation == package_generation.get()) {
+                    package_retry_after_ms = SystemClock.elapsedRealtime() +
+                        ReferenceDictionaryPackageStore.PACKAGE_MISSING_RETRY_MS
+                }
+            }
+        } finally {
+            package_probe_pending.set(false)
+            if (published || generation != package_generation.get()) request_redraw()
+        }
     }
 
     private fun request_tile_if_needed(
@@ -2811,6 +2876,11 @@ internal class ReferenceDictionaryOverlayRenderer(
         val coordinate: ReferenceDictionaryTileCoordinate,
         val boundaries: List<DictionaryLineRecord>,
         val labels: List<DictionaryLabelRecord>
+    )
+
+    private data class PackageSnapshot(
+        val info: ReferenceDictionaryPackageInfo,
+        val catalog: ReferenceClassCatalog,
     )
 
     private data class DictionaryLineRecord(

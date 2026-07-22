@@ -275,8 +275,8 @@ internal class ReferenceDictionaryPackageStore(
         }
     }
 
-    private companion object {
-        const val PACKAGE_MISSING_RETRY_MS = 1_000L
+    companion object {
+        internal const val PACKAGE_MISSING_RETRY_MS = 1_000L
     }
 }
 

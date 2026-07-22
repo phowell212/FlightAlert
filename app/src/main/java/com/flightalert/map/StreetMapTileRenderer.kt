@@ -165,15 +165,7 @@ internal class StreetMapTileRenderer(
                     val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                     val key = "$cache_key/$tile_zoom/$tx/$ty"
                     exact_visible++
-                    if (tile_bitmap(
-                            tile_zoom,
-                            tx,
-                            ty,
-                            key,
-                            cache_key,
-                            allow_disk_decode = !state.interaction_active
-                        ) != null
-                    ) {
+                    if (memory_tile_bitmap(key) != null) {
                         exact_loaded++
                     } else {
                         exact_requested++
@@ -185,7 +177,6 @@ internal class StreetMapTileRenderer(
                             state,
                             cache_key,
                             tile_url,
-                            allow_ui_disk_decode = !state.interaction_active,
                             request_generation = request_generation,
                             request_priority = TILE_REQUEST_PRIORITY_EXACT
                         )
@@ -216,14 +207,7 @@ internal class StreetMapTileRenderer(
                     screen_x + tile_size_on_screen,
                     screen_y + tile_size_on_screen
                 )
-                val bitmap = tile_bitmap(
-                    tile_zoom,
-                    tx,
-                    ty,
-                    key,
-                    cache_key,
-                    allow_disk_decode = !state.interaction_active
-                )
+                val bitmap = memory_tile_bitmap(key)
                 visible++
                 if (bitmap != null) {
                     loaded++
@@ -237,7 +221,6 @@ internal class StreetMapTileRenderer(
                         state,
                         cache_key,
                         tile_url,
-                        allow_ui_disk_decode = !state.interaction_active,
                         request_generation = request_generation
                     )
                     request_tile(
@@ -248,7 +231,6 @@ internal class StreetMapTileRenderer(
                         state,
                         cache_key,
                         tile_url,
-                        allow_ui_disk_decode = !state.interaction_active,
                         request_generation = request_generation,
                         request_priority = TILE_REQUEST_PRIORITY_EXACT
                     )
@@ -259,8 +241,7 @@ internal class StreetMapTileRenderer(
                                 tx,
                                 ty,
                                 cache_key,
-                                tile_destination,
-                                !state.interaction_active
+                                tile_destination
                             ) || draw_child_tile_fallback(
                                 canvas,
                                 tile_zoom,
@@ -315,7 +296,6 @@ internal class StreetMapTileRenderer(
         state: MapTileRenderState,
         cache_key: String,
         tile_url: (Int, Int, Int) -> String,
-        allow_ui_disk_decode: Boolean,
         request_generation: Long
     ) {
         if (z <= MIN_ZOOM) return
@@ -326,15 +306,7 @@ internal class StreetMapTileRenderer(
             val parent_x = x / scale
             val parent_y = y / scale
             val parent_key = "$cache_key/$parent_z/$parent_x/$parent_y"
-            if (tile_bitmap(
-                    parent_z,
-                    parent_x,
-                    parent_y,
-                    parent_key,
-                    cache_key,
-                    allow_ui_disk_decode
-                ) == null
-            ) {
+            if (memory_tile_bitmap(parent_key) == null) {
                 request_tile(
                     parent_z,
                     parent_x,
@@ -343,7 +315,6 @@ internal class StreetMapTileRenderer(
                     state,
                     cache_key,
                     tile_url,
-                    allow_ui_disk_decode,
                     request_generation = request_generation,
                     request_priority = TILE_REQUEST_PRIORITY_PARENT_BASE - depth
                 )
@@ -359,18 +330,10 @@ internal class StreetMapTileRenderer(
         state: MapTileRenderState,
         cache_key: String,
         tile_url: (Int, Int, Int) -> String,
-        allow_ui_disk_decode: Boolean,
         request_generation: Long,
         request_priority: Int
     ) {
-        if (if (allow_ui_disk_decode) tile_bitmap(
-                z,
-                x,
-                y,
-                key,
-                cache_key
-            ) != null else memory_tile_bitmap(key) != null
-        ) return
+        if (memory_tile_bitmap(key) != null) return
         synchronized(requested_tiles_lock) {
             if (!requested_tiles.add(key)) return
         }
@@ -379,97 +342,81 @@ internal class StreetMapTileRenderer(
                 generation = request_generation,
                 priority = request_priority,
                 sequence = tile_task_sequence.incrementAndGet(),
-                action = tileTask@{
-                    var connection: HttpURLConnection? = null
-                    var redrew_when_loaded = false
-                    var skipped_loaded_request = false
-                    try {
-                        if (tile_bitmap(z, x, y, key, cache_key, allow_disk_decode = false) != null) {
-                            skipped_loaded_request = true
-                            return@tileTask
-                        }
-                        val file = tile_file(z, x, y, cache_key)
-                        val bitmap = map_tile_disk_cache.read_if_fresh(
-                            file = file,
-                            max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
-                        ) { cached ->
-                            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
-                        }
-                        if (bitmap != null) {
-                            put_tile_in_memory(key, bitmap)
-                            return@tileTask
-                        }
-                        val url =
-                            https_url(tile_url(z, x, y))
-                                ?: run {
-                                    report_status("Map tiles unavailable")
-                                    return@tileTask
-                                }
-                        connection = (url.openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 8000
-                            readTimeout = 10000
-                            requestMethod = "GET"
-                            setRequestProperty("User-Agent", state.user_agent)
-                        }
-                        if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                            val bytes = connection.inputStream.use { it.readBytes() }
-                            val bitmap = BitmapFactory.decodeByteArray(
-                                bytes,
-                                0,
-                                bytes.size,
-                                decode_options()
-                            )
-                            if (bitmap != null) {
-                                put_tile_in_memory(key, bitmap)
-                                redrew_when_loaded = true
-                                request_redraw()
-                                write_tile_file_async(file, bytes)
-                            }
-                        } else {
-                            connection.errorStream?.close()
-                            report_status("Map tiles unavailable")
-                        }
-                    } catch (_: Exception) {
-                        report_status("Map network unavailable")
-                    } finally {
-                        connection?.disconnect()
-                        synchronized(requested_tiles_lock) { requested_tiles.remove(key) }
-                        if (!redrew_when_loaded && !skipped_loaded_request) request_redraw()
-                    }
-                })
+                action = {
+                    load_tile(z, x, y, key, state, cache_key, tile_url)
+                }
+            )
         )
     }
 
-    private fun write_tile_file_async(file: File, bytes: ByteArray) {
-        map_tile_disk_cache.write_async(file, bytes)
-    }
-
-    private fun tile_bitmap(
+    private fun load_tile(
         z: Int,
         x: Int,
         y: Int,
         key: String,
+        state: MapTileRenderState,
         cache_key: String,
-        allow_disk_decode: Boolean = true
-    ): Bitmap? {
-        memory_tile_bitmap(key)?.let { return it }
-        if (!allow_disk_decode) return null
-        val file = tile_file(z, x, y, cache_key)
-        val bitmap = map_tile_disk_cache.read_if_fresh(
-            file = file,
-            max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
-        ) { cached ->
-            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
-        } ?: return null
-        val cache = memory_cache_for_key(key)
-        synchronized(cache) {
-            cache[key]?.let { existing ->
-                if (existing !== bitmap && !bitmap.isRecycled) bitmap.recycle()
-                return existing
+        tile_url: (Int, Int, Int) -> String,
+    ) {
+        var connection: HttpURLConnection? = null
+        var redrew_when_loaded = false
+        var skipped_loaded_request = false
+        try {
+            if (memory_tile_bitmap(key) != null) {
+                skipped_loaded_request = true
+                return
             }
-            put_tile_in_memory_locked(cache, key, bitmap)
+            val file = tile_file(z, x, y, cache_key)
+            val bitmap = map_tile_disk_cache.read_if_fresh(
+                file = file,
+                max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
+            ) { cached ->
+                BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+            }
+            if (bitmap != null) {
+                put_tile_in_memory(key, bitmap)
+                return
+            }
+            val url = https_url(tile_url(z, x, y))
+                ?: run {
+                    report_status("Map tiles unavailable")
+                    return
+                }
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 8000
+                readTimeout = 10000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", state.user_agent)
+            }
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val bytes = connection.inputStream.use { it.readBytes() }
+                val downloaded = BitmapFactory.decodeByteArray(
+                    bytes,
+                    0,
+                    bytes.size,
+                    decode_options()
+                )
+                if (downloaded != null) {
+                    put_tile_in_memory(key, downloaded)
+                    redrew_when_loaded = true
+                    request_redraw()
+                    write_tile_file_async(file, bytes)
+                }
+            } else {
+                connection.errorStream?.close()
+                report_status("Map tiles unavailable")
+            }
+        } catch (_: Exception) {
+            report_status("Map network unavailable")
+        } finally {
+            connection?.disconnect()
+            synchronized(requested_tiles_lock) { requested_tiles.remove(key) }
+            if (!redrew_when_loaded && !skipped_loaded_request) request_redraw()
         }
-        return bitmap
+    }
+
+    private fun write_tile_file_async(file: File, bytes: ByteArray) {
+        map_tile_disk_cache.write_async(file, bytes)
     }
 
     private fun memory_tile_bitmap(key: String): Bitmap? {
@@ -514,8 +461,7 @@ internal class StreetMapTileRenderer(
         x: Int,
         y: Int,
         cache_key: String,
-        destination: RectF,
-        allow_disk_decode: Boolean
+        destination: RectF
     ): Boolean {
         if (z <= MIN_ZOOM) return false
         var fallback_z = z - 1
@@ -525,14 +471,7 @@ internal class StreetMapTileRenderer(
             val parent_x = x / scale
             val parent_y = y / scale
             val parent_key = "$cache_key/$fallback_z/$parent_x/$parent_y"
-            val bitmap = tile_bitmap_for_cache_key(
-                fallback_z,
-                parent_x,
-                parent_y,
-                parent_key,
-                cache_key,
-                allow_disk_decode
-            )
+            val bitmap = memory_tile_bitmap(parent_key)
             if (bitmap != null) {
                 val src_width = (bitmap.width / scale).coerceAtLeast(1)
                 val src_height = (bitmap.height / scale).coerceAtLeast(1)
@@ -553,34 +492,6 @@ internal class StreetMapTileRenderer(
             fallback_z -= 1
         }
         return false
-    }
-
-    private fun tile_bitmap_for_cache_key(
-        z: Int,
-        x: Int,
-        y: Int,
-        key: String,
-        cache_key: String,
-        allow_disk_decode: Boolean
-    ): Bitmap? {
-        memory_tile_bitmap(key)?.let { return it }
-        if (!allow_disk_decode) return null
-        val file = tile_file(z, x, y, cache_key)
-        val bitmap = map_tile_disk_cache.read_if_fresh(
-            file = file,
-            max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
-        ) { cached ->
-            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
-        } ?: return null
-        val cache = memory_cache_for_key(key)
-        synchronized(cache) {
-            cache[key]?.let { existing ->
-                if (existing !== bitmap && !bitmap.isRecycled) bitmap.recycle()
-                return existing
-            }
-            put_tile_in_memory_locked(cache, key, bitmap)
-        }
-        return bitmap
     }
 
     private fun draw_child_tile_fallback(
