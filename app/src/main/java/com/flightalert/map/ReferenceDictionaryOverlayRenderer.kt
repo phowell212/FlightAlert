@@ -589,8 +589,25 @@ internal class ReferenceDictionaryOverlayRenderer(
             } catch (_: Exception) {
                 // Missing or corrupt baked reference data is treated as unavailable real data.
             } finally {
+                var replacement_generation: Long? = null
                 synchronized(tile_cache) {
                     requested_tiles.remove(cache_key)
+                    if (
+                        request_became_obsolete &&
+                        !tile_cache.containsKey(cache_key) &&
+                        desired_tile_keys.contains(cache_key)
+                    ) {
+                        replacement_generation = request_generation.get()
+                    }
+                }
+                replacement_generation?.let { current_generation ->
+                    try {
+                        request_tile_if_needed(tile, current_generation)
+                    } catch (_: RejectedExecutionException) {
+                        synchronized(tile_cache) {
+                            requested_tiles.remove(cache_key)
+                        }
+                    }
                 }
                 if (published || keep_loading()) {
                     request_redraw()
