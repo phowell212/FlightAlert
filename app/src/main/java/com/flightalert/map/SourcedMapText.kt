@@ -71,10 +71,11 @@ class SourcedMapText internal constructor(
     val primaryScriptSignals: SourcedTextScriptSignals,
     val englishScriptSignals: SourcedTextScriptSignals?,
     canonicalBytes: ByteArray,
+    canonicalSha256: ByteArray,
     fullSha256: ByteArray,
 ) {
     private val canonicalBytesValue = canonicalBytes.copyOf()
-    private val canonicalSha256Value = sha256_bytes(canonicalBytesValue)
+    private val canonicalSha256Value = canonicalSha256.copyOf()
     private val fullSha256Value = fullSha256.copyOf()
 
     val canonicalBytes: ByteArray get() = canonicalBytesValue.copyOf()
@@ -249,6 +250,9 @@ object SourcedMapTextBinaryCodec {
             primarySignals,
             englishSignals,
         )
+        identityDigest.reset()
+        identityDigest.update(canonicalBytes)
+        val canonicalDigest = identityDigest.digest()
         return SourcedMapText(
             primaryText,
             primaryFieldId,
@@ -259,6 +263,7 @@ object SourcedMapTextBinaryCodec {
             primarySignals,
             englishSignals,
             canonicalBytes,
+            canonicalDigest,
             actualDigest,
         )
     }
@@ -301,6 +306,7 @@ object SourcedMapTextBinaryCodec {
         }
         val canonical = writer.finish()
         val fullDigest = sha256_bytes(identityDomain + canonical)
+        val canonicalDigest = sha256_bytes(canonical)
         return SourcedMapText(
             primaryText,
             primaryFieldId,
@@ -311,6 +317,7 @@ object SourcedMapTextBinaryCodec {
             primarySignals,
             englishSignals,
             canonical,
+            canonicalDigest,
             fullDigest,
         )
     }
