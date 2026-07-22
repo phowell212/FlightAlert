@@ -150,7 +150,7 @@ internal object SourcedMapTextPresentation {
 
 /**
  * Decodes the bake-owned canonical sourced-text record used by the binary
- * Experiment 8 package. The bake performs that package's script/source decision
+ * reference dictionary package. Data preparation performs the script/source decision
  * once, and the package hash chain plus this strict decoder binds its typed
  * result. Live-source text instead enters through [SourcedMapTextPolicy] once at
  * ingestion; neither path classifies during rendering.

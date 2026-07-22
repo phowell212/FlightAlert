@@ -2,10 +2,8 @@ package com.flightalert.map
 
 import java.io.Closeable
 import java.io.File
-import java.io.FileInputStream
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
 import java.util.LinkedHashMap
 
 internal data class ReferenceDictionaryIndexEntry(
@@ -18,7 +16,7 @@ internal data class ReferenceDictionaryIndexEntry(
 
 /** Bounded, page-cached access to the whole-world tile index. */
 internal class ReferenceDictionaryIndexReader private constructor(
-    private val channel: FileChannel,
+    private val index_file: ReferenceDictionarySegmentedFile,
     private val expected_byte_count: Long,
 ) : Closeable {
     private val pages = object : LinkedHashMap<Long, ByteArray>(
@@ -58,7 +56,7 @@ internal class ReferenceDictionaryIndexReader private constructor(
     override fun close() {
         synchronized(pages) {
             pages.clear()
-            channel.close()
+            index_file.close()
         }
     }
 
@@ -67,28 +65,36 @@ internal class ReferenceDictionaryIndexReader private constructor(
         val remaining = expected_byte_count - page_start
         val page_size = minOf(PAGE_BYTES.toLong(), remaining).toInt()
         val bytes = ByteArray(page_size)
-        val buffer = ByteBuffer.wrap(bytes)
-        var read = 0L
-        while (buffer.hasRemaining()) {
-            val count = channel.read(buffer, page_start + read)
-            if (count <= 0) throw IOException("Reference dictionary index ended early")
-            read += count.toLong()
-        }
+        index_file.read_fully(ByteBuffer.wrap(bytes), page_start)
         return bytes
     }
 
     companion object {
         fun open(index_file: File, expectedByteCount: Long): ReferenceDictionaryIndexReader {
-            if (expectedByteCount < 0L || expectedByteCount % INDEX_ENTRY_BYTES != 0L) {
-                throw IOException("Reference dictionary index length is invalid")
+            return open(ReferenceDictionarySegmentedFile.open(index_file), expectedByteCount)
+        }
+
+        fun open(
+            index_file: ReferenceDictionarySegmentedFile,
+            expectedByteCount: Long,
+        ): ReferenceDictionaryIndexReader {
+            try {
+                if (expectedByteCount < 0L || expectedByteCount % INDEX_ENTRY_BYTES != 0L) {
+                    throw IOException("Reference dictionary index length is invalid")
+                }
+                if (index_file.byte_count < expectedByteCount) {
+                    throw IOException(
+                        "Reference dictionary index is shorter than its manifest coverage",
+                    )
+                }
+                return ReferenceDictionaryIndexReader(
+                    index_file = index_file,
+                    expected_byte_count = expectedByteCount,
+                )
+            } catch (exception: Exception) {
+                index_file.close()
+                throw exception
             }
-            if (index_file.length() < expectedByteCount) {
-                throw IOException("Reference dictionary index is shorter than its manifest coverage")
-            }
-            return ReferenceDictionaryIndexReader(
-                channel = FileInputStream(index_file).channel,
-                expected_byte_count = expectedByteCount,
-            )
         }
 
         private fun little_endian_int(bytes: ByteArray, offset: Int): Int {

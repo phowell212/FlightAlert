@@ -78,7 +78,7 @@ internal data class ReferenceDictionaryBinaryTile(
     val records: List<ReferenceDictionaryBinaryRecord>,
 )
 
-/** Strict decoder for the background-loaded Experiment 8 renderer tile. */
+/** Strict decoder for a background-loaded reference dictionary renderer tile. */
 internal object ReferenceDictionaryBinaryTileCodec {
     private val tileMagic = "FAE8TILE1\u0000".toByteArray(Charsets.US_ASCII)
     private val n8Magic = "N8T1".toByteArray(Charsets.US_ASCII)

@@ -1,0 +1,38 @@
+{
+  "classCatalog": {
+    "catalogSha256": "85ef2303d4b44878033e0818cd232436c061be789e841725b6f28634b0055ec9",
+    "rendererContractSha256": "a4698b39604059738a5ec834a0645587e74549de2c037030105ec3bf92b5ccf7"
+  },
+  "compatibility": {
+    "emptyPresentTilesSharePayload": false
+  },
+  "coverage": {
+    "completeDeclaredScope": false,
+    "completeWholeEarthDictionary": false,
+    "tileCount": 5589648,
+    "zoomRanges": [
+      { "tileCount": 48, "xMax": 7, "xMin": 0, "yMax": 5, "yMin": 0, "z": 3 },
+      { "tileCount": 256, "xMax": 15, "xMin": 0, "yMax": 15, "yMin": 0, "z": 4 },
+      { "tileCount": 992, "xMax": 31, "xMin": 0, "yMax": 31, "yMin": 1, "z": 5 },
+      { "tileCount": 3968, "xMax": 63, "xMin": 0, "yMax": 63, "yMin": 2, "z": 6 },
+      { "tileCount": 15872, "xMax": 127, "xMin": 0, "yMax": 127, "yMin": 4, "z": 7 },
+      { "tileCount": 63488, "xMax": 255, "xMin": 0, "yMax": 255, "yMin": 8, "z": 8 },
+      { "tileCount": 262144, "xMax": 511, "xMin": 0, "yMax": 511, "yMin": 0, "z": 9 },
+      { "tileCount": 1048576, "xMax": 1023, "xMin": 0, "yMax": 1023, "yMin": 0, "z": 10 },
+      { "tileCount": 4194304, "xMax": 2047, "xMin": 0, "yMax": 2047, "yMin": 0, "z": 11 }
+    ]
+  },
+  "packageId": "world-reference-dictionary-v4",
+  "payloadSchema": "flightalert.reference.renderer-tile.v1",
+  "presentationPolicySha256": "dce9bd4b789c0528318dbb184e17efe7465f444550ba0180efd82e1cb7219154",
+  "rendererSemanticStreamSha256": "a4698b39604059738a5ec834a0645587e74549de2c037030105ec3bf92b5ccf7",
+  "schemaVersion": 3,
+  "sourcedTextPolicySha256": "ca7bd559b3d84758d17e11b5e619f04da7e5093d67d0f90506ab509e2ef6543a",
+  "storage": {
+    "schemaVersion": 1,
+    "chunkByteCount": 99614720,
+    "recordsByteCount": 19361576401,
+    "indexByteCount": 134151552
+  },
+  "unicodeScriptProfileSha256": "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb"
+}

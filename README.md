@@ -1,129 +1,91 @@
 # Flight Alert
 
-Flight Alert is a Kotlin Android app for drone pilots who want live, map-first awareness of nearby aircraft. It is supplemental situational awareness only, not a certified detect-and-avoid system.
+Flight Alert is a native Kotlin Android app that gives drone pilots map-first awareness of nearby aircraft. It combines live public traffic feeds with maps, aircraft details, configurable filters, aviation layers, and proximity alerts.
 
-Current version: **1.10**
+Flight Alert is supplemental situational awareness only. It is not a certified detect-and-avoid system.
 
-## What It Does
+Current version: **1.10** &middot; Minimum Android version: **Android 10 (API 29)**
 
-- Shows nearby live aircraft on a map using real public traffic feeds.
-- Supports street, no-label, and satellite map styles from real map providers.
-- Displays aircraft identity, altitude, motion, source freshness, and details when source data supports them.
-- Lets you filter visible traffic by search, aircraft class, altitude, range, airborne/ground state, report age, and alert-volume membership.
-- Provides selected-aircraft details such as registry, route, trace, usage, photos, and environmental-impact estimates when real sources provide enough information.
-- Supports priority alert settings with unit-aware horizontal and vertical separation controls.
-- Sends notifications only while aircraft qualify for the configured extreme-priority alert volume.
-- Includes optional aviation layers from real public sources.
+## Features
 
-## Data Honesty
+- Live aircraft from Airplanes.Live, with OpenSky fallback.
+- Street, no-label, and satellite maps.
+- Aircraft identity, altitude, motion, source freshness, route, trace, registry data, and photos when sources provide them.
+- Search and filters for aircraft class, altitude, range, airborne state, report age, and alert-volume membership.
+- Configurable horizontal and vertical alert volumes with extreme-priority notifications.
+- FAA airspace, airport, and North Atlantic Track layers.
+- Worldwide OpenStreetMap-derived labels, waterways, and administrative boundaries from the included reference dictionary.
 
-Flight Alert follows a no-pretending rule: if a value cannot be obtained from a live or documented source, the app says **Loading** or **Unavailable** instead of inventing it.
+Unavailable source data is shown as loading or unavailable; the app does not invent missing values.
 
-That applies to aircraft, maps, routes, photos, alerts, altitude, location, military status, ownership, and source freshness.
+## Repository layout
 
-## Data Sources
+```text
+app/            Android application source and resources
+references/     Runtime reference dictionary data
+AGENTS.md       Repository guidance for coding agents
+README.md       Project and setup documentation
+```
 
-- Aircraft traffic: Airplanes.Live and OpenSky-style viewport queries.
-- Flight traces: tar1090-compatible trace sources such as ADSB.lol.
-- Aircraft metadata, routes, and photos: documented aviation metadata and photo sources, with uncertainty labeled when a result is representative or investigable rather than exact.
-- Map tiles: OpenStreetMap, CARTO no-label tiles, and Esri World Imagery.
-- Aviation layers: FAA public services for airspace, airports, and NAT track data.
-- Environmental impact: trace time/distance when available, broad aircraft-class fuel-burn ranges, and published per-gallon CO2 factors.
+Gradle, Android Studio, and other local project configuration are intentionally not tracked. They remain in configured development checkouts but are not part of the public Git tree.
 
-## Safety Limits
+`references/world-reference-dictionary-v4/` holds the complete dictionary used by the app:
 
-- Public ADS-B/MLAT feeds can be delayed, incomplete, rate-limited, or missing aircraft.
-- Small drones and non-transmitting aircraft generally cannot be detected from public aircraft feeds.
-- Device altitude quality varies; vertical separation is unavailable if either altitude is missing.
-- Photos, route metadata, traces, maps, and aviation layers depend on third-party source availability.
-- Filters only change visible map traffic; alert monitoring continues against the full live feed.
-- Environmental-impact values are estimates, not measured fuel burn.
+```text
+class-catalog.bin
+manifest.json
+world-reference-records.part-0001-of-0195.bin ... part-0195-of-0195.bin
+world-reference-tile-index.part-0001-of-0002.bin ... part-0002-of-0002.bin
+```
 
-## Permissions
+The 197 binary parts are ordinary Git files no larger than 95 MiB. Flight Alert reads them directly as two logical files; no download or reassembly step is required after cloning. The directory's exact combined size is **19,495,730,581 bytes** (19.50 GB / 18.16 GiB). Allow additional space for Git's object database, the Android SDK, Gradle cache, and APK build output.
 
-- Location: map centering and alert separation.
-- Notifications: extreme-priority aircraft alerts only while qualifying aircraft are present.
-- Foreground service location: background monitoring.
-- Internet: maps, aircraft feeds, traces, metadata, photos, and aviation layers.
+## Build and install
 
-## Build From Source
+Requirements:
 
-Clone the repository, open its root in Android Studio, or build from PowerShell:
+- Android Studio with its bundled JDK, or an equivalent Gradle-compatible JDK.
+- Android SDK Platform 37 and Android SDK Platform Tools.
+- An Android 10 or newer device with USB debugging enabled and at least 20 GB free for the dictionary and app.
+
+Build from a configured local Android Studio project, or use its local Gradle wrapper:
 
 ```powershell
-git clone https://github.com/phowell212/FlightAlert.git
-Set-Location FlightAlert
 .\gradlew.bat assembleDebug
 ```
 
-The debug APK is written under:
-
-```text
-build/outputs/apk/debug/Flight Alert-debug.apk
-```
-
-## Whole-world reference preview
-
-Flight Alert can use a downloadable whole-world reference preview containing
-source-backed OpenStreetMap labels, waterways, and administrative boundaries.
-This global places and named waterways preview now also renders administrative
-boundaries from the same source-bound package.
-It is intentionally classified as
-`full-fidelity-visual-evaluation`: it is useful for worldwide visual testing,
-but it does **not** claim a complete all-feature world dictionary. The current
-six-file package is 19,495,741,202 bytes (about 19.50 GB / 18.16 GiB), so choose
-a destination with adequate free space.
-
-Use the exact manifest URL from a pinned Flight Alert GitHub release, never a
-`latest` shortcut:
+The APK is created at `build/outputs/apk/debug/Flight Alert-debug.apk`. Install it, then copy the included dictionary to the app's external-files directory:
 
 ```powershell
-$manifestUrl = 'https://github.com/phowell212/FlightAlert/releases/download/experiment8-world-reference-v4-r16/world-experiment8-binary-v4.release-manifest.json'
-$referenceRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'FlightAlert\Reference'
-$null = New-Item -ItemType Directory -Force $referenceRoot
-$packageRoot = Join-Path $referenceRoot 'world-experiment8-binary-v4'
-$authorityRoot = Join-Path $referenceRoot 'flightalert-reference-authority'
+adb install -r ".\build\outputs\apk\debug\Flight Alert-debug.apk"
 
-.\tools\download-reference-dictionary-experiment8.ps1 `
-  -ManifestUrl $manifestUrl `
-  -Output $packageRoot
-
-py -3.11 -m tools.experiment8.reference_release_assets materialize `
-  --manifest-url $manifestUrl `
-  --package $packageRoot `
-  --output $authorityRoot
-
-.\tools\install-reference-dictionary-experiment8.ps1 `
-  -PackageRoot $packageRoot `
-  -ApkPath "$authorityRoot\FlightAlert-reference-preview.apk" `
-  -FinalResult "$authorityRoot\final-package-result.json" `
-  -InstallPolicy full-fidelity-visual-evaluation `
-  -ValidateOnly
+$deviceReferences = "/sdcard/Android/data/com.flightalert/files/references"
+adb shell mkdir -p $deviceReferences
+adb push ".\references\world-reference-dictionary-v4" "$deviceReferences/"
 ```
 
-The fetch step atomically publishes exactly one six-file package root. The
-materialization step downloads the manifest-bound APK and source result, then
-creates a local result whose only changes are the current package/APK paths and
-the documented installPolicy; it revalidates all identities before publication.
-Building, fetching,
-materializing, and `-ValidateOnly` do not require a device lease helper.
-Transactional phone modes require an explicit `-LeaseHelper`, `-ThreadId`, and
-external `-EvidenceDirectory`; there is no machine-specific default.
+Launch Flight Alert and grant the requested permissions.
 
-The 19.50 GB database is attached to the pinned GitHub release in transport
-chunks because GitHub cannot store it as one Git object. The downloader verifies
-and reconstructs the exact original files. The APK remains one ordinary APK,
-and compiling the app does not download or embed the database.
+## Sources and attribution
 
-OpenStreetMap attribution, the ODbL 1.0 license, pinned source identity, build
-method, and machine-readable database offer are documented in
-[THIRD_PARTY_REFERENCE_DATA.md](THIRD_PARTY_REFERENCE_DATA.md).
+- Aircraft traffic and metadata: Airplanes.Live and OpenSky.
+- Flight traces: Airplanes.Live and ADSB.lol.
+- Registry and aircraft photos: FAA Registry and PlaneSpotters where available.
+- Maps: CARTO using OpenStreetMap data, and Esri World Imagery.
+- Aviation layers: FAA public services.
+- Reference dictionary: OpenStreetMap planet data dated 2026-06-29.
 
-## Repository Notes
+Map and reference data: [&copy; OpenStreetMap contributors](https://www.openstreetmap.org/copyright). The derived reference database is made available under the [Open Data Commons Open Database License 1.0](https://opendatacommons.org/licenses/odbl/1-0/).
 
-The Git tree contains source code, durable documentation, and small project
-tooling. The large reference database is published as release assets;
-screenshots, videos, traces, diagnostics, caches, and temporary run output stay
-outside the Git history.
+Other providers retain their respective terms and attribution.
 
-Agent and contributor methodology lives in [AGENTS.md](AGENTS.md).
+## Safety and permissions
+
+- Public ADS-B and MLAT feeds can be delayed, incomplete, rate-limited, or missing aircraft. Small drones and non-transmitting aircraft generally cannot be detected.
+- Device altitude accuracy varies. Vertical separation is unavailable when either altitude is missing.
+- Map filters affect visible traffic; alert monitoring continues against the complete live feed.
+- Environmental-impact figures are estimates, not measured fuel burn.
+- **Location** centers the map and calculates alert separation.
+- **Notifications** deliver extreme-priority aircraft alerts.
+- **Foreground-service location** keeps monitoring active in the background.
+- **Internet** loads traffic, maps, traces, metadata, photos, and aviation layers.

@@ -1,165 +1,55 @@
 # Flight Alert Agent Guardrails
 
-Flight Alert is a drone situational-awareness app. Preserve the current user experience and styling unless a visible difference fixes a real bug or honesty issue.
-
-This file is durable guidance for agents working in the repo. It is not a backlog, task prompt, roadmap, or active goal source. Use it only as constraints for the user's current request.
-
-Rules are priority ordered. If rules conflict, follow the higher-priority rule. Newer concrete user instructions supersede older notes.
-
-## Scope Guardrails
-
-Do only the work requested in the current chat unless additional work is required to complete or verify that request.
-
-Do not infer a task from protected behaviors, examples, release checks, source names, file paths, documentation rules, or testing guidance in this file.
-
-Do not start unrelated cleanup, refactors, release work, artifact-generation work, scans, performance investigations, pushes, or broad verification passes unless the user asks for them or they are directly necessary for the current request.
-
-When a specific task needs detailed instructions, keep those instructions outside durable repo guidance unless the details are included only to explain a reusable method.
-
-## 0. Priorities And Baseline
-
-Prioritize in this order: functionality for the end user, visuals for the end user, frame timing, then implementation elegance.
-
-Performance wins that introduce flicker, pop, missing layers, wrong motion, changed styling, reduced information, or source dishonesty are failures.
-
-Use the current branch/release as the normal baseline unless the user explicitly requests another comparison.
-
-### Implementation-First Feedback Loop
-
-When the implementation choice and prerequisite state are under our control, choose the best-known correct option, run the real app or the narrowest representative test, and let the result expose wrong assumptions or setup. Correct what the test reveals and continue the loop.
-
-Do not delay implementation with redundant pre-verification of settings or choices we just made. Research, modeling, and host checks are useful when they are necessary to choose a source-honest implementation, prevent irreversible harm, or explain an observed failure; they must not become substitutes for building and testing the actual app.
-
-Structural validity, theoretical benefit, and passing host tests are intermediate evidence. User-visible behavior on the real app is the acceptance target whenever the requested work is visible or temporal.
-
-## 1. No Pretending
-
-Never fake aircraft, map, route, photo, alert, altitude, location, or source data.
-
-If real data is unavailable, show `Unavailable`, show `Loading`, hide the feature, disable the control, or label uncertainty clearly.
-
-## 2. Creative Reinvention, Never The Axe
-
-Preserve the visible/user-facing result first, then reinvent the implementation underneath until it is fast.
-
-Do not win frame time by removing, hiding, delaying, shrinking, darkening, simplifying, skipping, or approximating accepted visuals, features, information density, aircraft morphing, map labels, tile transitions, details, photos, or alerts unless the user explicitly asks for that tradeoff.
-
-Protected behavior includes live aircraft identity/order/presence, smooth aircraft entry/exit at screen edges, aircraft dots/symbols/outlines/shadows/colors/scales/rotations/selection rings, aircraft morphing, rotorcraft blade animation, satellite/street imagery, tile/road/reference fades, map labels and borders, county-label zoom fades, selected paths, ownship display, controls/chrome, modal/details/photo/loading states, alerts, and source-freshness honesty.
-
-## 3. Real Sources Only
-
-Map tiles must come from real map providers such as OpenStreetMap, CARTO, or real satellite imagery providers.
-
-Aircraft traffic must come from live aircraft APIs or documented live feed formats. Flight paths must come from real trace/path APIs after an aircraft is selected. Do not accumulate app-session aircraft positions and call that a real flight path.
-
-## 4. Debugging Stays Off App
-
-Keep debugging, profiling, and measurement code out of the app runtime. Do not add app-side counters, timing wrappers, debug flags, perf intents, diagnostic overlays, hidden debug gestures, or per-frame log strings to collect stats. Gather stats through external probing and analysis: Android Studio Profiler, Perfetto/System Trace, Android Studio MCP/IDE debugger inspection, Logcat capture of existing user-facing/status logs, tests, scripts, and external tool analysis. If a measurement requires editing production app code, stop and choose an external probe instead.
-
-## 5. Safety Bias
-
-Accuracy matters more than impressive visuals. Vertical separation is critical.
-
-If altitude, location, source freshness, or feed data is missing, do not claim an aircraft is safe or inside/outside an alert volume unless the calculation is supported.
-
-## 6. Alerts
-
-Alerts are based on a 3D volume around the user: horizontal distance plus vertical separation.
-
-Notify when an aircraft enters or leaves the configured alert volume. Do not spam repeat notifications. The persistent extreme-priority notification is non-clearable while active, self-clearing when empty, and should only beep or buzz on the first transition from no extreme-priority aircraft to at least one.
-
-## 7. UI Honesty
-
-Anything that looks like a button must be interactable.
-
-Unavailable or unverified features must be hidden, disabled, or labeled honestly. Do not show fake radar graphics or fake aviation overlays. Attribution can move later, but do not misrepresent providers.
-
-## 8. Layout Quality
-
-No text clipping, hidden labels, or strange overlaps.
-
-Support portrait, landscape, folding devices, resizing, and emulator hardware input. Back should close overlays/screens before leaving the app.
-
-## 9. Map Interaction
-
-Panning, pinch zoom, wheel zoom, and keyboard zoom should feel smooth.
-
-Aircraft sprites may move smoothly every frame using interpolation from speed, heading, and last report. Do not request aircraft positions every frame.
-
-No aircraft sprite, dot, outline, or symbol gate may create a sudden apparent size jump anywhere in the zoom range. Transitions must be continuous curves tied to zoom/appearance state.
-
-## 10. Flight Paths
-
-Only show the path button when a real usable path was retrieved.
-
-The path must represent the selected aircraft's actual current flight/trace, not stale old legs. If the trace endpoint stops before the live sprite position, extend the visible trail to the current live position only when the live report is fresh.
-
-## 11. Aircraft Details And Photos
-
-Try exact aircraft photos first from real aircraft-photo sources.
-
-Representative same make/model photos are acceptable only with a clear "not this exact aircraft" note. Search-engine fallback photos must be labeled investigable and include source/proof view buttons. Claimed make/model/owner data must come from official or documented sources.
-
-## 12. Military Handling
-
-Only show military-specific stats if the aircraft is actually tagged military.
-
-Military origin/base claims require real flight-origin and aerodrome/source data. Registry-country fallback may use real ICAO 24-bit allocation ranges when registration prefix data is unavailable, but it must be labeled allocation-derived.
-
-## 13. Codebase / Repo Discipline
-
-Use Kotlin and work directly in the Android Studio project structure.
-
-Keep one real project: one manifest, one root Gradle setup, and no duplicate generated/source projects. Do not commit Android Studio machine state, build outputs, temporary screenshots/videos, secrets, `local.properties`, generated junk, stale comparison artifacts, or agent scratch output.
-
-## 14. Testing
-
-Build before release. Use lint and unit/instrumented tests when the touched area warrants them.
-
-Before judging a feature, set every prerequisite app setting to the state that actually exercises it. A disabled layer, wrong map source, incompatible filter, or stale test preference is an invalid test state, not a feature pass or failure. Restore the user's prior settings after the test. Do not add a separate settings-readback step unless observed app behavior makes the selected state uncertain.
-
-Use emulators for layout/aspect/theme checks. Use physical-device video for timing, responsiveness, smoothness, flicker, popping, aircraft continuity, border behavior, and road/reference-layer motion when the requested work warrants it. Screenshots are scouting evidence only for temporal rendering bugs.
-
-## 15. Code Organization
-
-Flight Alert code should read like objects doing jobs.
-
-`FlightMapView` coordinates map state, selection, draw order, and user input. Feature objects own feed parsing, route validation, photo lookup, impact scoring, settings math, motion projection, and feature-specific rules.
-
-Prefer small objects/files with narrow public methods. Keep settings and tuning values in explicit settings files. See `docs/code-organization.md`.
-
-In hot paths, prefer typed fields, numeric keys, sets/maps, arrays, or cached normalized values over parsing/composing strings. Strings are fine at source boundaries such as binCraft/feed parsing, for user-facing text/status labels, or where design notes explicitly call strings the right representation; otherwise do not organize runtime state around fresh string processing.
-
-## 16. Agent Workflow
-
-Before changing code, read this file and `docs/code-organization.md`.
-
-Use subagents only for low-conflict, bounded work. Do not touch files owned by an active editing subagent unless the user redirects ownership.
-
-When an active deity/project agent is genuinely finished, it must notify every
-other currently active Flight Alert agent that it is signing off, identify the
-scope/files/device state it releases, and explicitly release that scope for
-redistribution or reassignment before leaving the active roster.
-Do not wake or message idle, completed, or already signed-off agents for this
-broadcast. The last active agent signs itself off without triggering another
-agent.
-
-After meaningful code changes, run `.\gradlew.bat assembleDebug` when the touched area warrants it or before release.
-
-## 17. Documentation
-
-Keep `README.md` public-facing and user-friendly. Keep methodology, agent workflow, and repeatable contributor rules in this file or durable docs under `docs/`.
-
-Do not store one-off task prompts, run logs, generated evidence, temporary instructions, stale experiment notes, or scratch plans in durable docs unless they are intentionally included to explain methodology.
-
-## 18. Security / Privacy
-
-Prefer HTTPS-only APIs and assets. Do not hardcode API keys, tokens, secrets, credentials, personal device IDs, or private test artifacts.
-
-Avoid cleartext traffic unless documented. Lock-screen notifications should avoid exposing sensitive aircraft details unnecessarily.
-
-## 19. Release Behavior
-
-Before pushing: build, inspect git status, check for duplicate project files, scan for obvious secrets, update README accurately, and clean generated junk.
-
-Push only scoped, intentional app/source/docs changes.
+Flight Alert is an Android drone situational-awareness app. Preserve its established behavior and visual identity unless the user requests a change or a real bug, safety issue, or honesty problem requires one.
+
+This file contains durable repository constraints. It is not a backlog, roadmap, release checklist, or source of work. Current, concrete user instructions take precedence.
+
+## Scope and priorities
+
+- Work only on the current request and the changes needed to complete or verify it. Do not infer tasks from this file.
+- Do not start unrelated cleanup, refactors, experiments, profiling, releases, pushes, or broad verification passes.
+- Prioritize user functionality, visual fidelity, frame timing, then implementation elegance.
+- Use the current working tree as the baseline unless the user names another one. Preserve unrelated user changes.
+- A performance change is a regression if it causes missing information, flicker, popping, incorrect motion, altered styling, reduced honesty, or broken interaction.
+
+## Truth, sources, and safety
+
+- Never fabricate aircraft, map, route, photo, alert, altitude, location, freshness, or provider data.
+- When real data is unavailable, show `Unavailable` or `Loading`, hide or disable the feature, or label the uncertainty clearly.
+- Use real, documented sources. A session-built position history is not a real flight trace, and representative media must not be presented as an exact match.
+- Claims about identity, ownership, origin, military status, location, or safety must be supported by the available source data.
+- Alert decisions use both horizontal distance and vertical separation. Missing or stale altitude, location, or feed data must not produce an unsupported safe/unsafe or inside/outside claim.
+- Anything presented as a control must work. Unavailable controls and provider attribution must be represented honestly.
+
+## UI and rendering invariants
+
+- Preserve accepted content, styling, information density, layers, labels, borders, aircraft presentation, paths, controls, alerts, and loading/error states unless the request explicitly changes them.
+- Avoid flicker, popping, missing layers, abrupt sprite-size changes, or discontinuous transitions while panning, zooming, selecting, or crossing screen edges.
+- Keep animation and zoom-dependent rendering continuous. Do not turn a frame-rendering path into network polling.
+- Prevent clipped text, hidden labels, and unintended overlaps. Support portrait, landscape, resizing, and folding layouts where the touched UI applies.
+- Back navigation should dismiss the active overlay or screen before leaving the app.
+
+## Code and diagnostics
+
+- Follow the existing Kotlin/Gradle Android project structure and reuse established code before adding another abstraction or dependency.
+- Fix root causes at the shared path used by all affected callers.
+- `FlightMapView` coordinates map state, draw order, selection, and input; feature-specific objects should own parsing, validation, lookup, scoring, settings math, projection, and feature rules.
+- Prefer small files and narrow public APIs. In hot paths, prefer typed fields, numeric keys, collections, and cached normalized values over repeated string parsing or composition.
+- Keep temporary diagnostics, per-frame logging, counters, profiling hooks, debug gestures, and measurement overlays out of production runtime code. Prefer external profiling and existing logs.
+
+## Repository, documentation, and privacy
+
+- Maintain one buildable Android project. Do not create duplicate source trees, manifests, or Gradle projects.
+- Gradle and Android Studio project configuration is intentionally local-only. Do not add those files to Git.
+- Do not modify, delete, or commit user-local Android Studio state. Keep IDE files, `local.properties`, build outputs, generated files, temporary media, comparison artifacts, agent scratch files, and secrets out of Git.
+- `references/` contains large, immutable runtime dictionary data, not experiment tooling. Do not copy, rewrite, hash, or include it in broad text scans unless the task requires it. If the assets move or change names, update every corresponding Kotlin path and format expectation.
+- Keep `README.md` public-facing and accurate. Keep only reusable agent constraints here; do not add task prompts, plans, run logs, generated evidence, or stale experiment notes.
+- Prefer HTTPS. Never hardcode credentials, API keys, tokens, personal device IDs, or private test artifacts. Avoid exposing sensitive details in lock-screen notifications.
+
+## Verification and release discipline
+
+- Use the narrowest check that can disprove the change: targeted tests, compilation, lint, a host check, or an emulator as appropriate.
+- Run `./gradlew assembleDebug` (or `gradlew.bat assembleDebug` on Windows) after meaningful source or build changes and before a release.
+- Do not use a physical device unless the current user request permits it. Never claim unobserved visual or timing behavior was verified; state the remaining gap.
+- Before an explicitly requested push or release, inspect Git status, confirm the diff is scoped, and check for secrets, generated junk, and duplicate project files.
+- Push only intentional changes and only when the user asks.
