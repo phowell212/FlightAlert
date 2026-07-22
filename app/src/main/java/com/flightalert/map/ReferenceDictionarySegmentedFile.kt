@@ -6,6 +6,8 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 
 /** Positional reads over either one binary file or fixed-size numbered parts. */
 internal class ReferenceDictionarySegmentedFile private constructor(
@@ -107,7 +109,11 @@ internal class ReferenceDictionarySegmentedFile private constructor(
                     part_byte_count,
                     byte_count - index.toLong() * part_byte_count,
                 )
-                if (!part.isFile || part.length() != expected_size) {
+                val attributes = Files.readAttributes(
+                    part.toPath(),
+                    BasicFileAttributes::class.java,
+                )
+                if (!attributes.isRegularFile || attributes.size() != expected_size) {
                     throw IOException("Reference dictionary part is missing or has the wrong size")
                 }
                 part

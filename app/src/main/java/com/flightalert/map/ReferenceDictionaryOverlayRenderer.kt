@@ -443,6 +443,10 @@ internal class ReferenceDictionaryOverlayRenderer(
         return content_revision.get()
     }
 
+    fun package_check_pending(): Boolean {
+        return package_probe_pending.get() != null
+    }
+
     fun reference_class_catalog(): ReferenceClassCatalog? {
         val snapshot = package_snapshot
         if (snapshot != null) return snapshot.catalog

@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
         flight_map_view = view
 
         setContentView(view)
+        view.defer_initial_satellite_map_until_reference_check_finishes()
         view.post { configure_high_refresh_rate(view) }
 
         // Put keyboard focus on FlightMapView so emulator keys and filter typing land in the map controller.

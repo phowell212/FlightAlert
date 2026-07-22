@@ -38,6 +38,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewTreeObserver
 import android.view.WindowInsets
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -813,6 +814,21 @@ class FlightMapView(
         globe_bin_craft_aircraft_source?.on_snapshot_updated = {
             publish_globe_snapshot_update_if_useful()
         }
+    }
+
+    fun defer_initial_satellite_map_until_reference_check_finishes() {
+        viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (
+                    map_source != TileSource.SATELLITE ||
+                    !map_tile_renderer.reference_package_check_pending()
+                ) {
+                    viewTreeObserver.removeOnPreDrawListener(this)
+                    return true
+                }
+                return latest_location == null
+            }
+        })
     }
 
     fun start() {

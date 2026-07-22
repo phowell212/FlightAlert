@@ -68,6 +68,10 @@ class MapTileRenderer(
         return satellite_renderer.reference_class_catalog()
     }
 
+    fun reference_package_check_pending(): Boolean {
+        return satellite_renderer.reference_package_check_pending()
+    }
+
     fun clear() {
         street_renderer.clear()
         satellite_renderer.clear()

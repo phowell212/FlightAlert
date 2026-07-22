@@ -70,6 +70,10 @@ internal class SatelliteMapTileRenderer(
         return dictionary_reference_renderer.reference_class_catalog()
     }
 
+    fun reference_package_check_pending(): Boolean {
+        return dictionary_reference_renderer.package_check_pending()
+    }
+
     private fun draw_reference_layers(
         canvas: Canvas,
         viewport: Viewport,
