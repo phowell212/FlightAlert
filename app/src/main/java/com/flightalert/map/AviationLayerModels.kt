@@ -1,6 +1,9 @@
 package com.flightalert.map
 
+import com.flightalert.ThemeTreatment
 import java.util.Collections
+import kotlin.math.max
+import kotlin.math.min
 
 enum class AviationLayerAvailability { OFF, LOADING, USABLE, EMPTY, UNAVAILABLE }
 enum class AviationLayerCompleteness { COMPLETE, PARTIAL, UNKNOWN }
@@ -196,6 +199,88 @@ class AviationSourceResult<T>(
     val returned_object_ids: Set<Long> = immutable_set(returned_object_ids)
     val invalid_object_ids: Set<Long> = immutable_set(invalid_object_ids)
 }
+
+enum class AviationLayerKind(val display_name: String) {
+    ATC_BOUNDARIES("FAA US-chart ARTCC/FIR/OCA boundaries"),
+    RESTRICTED_AIRSPACES("FAA special-use airspace"),
+    AIRPORTS("FAA US-chart operational airport records"),
+    OCEANIC_TRACKS("FAA NAT tracks")
+}
+
+enum class AviationLayerState {
+    LOADED,
+    PARTIAL,
+    EMPTY,
+    UNAVAILABLE
+}
+data class AviationLayerStatus(
+    val state: AviationLayerState,
+    val message: String,
+    val showing_last_good: Boolean = false
+)
+
+data class AviationLayerPublication(
+    val displayed_health: AviationLayerHealth,
+    val displayed_source_identity: AviationSourceIdentity?,
+    val latest_attempt_health: AviationLayerHealth,
+    val latest_attempt_source_identity: AviationSourceIdentity?
+)
+
+data class AviationLayerSnapshot(
+    val atc_boundaries: List<AviationAirspaceFeature>,
+    val restricted_airspaces: List<AviationAirspaceFeature>,
+    val airports: List<AviationAirportFeature>,
+    val oceanic_tracks: List<AviationOceanicTrack>,
+    val statuses: Map<AviationLayerKind, AviationLayerStatus>,
+    val fetched_at_ms: Long,
+    val publications: Map<AviationLayerKind, AviationLayerPublication> = emptyMap()
+)
+
+data class AviationLayerBounds(
+    val min_lat: Double,
+    val min_lon: Double,
+    val max_lat: Double,
+    val max_lon: Double
+) {
+    fun arc_gis_envelope(): String = "$min_lon,$min_lat,$max_lon,$max_lat"
+}
+
+internal const val AVIATION_AIRPORT_LABEL_MIN_ZOOM = 8.4
+
+fun List<AviationLayerPoint>.to_bounds(): AviationGeoBounds {
+    if (isEmpty()) return AviationGeoBounds(0.0, 0.0, 0.0, 0.0)
+    var min_lat = first().lat
+    var max_lat = first().lat
+    var min_lon = first().lon
+    var max_lon = first().lon
+    forEach { point ->
+        min_lat = min(min_lat, point.lat)
+        max_lat = max(max_lat, point.lat)
+        min_lon = min(min_lon, point.lon)
+        max_lon = max(max_lon, point.lon)
+    }
+    return AviationGeoBounds(min_lat, min_lon, max_lat, max_lon)
+}
+
+data class AviationLayerVisibility(
+    val restricted_airspaces_enabled: Boolean,
+    val atc_boundaries_enabled: Boolean,
+    val oceanic_tracks_enabled: Boolean,
+    val airport_labels_enabled: Boolean
+)
+
+data class AviationLayerStyle(
+    val accent_orange: Int,
+    val danger: Int,
+    val accent_blue: Int,
+    val accent_green: Int,
+    val accent_pink: Int,
+    val accent_yellow: Int,
+    val military_gray: Int,
+    val panel: Int,
+    val text: Int,
+    val treatment: ThemeTreatment
+)
 
 private fun <T> immutable_list(values: Collection<T>): List<T> =
     Collections.unmodifiableList(ArrayList(values))
