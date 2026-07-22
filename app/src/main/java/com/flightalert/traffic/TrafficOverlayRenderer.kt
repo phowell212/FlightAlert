@@ -60,7 +60,6 @@ interface TrafficOverlayChrome {
     fun request_animation_frame()
 }
 
-// Draws aircraft and ownship overlays from prepared display state without fetching or changing traffic data.
 class TrafficOverlayRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
@@ -1578,7 +1577,6 @@ class TrafficOverlayRenderer(
         )
     }
 
-    // Draw one aircraft sprite using the classifier shape and the current dot-to-symbol blend.
     private fun draw_aircraft_icon(
         canvas: Canvas,
         x: Float,

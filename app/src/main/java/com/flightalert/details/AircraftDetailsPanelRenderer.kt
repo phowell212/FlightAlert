@@ -35,14 +35,12 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-// Draws the selected-aircraft modal; FlightMapView provides state and this object owns all panel geometry.
 class AircraftDetailsPanelRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
     private val text_paint: Paint,
     private val chrome: AircraftDetailsPanelChrome
 ) {
-    // Dispatch one details-panel state to the matching drawing branch and return scroll bounds to FlightMapView.
     fun draw_panel(
         canvas: Canvas,
         w: Float,
@@ -170,7 +168,6 @@ class AircraftDetailsPanelRenderer(
         return RectF(x, y, x + width, y + height)
     }
 
-    // Draw the normal details mode: title, exact/representative photo, metadata rows, and impact entry.
     private fun draw_main_panel(
         canvas: Canvas,
         rect: RectF,

@@ -717,7 +717,6 @@ internal fun https_url(value: String): URL? {
     }
 }
 
-// Tile loading previously used runCatching, which catches Throwable rather than only Exception.
 internal fun throwable_safe_https_url(value: String): URL? {
     return runCatching {
         URL(value.trim()).takeIf { it.protocol.equals("https", ignoreCase = true) }

@@ -224,22 +224,6 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-internal class ReferenceFilterCatalogPanelCache {
-    private var catalog: ReferenceClassCatalog? = null
-
-    fun update(
-        next: ReferenceClassCatalog?,
-        on_identity_changed: () -> Unit,
-    ): ReferenceClassCatalog? {
-        if (next !== catalog) {
-            catalog = next
-            on_identity_changed()
-        }
-        return catalog
-    }
-}
-
-// Custom map cockpit: real map tiles, real aircraft feeds, and canvas UI that adapts to device shape.
 @SuppressLint("ViewConstructor")
 class FlightMapView(
     context: Context,
@@ -251,7 +235,6 @@ class FlightMapView(
     private val icon_path = Path()
     private val prefs: SharedPreferences = FlightAlertSettings.prefs(context)
 
-    // Wire renderers first; FlightMapView chooses order, while renderer objects own drawing details.
     private val layout = FlightMapLayout { value -> dp(value) }
     private val chrome_bridge = FlightMapChromeBridge(
         layout = layout,
@@ -395,7 +378,6 @@ class FlightMapView(
         units = { units }
     )
 
-    // Keep source clients together so the coordinator can fetch traffic, details, photos, traces, and layers.
     private val map_tile_renderer = MapTileRenderer(
         context = context,
         paint = paint,
@@ -679,7 +661,6 @@ class FlightMapView(
         FlightAlertSettings.DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE
     )
 
-    // Track which panel is open; Back and draw both use these flags to choose one visible branch.
     private var settings_open = false
     private var display_settings_open = false
     private var map_settings_open = false
@@ -760,7 +741,6 @@ class FlightMapView(
     private var manual_center_lat: Double? = null
     private var manual_center_lon: Double? = null
 
-    // Touch state is kept here because Android sends gestures as a stream of low-level MotionEvents.
     private var down_x = 0f
     private var down_y = 0f
     private var details_scroll_y = 0f
@@ -821,7 +801,6 @@ class FlightMapView(
         }
     }
 
-    // Init the custom View settings Android needs before it can route keys, touches, and insets here.
     init {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -836,7 +815,6 @@ class FlightMapView(
         }
     }
 
-    // MainActivity calls this from onResume; live location and the frame ticker start here.
     fun start() {
         start_location_updates()
         latest_location?.let { device_heading_provider.update_location(it) }
@@ -845,7 +823,6 @@ class FlightMapView(
         postOnAnimation(ticker)
     }
 
-    // MainActivity calls this from onPause; stop listeners that only matter while the map is visible.
     fun stop() {
         removeCallbacks(ticker)
         removeCallbacks(map_interaction_settle_redraw)
@@ -894,7 +871,6 @@ class FlightMapView(
         return false
     }
 
-    // MainActivity owns the Android permission popup; this view owns what the map does with the answer.
     fun set_location_permission_granted(granted: Boolean) {
         if (location_permission_granted == granted) return
         location_permission_granted = granted
@@ -975,7 +951,6 @@ class FlightMapView(
         return false
     }
 
-    // Android's LocationManager calls this with the device's real location fix.
     override fun onLocationChanged(location: Location) {
         latest_location = location
         device_heading_provider.update_location(location)
@@ -1086,7 +1061,6 @@ class FlightMapView(
         }
     }
 
-    // Android sends every touch here. Convert through safe insets, then route to pinch, drag, or tap.
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val x = content_x(event.x)
         val y = content_y(event.y)
@@ -1246,7 +1220,6 @@ class FlightMapView(
         return filters_open && filter_search_focused
     }
 
-    // Android asks for this when the filter box has focus. This small bridge turns keyboard text into filter text.
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         if (!filters_open || !filter_search_focused) return null
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
@@ -1420,7 +1393,6 @@ class FlightMapView(
                     abs(focus_y - last_pinch_focus_y) > dp(0.25f)
 
         // 0.001 zoom levels is roughly 0.07% scale change.
-        // Or remove this threshold entirely and apply every valid MOVE.
         if (abs(zoom_delta) >= 0.001 || moved) {
             zoom_and_pan_during_pinch(
                 scale_factor,
@@ -2720,7 +2692,6 @@ class FlightMapView(
         )
     }
 
-    // Details panel is one shell with several content modes, so buttons swap state instead of changing screens.
     private fun details_panel_content() = when {
         details_session.environmental_impact_open -> aircraft_impact_panel_state()
         details_session.usage_open -> aircraft_usage_panel_state()
@@ -2745,7 +2716,6 @@ class FlightMapView(
         )
     }
 
-    // Details rows are presented by a dedicated object so the map view only chooses which aircraft is active.
     private fun aircraft_details_rows(
         aircraft: Aircraft,
         details: AircraftDetails?
@@ -4446,7 +4416,6 @@ class FlightMapView(
         )
     }
 
-    // Pack layout flags once so the layout object can stay focused on geometry instead of app state.
     private fun layout_state(): FlightMapLayoutState {
         return FlightMapLayoutState(
             following_location = following_location,
@@ -4729,4 +4698,19 @@ class FlightMapView(
         const val MAP_LABEL_SETTLED_FADE_MS = 140L
     }
 
+}
+
+internal class ReferenceFilterCatalogPanelCache {
+    private var catalog: ReferenceClassCatalog? = null
+
+    fun update(
+        next: ReferenceClassCatalog?,
+        on_identity_changed: () -> Unit,
+    ): ReferenceClassCatalog? {
+        if (next !== catalog) {
+            catalog = next
+            on_identity_changed()
+        }
+        return catalog
+    }
 }

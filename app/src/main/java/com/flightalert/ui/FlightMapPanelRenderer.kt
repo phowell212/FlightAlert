@@ -45,7 +45,6 @@ import kotlin.math.floor
 import kotlin.math.round
 import kotlin.math.sqrt
 
-// Draws settings, filters, layers, methodology, and priority panels from prepared state snapshots.
 class FlightMapPanelRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
@@ -54,7 +53,6 @@ class FlightMapPanelRenderer(
 ) {
     private val long_press_fill_clip = Path()
 
-    // Draw the main settings hub; subpanels own detailed choices but share this modal shell.
     fun draw_settings_panel(
         canvas: Canvas,
         w: Float,
@@ -435,7 +433,6 @@ class FlightMapPanelRenderer(
         }
     }
 
-    // Draw traffic and package-derived map filters through one typed adaptive panel plan.
     fun draw_filters_panel(
         canvas: Canvas,
         w: Float,

@@ -16,37 +16,6 @@ import android.graphics.Rect
 import com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES
 import java.io.File
 
-internal fun map_tile_cache_file(
-    context: Context,
-    cache_key: String,
-    z: Int,
-    x: Int,
-    y: Int
-): File {
-    return File(context.cacheDir, "${cache_key}_tiles/$z/$x/$y.png")
-}
-
-internal fun draw_unavailable_map_tile(
-    canvas: Canvas,
-    paint: Paint,
-    text_paint: Paint,
-    x: Float,
-    y: Float,
-    size: Float,
-    fill_color: Int,
-    text_color: Int,
-    text_size: Float
-) {
-    paint.style = Paint.Style.FILL
-    paint.color = fill_color
-    canvas.drawRect(x, y, x + size, y + size, paint)
-    text_paint.textAlign = Paint.Align.CENTER
-    text_paint.textSize = text_size
-    text_paint.color = text_color
-    canvas.drawText("Loading map", x + size / 2f, y + size / 2f, text_paint)
-}
-
-// Public facade kept stable for FlightMapView; source-specific behavior lives in the street/satellite renderers.
 class MapTileRenderer(
     context: Context,
     paint: Paint,
@@ -169,3 +138,33 @@ internal data class TileLayerDrawStats(
     val fallback_drawn: Int,
     val fading: Boolean
 )
+
+internal fun map_tile_cache_file(
+    context: Context,
+    cache_key: String,
+    z: Int,
+    x: Int,
+    y: Int
+): File {
+    return File(context.cacheDir, "${cache_key}_tiles/$z/$x/$y.png")
+}
+
+internal fun draw_unavailable_map_tile(
+    canvas: Canvas,
+    paint: Paint,
+    text_paint: Paint,
+    x: Float,
+    y: Float,
+    size: Float,
+    fill_color: Int,
+    text_color: Int,
+    text_size: Float
+) {
+    paint.style = Paint.Style.FILL
+    paint.color = fill_color
+    canvas.drawRect(x, y, x + size, y + size, paint)
+    text_paint.textAlign = Paint.Align.CENTER
+    text_paint.textSize = text_size
+    text_paint.color = text_color
+    canvas.drawText("Loading map", x + size / 2f, y + size / 2f, text_paint)
+}

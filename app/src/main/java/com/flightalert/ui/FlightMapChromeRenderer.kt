@@ -101,7 +101,6 @@ class FlightMapChromeBridge(
     }
 }
 
-// Draws shared map chrome: panels, controls, status labels, and theme treatments.
 class FlightMapChromeRenderer(
     private val paint: Paint,
     private val stroke_paint: Paint,
@@ -177,7 +176,6 @@ class FlightMapChromeRenderer(
         text_paint.textAlign = previous_align
     }
 
-    // Context controls are icon-only map actions that share one cockpit surface treatment.
     fun draw_context_control(
         canvas: Canvas,
         rect: RectF,
@@ -201,7 +199,6 @@ class FlightMapChromeRenderer(
         )
     }
 
-    // Draw the reusable control surface before icons or text are placed on top.
     fun draw_control_surface(
         canvas: Canvas,
         rect: RectF,
@@ -286,7 +283,6 @@ class FlightMapChromeRenderer(
         canvas.drawRoundRect(rect, radius, radius, stroke_paint)
     }
 
-    // Draw the reusable panel surface with theme texture and border applied consistently.
     fun draw_panel_surface(
         canvas: Canvas,
         rect: RectF,
@@ -402,7 +398,6 @@ class FlightMapChromeRenderer(
         return bitmap
     }
 
-    // Modal backdrop dims the map while keeping the active panel visually attached to the cockpit.
     fun draw_modal_backdrop(canvas: Canvas, w: Float, h: Float, style: FlightMapChromeStyle) {
         val colors = style.visual_theme.colors
         val alpha = when (style.visual_theme.style.treatment) {
