@@ -601,7 +601,7 @@ class AviationArcGisSource(
             },
             object_ids_captured_at_epoch_ms = null,
             response_observed_at_epoch_ms = now_ms(),
-            final_source_url = (failure.final_url ?: URL(layer.metadata_url)).toString(),
+            final_source_url = failure.final_url ?: URL(layer.metadata_url),
             advertised_revision = failure.advertised_revision
         ),
         health = AviationLayerHealth(
@@ -716,7 +716,7 @@ class AviationArcGisSource(
                     },
                     object_ids_captured_at_epoch_ms = captured_at_epoch_ms,
                     response_observed_at_epoch_ms = observed_at_epoch_ms,
-                    final_source_url = final_url.toString(),
+                    final_source_url = final_url,
                     advertised_revision = advertised_revision
                 ),
                 health = AviationLayerHealth(availability, completeness, freshness),
@@ -1214,7 +1214,7 @@ private fun nat_identity(final_url: URL, observed_at: Long): AviationSourceIdent
         requested_envelopes = emptyList(),
         object_ids_captured_at_epoch_ms = null,
         response_observed_at_epoch_ms = observed_at,
-        final_source_url = final_url.toString(),
+        final_source_url = final_url,
         advertised_revision = null
     )
 

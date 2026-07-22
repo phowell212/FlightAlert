@@ -1,6 +1,7 @@
 package com.flightalert.map
 
 import com.flightalert.ThemeTreatment
+import java.net.URL
 import java.util.Collections
 import kotlin.math.max
 import kotlin.math.min
@@ -38,11 +39,14 @@ class AviationSourceIdentity(
     requested_envelopes: List<AviationGeoBounds>,
     val object_ids_captured_at_epoch_ms: Long?,
     val response_observed_at_epoch_ms: Long,
-    val final_source_url: String,
+    final_source_url: URL,
     val advertised_revision: Long?
 ) {
     val requested_envelopes: List<AviationGeoBounds> = immutable_list(requested_envelopes)
-    val request_url: String = final_source_url
+    val final_source_url_is_valid: Boolean =
+        final_source_url.protocol.equals("https", ignoreCase = true) && final_source_url.host.isNotBlank()
+    val final_source_url: String = final_source_url.toString()
+    val request_url: String = this.final_source_url
     val observed_at_epoch_ms: Long = response_observed_at_epoch_ms
     val source_revision: Long? = advertised_revision
 }

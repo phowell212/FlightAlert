@@ -1,7 +1,6 @@
 package com.flightalert.map
 
 import java.time.Instant
-import java.net.URI
 import java.util.Locale
 
 internal sealed interface AviationSelectionKey {
@@ -530,8 +529,7 @@ internal object AviationSelectionPresentationPolicy {
         if (captured_at != null &&
             (captured_at < 0L || captured_at > identity.response_observed_at_epoch_ms)
         ) return false
-        val source_uri = runCatching { URI(identity.final_source_url) }.getOrNull() ?: return false
-        return source_uri.scheme.equals("https", ignoreCase = true) && !source_uri.host.isNullOrBlank()
+        return identity.final_source_url_is_valid
     }
 
     private fun source_identities_match(

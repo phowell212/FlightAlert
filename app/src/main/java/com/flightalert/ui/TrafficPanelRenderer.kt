@@ -702,23 +702,25 @@ internal class TrafficPanelStateBuilder(
         val upper = cleaned.uppercase(Locale.US)
         if (upper.length == 3 && upper.all { it in 'A'..'Z' }) return upper
         if (upper.length == 2 && upper.all { it in 'A'..'Z' }) {
-            return iso3_for_region(upper)
+            return ISO3_BY_ALPHA2[upper]
         }
         val normalized = upper.replace(Regex("[^A-Z]+"), " ").trim()
-        return COUNTRY_NAME_OVERRIDES[normalized] ?: Locale.getISOCountries()
-            .firstNotNullOfOrNull { code ->
-                val locale = Locale.Builder().setRegion(code).build()
-                iso3_for_region(code)?.takeIf {
-                    locale.getDisplayCountry(Locale.US).uppercase(Locale.US) == upper
-                }
-            }
-    }
-
-    private fun iso3_for_region(region: String): String? {
-        return runCatching { Locale.Builder().setRegion(region).build().isO3Country }.getOrNull()
+        return COUNTRY_NAME_OVERRIDES[normalized] ?: ISO3_BY_DISPLAY_COUNTRY[upper]
     }
 
     private companion object {
+        val ISO3_BY_ALPHA2 = Locale.getISOCountries().associateWith { code ->
+            Locale.Builder().setRegion(code).build().isO3Country
+        }
+        val ISO3_BY_DISPLAY_COUNTRY = buildMap {
+            Locale.getISOCountries().forEach { code ->
+                val locale = Locale.Builder().setRegion(code).build()
+                putIfAbsent(
+                    locale.getDisplayCountry(Locale.US).uppercase(Locale.US),
+                    ISO3_BY_ALPHA2.getValue(code)
+                )
+            }
+        }
         val COUNTRY_NAME_OVERRIDES = mapOf(
             "UNITED STATES" to "USA",
             "UNITED KINGDOM" to "GBR",

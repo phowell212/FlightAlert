@@ -98,17 +98,10 @@ internal class ReferenceFiltersPanelLayout(
         val rowsBySection = ReferenceFilterSection.entries.associateWith { section ->
             sortedRows.filter { it.section == section }
         }
-        val useTwoColumns = canUseTwoColumns(
-            contentViewport = contentViewport,
-            fontScale = input.viewport.fontScale,
-            rowsBySection = rowsBySection,
-            input = input,
-        )
-        val sectionDrafts = if (useTwoColumns) {
-            buildTwoColumnSections(input, rowsBySection, contentViewport)
-        } else {
-            buildOneColumnSections(input, rowsBySection, contentViewport)
-        }
+        val twoColumnDrafts = buildTwoColumnSectionsOrNull(input, rowsBySection, contentViewport)
+        val sectionDrafts = twoColumnDrafts
+            ?: buildOneColumnSections(input, rowsBySection, contentViewport)
+        val useTwoColumns = twoColumnDrafts != null
         val contentHeight = sectionDrafts.maxOfOrNull { it.bounds.bottom } ?: 0f
         val maxScroll = (contentHeight - contentViewport.height).coerceAtLeast(0f)
         var scroll = input.requestedScrollOffsetDp.coerceIn(0f, maxScroll)
@@ -146,31 +139,33 @@ internal class ReferenceFiltersPanelLayout(
         )
     }
 
-    private fun canUseTwoColumns(
-        contentViewport: ReferenceDpRect,
-        fontScale: Float,
-        rowsBySection: Map<ReferenceFilterSection, List<ReferenceFilterRowUi>>,
+    private fun buildTwoColumnSectionsOrNull(
         input: ReferenceFiltersPanelInput,
-    ): Boolean {
-        if (input.viewport.heightDp >= input.viewport.widthDp) return false
-        if (contentViewport.width < TWO_COLUMN_MIN_WIDTH) return false
-        if (rowsBySection.values.any(List<ReferenceFilterRowUi>::isEmpty)) return false
+        rowsBySection: Map<ReferenceFilterSection, List<ReferenceFilterRowUi>>,
+        contentViewport: ReferenceDpRect,
+    ): List<SectionDraft>? {
+        if (input.viewport.heightDp >= input.viewport.widthDp) return null
+        if (contentViewport.width < TWO_COLUMN_MIN_WIDTH) return null
+        if (rowsBySection.values.any(List<ReferenceFilterRowUi>::isEmpty)) return null
         val columnWidth = (contentViewport.width - COLUMN_GAP) / 2f
-        if (columnWidth < MIN_COLUMN_WIDTH) return false
-        return runCatching {
-            for (section in ReferenceFilterSection.entries) {
-                buildSection(
-                    input = input,
-                    section = section,
-                    rows = rowsBySection.getValue(section),
-                    column = ReferenceDpRect(0f, 0f, columnWidth, 0f),
-                    startY = 0f,
-                    columnIndex = section.ordinal,
-                    maxLabelLines = 2,
-                    fontScale = fontScale,
-                )
+        if (columnWidth < MIN_COLUMN_WIDTH) return null
+        return ReferenceFilterSection.entries.map { section ->
+            val left = if (section == ReferenceFilterSection.LABELS) {
+                contentViewport.left
+            } else {
+                contentViewport.left + columnWidth + COLUMN_GAP
             }
-        }.isSuccess
+            buildSection(
+                input = input,
+                section = section,
+                rows = rowsBySection.getValue(section),
+                column = ReferenceDpRect(left, 0f, left + columnWidth, 0f),
+                startY = 0f,
+                columnIndex = section.ordinal,
+                maxLabelLines = 2,
+                fontScale = input.viewport.fontScale,
+            ) ?: return null
+        }
     }
 
     private fun buildOneColumnSections(
@@ -192,36 +187,11 @@ internal class ReferenceFiltersPanelLayout(
                 columnIndex = 0,
                 maxLabelLines = null,
                 fontScale = input.viewport.fontScale,
-            )
+            ) ?: continue
             result += draft
             top = draft.bounds.bottom + SECTION_GAP
         }
         return result
-    }
-
-    private fun buildTwoColumnSections(
-        input: ReferenceFiltersPanelInput,
-        rowsBySection: Map<ReferenceFilterSection, List<ReferenceFilterRowUi>>,
-        contentViewport: ReferenceDpRect,
-    ): List<SectionDraft> {
-        val columnWidth = (contentViewport.width - COLUMN_GAP) / 2f
-        return ReferenceFilterSection.entries.map { section ->
-            val left = if (section == ReferenceFilterSection.LABELS) {
-                contentViewport.left
-            } else {
-                contentViewport.left + columnWidth + COLUMN_GAP
-            }
-            buildSection(
-                input = input,
-                section = section,
-                rows = rowsBySection.getValue(section),
-                column = ReferenceDpRect(left, 0f, left + columnWidth, 0f),
-                startY = 0f,
-                columnIndex = section.ordinal,
-                maxLabelLines = 2,
-                fontScale = input.viewport.fontScale,
-            )
-        }
     }
 
     private fun buildSection(
@@ -233,7 +203,7 @@ internal class ReferenceFiltersPanelLayout(
         columnIndex: Int,
         maxLabelLines: Int?,
         fontScale: Float,
-    ): SectionDraft {
+    ): SectionDraft? {
         val sectionTitle = section.title()
         val headingFit = fitText(
             sectionTitle,
@@ -244,7 +214,7 @@ internal class ReferenceFiltersPanelLayout(
             700,
             false,
             2,
-        )
+        ) ?: return null
         val headingHeight = headingFit.height + HEADING_VERTICAL_PADDING
         val heading = textPlan(
             text = sectionTitle,
@@ -268,7 +238,7 @@ internal class ReferenceFiltersPanelLayout(
             top = top,
             maxLabelLines = maxLabelLines,
             fontScale = fontScale,
-        )
+        ) ?: return null
         top = controls.last().bounds.bottom + CONTROL_GAP
         rows.forEach { row ->
             val stateLabel = when {
@@ -289,7 +259,7 @@ internal class ReferenceFiltersPanelLayout(
                 top = top,
                 maxLabelLines = maxLabelLines,
                 fontScale = fontScale,
-            )
+            ) ?: return null
             top = controls.last().bounds.bottom + CONTROL_GAP
         }
         return SectionDraft(
@@ -317,7 +287,7 @@ internal class ReferenceFiltersPanelLayout(
         top: Float,
         maxLabelLines: Int?,
         fontScale: Float,
-    ): ReferenceControlPlan {
+    ): ReferenceControlPlan? {
         val horizontalPadding = CONTROL_HORIZONTAL_PADDING
         val stateWidth = (column.width * STATE_WIDTH_FRACTION).coerceIn(MIN_STATE_WIDTH, MAX_STATE_WIDTH)
         val swatchSpace = if (swatch == null) 0f else SWATCH_WIDTH + SWATCH_GAP
@@ -335,7 +305,7 @@ internal class ReferenceFiltersPanelLayout(
             labelStyle?.fontWeight ?: 500,
             labelStyle?.italic ?: false,
             maxLabelLines,
-        )
+        ) ?: return null
         val stateFit = fitText(
             stateLabel,
             stateWidth,
@@ -345,7 +315,7 @@ internal class ReferenceFiltersPanelLayout(
             700,
             false,
             null,
-        )
+        ) ?: return null
         val controlHeight = max(
             MIN_TARGET_SIZE,
             max(labelFit.height, stateFit.height) + 2f * CONTROL_VERTICAL_PADDING,
@@ -419,18 +389,16 @@ internal class ReferenceFiltersPanelLayout(
             (viewport.fontScale * LINE_HEIGHT_MULTIPLIER)
         val preferredSize = min(TITLE_TEXT_SP, heightLimitedSize)
         val minimumSize = min(MIN_TITLE_TEXT_SP, preferredSize)
-        val fitted = runCatching {
-            fitText(
-                "Filters",
-                right - left,
-                preferredSize,
-                minimumSize,
-                viewport.fontScale,
-                700,
-                false,
-                1,
-            )
-        }.getOrNull() ?: return null
+        val fitted = fitText(
+            "Filters",
+            right - left,
+            preferredSize,
+            minimumSize,
+            viewport.fontScale,
+            700,
+            false,
+            1,
+        ) ?: return null
         val top = geometry.headerTop + (geometry.headerHeight - fitted.height) / 2f
         return textPlan(
             text = "Filters",
@@ -515,16 +483,18 @@ internal class ReferenceFiltersPanelLayout(
             CONTROL_HORIZONTAL_PADDING,
             ((bounds.width - MIN_HEADER_LABEL_WIDTH) / 2f).coerceAtLeast(0f),
         )
-        val fit = fitText(
-            label,
-            bounds.width - 2f * horizontalPadding,
-            preferredSize,
-            minimumSize,
-            fontScale,
-            600,
-            false,
-            1,
-        )
+        val fit = requireNotNull(
+            fitText(
+                label,
+                bounds.width - 2f * horizontalPadding,
+                preferredSize,
+                minimumSize,
+                fontScale,
+                600,
+                false,
+                1,
+            )
+        ) { "text cannot fit without clipping: $label" }
         val textBounds = ReferenceDpRect(
             bounds.left + horizontalPadding,
             bounds.top + (bounds.height - fit.height) / 2f,
@@ -548,16 +518,18 @@ internal class ReferenceFiltersPanelLayout(
         contentViewport: ReferenceDpRect,
         fontScale: Float,
     ): ReferenceTextPlan {
-        val fit = fitText(
-            message,
-            contentViewport.width - 2f * STATUS_PADDING,
-            STATUS_TEXT_SP,
-            MIN_NARROW_STATUS_TEXT_SP,
-            fontScale,
-            500,
-            false,
-            null,
-        )
+        val fit = requireNotNull(
+            fitText(
+                message,
+                contentViewport.width - 2f * STATUS_PADDING,
+                STATUS_TEXT_SP,
+                MIN_NARROW_STATUS_TEXT_SP,
+                fontScale,
+                500,
+                false,
+                null,
+            )
+        ) { "text cannot fit without clipping: $message" }
         return textPlan(
             message,
             fit,
@@ -707,7 +679,7 @@ internal class ReferenceFiltersPanelLayout(
         fontWeight: Int,
         italic: Boolean,
         maxLines: Int?,
-    ): FittedText {
+    ): FittedText? {
         require(text.isNotBlank()) { "visible text must not be blank" }
         require(maxWidth > 0f) { "visible text width must be positive" }
         var size = preferredSizeSp
@@ -726,7 +698,7 @@ internal class ReferenceFiltersPanelLayout(
             }
             size -= TEXT_SIZE_STEP
         }
-        throw IllegalArgumentException("text cannot fit without clipping: $text")
+        return null
     }
 
     private fun wrapText(
