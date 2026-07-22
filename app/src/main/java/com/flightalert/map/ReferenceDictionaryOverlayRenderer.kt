@@ -106,6 +106,10 @@ internal class ReferenceDictionaryOverlayRenderer(
     private var retained_fade: RetainedReferenceFade? = null
     private var retained_labels: RetainedReferenceLabels? = null
 
+    init {
+        request_package_probe_if_due()
+    }
+
     fun draw(
         canvas: Canvas,
         viewport: Viewport,
