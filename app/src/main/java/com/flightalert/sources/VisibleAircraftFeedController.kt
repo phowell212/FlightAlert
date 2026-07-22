@@ -23,18 +23,6 @@ import com.flightalert.ui.AircraftFeedMode
 import java.util.Locale
 import java.util.concurrent.Executor
 
-data class VisibleAircraftRequest(
-    val feed_bounds: FeedBounds,
-    val safety_api_bounds: FeedBounds?,
-    val own_lat: Double,
-    val own_lon: Double,
-    val center_lat: Double,
-    val center_lon: Double,
-    val zoom: Double,
-    val feed_mode: AircraftFeedMode,
-    val exact_search: String?
-)
-
 class VisibleAircraftFeedController(
     private val aircraft_traffic_feed: AircraftTrafficFeed,
     private val globe_source: GlobeBinCraftAircraftSource?,

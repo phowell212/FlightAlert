@@ -19,6 +19,7 @@ package com.flightalert.sources
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
 import com.flightalert.aircraft.aircraft_identity_key
+import com.flightalert.ui.AircraftFeedMode
 import kotlin.math.max
 import kotlin.math.min
 
@@ -37,6 +38,18 @@ data class FeedBounds(
         )
     }
 }
+
+data class VisibleAircraftRequest(
+    val feed_bounds: FeedBounds,
+    val safety_api_bounds: FeedBounds?,
+    val own_lat: Double,
+    val own_lon: Double,
+    val center_lat: Double,
+    val center_lon: Double,
+    val zoom: Double,
+    val feed_mode: AircraftFeedMode,
+    val exact_search: String?
+)
 
 data class FeedResult(
     val status: FeedStatus,

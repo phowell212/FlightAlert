@@ -36,28 +36,6 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 
-internal fun project_aviation_point_to_screen(
-    point: AviationLayerPoint,
-    viewport: Viewport,
-    lat_lon_to_world: (Double, Double, Double) -> WorldPoint
-): ScreenPoint? {
-    val world = lat_lon_to_world(point.lat, point.lon, viewport.zoom)
-    var screen_x = (world.x - viewport.center_x + viewport.width / 2.0).toFloat()
-    val world_span = (TILE_SIZE * 2.0.pow(viewport.zoom)).toFloat()
-    while (screen_x < -world_span / 2f) screen_x += world_span
-    while (screen_x > viewport.width + world_span / 2f) screen_x -= world_span
-    val screen_y = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
-    if (
-        screen_x < -viewport.width ||
-        screen_x > viewport.width * 2f ||
-        screen_y < -viewport.height ||
-        screen_y > viewport.height * 2f
-    ) {
-        return null
-    }
-    return ScreenPoint(screen_x, screen_y)
-}
-
 internal object AviationAirspaceRenderPolicy {
     fun forEachApplicable(
         features: List<AviationAirspaceFeature>,
@@ -1462,4 +1440,26 @@ internal class AviationLayerRenderer(
         const val AIRSPACE_LABEL_MIN_ZOOM = 7.2
         const val OCEANIC_TRACK_MIN_ZOOM = 3.0
     }
+}
+
+internal fun project_aviation_point_to_screen(
+    point: AviationLayerPoint,
+    viewport: Viewport,
+    lat_lon_to_world: (Double, Double, Double) -> WorldPoint
+): ScreenPoint? {
+    val world = lat_lon_to_world(point.lat, point.lon, viewport.zoom)
+    var screen_x = (world.x - viewport.center_x + viewport.width / 2.0).toFloat()
+    val world_span = (TILE_SIZE * 2.0.pow(viewport.zoom)).toFloat()
+    while (screen_x < -world_span / 2f) screen_x += world_span
+    while (screen_x > viewport.width + world_span / 2f) screen_x -= world_span
+    val screen_y = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
+    if (
+        screen_x < -viewport.width ||
+        screen_x > viewport.width * 2f ||
+        screen_y < -viewport.height ||
+        screen_y > viewport.height * 2f
+    ) {
+        return null
+    }
+    return ScreenPoint(screen_x, screen_y)
 }
