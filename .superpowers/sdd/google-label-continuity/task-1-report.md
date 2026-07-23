@@ -52,3 +52,36 @@ Results: `BUILD SUCCESSFUL in 2s` and `BUILD SUCCESSFUL in 48s`, respectively. T
 ## Concerns
 
 No known implementation concerns. Physical-device temporal validation is intentionally out of scope for Task 1.
+
+## Empty-Preference Regression Fix
+
+### RED
+
+Command (with process-local `ANDROID_HOME=C:\\Users\\h\\AppData\\Local\\Android\\Sdk`):
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest
+```
+
+Result: failed as intended. `emptyPreferredOccurrencesDoNotQueryMembership` threw
+`IllegalStateException` from its `contains` implementation, proving the empty set was queried.
+
+### GREEN
+
+Command:
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest
+```
+
+Result: `BUILD SUCCESSFUL in 3s`; all four focused tests passed.
+
+### Corrected Committed-File Scope
+
+The original Task 1 commit also includes these task files:
+
+- `.superpowers/sdd/google-label-continuity/task-1-brief.md`
+- `docs/superpowers/plans/2026-07-22-google-style-label-continuity.md`
+- `docs/superpowers/specs/2026-07-22-google-style-label-continuity-design.md`
+
+This regression fix changes the focused test, selector, and this report only.

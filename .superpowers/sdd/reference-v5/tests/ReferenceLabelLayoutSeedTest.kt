@@ -64,6 +64,21 @@ class ReferenceLabelLayoutSeedTest {
         )
     }
 
+    @Test
+    fun emptyPreferredOccurrencesDoNotQueryMembership() {
+        val first = candidate(id = 1u, feature = 10u, left = 40.0, right = 60.0)
+        val second = candidate(id = 2u, feature = 20u, left = 70.0, right = 90.0)
+        val empty_preferred_occurrences = object : Set<ReferenceLabelOccurrenceId> by emptySet() {
+            override fun contains(element: ReferenceLabelOccurrenceId): Boolean =
+                error("empty preferences must not be queried")
+        }
+
+        assertEquals(
+            listOf(first, second),
+            selectWithPreferred(empty_preferred_occurrences, first, second),
+        )
+    }
+
     private fun select(
         fixed: Candidate,
         vararg candidates: Candidate,
@@ -83,10 +98,15 @@ class ReferenceLabelLayoutSeedTest {
     private fun selectPreferred(
         preferredOccurrence: ReferenceLabelOccurrenceId,
         vararg candidates: Candidate,
+    ): List<Candidate> = selectWithPreferred(setOf(preferredOccurrence), *candidates)
+
+    private fun selectWithPreferred(
+        preferredOccurrences: Set<ReferenceLabelOccurrenceId>,
+        vararg candidates: Candidate,
     ): List<Candidate> {
         return ReferenceLabelLayoutSelector.select(
             candidates = candidates.toList(),
-            preferredOccurrences = setOf(preferredOccurrence),
+            preferredOccurrences = preferredOccurrences,
             viewport = ReferenceScreenRect(0.0, 0.0, 200.0, 100.0),
             staticAvoidRects = emptyList(),
             labelBudget = 8,

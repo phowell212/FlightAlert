@@ -96,6 +96,20 @@ internal object ReferenceLabelLayoutSelector {
         candidates.forEach(::validateCandidate)
         fixedCandidates.forEach(::validateCandidate)
 
+        val groupComparator = if (preferredOccurrences.isEmpty()) {
+            compareBy<CandidateGroup<T>> { it.first.priority }
+                .thenBy { it.first.featureId }
+                .thenBy { it.first.occurrenceId.candidateId }
+                .thenBy { it.first.occurrenceId.repeatOrdinal }
+                .thenBy { it.first.occurrenceId.renderedWorldCopy }
+        } else {
+            compareBy<CandidateGroup<T>> { it.first.priority }
+                .thenBy { it.first.occurrenceId !in preferredOccurrences }
+                .thenBy { it.first.featureId }
+                .thenBy { it.first.occurrenceId.candidateId }
+                .thenBy { it.first.occurrenceId.repeatOrdinal }
+                .thenBy { it.first.occurrenceId.renderedWorldCopy }
+        }
         val groups = candidates
             .groupBy { it.occurrenceId }
             .values
@@ -106,14 +120,7 @@ internal object ReferenceLabelLayoutSelector {
                         .sortedBy { it.placementRank },
                 )
             }
-            .sortedWith(
-                compareBy<CandidateGroup<T>> { it.first.priority }
-                    .thenBy { it.first.occurrenceId !in preferredOccurrences }
-                    .thenBy { it.first.featureId }
-                    .thenBy { it.first.occurrenceId.candidateId }
-                    .thenBy { it.first.occurrenceId.repeatOrdinal }
-                    .thenBy { it.first.occurrenceId.renderedWorldCopy },
-            )
+            .sortedWith(groupComparator)
 
         val accepted = ArrayList<T>(min(labelBudget, groups.size + fixedCandidates.size))
         accepted += fixedCandidates
