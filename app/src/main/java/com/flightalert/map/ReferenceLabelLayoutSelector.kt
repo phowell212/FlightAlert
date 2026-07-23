@@ -7,6 +7,7 @@ import kotlin.math.min
 internal data class ReferenceLabelOccurrenceId(
     val candidateId: ULong,
     val repeatOrdinal: Long,
+    val renderedWorldCopy: Long,
 )
 
 internal sealed interface ReferenceLabelCollisionShape {
@@ -23,6 +24,47 @@ internal sealed interface ReferenceLabelCollisionShape {
     ) : ReferenceLabelCollisionShape
 }
 
+internal fun referencePathCollisionShape(
+    points: List<ReferencePathLabelPoint>,
+    radiusPx: Double,
+): ReferenceLabelCollisionShape.Path {
+    var minX = points[0].x
+    var minY = points[0].y
+    var maxX = minX
+    var maxY = minY
+    var index = 1
+    while (index < points.size) {
+        val point = points[index]
+        minX = min(minX, point.x)
+        minY = min(minY, point.y)
+        maxX = max(maxX, point.x)
+        maxY = max(maxY, point.y)
+        index++
+    }
+    return ReferenceLabelCollisionShape.Path(
+        points = points,
+        radiusPx = radiusPx,
+        bounds = ReferenceScreenRect(
+            left = minX - radiusPx,
+            top = minY - radiusPx,
+            right = maxX + radiusPx,
+            bottom = maxY + radiusPx,
+        ),
+    )
+}
+
+internal fun translateReferencePathCollisionShape(
+    shape: ReferenceLabelCollisionShape.Path,
+    dx: Double,
+    dy: Double,
+): ReferenceLabelCollisionShape.Path {
+    val translated = ArrayList<ReferencePathLabelPoint>(shape.points.size)
+    for (point in shape.points) {
+        translated += ReferencePathLabelPoint(point.x + dx, point.y + dy)
+    }
+    return referencePathCollisionShape(translated, shape.radiusPx)
+}
+
 internal interface ReferenceLabelLayoutCandidate {
     val occurrenceId: ReferenceLabelOccurrenceId
     val featureId: ULong
@@ -37,6 +79,7 @@ internal interface ReferenceLabelLayoutCandidate {
 internal object ReferenceLabelLayoutSelector {
     fun <T : ReferenceLabelLayoutCandidate> select(
         candidates: List<T>,
+        fixedCandidates: List<T> = emptyList(),
         viewport: ReferenceScreenRect,
         staticAvoidRects: List<ReferenceScreenRect>,
         labelBudget: Int,
@@ -50,6 +93,7 @@ internal object ReferenceLabelLayoutSelector {
             "water repeat distance must be finite and nonnegative"
         }
         candidates.forEach(::validateCandidate)
+        fixedCandidates.forEach(::validateCandidate)
 
         val groups = candidates
             .groupBy { it.occurrenceId }
@@ -65,11 +109,13 @@ internal object ReferenceLabelLayoutSelector {
                 compareBy<CandidateGroup<T>> { it.first.priority }
                     .thenBy { it.first.featureId }
                     .thenBy { it.first.occurrenceId.candidateId }
-                    .thenBy { it.first.occurrenceId.repeatOrdinal },
+                    .thenBy { it.first.occurrenceId.repeatOrdinal }
+                    .thenBy { it.first.occurrenceId.renderedWorldCopy },
             )
 
-        val accepted = ArrayList<T>(min(labelBudget, groups.size))
-        var protectedAreaCount = 0
+        val accepted = ArrayList<T>(min(labelBudget, groups.size + fixedCandidates.size))
+        accepted += fixedCandidates
+        var protectedAreaCount = fixedCandidates.count { it.protectedArea }
         for (group in groups) {
             if (accepted.size >= labelBudget) break
             for (candidate in group.placements) {
@@ -154,6 +200,8 @@ internal object ReferenceLabelLayoutSelector {
         return accepted.any { other ->
             other.waterLine &&
                 other.featureId == candidate.featureId &&
+                other.occurrenceId.renderedWorldCopy ==
+                    candidate.occurrenceId.renderedWorldCopy &&
                 (
                     singleWaterLabelPerFeature ||
                         hypot(

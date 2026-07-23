@@ -44,6 +44,7 @@ internal class SatelliteMapTileRenderer(
     )
     private val dictionary_reference_renderer = ReferenceDictionaryOverlayRenderer(
         context = context,
+        map_tile_disk_cache = map_tile_disk_cache,
         paint = paint,
         text_paint = text_paint,
         dp = dp,

@@ -639,6 +639,7 @@ internal class MapTileDiskCache(
             "carto_voyager_nolabels_tiles",
             "carto_voyager_only_labels_tiles",
             "esri_world_imagery_tiles",
+            REFERENCE_BOUNDARY_RASTER_CACHE_ROOT,
         )
         val OWNED_TEMP_NAME = Regex(
             "^\\.[0-9]+\\.png\\.flightalert-map-tile-[0-9]+\\.tmp$",

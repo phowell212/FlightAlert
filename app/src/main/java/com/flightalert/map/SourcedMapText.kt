@@ -1,5 +1,6 @@
 package com.flightalert.map
 
+import java.lang.Character.UnicodeScript
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
@@ -85,7 +86,68 @@ class SourcedMapText internal constructor(
     val hotId: ULong get() = first_u64_big_endian(fullSha256Value)
     val isAtomicBilingual: Boolean
         get() = layoutMode == SourcedTextLayoutMode.PRIMARY_WITH_ENGLISH && englishText != null
+    internal val primaryPresentationLines: List<String> =
+        if (isAtomicBilingual && primaryScriptSignals.hasStrongLatin) {
+            splitMixedScriptPrimary(primaryText)
+        } else {
+            listOf(primaryText)
+        }
 }
+
+private fun splitMixedScriptPrimary(text: String): List<String> {
+    val runs = ArrayList<SourcedTextScriptRun>(3)
+    var offset = 0
+    while (offset < text.length) {
+        while (offset < text.length) {
+            val scalar = text.codePointAt(offset)
+            if (!isScriptSeparator(scalar)) break
+            offset += Character.charCount(scalar)
+        }
+        if (offset >= text.length) break
+        val start = offset
+        while (offset < text.length) {
+            val scalar = text.codePointAt(offset)
+            if (isScriptSeparator(scalar)) break
+            offset += Character.charCount(scalar)
+        }
+        val word = text.substring(start, offset)
+        val script = firstStrongScript(word)
+        val previous = runs.lastOrNull()
+        if (previous != null && (script == null || previous.script == script)) {
+            previous.text.append(' ').append(word)
+        } else {
+            runs += SourcedTextScriptRun(script, StringBuilder(word))
+        }
+    }
+    val native_lines = runs
+        .filter { it.script != UnicodeScript.LATIN }
+        .map { it.text.toString() }
+    return native_lines.ifEmpty { listOf(text) }
+}
+
+private fun isScriptSeparator(scalar: Int): Boolean {
+    return Character.isWhitespace(scalar) || Character.isSpaceChar(scalar) || scalar == ';'.code
+}
+
+private fun firstStrongScript(text: String): UnicodeScript? {
+    var offset = 0
+    while (offset < text.length) {
+        val scalar = text.codePointAt(offset)
+        val script = UnicodeScript.of(scalar)
+        if (script != UnicodeScript.COMMON && script != UnicodeScript.INHERITED &&
+            script != UnicodeScript.UNKNOWN
+        ) {
+            return script
+        }
+        offset += Character.charCount(scalar)
+    }
+    return null
+}
+
+private data class SourcedTextScriptRun(
+    val script: UnicodeScript?,
+    val text: StringBuilder,
+)
 
 internal data class SourcedMapTextLinePlan(
     val text: String,
@@ -95,7 +157,7 @@ internal data class SourcedMapTextLinePlan(
 )
 
 internal data class SourcedMapTextPresentationPlan(
-    val primary: SourcedMapTextLinePlan,
+    val primaryLines: List<SourcedMapTextLinePlan>,
     val english: SourcedMapTextLinePlan?,
     val collisionHeightEm: Float,
     val collisionCenterOffset: Float,
@@ -112,38 +174,51 @@ internal object SourcedMapTextPresentation {
         val english = text.englishText
         if (!text.isAtomicBilingual || english == null) {
             return SourcedMapTextPresentationPlan(
-                primary = SourcedMapTextLinePlan(
-                    text.primaryText,
-                    primaryTextSize,
-                    0f,
-                    false,
+                primaryLines = listOf(
+                    SourcedMapTextLinePlan(
+                        text.primaryText,
+                        primaryTextSize,
+                        0f,
+                        false,
+                    ),
                 ),
                 english = null,
                 collisionHeightEm = SINGLE_COLLISION_HEIGHT_EM,
                 collisionCenterOffset = 0f,
             )
         }
+        val extra_primary_lines = text.primaryPresentationLines.size - 1
+        val first_baseline_offset = PRIMARY_BASELINE_OFFSET_EM -
+            extra_primary_lines * PRIMARY_LINE_STEP_EM
         return SourcedMapTextPresentationPlan(
-            primary = SourcedMapTextLinePlan(
-                text.primaryText,
-                primaryTextSize,
-                PRIMARY_BASELINE_OFFSET_EM * primaryTextSize,
-                false,
-            ),
+            primaryLines = text.primaryPresentationLines.mapIndexed { index, line ->
+                SourcedMapTextLinePlan(
+                    line,
+                    primaryTextSize,
+                    (first_baseline_offset + index * PRIMARY_LINE_STEP_EM) * primaryTextSize,
+                    false,
+                )
+            },
             english = SourcedMapTextLinePlan(
                 english,
                 primaryTextSize * ENGLISH_TEXT_SCALE,
                 ENGLISH_BASELINE_OFFSET_EM * primaryTextSize,
                 true,
             ),
-            collisionHeightEm = BILINGUAL_COLLISION_HEIGHT_EM,
-            collisionCenterOffset = BILINGUAL_COLLISION_CENTER_OFFSET_EM * primaryTextSize,
+            collisionHeightEm = BILINGUAL_COLLISION_HEIGHT_EM +
+                extra_primary_lines * PRIMARY_LINE_STEP_EM,
+            collisionCenterOffset = (
+                BILINGUAL_COLLISION_CENTER_OFFSET_EM -
+                    extra_primary_lines * PRIMARY_LINE_STEP_EM / 2f
+                ) * primaryTextSize,
         )
     }
 
     private const val ENGLISH_TEXT_SCALE = 0.76f
     private const val PRIMARY_BASELINE_OFFSET_EM = -0.38f
     private const val ENGLISH_BASELINE_OFFSET_EM = 0.56f
+    private const val PRIMARY_LINE_STEP_EM =
+        ENGLISH_BASELINE_OFFSET_EM - PRIMARY_BASELINE_OFFSET_EM
     private const val SINGLE_COLLISION_HEIGHT_EM = 1.45f
     private const val BILINGUAL_COLLISION_HEIGHT_EM = 2.2f
     private const val BILINGUAL_COLLISION_CENTER_OFFSET_EM =
@@ -195,6 +270,27 @@ object SourcedMapTextBinaryCodec {
         val actualDigest = sha256_bytes(identityDigest, identityDomain, canonicalBytes)
         if (!actualDigest.contentEquals(expectedDigest)) {
             throw SourcedMapTextException("sourced-text record full SHA-256 does not match")
+        }
+
+        identityDigest.reset()
+        identityDigest.update(canonicalBytes)
+        return decodePrevalidated(
+            canonicalBytes,
+            identityDigest.digest(),
+            actualDigest,
+        )
+    }
+
+    internal fun decodePrevalidated(
+        canonicalBytes: ByteArray,
+        canonicalSha256: ByteArray,
+        fullSha256: ByteArray,
+    ): SourcedMapText {
+        if (canonicalBytes.isEmpty() || canonicalBytes.size > maximumCanonicalRecordBytes) {
+            throw SourcedMapTextException("sourced-text record byte length is outside its bound")
+        }
+        if (canonicalSha256.size != 32 || fullSha256.size != 32) {
+            throw SourcedMapTextException("sourced-text identity is malformed")
         }
 
         val reader = PolicyByteReader(canonicalBytes)
@@ -250,9 +346,6 @@ object SourcedMapTextBinaryCodec {
             primarySignals,
             englishSignals,
         )
-        identityDigest.reset()
-        identityDigest.update(canonicalBytes)
-        val canonicalDigest = identityDigest.digest()
         return SourcedMapText(
             primaryText,
             primaryFieldId,
@@ -263,8 +356,8 @@ object SourcedMapTextBinaryCodec {
             primarySignals,
             englishSignals,
             canonicalBytes,
-            canonicalDigest,
-            actualDigest,
+            canonicalSha256,
+            fullSha256,
         )
     }
 

@@ -1251,14 +1251,14 @@ internal class AviationLayerRenderer(
                 width = text_paint.measureText(display),
             )
         }
-        val primary = prepare(presentation.primary)
+        val primary = presentation.primaryLines.map(::prepare)
         val english = presentation.english?.let(::prepare)
-        text_paint.textSize = presentation.primary.textSize
+        text_paint.textSize = presentation.primaryLines.first().textSize
         text_paint.textSkewX = 0f
         return PreparedSourcedMapLabel(
             primary = primary,
             english = english,
-            width = max(primary.width, english?.width ?: 0f),
+            width = max(primary.maxOf(PreparedSourcedMapLabelLine::width), english?.width ?: 0f),
             collision_height = presentation.collisionHeightEm * primary_text_size,
             collision_center_offset = presentation.collisionCenterOffset,
         )
@@ -1279,9 +1279,9 @@ internal class AviationLayerRenderer(
             }
             canvas.drawText(line.text, x, anchor_baseline + line.baseline_offset, text_paint)
         }
-        draw(label.primary)
+        label.primary.forEach(::draw)
         label.english?.let(::draw)
-        text_paint.textSize = label.primary.text_size
+        text_paint.textSize = label.primary.first().text_size
         text_paint.textSkewX = 0f
     }
 
@@ -1402,7 +1402,7 @@ internal class AviationLayerRenderer(
     )
 
     private data class PreparedSourcedMapLabel(
-        val primary: PreparedSourcedMapLabelLine,
+        val primary: List<PreparedSourcedMapLabelLine>,
         val english: PreparedSourcedMapLabelLine?,
         val width: Float,
         val collision_height: Float,

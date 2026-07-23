@@ -23,10 +23,12 @@ internal enum class ReferenceDictionaryRuntimeSchema {
     LEGACY_JSON,
     HOT_JSON_V2,
     BINARY_V3,
+    RENDER_TILE_V1,
 }
 
 internal object ReferenceDictionaryRuntimeSchemaResolver {
     private const val binaryV3PayloadSchema = "flightalert.reference.renderer-tile.v1"
+    const val renderTileV1PayloadSchema = "flightalert.reference.render-tile.v1"
 
     fun resolve(
         schemaVersion: Int,
@@ -37,15 +39,24 @@ internal object ReferenceDictionaryRuntimeSchemaResolver {
         sourcedTextPolicySha256: String,
         unicodeScriptProfileSha256: String,
     ): ReferenceDictionaryRuntimeSchema {
-        if (schemaVersion == 3) {
-            if (!hasPayloadSchema || payloadSchema != binaryV3PayloadSchema ||
+        if (schemaVersion == 3 || schemaVersion == 4) {
+            val expectedPayloadSchema = if (schemaVersion == 3) {
+                binaryV3PayloadSchema
+            } else {
+                renderTileV1PayloadSchema
+            }
+            if (!hasPayloadSchema || payloadSchema != expectedPayloadSchema ||
                 presentationPolicySha256 != ReferencePresentationPolicy.canonical_policy_sha256 ||
                 sourcedTextPolicySha256 != SourcedMapTextBinaryCodec.policySha256 ||
                 unicodeScriptProfileSha256 != SourcedMapTextBinaryCodec.unicodeScriptProfileSha256
             ) {
                 throw IOException("Unsupported reference dictionary policy identity")
             }
-            return ReferenceDictionaryRuntimeSchema.BINARY_V3
+            return if (schemaVersion == 3) {
+                ReferenceDictionaryRuntimeSchema.BINARY_V3
+            } else {
+                ReferenceDictionaryRuntimeSchema.RENDER_TILE_V1
+            }
         }
         return if (hasPayloadSchema || emptyPresentTilesSharePayload || schemaVersion >= 2) {
             ReferenceDictionaryRuntimeSchema.HOT_JSON_V2
@@ -69,7 +80,10 @@ internal object ReferenceDictionaryV3ClassCatalogLoader {
         presentation_policy_sha256: String,
         read_catalog_bytes: (File) -> ByteArray = { file -> file.readBytes() },
     ): ReferenceClassCatalog {
-        if (runtime_schema != ReferenceDictionaryRuntimeSchema.BINARY_V3) {
+        if (
+            runtime_schema != ReferenceDictionaryRuntimeSchema.BINARY_V3 &&
+            runtime_schema != ReferenceDictionaryRuntimeSchema.RENDER_TILE_V1
+        ) {
             return unavailable("class catalog is not defined for this reference package schema")
         }
         val renderer_semantic_sha256 = renderer_semantic_stream_sha256
@@ -194,6 +208,14 @@ internal data class ReferenceDictionaryTilePayload(
         get() = raw_bytes.toString(Charsets.UTF_8)
 }
 
+internal fun <T> first_available_reference_package(
+    candidates: List<File>,
+    opener: (File) -> T?,
+): T? {
+    candidates.forEach { candidate -> opener(candidate)?.let { return it } }
+    return null
+}
+
 internal class ReferenceDictionaryPackageStore(
     private val candidate_provider: () -> List<File>,
     private val package_opener: (File) -> ReferenceDictionaryPackage?,
@@ -260,20 +282,12 @@ internal class ReferenceDictionaryPackageStore(
             }
             package_checked = true
             last_package_check_ms = now_ms
-            for (candidate in candidate_provider()) {
-                val opened = package_opener(candidate)
-                if (opened != null) {
-                    package_ref = opened
-                    return@synchronized opened
-                }
-                if (
-                    candidate.name == ReferenceDictionaryPackage.REFERENCE_PACKAGE_ID &&
-                    candidate.exists()
-                ) {
-                    return@synchronized null
-                }
-            }
-            null
+            val opened = first_available_reference_package(
+                candidate_provider(),
+                package_opener,
+            )
+            package_ref = opened
+            opened
         }
     }
 
@@ -310,13 +324,19 @@ internal class ReferenceDictionaryPackage private constructor(
         if (entry.raw_length > MAX_RAW_TILE_BYTES) {
             throw IOException("Reference dictionary tile exceeds its raw byte ceiling")
         }
+        if (!request_is_relevant()) return null
         val compressed = read_record_bytes(entry.offset, entry.compressed_length)
         if (!request_is_relevant()) return null
         val raw_bytes = inflate_raw_deflate(
             compressed = compressed,
-            expected_size = entry.raw_length
-        )
-        if (verify_hash && raw_hash32(raw_bytes) != entry.raw_hash32) {
+            expected_size = entry.raw_length,
+            request_is_relevant = request_is_relevant,
+        ) ?: return null
+        if (!request_is_relevant()) return null
+        if (
+            (verify_hash || info.runtime_schema == ReferenceDictionaryRuntimeSchema.RENDER_TILE_V1) &&
+            raw_hash32(raw_bytes) != entry.raw_hash32
+        ) {
             throw IOException("Reference dictionary tile hash mismatch for $z/$x/$y")
         }
         return ReferenceDictionaryTilePayload(
@@ -353,13 +373,21 @@ internal class ReferenceDictionaryPackage private constructor(
 
     companion object {
         const val REFERENCE_PACKAGE_ID = "world-reference-dictionary-v4"
+        const val RENDER_PACKAGE_ID = "world-reference-dictionary-v5"
         private const val RECORDS_FILE_NAME = "world-reference-records.bin"
         private const val INDEX_FILE_NAME = "world-reference-tile-index.bin"
 
         fun package_candidates(context: Context, package_id: String? = null): List<File> {
             val root = context.getExternalFilesDir("references") ?: return emptyList()
-            return listOf(File(root, package_id ?: REFERENCE_PACKAGE_ID))
+            return package_candidate_names(package_id).map { name -> File(root, name) }
         }
+
+        internal fun package_candidate_names(package_id: String? = null): List<String> =
+            if (package_id == null) {
+                listOf(RENDER_PACKAGE_ID, REFERENCE_PACKAGE_ID)
+            } else {
+                listOf(package_id)
+            }
 
         fun open_if_available(package_dir: File): ReferenceDictionaryPackage? {
             val manifest_file = File(package_dir, "manifest.json")
@@ -494,7 +522,7 @@ internal class ReferenceDictionaryPackage private constructor(
         }
 
         private fun supported_schema_version(schema_version: Int): Boolean {
-            return schema_version in 1..3
+            return schema_version in 1..4
         }
 
         private fun open_runtime_file(
@@ -607,10 +635,12 @@ internal class ReferenceDictionaryPackage private constructor(
             return parsed
         }
 
-        private fun inflate_raw_deflate(
+        internal fun inflate_raw_deflate(
             compressed: ByteArray,
-            expected_size: Int
-        ): ByteArray {
+            expected_size: Int,
+            request_is_relevant: () -> Boolean,
+        ): ByteArray? {
+            if (!request_is_relevant()) return null
             val inflater = Inflater(true)
             val output = ByteArray(expected_size)
             var output_offset = 0
@@ -618,10 +648,11 @@ internal class ReferenceDictionaryPackage private constructor(
             try {
                 inflater.setInput(compressed)
                 while (!inflater.finished() && output_offset < output.size) {
+                    if (!request_is_relevant()) return null
                     val count = inflater.inflate(
                         output,
                         output_offset,
-                        output.size - output_offset,
+                        minOf(INFLATE_OUTPUT_CHUNK_BYTES, output.size - output_offset),
                     )
                     if (count > 0) {
                         output_offset += count
@@ -640,6 +671,8 @@ internal class ReferenceDictionaryPackage private constructor(
             }
             return output
         }
+
+        private const val INFLATE_OUTPUT_CHUNK_BYTES = 256 * 1_024
 
         private fun raw_hash32(raw: ByteArray): Int {
             val digest = MessageDigest.getInstance("SHA-256").digest(raw)
