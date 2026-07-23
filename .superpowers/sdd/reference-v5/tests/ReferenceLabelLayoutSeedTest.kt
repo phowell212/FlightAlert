@@ -80,57 +80,162 @@ class ReferenceLabelLayoutSeedTest {
     }
 
     @Test
-    fun preferredFrontierReselectsOnlyEqualPriorityRecords() {
+    fun preferredSeedsRequireExactOccurrenceAndActivePriority() {
         val challenger = candidate(id = 1u, feature = 10u, left = 40.0, right = 60.0)
-        val previous = candidate(id = 2u, feature = 20u, left = 40.0, right = 60.0)
-        val weaker_previous = candidate(
+        val exact_previous = candidate(
+            id = 2u,
+            feature = 20u,
+            left = 40.0,
+            right = 60.0,
+            repeatOrdinal = 1L,
+        )
+        val stale_current_repeat = candidate(
             id = 3u,
             feature = 30u,
+            left = 40.0,
+            right = 60.0,
+            repeatOrdinal = 2L,
+        )
+        val wrong_world_copy = candidate(
+            id = 4u,
+            feature = 40u,
+            left = 40.0,
+            right = 60.0,
+            renderedWorldCopy = 1L,
+        )
+        val same_feature_nonpreferred = candidate(
+            id = 5u,
+            feature = exact_previous.featureId,
+            left = 70.0,
+            right = 90.0,
+        )
+        val weaker_previous = candidate(
+            id = 6u,
+            feature = 60u,
             left = 70.0,
             right = 90.0,
             priority = 2,
         )
+        val stronger = candidate(
+            id = 7u,
+            feature = 5u,
+            left = 40.0,
+            right = 60.0,
+            priority = 0,
+        )
         val preferred_occurrences = setOf(
-            previous.occurrenceId,
+            exact_previous.occurrenceId,
+            ReferenceLabelOccurrenceId(3u, 1L, 0L),
+            ReferenceLabelOccurrenceId(4u, 0L, 0L),
             weaker_previous.occurrenceId,
         )
-        val ordered_records = listOf(
-            AdmissionRecord(challenger.priority, challenger.featureId, preferred = false),
-            AdmissionRecord(previous.priority, previous.featureId, preferred = true),
-            AdmissionRecord(weaker_previous.priority, weaker_previous.featureId, preferred = true),
-        ).sortedWith(
-            ReferenceLabelAdmissionPolicy.preferredRecordComparator(
-                priority = AdmissionRecord::priority,
-                preferred = AdmissionRecord::preferred,
-                featureId = AdmissionRecord::featureId,
-                encounterOrder = AdmissionRecord::encounterOrder,
+        val seeds = ArrayList<Candidate>()
+        ReferenceLabelAdmissionPolicy.retainPreferredSeeds(
+            candidates = listOf(
+                exact_previous,
+                stale_current_repeat,
+                wrong_world_copy,
+                same_feature_nonpreferred,
+                weaker_previous,
             ),
+            preferredOccurrences = preferred_occurrences,
+            occurrenceId = Candidate::occurrenceId,
+            output = seeds,
         )
 
         assertEquals(
-            listOf(previous.featureId, challenger.featureId, weaker_previous.featureId),
-            ordered_records.map(AdmissionRecord::featureId),
+            listOf(exact_previous, weaker_previous),
+            seeds,
+        )
+        assertFalse(same_feature_nonpreferred in seeds)
+
+        val equal_priority_selection = arrayListOf(
+            challenger,
+            stale_current_repeat,
+            wrong_world_copy,
+            same_feature_nonpreferred,
+        )
+        ReferenceLabelAdmissionPolicy.appendActivePreferredSeeds(
+            seeds = seeds,
+            priorityFrontier = challenger.priority,
+            priority = Candidate::priority,
+            output = equal_priority_selection,
         )
         assertEquals(
-            listOf(challenger),
-            selectWithPreferred(preferred_occurrences, 1, challenger),
-        )
-        assertTrue(
-            ReferenceLabelAdmissionPolicy.shouldContinuePreferredFrontier(
-                filledPriority = challenger.priority,
-                nextPriority = previous.priority,
-                nextIsPreferred = true,
+            listOf(exact_previous),
+            selectWithPreferred(
+                preferred_occurrences,
+                1,
+                *equal_priority_selection.toTypedArray(),
             ),
         )
-        assertEquals(
-            listOf(previous),
-            selectWithPreferred(preferred_occurrences, 1, challenger, previous),
+
+        val stale_repeat_seeds = ArrayList<Candidate>()
+        ReferenceLabelAdmissionPolicy.retainPreferredSeeds(
+            candidates = listOf(stale_current_repeat),
+            preferredOccurrences = setOf(ReferenceLabelOccurrenceId(3u, 1L, 0L)),
+            occurrenceId = Candidate::occurrenceId,
+            output = stale_repeat_seeds,
         )
-        assertFalse(
-            ReferenceLabelAdmissionPolicy.shouldContinuePreferredFrontier(
-                filledPriority = challenger.priority,
-                nextPriority = weaker_previous.priority,
-                nextIsPreferred = true,
+        assertTrue(stale_repeat_seeds.isEmpty())
+        assertEquals(
+            listOf(challenger),
+            selectWithPreferred(
+                setOf(ReferenceLabelOccurrenceId(3u, 1L, 0L)),
+                1,
+                challenger,
+                stale_current_repeat,
+            ),
+        )
+
+        val wrong_world_seeds = ArrayList<Candidate>()
+        ReferenceLabelAdmissionPolicy.retainPreferredSeeds(
+            candidates = listOf(wrong_world_copy),
+            preferredOccurrences = setOf(ReferenceLabelOccurrenceId(4u, 0L, 0L)),
+            occurrenceId = Candidate::occurrenceId,
+            output = wrong_world_seeds,
+        )
+        assertTrue(wrong_world_seeds.isEmpty())
+        assertEquals(
+            listOf(challenger),
+            selectWithPreferred(
+                setOf(ReferenceLabelOccurrenceId(4u, 0L, 0L)),
+                1,
+                challenger,
+                wrong_world_copy,
+            ),
+        )
+
+        val stronger_priority_selection = arrayListOf(stronger)
+        ReferenceLabelAdmissionPolicy.appendActivePreferredSeeds(
+            seeds = seeds,
+            priorityFrontier = challenger.priority,
+            priority = Candidate::priority,
+            output = stronger_priority_selection,
+        )
+        assertEquals(
+            listOf(stronger),
+            selectWithPreferred(
+                preferred_occurrences,
+                1,
+                *stronger_priority_selection.toTypedArray(),
+            ),
+        )
+
+        val stronger_frontier_selection = arrayListOf(stronger)
+        ReferenceLabelAdmissionPolicy.appendActivePreferredSeeds(
+            seeds = seeds,
+            priorityFrontier = stronger.priority,
+            priority = Candidate::priority,
+            output = stronger_frontier_selection,
+        )
+        assertEquals(listOf(stronger), stronger_frontier_selection)
+        assertEquals(
+            listOf(stronger),
+            selectWithPreferred(
+                preferred_occurrences,
+                1,
+                *stronger_frontier_selection.toTypedArray(),
             ),
         )
     }
@@ -180,9 +285,11 @@ class ReferenceLabelLayoutSeedTest {
         right: Double,
         water: Boolean = false,
         priority: Int = 1,
+        repeatOrdinal: Long = 0L,
+        renderedWorldCopy: Long = 0L,
     ): Candidate {
         return Candidate(
-            occurrenceId = ReferenceLabelOccurrenceId(id, 0L, 0L),
+            occurrenceId = ReferenceLabelOccurrenceId(id, repeatOrdinal, renderedWorldCopy),
             featureId = feature,
             priority = priority,
             placementRank = 0,
@@ -206,10 +313,4 @@ class ReferenceLabelLayoutSeedTest {
         override val collisionShape: ReferenceLabelCollisionShape,
     ) : ReferenceLabelLayoutCandidate
 
-    private data class AdmissionRecord(
-        val priority: Int,
-        val featureId: ULong,
-        val preferred: Boolean,
-        val encounterOrder: Int = 0,
-    )
 }

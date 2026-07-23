@@ -148,3 +148,73 @@ and lint passed.
   not advance to a weaker preferred priority.
 - Current geometry, collision, validity, and admission rules remain unchanged. No stale
   candidate is fixed in place, and no device testing or push was performed.
+
+## Exact-Preseed Replacement
+
+This section supersedes the rejected coarse record-order/frontier implementation above.
+The coarse comparator, record flag, continuation policy, and regression were removed.
+
+### RED
+
+Command (with process-local `ANDROID_HOME=C:\\Users\\h\\AppData\\Local\\Android\\Sdk`):
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest.preferredSeedsRequireExactOccurrenceAndActivePriority
+```
+
+Result: failed at `:compileDebugUnitTestKotlin` as intended:
+
+```text
+Unresolved reference 'retainPreferredSeeds'.
+Unresolved reference 'appendActivePreferredSeeds'.
+```
+
+The focused scenario required full occurrence matching, repeat/world-copy rejection,
+same-feature filtering, semantic-priority preservation, and frontier gating.
+
+### GREEN
+
+Focused command:
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest.preferredSeedsRequireExactOccurrenceAndActivePriority
+```
+
+Results: initial GREEN was `BUILD SUCCESSFUL in 4s`; the final focused scenario rerun
+was `BUILD SUCCESSFUL in 2s`.
+
+Full verification:
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest
+.\gradlew.bat assembleDebug lintDebug
+git diff --check
+```
+
+Results: the full injected suite was `BUILD SUCCESSFUL in 2s`, its final post-review
+rerun was `BUILD SUCCESSFUL in 4s`, `assembleDebug lintDebug` was
+`BUILD SUCCESSFUL in 51s`, and `git diff --check` exited 0 with no output.
+
+### Files Changed
+
+- `.superpowers/sdd/reference-v5/tests/ReferenceLabelLayoutSeedTest.kt`
+- `app/src/main/java/com/flightalert/map/ReferenceLabelAdmissionPolicy.kt`
+- `app/src/main/java/com/flightalert/map/ReferenceDictionaryOverlayRenderer.kt`
+- `.superpowers/sdd/google-label-continuity/task-1-report.md`
+
+### Self-Review
+
+- The original record comparator, feature block, candidate thresholds, candidate counts,
+  and immediate full-budget stop are restored.
+- The retained-label executor still builds both full occurrence IDs and coarse
+  candidate/world-copy keys. Only nonempty background preference planning allocates seed
+  and selector scratch lists.
+- The prepass scans original-sorted visible records, generates only matching coarse keys
+  through the same current-geometry helper as normal planning, deduplicates postings
+  locally, and clears that dedupe set before normal planning.
+- Only exact full occurrence matches become separate seeds. Excluded padding geometry is
+  filtered by the shared generator. Seeds never enter normal candidate counts or thresholds.
+- Each selector call activates only seeds whose current effective priority is no weaker
+  than the processed priority frontier. Seeds remain ordinary candidates subject to all
+  existing admission checks; stale repeats and world copies seed nothing.
+- No push or device testing was performed.
