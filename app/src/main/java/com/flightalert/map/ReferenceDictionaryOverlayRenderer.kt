@@ -1950,8 +1950,15 @@ internal class ReferenceDictionaryOverlayRenderer(
         val key = request.token.key
         val keep_planning = { retained_label_coordinator.shouldStart(request.token) }
         val preferred_occurrences = HashSet<ReferenceLabelOccurrenceId>(request.preferredLabels.size)
+        val preferred_candidate_keys =
+            HashSet<ReferenceLabelCandidateKey>(request.preferredLabels.size)
         for (label in request.preferredLabels) {
-            preferred_occurrences += label.occurrenceId
+            val occurrence_id = label.occurrenceId
+            preferred_occurrences += occurrence_id
+            preferred_candidate_keys += ReferenceLabelCandidateKey(
+                occurrence_id.candidateId,
+                occurrence_id.renderedWorldCopy,
+            )
         }
         val frame = create_retained_frame(
             boundary_batches = emptyList(),
@@ -1971,6 +1978,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             options = key.options,
             package_generation_snapshot = key.packageGeneration,
             preferred_occurrences = preferred_occurrences,
+            preferred_candidate_keys = preferred_candidate_keys,
             workspace = retained_label_workspace,
             keep_planning = keep_planning,
         )
@@ -2152,6 +2160,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         options: RetainedReferenceOptions,
         package_generation_snapshot: Long,
         preferred_occurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
+        preferred_candidate_keys: Set<ReferenceLabelCandidateKey> = emptySet(),
         workspace: LabelPlanningWorkspace = ui_label_workspace,
         keep_planning: () -> Boolean = ALWAYS_KEEP_LABEL_PLAN,
     ): RetainedReferenceFrame? {
@@ -2177,6 +2186,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
             preferred_occurrences = preferred_occurrences,
+            preferred_candidate_keys = preferred_candidate_keys,
             horizontal_padding = horizontal_padding,
             vertical_padding = vertical_padding,
             keep_planning = keep_planning,
@@ -2333,6 +2343,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         filter_mask: ReferenceFilterMask,
         label_avoid_rects: List<ReferenceScreenRect>,
         preferred_occurrences: Set<ReferenceLabelOccurrenceId>,
+        preferred_candidate_keys: Set<ReferenceLabelCandidateKey>,
         horizontal_padding: Double,
         vertical_padding: Double,
         keep_planning: () -> Boolean,
@@ -2362,6 +2373,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
             preferred_occurrences = preferred_occurrences,
+            preferred_candidate_keys = preferred_candidate_keys,
             keep_planning = keep_planning,
         )) return null
         val core_candidates = workspace.acceptedLabels.map { candidate ->
@@ -2406,6 +2418,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 core_candidates.count { it.protectedArea } + padding_protected_area_budget
                 ).coerceAtLeast(1),
             preferred_occurrences = preferred_occurrences,
+            preferred_candidate_keys = preferred_candidate_keys,
             keep_planning = keep_planning,
         )) return null
         return RetainedReferenceContent(
@@ -3125,6 +3138,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         include_buffer_tiles: Boolean = false,
         fixed_candidates: List<DictionaryLabelCandidate> = emptyList(),
         preferred_occurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
+        preferred_candidate_keys: Set<ReferenceLabelCandidateKey> = emptySet(),
         excluded_rect: ReferenceScreenRect? = null,
         label_budget_override: Int? = null,
         protected_area_budget_override: Int? = null,
@@ -3159,14 +3173,32 @@ internal class ReferenceDictionaryOverlayRenderer(
                 )
             }
         }
-        workspace.recordRefs.sortWith(
-            compareBy<DictionaryLabelRecordRef> { it.layout_priority }
-                .thenBy { it.layout_feature_id }
-                .thenBy { it.encounter_order },
-        )
+        if (preferred_candidate_keys.isEmpty()) {
+            workspace.recordRefs.sortWith(
+                compareBy<DictionaryLabelRecordRef> { it.layout_priority }
+                    .thenBy { it.layout_feature_id }
+                    .thenBy { it.encounter_order },
+            )
+        } else {
+            for (reference in workspace.recordRefs) {
+                reference.preferred = ReferenceLabelCandidateKey(
+                    layout_candidate_id(reference.record),
+                    rendered_label_world_copy(reference.tile, reference.record),
+                ) in preferred_candidate_keys
+            }
+            workspace.recordRefs.sortWith(
+                ReferenceLabelAdmissionPolicy.preferredRecordComparator(
+                    priority = DictionaryLabelRecordRef::layout_priority,
+                    preferred = DictionaryLabelRecordRef::preferred,
+                    featureId = DictionaryLabelRecordRef::layout_feature_id,
+                    encounterOrder = DictionaryLabelRecordRef::encounter_order,
+                ),
+            )
+        }
         val budget = label_budget_override ?: label_budget(viewport)
         var selection_threshold = ReferenceLabelAdmissionPolicy.initial_threshold(budget)
         var last_selected_candidate_count = -1
+        var preferred_frontier_priority: Int? = null
         var record_index = 0
         while (record_index < workspace.recordRefs.size) {
             if (!keep_planning()) return abandon_label_plan(workspace)
@@ -3252,9 +3284,56 @@ internal class ReferenceDictionaryOverlayRenderer(
                         ?: protected_area_label_budget(viewport),
                 )
                 last_selected_candidate_count = workspace.candidates.size
-                if (workspace.acceptedLabels.size >= budget) break
-                selection_threshold =
-                    ReferenceLabelAdmissionPolicy.next_threshold(workspace.candidates.size)
+                if (workspace.acceptedLabels.size >= budget) {
+                    if (preferred_candidate_keys.isEmpty()) break
+                    val next_record = workspace.recordRefs.getOrNull(record_index)
+                    if (
+                        ReferenceLabelAdmissionPolicy.shouldContinuePreferredFrontier(
+                            filledPriority = block_priority,
+                            nextPriority = next_record?.layout_priority,
+                            nextIsPreferred = next_record?.preferred == true,
+                        )
+                    ) {
+                        preferred_frontier_priority = block_priority
+                        selection_threshold = ReferenceLabelAdmissionPolicy.next_threshold(
+                            workspace.candidates.size
+                        )
+                    } else {
+                        break
+                    }
+                } else {
+                    selection_threshold =
+                        ReferenceLabelAdmissionPolicy.next_threshold(workspace.candidates.size)
+                }
+            }
+            val frontier_priority = preferred_frontier_priority
+            if (frontier_priority != null) {
+                val next_record = workspace.recordRefs.getOrNull(record_index)
+                if (
+                    !ReferenceLabelAdmissionPolicy.shouldContinuePreferredFrontier(
+                        filledPriority = frontier_priority,
+                        nextPriority = next_record?.layout_priority,
+                        nextIsPreferred = next_record?.preferred == true,
+                    )
+                ) {
+                    if (last_selected_candidate_count != workspace.candidates.size) {
+                        accept_label_candidates(
+                            workspace = workspace,
+                            viewport = viewport,
+                            label_avoid_rects = label_avoid_rects,
+                            fixed_candidates = fixed_candidates,
+                            preferred_occurrences = preferred_occurrences,
+                            label_budget = budget,
+                            protected_area_budget = protected_area_budget_override
+                                ?: protected_area_label_budget(viewport),
+                        )
+                        last_selected_candidate_count = workspace.candidates.size
+                    }
+                    if (workspace.acceptedLabels.size >= budget) break
+                    preferred_frontier_priority = null
+                    selection_threshold =
+                        ReferenceLabelAdmissionPolicy.next_threshold(workspace.candidates.size)
+                }
             }
         }
         if (
@@ -5330,6 +5409,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         val layout_priority: Int,
         val layout_feature_id: ULong,
         val encounter_order: Int,
+        var preferred: Boolean = false,
     )
 
     private data class ParsedDictionaryTile(

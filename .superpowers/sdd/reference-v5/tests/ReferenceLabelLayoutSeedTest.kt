@@ -75,7 +75,63 @@ class ReferenceLabelLayoutSeedTest {
 
         assertEquals(
             listOf(first, second),
-            selectWithPreferred(empty_preferred_occurrences, first, second),
+            selectWithPreferred(empty_preferred_occurrences, 8, first, second),
+        )
+    }
+
+    @Test
+    fun preferredFrontierReselectsOnlyEqualPriorityRecords() {
+        val challenger = candidate(id = 1u, feature = 10u, left = 40.0, right = 60.0)
+        val previous = candidate(id = 2u, feature = 20u, left = 40.0, right = 60.0)
+        val weaker_previous = candidate(
+            id = 3u,
+            feature = 30u,
+            left = 70.0,
+            right = 90.0,
+            priority = 2,
+        )
+        val preferred_occurrences = setOf(
+            previous.occurrenceId,
+            weaker_previous.occurrenceId,
+        )
+        val ordered_records = listOf(
+            AdmissionRecord(challenger.priority, challenger.featureId, preferred = false),
+            AdmissionRecord(previous.priority, previous.featureId, preferred = true),
+            AdmissionRecord(weaker_previous.priority, weaker_previous.featureId, preferred = true),
+        ).sortedWith(
+            ReferenceLabelAdmissionPolicy.preferredRecordComparator(
+                priority = AdmissionRecord::priority,
+                preferred = AdmissionRecord::preferred,
+                featureId = AdmissionRecord::featureId,
+                encounterOrder = AdmissionRecord::encounterOrder,
+            ),
+        )
+
+        assertEquals(
+            listOf(previous.featureId, challenger.featureId, weaker_previous.featureId),
+            ordered_records.map(AdmissionRecord::featureId),
+        )
+        assertEquals(
+            listOf(challenger),
+            selectWithPreferred(preferred_occurrences, 1, challenger),
+        )
+        assertTrue(
+            ReferenceLabelAdmissionPolicy.shouldContinuePreferredFrontier(
+                filledPriority = challenger.priority,
+                nextPriority = previous.priority,
+                nextIsPreferred = true,
+            ),
+        )
+        assertEquals(
+            listOf(previous),
+            selectWithPreferred(preferred_occurrences, 1, challenger, previous),
+        )
+        assertFalse(
+            ReferenceLabelAdmissionPolicy.shouldContinuePreferredFrontier(
+                filledPriority = challenger.priority,
+                nextPriority = weaker_previous.priority,
+                nextIsPreferred = true,
+            ),
         )
     }
 
@@ -98,10 +154,11 @@ class ReferenceLabelLayoutSeedTest {
     private fun selectPreferred(
         preferredOccurrence: ReferenceLabelOccurrenceId,
         vararg candidates: Candidate,
-    ): List<Candidate> = selectWithPreferred(setOf(preferredOccurrence), *candidates)
+    ): List<Candidate> = selectWithPreferred(setOf(preferredOccurrence), 8, *candidates)
 
     private fun selectWithPreferred(
         preferredOccurrences: Set<ReferenceLabelOccurrenceId>,
+        labelBudget: Int = 8,
         vararg candidates: Candidate,
     ): List<Candidate> {
         return ReferenceLabelLayoutSelector.select(
@@ -109,7 +166,7 @@ class ReferenceLabelLayoutSeedTest {
             preferredOccurrences = preferredOccurrences,
             viewport = ReferenceScreenRect(0.0, 0.0, 200.0, 100.0),
             staticAvoidRects = emptyList(),
-            labelBudget = 8,
+            labelBudget = labelBudget,
             protectedAreaBudget = 4,
             waterRepeatDistancePx = 500.0,
             singleWaterLabelPerFeature = true,
@@ -148,4 +205,11 @@ class ReferenceLabelLayoutSeedTest {
         override val anchor: ReferencePathLabelPoint,
         override val collisionShape: ReferenceLabelCollisionShape,
     ) : ReferenceLabelLayoutCandidate
+
+    private data class AdmissionRecord(
+        val priority: Int,
+        val featureId: ULong,
+        val preferred: Boolean,
+        val encounterOrder: Int = 0,
+    )
 }

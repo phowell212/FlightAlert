@@ -85,3 +85,66 @@ The original Task 1 commit also includes these task files:
 - `docs/superpowers/specs/2026-07-22-google-style-label-continuity-design.md`
 
 This regression fix changes the focused test, selector, and this report only.
+
+## Dense-Scene Preferred-Frontier Fix
+
+### RED
+
+Command (with process-local `ANDROID_HOME=C:\\Users\\h\\AppData\\Local\\Android\\Sdk`):
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest.preferredFrontierReselectsOnlyEqualPriorityRecords
+```
+
+Result: failed at `:compileDebugUnitTestKotlin` as intended:
+
+```text
+Unresolved reference 'preferredRecordComparator'.
+Unresolved reference 'shouldContinuePreferredFrontier'.
+```
+
+This proved the planner/admission policy had no preferred record ordering or bounded
+same-priority frontier.
+
+### GREEN
+
+Focused command:
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest.preferredFrontierReselectsOnlyEqualPriorityRecords
+```
+
+Result: `BUILD SUCCESSFUL in 3s`; the focused dense-scene regression passed.
+
+Full verification:
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest
+.\gradlew.bat assembleDebug lintDebug
+git diff --check
+```
+
+Results: `BUILD SUCCESSFUL in 1s`, `BUILD SUCCESSFUL in 1m 4s`, and
+`git diff --check` exited 0 with no output. The full injected suite, debug assembly,
+and lint passed.
+
+### Files Changed
+
+- `.superpowers/sdd/reference-v5/tests/ReferenceLabelLayoutSeedTest.kt`
+- `app/src/main/java/com/flightalert/map/ReferenceLabelAdmissionPolicy.kt`
+- `app/src/main/java/com/flightalert/map/ReferenceDictionaryOverlayRenderer.kt`
+- `.superpowers/sdd/google-label-continuity/task-1-report.md`
+- `.superpowers/sdd/google-label-continuity/task-1-brief.md` removed from Git only;
+  the ignored local workflow copy remains.
+
+### Self-Review
+
+- Preferred candidate keys are derived on the retained-label executor from candidate ID
+  plus rendered world copy; full occurrence identities remain authoritative in selection.
+- Nonempty retained planning orders preferred records after effective priority and before
+  feature ID. Empty planning uses the original record comparator and immediate budget stop.
+- A full budget advances only through preferred records at the same effective priority,
+  forces a final reselect when candidates were added below the doubling threshold, and does
+  not advance to a weaker preferred priority.
+- Current geometry, collision, validity, and admission rules remain unchanged. No stale
+  candidate is fixed in place, and no device testing or push was performed.
