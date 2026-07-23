@@ -96,7 +96,7 @@ internal class SatelliteMapTileRenderer(
             region_labels_enabled = state.region_labels_enabled,
             public_lands_enabled = state.public_lands_enabled,
             filter_state = state.reference_filter_state,
-            interaction_active = state.interaction_active,
+            interaction_active = state.reference_interaction_active,
             label_avoid_rects = state.reference_label_avoid_rects,
         )
         if (dictionary_stats.available) {

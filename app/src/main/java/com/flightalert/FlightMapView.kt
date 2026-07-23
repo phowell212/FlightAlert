@@ -1190,6 +1190,7 @@ class FlightMapView(
                 if (was_dragging) {
                     if (was_dragging_map) {
                         mark_map_interaction()
+                        postInvalidateOnAnimation()
                         request_visible_aircraft_after_map_interaction()
                     }
                     return true
@@ -1436,6 +1437,7 @@ class FlightMapView(
         drag_start_center = null
         parent?.requestDisallowInterceptTouchEvent(false)
         persist_zoom_preference_if_dirty()
+        postInvalidateOnAnimation()
         request_visible_aircraft_after_map_interaction()
     }
 
@@ -1683,6 +1685,8 @@ class FlightMapView(
             map_label_transition_alpha = map_label_transition_alpha(traffic_draw_elapsed_ms),
             user_agent = USER_AGENT,
             interaction_active = map_tile_interaction_active(traffic_draw_elapsed_ms),
+            reference_interaction_active =
+                pinch_in_progress || drag_started || map_touch_active,
             reference_filter_state = reference_filter_state,
             reference_label_avoid_rects = reference_label_avoid_rects(
                 viewport,

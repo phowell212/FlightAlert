@@ -101,6 +101,7 @@ data class MapTileRenderState(
     val map_label_transition_alpha: Float = 1f,
     val user_agent: String,
     val interaction_active: Boolean = false,
+    val reference_interaction_active: Boolean = false,
     val reference_filter_state: FilterState = FilterState.defaults(),
     val reference_label_avoid_rects: List<ReferenceScreenRect> = emptyList()
 ) {
