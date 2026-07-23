@@ -279,7 +279,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 compatibleActiveBoundaryBand = compatible_active_boundary_band,
             )
         ) {
-            val generation = update_desired_tile_keys(include_target_tiles = false)
+            val generation = request_generation.get()
             val boundary_raster = if (borders_enabled) {
                 draw_boundary_raster_layer(
                     canvas = canvas,
@@ -632,6 +632,25 @@ internal class ReferenceDictionaryOverlayRenderer(
                     package_generation.get(),
                 )
             ) {
+                if (fallback_needs_build && fallback_ready && !retained_label_coordinator.hasCurrentRequest()) {
+                    request_retained_label_frame(
+                        role = RetainedFrameRole.FALLBACK,
+                        viewport = viewport,
+                        frame_viewport = requireNotNull(fallback_viewport),
+                        tile_zoom = requireNotNull(fallback_zoom),
+                        tiles = fallback_draw_tiles,
+                        labels_enabled = labels_enabled,
+                        label_text_scale = label_text_scale,
+                        place_labels_enabled = place_labels_enabled,
+                        water_labels_enabled = water_labels_enabled,
+                        region_labels_enabled = region_labels_enabled,
+                        public_lands_enabled = public_lands_enabled,
+                        filter_mask = filter_mask,
+                        label_avoid_rects = label_avoid_rects,
+                        options = options,
+                        package_generation_snapshot = package_generation.get(),
+                    )
+                }
                 draw_retained_frame_with_transition(
                     canvas,
                     viewport,
@@ -1089,9 +1108,11 @@ internal class ReferenceDictionaryOverlayRenderer(
             interactionActive = interaction_active,
             hasActiveBand = active_before_promotion != null,
         )
-        val relevant_keys = HashSet<ReferenceBoundaryRasterKey>(
-            boundary_raster_cells.size + boundary_raster_draw_cells.size,
-        )
+        val relevant_keys = if (raster_work_suspended) {
+            HashSet<ReferenceBoundaryRasterKey>(relevant_boundary_raster_keys)
+        } else {
+            HashSet(boundary_raster_cells.size + boundary_raster_draw_cells.size)
+        }
         for (cell in boundary_raster_cells) {
             if (cell.coreVisible || desired_band == active_before_promotion) {
                 val key = ReferenceBoundaryRasterKey(desired_band, cell.x, cell.y)
