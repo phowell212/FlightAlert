@@ -240,6 +240,76 @@ class ReferenceLabelLayoutSeedTest {
         )
     }
 
+    @Test
+    fun preferredPrepassDoesNotDedupeNullIdPostingsOrSeedExcludedPadding() {
+        val lookup_key = PrepassKey(20u, 0L)
+        val other_repeat = candidate(
+            id = lookup_key.candidateId,
+            feature = 20u,
+            left = 40.0,
+            right = 60.0,
+            repeatOrdinal = 2L,
+        )
+        val exact_repeat = candidate(
+            id = lookup_key.candidateId,
+            feature = 20u,
+            left = 40.0,
+            right = 60.0,
+            repeatOrdinal = 1L,
+        )
+        val excluded_exact_repeat = candidate(
+            id = lookup_key.candidateId,
+            feature = 20u,
+            left = 120.0,
+            right = 140.0,
+            repeatOrdinal = 1L,
+        )
+        val postings = listOf(
+            PrepassPosting(lookup_key, other_repeat),
+            PrepassPosting(lookup_key, exact_repeat),
+            PrepassPosting(lookup_key, excluded_exact_repeat, excluded = true),
+        )
+        val planned_keys = HashSet<PrepassKey>()
+        val generated_candidates = ArrayList<Candidate>()
+        var visited_postings = 0
+
+        assertTrue(
+            ReferenceLabelAdmissionPolicy.visitPreferredSeedRecords(
+                records = postings,
+                preferredLookupKeys = setOf(lookup_key),
+                lookupKey = PrepassPosting::lookupKey,
+                recordCandidateId = PrepassPosting::recordCandidateId,
+                dedupeKey = { candidate_id, key ->
+                    PrepassKey(candidate_id, key.renderedWorldCopy)
+                },
+                visit = { posting, _, dedupe_key ->
+                    visited_postings++
+                    if (dedupe_key != null && dedupe_key in planned_keys) {
+                        true
+                    } else {
+                        if (!posting.excluded) {
+                            generated_candidates += posting.generatedCandidate
+                            dedupe_key?.let(planned_keys::add)
+                        }
+                        true
+                    }
+                },
+            ),
+        )
+        val seeds = ArrayList<Candidate>()
+        ReferenceLabelAdmissionPolicy.retainPreferredSeeds(
+            candidates = generated_candidates,
+            preferredOccurrences = setOf(exact_repeat.occurrenceId),
+            occurrenceId = Candidate::occurrenceId,
+            output = seeds,
+        )
+
+        assertEquals(3, visited_postings)
+        assertEquals(listOf(other_repeat, exact_repeat), generated_candidates)
+        assertEquals(listOf(exact_repeat), seeds)
+        assertFalse(excluded_exact_repeat in seeds)
+    }
+
     private fun select(
         fixed: Candidate,
         vararg candidates: Candidate,
@@ -313,4 +383,15 @@ class ReferenceLabelLayoutSeedTest {
         override val collisionShape: ReferenceLabelCollisionShape,
     ) : ReferenceLabelLayoutCandidate
 
+    private data class PrepassKey(
+        val candidateId: ULong,
+        val renderedWorldCopy: Long,
+    )
+
+    private data class PrepassPosting(
+        val lookupKey: PrepassKey,
+        val generatedCandidate: Candidate,
+        val excluded: Boolean = false,
+        val recordCandidateId: ULong? = null,
+    )
 }

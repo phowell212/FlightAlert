@@ -3185,32 +3185,39 @@ internal class ReferenceDictionaryOverlayRenderer(
         } else {
             val seed_candidates = ArrayList<DictionaryLabelCandidate>()
             val seed_candidate_keys = HashSet<ReferenceLabelCandidateKey>()
-            for (record_ref in workspace.recordRefs) {
-                if (!keep_planning()) return abandon_label_plan(workspace)
-                val rendered_world_copy =
-                    rendered_label_world_copy(record_ref.tile, record_ref.record)
-                val candidate_key = ReferenceLabelCandidateKey(
-                    layout_candidate_id(record_ref.record),
-                    rendered_world_copy,
-                )
-                if (candidate_key !in preferred_candidate_keys) continue
-                if (!generate_label_record_candidates(
+            val prepass_complete = ReferenceLabelAdmissionPolicy.visitPreferredSeedRecords(
+                records = workspace.recordRefs,
+                preferredLookupKeys = preferred_candidate_keys,
+                lookupKey = { record_ref ->
+                    ReferenceLabelCandidateKey(
+                        layout_candidate_id(record_ref.record),
+                        rendered_label_world_copy(record_ref.tile, record_ref.record),
+                    )
+                },
+                recordCandidateId = { record_ref -> record_ref.record.candidate_id },
+                dedupeKey = { candidate_id, lookup_key ->
+                    ReferenceLabelCandidateKey(
+                        candidate_id,
+                        lookup_key.rendered_world_copy,
+                    )
+                },
+                visit = { record_ref, lookup_key, dedupe_key ->
+                    keep_planning() && generate_label_record_candidates(
                         workspace = workspace,
                         viewport = viewport,
                         record_ref = record_ref,
                         label_text_scale = label_text_scale,
                         label_avoid_rects = label_avoid_rects,
                         excluded_rect = excluded_rect,
-                        rendered_world_copy = rendered_world_copy,
-                        candidate_key = candidate_key,
+                        rendered_world_copy = lookup_key.rendered_world_copy,
+                        candidate_key = dedupe_key,
                         planned_candidate_ids = seed_candidate_keys,
                         output = seed_candidates,
                         keep_planning = keep_planning,
                     )
-                ) {
-                    return abandon_label_plan(workspace)
-                }
-            }
+                },
+            )
+            if (!prepass_complete) return abandon_label_plan(workspace)
             val retained_seeds = ArrayList<DictionaryLabelCandidate>()
             ReferenceLabelAdmissionPolicy.retainPreferredSeeds(
                 candidates = seed_candidates,

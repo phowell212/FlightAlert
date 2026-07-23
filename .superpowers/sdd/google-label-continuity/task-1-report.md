@@ -218,3 +218,56 @@ rerun was `BUILD SUCCESSFUL in 4s`, `assembleDebug lintDebug` was
   than the processed priority frontier. Seeds remain ordinary candidates subject to all
   existing admission checks; stale repeats and world copies seed nothing.
 - No push or device testing was performed.
+
+## Nullable Prepass-Dedupe Fix
+
+### RED
+
+Command (with process-local `ANDROID_HOME=C:\\Users\\h\\AppData\\Local\\Android\\Sdk`):
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest.preferredPrepassDoesNotDedupeNullIdPostingsOrSeedExcludedPadding
+```
+
+Result: failed at `:compileDebugUnitTestKotlin` as intended with
+`Unresolved reference 'visitPreferredSeedRecords'`. The focused test required two
+`candidate_id == null` postings with the same unconditional lookup key to remain
+independent, retain the later exact repeat, and reject an excluded padding candidate.
+
+### GREEN
+
+Focused command:
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest --tests com.flightalert.map.ReferenceLabelLayoutSeedTest.preferredPrepassDoesNotDedupeNullIdPostingsOrSeedExcludedPadding
+```
+
+Result: `BUILD SUCCESSFUL in 3s`; the focused prepass regression passed.
+
+Full verification:
+
+```powershell
+.\gradlew.bat -I .superpowers\sdd\reference-v5\tests.init.gradle testDebugUnitTest
+.\gradlew.bat assembleDebug lintDebug
+git diff --check
+```
+
+Results: `BUILD SUCCESSFUL in 2s`, `BUILD SUCCESSFUL in 50s`, and
+`git diff --check` exited 0 with no output.
+
+### Files Changed
+
+- `.superpowers/sdd/reference-v5/tests/ReferenceLabelLayoutSeedTest.kt`
+- `app/src/main/java/com/flightalert/map/ReferenceLabelAdmissionPolicy.kt`
+- `app/src/main/java/com/flightalert/map/ReferenceDictionaryOverlayRenderer.kt`
+- `.superpowers/sdd/google-label-continuity/task-1-report.md`
+
+### Self-Review
+
+- Prepass lookup still always uses layout candidate ID plus rendered world copy.
+- Prepass dedupe now uses only `record.candidate_id` plus rendered world copy, matching
+  unchanged normal generation; null-ID postings therefore cannot suppress each other.
+- The shared current-geometry generator still applies `excluded_rect` before candidates
+  can become exact seeds.
+- Normal ordering, feature blocks, thresholds, cutoff, and empty-preference direct
+  selection were not changed. No push or device testing was performed.
