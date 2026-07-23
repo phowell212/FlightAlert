@@ -25,6 +25,12 @@
 - Modify: `app/src/main/java/com/flightalert/map/ReferenceDictionaryOverlayRenderer.kt:626-652`
 - Modify: `app/src/main/java/com/flightalert/map/ReferenceDictionaryOverlayRenderer.kt:1088-1115`
 
+The external guard remains at the path above with SHA-256
+`A87E2F269BD6035AD8BFAC1CB08ADC0234B21E0FBAE965F46831959338535B86`.
+The injected reference suite remains under `.superpowers/sdd/reference-v5/tests/`;
+its `tests.init.gradle` entrypoint has SHA-256
+`0421D481EA38BD989996A18315DF45AD35E261C5381FCB0A7D5C0E082B22AC8F`.
+
 **Interfaces:**
 - Consumes: `request_generation`, `relevant_boundary_raster_keys`, `fallback_visible_tiles`, `fallback_draw_tiles`, and `retained_label_coordinator`.
 - Produces: preserved pre-gesture tile/raster work and an idle-prepared `RetainedFrameRole.FALLBACK` scene.
@@ -141,29 +147,31 @@ Expected: build and lint complete successfully.
 - Consumes: exact debug APK, physical Fold, Morocco dense-land fixtures, timed gesture harness.
 - Produces: continuous-motion evidence for z2.0, z5.8, z7.5, and z10.5.
 
-- [ ] **Step 1: Install the exact APK and preserve device preferences**
+- [x] **Step 1: Install the exact APK and preserve device preferences**
 
 Back up and hash the current app preferences, install the APK, set the Morocco
 test location, and verify each exact zoom readback before recording.
 
-- [ ] **Step 2: Record meaningful motion**
+- [x] **Step 2: Record meaningful motion**
 
 Record pan, pinch, reversal, and settled tail at every band. At z5.8 use the
 existing large-pan harness so newly exposed coverage exceeds retained padding.
 
-- [ ] **Step 3: Inspect the MP4 sequences**
+- [x] **Step 3: Inspect the MP4 sequences**
 
 Require borders and labels to remain attached to geography, continuing labels not
 to relocate, no blank reference strip, no wholesale post-gesture swap, and no
 material frame-pacing regression. Screenshots are not evidence.
 
-- [ ] **Step 4: Fix the demonstrated underlying failure**
+- [x] **Step 4: Conditional border-band fix not needed**
 
 If borders alone outrun the existing one-cell ring, add one idle-prepared parent
 boundary band through the existing cache/history and repeat only the failed band
 before the full final run. Do not enable raster allocation during gesture motion.
+The 660 px z5.8 land-pan video retained borders and labels without a blank strip,
+so that conditional production change was not made.
 
-- [ ] **Step 5: Restore the device and review the exact diff**
+- [x] **Step 5: Restore the device and review the exact diff**
 
 Restore preference hashes, location providers, authorization, and temporary files.
 Run `git diff --check`, inspect the scoped diff, and commit only the renderer plus
