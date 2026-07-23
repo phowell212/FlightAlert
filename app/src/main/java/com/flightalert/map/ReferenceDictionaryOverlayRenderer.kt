@@ -1921,9 +1921,17 @@ internal class ReferenceDictionaryOverlayRenderer(
             labelAvoidRects = avoid_rects,
         )
         val token = retained_label_coordinator.start(key) ?: return
+        val preferred_labels = displayed_retained_frame
+            ?.takeIf {
+                it.options == options &&
+                    it.package_generation == package_generation_snapshot
+            }
+            ?.labels
+            ?: emptyList()
         val request = RetainedLabelPlanRequest(
             token = token,
             tiles = tiles.toList(),
+            preferredLabels = preferred_labels,
             labelsEnabled = labels_enabled,
             labelTextScale = label_text_scale,
             placeLabelsEnabled = place_labels_enabled,
@@ -1941,6 +1949,10 @@ internal class ReferenceDictionaryOverlayRenderer(
         if (!retained_label_coordinator.shouldStart(request.token)) return
         val key = request.token.key
         val keep_planning = { retained_label_coordinator.shouldStart(request.token) }
+        val preferred_occurrences = HashSet<ReferenceLabelOccurrenceId>(request.preferredLabels.size)
+        for (label in request.preferredLabels) {
+            preferred_occurrences += label.occurrenceId
+        }
         val frame = create_retained_frame(
             boundary_batches = emptyList(),
             viewport = key.viewport,
@@ -1958,6 +1970,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             label_avoid_rects = key.labelAvoidRects,
             options = key.options,
             package_generation_snapshot = key.packageGeneration,
+            preferred_occurrences = preferred_occurrences,
             workspace = retained_label_workspace,
             keep_planning = keep_planning,
         )
@@ -2138,6 +2151,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
         options: RetainedReferenceOptions,
         package_generation_snapshot: Long,
+        preferred_occurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
         workspace: LabelPlanningWorkspace = ui_label_workspace,
         keep_planning: () -> Boolean = ALWAYS_KEEP_LABEL_PLAN,
     ): RetainedReferenceFrame? {
@@ -2162,6 +2176,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             public_lands_enabled = public_lands_enabled,
             filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
+            preferred_occurrences = preferred_occurrences,
             horizontal_padding = horizontal_padding,
             vertical_padding = vertical_padding,
             keep_planning = keep_planning,
@@ -2317,6 +2332,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         public_lands_enabled: Boolean,
         filter_mask: ReferenceFilterMask,
         label_avoid_rects: List<ReferenceScreenRect>,
+        preferred_occurrences: Set<ReferenceLabelOccurrenceId>,
         horizontal_padding: Double,
         vertical_padding: Double,
         keep_planning: () -> Boolean,
@@ -2345,6 +2361,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             groups = groups,
             filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
+            preferred_occurrences = preferred_occurrences,
             keep_planning = keep_planning,
         )) return null
         val core_candidates = workspace.acceptedLabels.map { candidate ->
@@ -2388,6 +2405,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             protected_area_budget_override = (
                 core_candidates.count { it.protectedArea } + padding_protected_area_budget
                 ).coerceAtLeast(1),
+            preferred_occurrences = preferred_occurrences,
             keep_planning = keep_planning,
         )) return null
         return RetainedReferenceContent(
@@ -3106,6 +3124,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
         include_buffer_tiles: Boolean = false,
         fixed_candidates: List<DictionaryLabelCandidate> = emptyList(),
+        preferred_occurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
         excluded_rect: ReferenceScreenRect? = null,
         label_budget_override: Int? = null,
         protected_area_budget_override: Int? = null,
@@ -3227,6 +3246,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     viewport = viewport,
                     label_avoid_rects = label_avoid_rects,
                     fixed_candidates = fixed_candidates,
+                    preferred_occurrences = preferred_occurrences,
                     label_budget = budget,
                     protected_area_budget = protected_area_budget_override
                         ?: protected_area_label_budget(viewport),
@@ -3246,6 +3266,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 viewport = viewport,
                 label_avoid_rects = label_avoid_rects,
                 fixed_candidates = fixed_candidates,
+                preferred_occurrences = preferred_occurrences,
                 label_budget = budget,
                 protected_area_budget = protected_area_budget_override
                     ?: protected_area_label_budget(viewport),
@@ -3633,6 +3654,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         viewport: Viewport,
         label_avoid_rects: List<ReferenceScreenRect>,
         fixed_candidates: List<DictionaryLabelCandidate> = emptyList(),
+        preferred_occurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
         label_budget: Int = label_budget(viewport),
         protected_area_budget: Int = protected_area_label_budget(viewport),
     ) {
@@ -3640,6 +3662,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         workspace.acceptedLabels += ReferenceLabelLayoutSelector.select(
             candidates = workspace.candidates,
             fixedCandidates = fixed_candidates,
+            preferredOccurrences = preferred_occurrences,
             viewport = ReferenceScreenRect(
                 0.0,
                 0.0,
@@ -5235,6 +5258,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     private data class RetainedLabelPlanRequest(
         val token: ReferenceRetainedBitmapRequestToken<RetainedLabelPlanKey>,
         val tiles: List<DictionaryTileDrawRef>,
+        val preferredLabels: List<DictionaryLabelCandidate>,
         val labelsEnabled: Boolean,
         val labelTextScale: Float,
         val placeLabelsEnabled: Boolean,

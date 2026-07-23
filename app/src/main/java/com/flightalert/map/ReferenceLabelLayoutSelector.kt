@@ -80,6 +80,7 @@ internal object ReferenceLabelLayoutSelector {
     fun <T : ReferenceLabelLayoutCandidate> select(
         candidates: List<T>,
         fixedCandidates: List<T> = emptyList(),
+        preferredOccurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
         viewport: ReferenceScreenRect,
         staticAvoidRects: List<ReferenceScreenRect>,
         labelBudget: Int,
@@ -107,6 +108,7 @@ internal object ReferenceLabelLayoutSelector {
             }
             .sortedWith(
                 compareBy<CandidateGroup<T>> { it.first.priority }
+                    .thenBy { it.first.occurrenceId !in preferredOccurrences }
                     .thenBy { it.first.featureId }
                     .thenBy { it.first.occurrenceId.candidateId }
                     .thenBy { it.first.occurrenceId.repeatOrdinal }
