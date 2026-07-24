@@ -22,13 +22,14 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.SystemClock
 import androidx.core.graphics.withSave
+import com.flightalert.MAX_ZOOM
+import com.flightalert.MIN_ZOOM
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.File
 import java.util.LinkedHashMap
-import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -78,9 +79,11 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val line_label_position = FloatArray(2)
     private val visible_tiles = ArrayList<VisibleDictionaryTile>(32)
     private val fallback_visible_tiles = ArrayList<VisibleDictionaryTile>(16)
+    private val zoom_ahead_visible_tiles = ArrayList<VisibleDictionaryTile>(16)
     private val draw_tiles = ArrayList<DictionaryTileDrawRef>(32)
     private val core_draw_tiles = ArrayList<DictionaryTileDrawRef>(16)
     private val fallback_draw_tiles = ArrayList<DictionaryTileDrawRef>(16)
+    private val zoom_ahead_draw_tiles = ArrayList<DictionaryTileDrawRef>(16)
     private val boundary_record_refs = ArrayList<DictionaryLineRecordRef>(256)
     private val boundary_occurrence_ids = HashSet<ReferenceBoundaryOccurrenceKey>(256)
     private val ui_label_workspace = LabelPlanningWorkspace(text_paint)
@@ -90,11 +93,16 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val requested_tiles = HashSet<String>()
     private val desired_tile_keys = HashSet<String>()
     private val next_desired_tile_keys = HashSet<String>()
+    private val zoom_ahead_desired_tile_keys = HashSet<String>()
+    private val next_zoom_ahead_desired_tile_keys = HashSet<String>()
     private val retained_destination = ReferenceRetainedDestination()
     private val fallback_destination = ReferenceRetainedDestination()
     private val fading_destination = ReferenceRetainedDestination()
+    private val candidate_destination = ReferenceRetainedDestination()
     private val boundary_raster_cells = ArrayList<ReferenceBoundaryRasterCell>(40)
     private val boundary_raster_draw_cells = ArrayList<ReferenceBoundaryRasterCell>(40)
+    private val boundary_raster_cell_window = BoundaryRasterCellWindow()
+    private val boundary_raster_draw_cell_window = BoundaryRasterCellWindow()
     private val boundary_raster_destination = RectF()
     private val boundary_raster_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     @Volatile
@@ -165,7 +173,23 @@ internal class ReferenceDictionaryOverlayRenderer(
     private var pending_boundary_raster_band: ReferenceBoundaryRasterBand? = null
     @Volatile
     private var relevant_boundary_raster_keys: Set<ReferenceBoundaryRasterKey> = emptySet()
-    private val boundary_raster_band_history = ArrayDeque<ReferenceBoundaryRasterBand>(4)
+    private var relevant_boundary_raster_desired_band: ReferenceBoundaryRasterBand? = null
+    private var relevant_boundary_raster_active_band: ReferenceBoundaryRasterBand? = null
+    private var relevant_boundary_raster_cell_revision = -1
+    private var relevant_boundary_raster_draw_cell_revision = -1
+    private val boundary_raster_safety_cells = ArrayList<ReferenceBoundaryRasterCell>(64)
+    private val boundary_raster_safety_cell_window = BoundaryRasterCellWindow()
+    private val boundary_raster_safety_draw_cells =
+        ArrayList<ReferenceBoundaryRasterCell>(64)
+    private val boundary_raster_safety_draw_cell_window = BoundaryRasterCellWindow()
+    private var pending_boundary_raster_safety_scene: BoundaryRasterScene? = null
+    private var ready_boundary_raster_safety_scene: BoundaryRasterScene? = null
+    private var settled_boundary_raster_scene: BoundaryRasterScene? = null
+    private var resident_boundary_raster_scene: BoundaryRasterScene? = null
+    private var boundary_raster_fade: BoundaryRasterFade? = null
+    @Volatile
+    private var relevant_boundary_raster_safety_keys: Set<ReferenceBoundaryRasterKey> =
+        emptySet()
     private val retained_bitmap_coordinator = ReferenceRetainedBitmapCoordinator<
         RetainedBoundaryBitmapKey,
         PreparedRetainedBoundaryBitmap
@@ -223,10 +247,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             tile_zoom,
             package_info.zooms,
         )
-        if (interaction_active && !retained_label_interaction_active) {
-            retained_label_coordinator.cancel()
-        }
-        retained_label_interaction_active = interaction_active
+        val interaction_started = interaction_active && !retained_label_interaction_active
         val now_ms = SystemClock.elapsedRealtime()
         val options = RetainedReferenceOptions(
             labels_enabled = labels_enabled,
@@ -245,14 +266,112 @@ internal class ReferenceDictionaryOverlayRenderer(
             options = options,
             label_avoid_rects = label_avoid_rects,
             interaction_active = interaction_active,
-            now_ms = now_ms,
         )
+        if (interaction_started) {
+            retained_label_coordinator.cancel()
+            clear_zoom_ahead_desired_tile_keys()
+        }
+        retained_label_interaction_active = interaction_active
         val groups = ReferenceDictionaryLayerGroups(
             places = place_labels_enabled,
             water = water_labels_enabled,
             regions = region_labels_enabled,
             public_lands = public_lands_enabled,
         )
+        val settled_target = retained_frame
+        val fallback_needs_build = retained_fallback_needs_build(
+            canvas = canvas,
+            viewport = viewport,
+            options = options,
+            target_tile_zoom = tile_zoom,
+            fallback_tile_zoom = fallback_zoom,
+        )
+        val settled_target_ready = !interaction_active &&
+            settled_target != null && settled_target.is_drawable() &&
+            settled_target.matches_environment(
+                viewport = viewport,
+                next = options,
+                current_package_generation = package_generation.get(),
+            ) &&
+            retained_target_frame_can_settle(
+                frame = settled_target,
+                viewport = viewport,
+                target_tile_zoom = tile_zoom,
+                fallback_tile_zoom = fallback_zoom,
+                destination = retained_destination,
+            )
+        var zoom_ahead_requests = 0
+        if (settled_target_ready &&
+            !reference_retained_scene_should_stage(
+                destination = retained_destination,
+                viewport = viewport,
+                repeatingWorldWidthPx = retained_repeating_world_width_px(
+                    viewport,
+                    tile_zoom,
+                ),
+            )
+        ) {
+            zoom_ahead_requests = stage_zoom_ahead_labels(
+                viewport = viewport,
+                source_zoom = tile_zoom,
+                labels_enabled = labels_enabled,
+                label_text_scale = label_text_scale,
+                place_labels_enabled = place_labels_enabled,
+                water_labels_enabled = water_labels_enabled,
+                region_labels_enabled = region_labels_enabled,
+                public_lands_enabled = public_lands_enabled,
+                filter_mask = filter_mask,
+                label_avoid_rects = label_avoid_rects,
+                options = options,
+            )
+        }
+        if (settled_target_ready && !fallback_needs_build) {
+            val successor_needed =
+                reference_retained_scene_should_stage(
+                    destination = retained_destination,
+                    viewport = viewport,
+                    repeatingWorldWidthPx = retained_repeating_world_width_px(
+                        viewport,
+                        tile_zoom,
+                    ),
+                ) &&
+                    !retained_history_has_exact_target(viewport, tile_zoom, options) &&
+                    !retained_label_coordinator.hasCurrentRequest()
+            if (!successor_needed) {
+                val boundary_raster = if (borders_enabled) {
+                    draw_boundary_raster_layer(
+                        canvas = canvas,
+                        viewport = viewport,
+                        source_zoom = tile_zoom,
+                        groups = groups,
+                        filter_mask = filter_mask,
+                        interaction_active = false,
+                        tile_request_generation = request_generation.get(),
+                        now_ms = now_ms,
+                    )
+                } else {
+                    BoundaryRasterDrawResult(0, true, 0)
+                }
+                draw_retained_frame_with_transition(
+                    canvas = canvas,
+                    viewport = viewport,
+                    frame = settled_target,
+                    now_ms = now_ms,
+                    destination = retained_destination,
+                )
+                return ReferenceDictionaryOverlayDrawStats(
+                    available = true,
+                    ready = boundary_raster.ready,
+                    visible_tiles = 0,
+                    loaded_tiles = 0,
+                    requested_tiles = boundary_raster.requested + zoom_ahead_requests,
+                    boundaries_drawn = boundary_raster.boundaries,
+                    labels_drawn = settled_target.labels_drawn,
+                    retained_frame_drawn = true,
+                    fading = retained_fade != null,
+                )
+            }
+        }
         val retained_for_interaction = if (interaction_active && labels_enabled) {
             retained_frame_for_viewport(
                 canvas = canvas,
@@ -290,6 +409,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     interaction_active = true,
                     tile_request_generation = generation,
                     freeze_active_band = true,
+                    now_ms = now_ms,
                 )
             } else {
                 BoundaryRasterDrawResult(0, true, 0)
@@ -315,31 +435,19 @@ internal class ReferenceDictionaryOverlayRenderer(
                 fading = retained_for_interaction != null && retained_fade != null,
             )
         }
-        val draw_viewport = retained_frame_viewport(
-            viewport,
-            tile_zoom,
-        )
+        val draw_viewport = if (interaction_active) {
+            viewport
+        } else {
+            retained_frame_viewport(viewport, tile_zoom)
+        }
         build_visible_tile_list(visible_tiles, draw_viewport, viewport, tile_zoom)
         if (visible_tiles.isEmpty()) return ready_empty_stats()
-        val fallback_frame = retained_fallback_frame
-        val fallback_needs_build = fallback_zoom != null && (
-            fallback_frame == null ||
-                fallback_frame.tile_zoom != fallback_zoom ||
-                !retained_frame_is_eligible(
-                    frame = fallback_frame,
-                    canvas = canvas,
-                    viewport = viewport,
-                    options = options,
-                    target_tile_zoom = tile_zoom,
-                    fallback_tile_zoom = fallback_zoom,
-                    destination = fallback_destination,
-                )
-            )
         val fallback_viewport = if (fallback_needs_build) {
-            retained_frame_viewport(
-                viewport,
-                requireNotNull(fallback_zoom),
-            )
+            if (interaction_active) {
+                viewport
+            } else {
+                retained_frame_viewport(viewport, requireNotNull(fallback_zoom))
+            }
         } else {
             null
         }
@@ -361,7 +469,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         fallback_draw_tiles.clear()
         var fallback_missing = 0
         var fallback_prefetch_requests = 0
-        var requested = 0
+        var requested = zoom_ahead_requests
         for (tile in fallback_visible_tiles) {
             val parsed = synchronized(tile_cache) {
                 tile_cache.get(tile.cache_key(), tile.low_zoom_profile())
@@ -424,6 +532,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 filter_mask = filter_mask,
                 interaction_active = interaction_active,
                 tile_request_generation = generation,
+                now_ms = now_ms,
             )
         } else {
             BoundaryRasterDrawResult(0, true, 0)
@@ -624,15 +733,24 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
 
         if (ready) {
-            val exact = retained_frame
-            if (exact != null && exact.is_drawable() && exact.matches_exact(
-                    viewport,
-                    tile_zoom,
-                    options,
-                    package_generation.get(),
+            val target = retained_frame
+            if (target != null && target.is_drawable() &&
+                target.matches_environment(
+                    viewport = viewport,
+                    next = options,
+                    current_package_generation = package_generation.get(),
+                ) &&
+                retained_target_frame_can_settle(
+                    frame = target,
+                    viewport = viewport,
+                    target_tile_zoom = tile_zoom,
+                    fallback_tile_zoom = fallback_zoom,
+                    destination = retained_destination,
                 )
             ) {
-                if (fallback_needs_build && fallback_ready && !retained_label_coordinator.hasCurrentRequest()) {
+                if (fallback_needs_build && fallback_ready &&
+                    !retained_label_coordinator.hasCurrentRequest()
+                ) {
                     request_retained_label_frame(
                         role = RetainedFrameRole.FALLBACK,
                         viewport = viewport,
@@ -650,12 +768,39 @@ internal class ReferenceDictionaryOverlayRenderer(
                         options = options,
                         package_generation_snapshot = package_generation.get(),
                     )
+                } else if (
+                    reference_retained_scene_should_stage(retained_destination, viewport) &&
+                    !retained_history_has_exact_target(
+                        viewport = viewport,
+                        tile_zoom = tile_zoom,
+                        options = options,
+                    ) &&
+                    !retained_label_coordinator.hasCurrentRequest()
+                ) {
+                    request_retained_label_frame(
+                        role = RetainedFrameRole.TARGET,
+                        viewport = viewport,
+                        frame_viewport = draw_viewport,
+                        tile_zoom = tile_zoom,
+                        tiles = draw_tiles,
+                        labels_enabled = labels_enabled,
+                        label_text_scale = label_text_scale,
+                        place_labels_enabled = place_labels_enabled,
+                        water_labels_enabled = water_labels_enabled,
+                        region_labels_enabled = region_labels_enabled,
+                        public_lands_enabled = public_lands_enabled,
+                        filter_mask = filter_mask,
+                        label_avoid_rects = label_avoid_rects,
+                        options = options,
+                        package_generation_snapshot = package_generation.get(),
+                    )
                 }
                 draw_retained_frame_with_transition(
                     canvas,
                     viewport,
-                    exact,
+                    target,
                     now_ms,
+                    retained_destination,
                 )
                 return ReferenceDictionaryOverlayDrawStats(
                     available = true,
@@ -664,7 +809,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     loaded_tiles = draw_tiles.size,
                     requested_tiles = if (layer_ready) 0 else maxOf(requested, missing),
                     boundaries_drawn = boundary_raster.boundaries,
-                    labels_drawn = exact.labels_drawn,
+                    labels_drawn = target.labels_drawn,
                     retained_frame_drawn = true,
                     fading = retained_fade != null,
                 )
@@ -761,6 +906,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                 tile_cache.clear()
                 requested_tiles.clear()
                 desired_tile_keys.clear()
+                zoom_ahead_desired_tile_keys.clear()
+                next_zoom_ahead_desired_tile_keys.clear()
             }
             package_probe_pending.set(null)
             cancel_pending_retained_bitmap()
@@ -778,6 +925,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     fun reset_retained_frame() {
         cancel_pending_retained_bitmap()
         retained_label_coordinator.cancel()
+        clear_zoom_ahead_desired_tile_keys()
         retained_label_interaction_active = false
         clear_retained_frames()
     }
@@ -929,7 +1077,10 @@ internal class ReferenceDictionaryOverlayRenderer(
                     if (
                         request_became_obsolete &&
                         !tile_cache.contains(cache_key, tile.low_zoom_profile()) &&
-                        desired_tile_keys.contains(cache_key)
+                        (
+                            desired_tile_keys.contains(cache_key) ||
+                                zoom_ahead_desired_tile_keys.contains(cache_key)
+                            )
                     ) {
                         replacement_generation = request_generation.get()
                     }
@@ -977,7 +1128,34 @@ internal class ReferenceDictionaryOverlayRenderer(
     private fun tile_request_still_relevant(cache_key: String, generation: Long): Boolean {
         if (generation == request_generation.get()) return true
         return synchronized(tile_cache) {
-            desired_tile_keys.contains(cache_key)
+            desired_tile_keys.contains(cache_key) ||
+                zoom_ahead_desired_tile_keys.contains(cache_key)
+        }
+    }
+
+    private fun update_zoom_ahead_desired_tile_keys(
+        tiles: List<VisibleDictionaryTile>,
+    ): Long {
+        return synchronized(tile_cache) {
+            next_zoom_ahead_desired_tile_keys.clear()
+            for (tile in tiles) {
+                next_zoom_ahead_desired_tile_keys += tile.cache_key()
+            }
+            if (zoom_ahead_desired_tile_keys != next_zoom_ahead_desired_tile_keys) {
+                zoom_ahead_desired_tile_keys.clear()
+                zoom_ahead_desired_tile_keys += next_zoom_ahead_desired_tile_keys
+                request_generation.incrementAndGet()
+            } else {
+                request_generation.get()
+            }
+        }
+    }
+
+    private fun clear_zoom_ahead_desired_tile_keys() {
+        synchronized(tile_cache) {
+            if (zoom_ahead_desired_tile_keys.isEmpty()) return
+            zoom_ahead_desired_tile_keys.clear()
+            request_generation.incrementAndGet()
         }
     }
 
@@ -993,7 +1171,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         output: MutableList<VisibleDictionaryTile>,
         viewport: Viewport,
         core_viewport: Viewport,
-        tile_zoom: Int
+        tile_zoom: Int,
+        outline_visibility_zoom: Double = core_viewport.zoom,
     ) {
         output.clear()
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
@@ -1010,7 +1189,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         val center_tile_y = floor(viewport.center_y * tile_world_scale / MAP_TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
         val outline_visibility_centizoom = ReferenceDictionaryLodPolicy.outline_decode_profile(
-            core_viewport.zoom,
+            outline_visibility_zoom,
             tile_zoom,
         )
         for (ty in first_tile_y..last_tile_y) {
@@ -1077,6 +1256,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         filter_mask: ReferenceFilterMask,
         interaction_active: Boolean,
         tile_request_generation: Long,
+        now_ms: Long,
         freeze_active_band: Boolean = false,
     ): BoundaryRasterDrawResult {
         val settings_key = boundary_raster_settings_key(groups, filter_mask)
@@ -1087,58 +1267,126 @@ internal class ReferenceDictionaryOverlayRenderer(
             interaction_active = interaction_active,
             freeze_active_band = freeze_active_band,
         )
-        build_boundary_raster_cells(
-            output = boundary_raster_cells,
-            viewport = viewport,
-            raster_zoom = desired_band.rasterZoom,
-            padding_cells = if (desired_band == active_boundary_raster_band) 1 else 0,
-        )
-        val active_before_promotion = active_boundary_raster_band
-        if (active_before_promotion != null) {
-            build_boundary_raster_cells(
-                output = boundary_raster_draw_cells,
-                viewport = viewport,
-                raster_zoom = active_before_promotion.rasterZoom,
-                padding_cells = 1,
-            )
-        } else {
-            boundary_raster_draw_cells.clear()
+        if (publish_completed_boundary_rasters()) {
+            promote_boundary_raster_safety_if_complete()
         }
+        val active_before_promotion = active_boundary_raster_band
         val raster_work_suspended = reference_boundary_raster_work_is_suspended(
             interactionActive = interaction_active,
             hasActiveBand = active_before_promotion != null,
         )
-        val relevant_keys = if (raster_work_suspended) {
-            HashSet<ReferenceBoundaryRasterKey>(relevant_boundary_raster_keys)
-        } else {
-            HashSet(boundary_raster_cells.size + boundary_raster_draw_cells.size)
+        if (interaction_active && pending_boundary_raster_safety_scene != null &&
+            active_before_promotion != null &&
+            viewport.zoom > active_before_promotion.presentationCentizoom / 100.0
+        ) {
+            pending_boundary_raster_safety_scene = null
+            update_boundary_raster_safety_relevance()
         }
-        for (cell in boundary_raster_cells) {
-            if (cell.coreVisible || desired_band == active_before_promotion) {
-                val key = ReferenceBoundaryRasterKey(desired_band, cell.x, cell.y)
-                if (!raster_work_suspended || boundary_raster_cache.containsKey(key)) {
-                    relevant_keys += key
+        val continuity_scene = active_before_promotion?.let { active ->
+            boundary_raster_continuity_scene(
+                active = active,
+                viewport = viewport,
+                settingsKey = settings_key,
+                packageGeneration = package_generation.get(),
+            )
+        }
+        val continuity_blend = if (continuity_scene != null) {
+            reference_boundary_raster_safety_blend(
+                active = requireNotNull(active_before_promotion),
+                safety = continuity_scene.band,
+                viewportZoom = viewport.zoom,
+            )
+        } else {
+            0f
+        }
+        if (raster_work_suspended && continuity_blend >= 1f) {
+            trim_boundary_raster_cache()
+            return draw_boundary_raster_safety_scene(
+                canvas,
+                viewport,
+                requireNotNull(continuity_scene),
+            )
+        }
+        val hold_continuity_while_loading = !interaction_active && continuity_blend >= 1f &&
+            desired_band != active_before_promotion
+        val initial_draw_band = if (hold_continuity_while_loading) {
+            requireNotNull(continuity_scene).band
+        } else {
+            active_before_promotion
+        }
+        val desired_padding_cells = when {
+            desired_band != active_boundary_raster_band -> 0
+            interaction_active -> 1
+            else -> reference_boundary_raster_padding_cells(
+                retainedPaddingPx = retained_scene_padding_for_viewport(viewport, source_zoom),
+                rasterCellScreenPx =
+                    MAP_TILE_SIZE * 2.0.pow(viewport.zoom - desired_band.rasterZoom),
+                interactionActive = false,
+            )
+        }
+        build_boundary_raster_cells(
+            output = boundary_raster_cells,
+            window = boundary_raster_cell_window,
+            viewport = viewport,
+            raster_zoom = desired_band.rasterZoom,
+            padding_cells = desired_padding_cells,
+        )
+        val desired_keys = boundary_raster_cell_window.keys_for(
+            desired_band,
+            boundary_raster_cells,
+        )
+        var draw_keys = if (initial_draw_band != null) {
+            build_boundary_raster_cells(
+                output = boundary_raster_draw_cells,
+                window = boundary_raster_draw_cell_window,
+                viewport = viewport,
+                raster_zoom = initial_draw_band.rasterZoom,
+                padding_cells = 1,
+            )
+            boundary_raster_draw_cell_window.keys_for(
+                initial_draw_band,
+                boundary_raster_draw_cells,
+            )
+        } else {
+            boundary_raster_draw_cells.clear()
+            boundary_raster_draw_cell_window.invalidate()
+            emptyList()
+        }
+        val relevance_changed =
+            desired_band != relevant_boundary_raster_desired_band ||
+                initial_draw_band != relevant_boundary_raster_active_band ||
+                boundary_raster_cell_window.revision !=
+                relevant_boundary_raster_cell_revision ||
+                boundary_raster_draw_cell_window.revision !=
+                relevant_boundary_raster_draw_cell_revision
+        if (!raster_work_suspended && relevance_changed) {
+            val relevant_keys =
+                HashSet<ReferenceBoundaryRasterKey>(
+                    boundary_raster_cells.size + boundary_raster_draw_cells.size,
+                )
+            for (index in boundary_raster_cells.indices) {
+                val cell = boundary_raster_cells[index]
+                if (cell.coreVisible || desired_band == active_before_promotion) {
+                    relevant_keys += desired_keys[index]
                 }
             }
-        }
-        for (cell in boundary_raster_draw_cells) {
-            val key = ReferenceBoundaryRasterKey(
-                requireNotNull(active_before_promotion),
-                cell.x,
-                cell.y,
-            )
-            if (!raster_work_suspended || boundary_raster_cache.containsKey(key)) {
+            for (key in draw_keys) {
                 relevant_keys += key
             }
+            relevant_boundary_raster_keys = relevant_keys
+            relevant_boundary_raster_desired_band = desired_band
+            relevant_boundary_raster_active_band = initial_draw_band
+            relevant_boundary_raster_cell_revision = boundary_raster_cell_window.revision
+            relevant_boundary_raster_draw_cell_revision =
+                boundary_raster_draw_cell_window.revision
         }
-        relevant_boundary_raster_keys = relevant_keys
-        publish_completed_boundary_rasters()
         trim_boundary_raster_cache()
 
         var requested = 0
         var desired_core_ready = true
-        for (cell in boundary_raster_cells) {
-            val key = ReferenceBoundaryRasterKey(desired_band, cell.x, cell.y)
+        for (index in boundary_raster_cells.indices) {
+            val cell = boundary_raster_cells[index]
+            val key = desired_keys[index]
             if (boundary_raster_cache.containsKey(key)) continue
             if (cell.coreVisible) desired_core_ready = false
             if (raster_work_suspended) continue
@@ -1153,36 +1401,103 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
 
         if (desired_band != active_boundary_raster_band && desired_core_ready) {
-            promote_boundary_raster_band(desired_band)
+            promote_boundary_raster_band(
+                next = desired_band,
+                displayed_scene = continuity_scene.takeIf { continuity_blend > 0f },
+                now_ms = now_ms,
+            )
         }
-        val draw_band = active_boundary_raster_band
+        var draw_band = initial_draw_band
+            ?: active_boundary_raster_band
             ?: return BoundaryRasterDrawResult(0, false, requested)
-        if (draw_band != active_before_promotion) {
+        if (active_boundary_raster_band != active_before_promotion) {
+            draw_band = requireNotNull(active_boundary_raster_band)
             build_boundary_raster_cells(
                 output = boundary_raster_draw_cells,
+                window = boundary_raster_draw_cell_window,
                 viewport = viewport,
                 raster_zoom = draw_band.rasterZoom,
                 padding_cells = 1,
             )
+            draw_keys = boundary_raster_draw_cell_window.keys_for(
+                draw_band,
+                boundary_raster_draw_cells,
+            )
             val promoted_keys = HashSet(relevant_boundary_raster_keys)
-            for (cell in boundary_raster_draw_cells) {
-                promoted_keys += ReferenceBoundaryRasterKey(draw_band, cell.x, cell.y)
+            for (key in draw_keys) {
+                promoted_keys += key
             }
             relevant_boundary_raster_keys = promoted_keys
+            invalidate_boundary_raster_relevance()
             trim_boundary_raster_cache()
         }
 
-        var boundaries_drawn = 0
-        var all_core_drawn = true
-        for (cell in boundary_raster_draw_cells) {
-            val key = ReferenceBoundaryRasterKey(draw_band, cell.x, cell.y)
+        if (!interaction_active && desired_core_ready &&
+            active_boundary_raster_band == desired_band
+        ) {
+            capture_settled_boundary_raster_scene(
+                band = desired_band,
+                cells = boundary_raster_draw_cells,
+                keys = draw_keys,
+                window = boundary_raster_draw_cell_window,
+            )
+        }
+
+        var underlay_scene = continuity_scene
+        var underlay_blend = if (continuity_blend > 0f &&
+            draw_band == active_before_promotion
+        ) {
+            continuity_blend
+        } else {
+            0f
+        }
+        val raster_fade = boundary_raster_fade
+        if (raster_fade != null && raster_fade.currentBand == draw_band &&
+            raster_fade.previous.matches_environment(
+                settingsKey = settings_key,
+                packageGeneration = package_generation.get(),
+            ) &&
+            raster_fade.previous.covers(viewport)
+        ) {
+            val fade_underlay = reference_boundary_raster_fade_underlay(
+                elapsedMillis = now_ms - raster_fade.startMs,
+                durationMillis = BOUNDARY_RASTER_FADE_MS,
+            )
+            if (fade_underlay > 0f) {
+                underlay_scene = raster_fade.previous
+                underlay_blend = fade_underlay
+            } else {
+                boundary_raster_fade = null
+                update_boundary_raster_safety_relevance()
+            }
+        }
+        val continuity_underlay = if (underlay_scene != null && underlay_blend > 0f) {
+            draw_boundary_raster_safety_scene(
+                canvas = canvas,
+                viewport = viewport,
+                scene = underlay_scene,
+                alpha = (255f * underlay_blend).roundToInt().coerceIn(0, 255),
+            )
+        } else {
+            null
+        }
+        var boundaries_drawn = continuity_underlay?.boundaries ?: 0
+        var all_core_drawn = continuity_underlay?.ready ?: true
+        boundary_raster_paint.alpha = if (continuity_underlay != null) {
+            (255f * (1f - underlay_blend)).roundToInt().coerceIn(0, 255)
+        } else {
+            255
+        }
+        for (index in boundary_raster_draw_cells.indices) {
+            val cell = boundary_raster_draw_cells[index]
+            val key = draw_keys[index]
             val tile = boundary_raster_cache[key]
-            var fallback_available = false
+            var fallback_available = continuity_underlay?.ready == true
             if (cell.coreVisible) {
                 if (tile != null) {
                     draw_boundary_raster(canvas, viewport, cell, tile)
                     boundaries_drawn += tile.boundaries
-                } else {
+                } else if (!fallback_available) {
                     val fallback_boundaries = draw_boundary_raster_fallback(
                         canvas,
                         viewport,
@@ -1214,6 +1529,19 @@ internal class ReferenceDictionaryOverlayRenderer(
                 )
             }
         }
+        boundary_raster_paint.alpha = 255
+        if (!interaction_active && desired_core_ready) {
+            requested += request_boundary_raster_safety_scene(
+                viewport = viewport,
+                settingsKey = settings_key,
+                groups = groups,
+                filterMask = filter_mask,
+                tileRequestGeneration = tile_request_generation,
+                requestBudget = (
+                    BOUNDARY_RASTER_REQUESTS_PER_DRAW - requested
+                    ).coerceIn(0, BOUNDARY_RASTER_SAFETY_REQUESTS_PER_DRAW),
+            )
+        }
         return BoundaryRasterDrawResult(boundaries_drawn, all_core_drawn, requested)
     }
 
@@ -1232,7 +1560,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 packageGeneration = current_package_generation,
             )
         ) {
-            pending_boundary_raster_band = null
             return requireNotNull(active)
         }
         val exact = reference_boundary_raster_band(
@@ -1281,6 +1608,18 @@ internal class ReferenceDictionaryOverlayRenderer(
             packageGeneration == other.packageGeneration
     }
 
+    private fun ReferenceBoundaryRasterBand.matches_safety_target(
+        safetyZoom: Int,
+        sourceZoom: Int,
+        settingsKey: Long,
+        packageGeneration: Long,
+    ): Boolean {
+        return presentationCentizoom == safetyZoom * 100 &&
+            this.sourceZoom == sourceZoom &&
+            this.settingsKey == settingsKey &&
+            this.packageGeneration == packageGeneration
+    }
+
     private fun boundary_raster_settings_key(
         groups: ReferenceDictionaryLayerGroups,
         filter_mask: ReferenceFilterMask,
@@ -1295,20 +1634,66 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private fun build_boundary_raster_cells(
         output: MutableList<ReferenceBoundaryRasterCell>,
+        window: BoundaryRasterCellWindow,
         viewport: Viewport,
         raster_zoom: Int,
         padding_cells: Int,
     ) {
-        output.clear()
-        val tile_scale = MAP_TILE_SIZE * 2.0.pow(viewport.zoom - raster_zoom)
-        val left_world = viewport.center_x - viewport.width / 2.0
-        val top_world = viewport.center_y - viewport.height / 2.0
+        build_boundary_raster_cells(
+            output = output,
+            window = window,
+            viewport_zoom = viewport.zoom,
+            center_x = viewport.center_x,
+            center_y = viewport.center_y,
+            viewport_width = viewport.width,
+            viewport_height = viewport.height,
+            raster_zoom = raster_zoom,
+            padding_cells = padding_cells,
+        )
+    }
+
+    private fun build_boundary_raster_cells(
+        output: MutableList<ReferenceBoundaryRasterCell>,
+        window: BoundaryRasterCellWindow,
+        viewport_zoom: Double,
+        center_x: Double,
+        center_y: Double,
+        viewport_width: Float,
+        viewport_height: Float,
+        raster_zoom: Int,
+        padding_cells: Int,
+    ) {
+        val tile_scale = MAP_TILE_SIZE * 2.0.pow(viewport_zoom - raster_zoom)
+        val left_world = center_x - viewport_width / 2.0
+        val top_world = center_y - viewport_height / 2.0
         val core_first_x = floor(left_world / tile_scale).toInt()
         val core_first_y = floor(top_world / tile_scale).toInt()
-        val core_last_x = floor((left_world + viewport.width) / tile_scale).toInt()
-        val core_last_y = floor((top_world + viewport.height) / tile_scale).toInt()
-        val center_x = floor(viewport.center_x / tile_scale).toInt()
-        val center_y = floor(viewport.center_y / tile_scale).toInt()
+        val core_last_x = floor((left_world + viewport_width) / tile_scale).toInt()
+        val core_last_y = floor((top_world + viewport_height) / tile_scale).toInt()
+        val center_tile_x = floor(center_x / tile_scale).toInt()
+        val center_tile_y = floor(center_y / tile_scale).toInt()
+        if (window.matches(
+                raster_zoom,
+                padding_cells,
+                core_first_x,
+                core_first_y,
+                core_last_x,
+                core_last_y,
+                center_tile_x,
+                center_tile_y,
+            )
+        ) return
+        window.update(
+            raster_zoom,
+            padding_cells,
+            core_first_x,
+            core_first_y,
+            core_last_x,
+            core_last_y,
+            center_tile_x,
+            center_tile_y,
+        )
+        output.clear()
         val tile_limit = 1 shl raster_zoom
         for (raw_y in core_first_y - padding_cells..core_last_y + padding_cells) {
             if (raw_y !in 0 until tile_limit) continue
@@ -1321,7 +1706,12 @@ internal class ReferenceDictionaryOverlayRenderer(
                     y = raw_y,
                     coreVisible = raw_x in core_first_x..core_last_x &&
                         raw_y in core_first_y..core_last_y,
-                    requestPriority = tile_request_priority(raw_x, raw_y, center_x, center_y),
+                    requestPriority = tile_request_priority(
+                        raw_x,
+                        raw_y,
+                        center_tile_x,
+                        center_tile_y,
+                    ),
                 )
             }
         }
@@ -1329,6 +1719,245 @@ internal class ReferenceDictionaryOverlayRenderer(
             compareBy<ReferenceBoundaryRasterCell> { !it.coreVisible }
                 .thenBy { it.requestPriority },
         )
+    }
+
+    private fun request_boundary_raster_safety_scene(
+        viewport: Viewport,
+        settingsKey: Long,
+        groups: ReferenceDictionaryLayerGroups,
+        filterMask: ReferenceFilterMask,
+        tileRequestGeneration: Long,
+        requestBudget: Int,
+    ): Int {
+        val snapshot = package_snapshot ?: return 0
+        val safety_zoom = reference_boundary_raster_safety_zoom(viewport.zoom, MIN_ZOOM)
+        val safety_source_zoom = dictionary_tile_zoom(
+            safety_zoom.toDouble(),
+            snapshot.info.zooms,
+        ) ?: return 0
+        val current_package_generation = package_generation.get()
+        val ready_band = ready_boundary_raster_safety_scene?.band
+        val pending_band = pending_boundary_raster_safety_scene?.band
+        val band = when {
+            ready_band?.matches_safety_target(
+                safetyZoom = safety_zoom,
+                sourceZoom = safety_source_zoom,
+                settingsKey = settingsKey,
+                packageGeneration = current_package_generation,
+            ) == true -> ready_band
+            pending_band?.matches_safety_target(
+                safetyZoom = safety_zoom,
+                sourceZoom = safety_source_zoom,
+                settingsKey = settingsKey,
+                packageGeneration = current_package_generation,
+            ) == true -> pending_band
+            else -> reference_boundary_raster_band(
+                viewportZoom = safety_zoom.toDouble(),
+                sourceZoom = safety_source_zoom,
+                settingsKey = settingsKey,
+                packageGeneration = current_package_generation,
+            )
+        }
+        val safety_center_x = reference_boundary_raster_safety_center(
+            center = viewport.center_x,
+            viewportZoom = viewport.zoom,
+            safetyZoom = safety_zoom,
+        )
+        val safety_center_y = reference_boundary_raster_safety_center(
+            center = viewport.center_y,
+            viewportZoom = viewport.zoom,
+            safetyZoom = safety_zoom,
+        )
+        build_boundary_raster_cells(
+            output = boundary_raster_safety_cells,
+            window = boundary_raster_safety_cell_window,
+            viewport_zoom = safety_zoom.toDouble(),
+            center_x = safety_center_x,
+            center_y = safety_center_y,
+            viewport_width = viewport.width,
+            viewport_height = viewport.height,
+            raster_zoom = band.rasterZoom,
+            padding_cells = BOUNDARY_RASTER_SAFETY_PADDING_CELLS,
+        )
+        val keys = boundary_raster_safety_cell_window.keys_for(
+            band,
+            boundary_raster_safety_cells,
+        )
+        val bounds = boundary_raster_safety_cell_window.bounds()
+        val ready = ready_boundary_raster_safety_scene
+        var pending_changed = false
+        if (ready == null || ready.band != band || ready.bounds != bounds) {
+            val pending = pending_boundary_raster_safety_scene
+            if (pending == null || pending.band != band || pending.bounds != bounds) {
+                pending_boundary_raster_safety_scene = BoundaryRasterScene(
+                    band = band,
+                    bounds = bounds,
+                    keys = LinkedHashSet(keys),
+                )
+                update_boundary_raster_safety_relevance()
+                pending_changed = true
+            }
+        } else if (pending_boundary_raster_safety_scene != null) {
+            pending_boundary_raster_safety_scene = null
+            update_boundary_raster_safety_relevance()
+        }
+        if (pending_changed) {
+            promote_boundary_raster_safety_if_complete()
+        }
+        val pending = pending_boundary_raster_safety_scene ?: return 0
+        if (requestBudget <= 0) return 0
+
+        var requested = 0
+        for (key in pending.keys) {
+            if (boundary_raster_cache.containsKey(key) ||
+                boundary_raster_requests.contains(key)
+            ) {
+                continue
+            }
+            requested += request_boundary_raster(
+                key = key,
+                groups = groups,
+                filter_mask = filterMask,
+                tile_request_generation = tileRequestGeneration,
+            )
+            if (requested >= requestBudget) break
+        }
+        return requested
+    }
+
+    private fun promote_boundary_raster_safety_if_complete() {
+        val pending = pending_boundary_raster_safety_scene ?: return
+        for (key in pending.keys) {
+            if (!boundary_raster_cache.containsKey(key)) return
+        }
+        ready_boundary_raster_safety_scene = pending
+        pending_boundary_raster_safety_scene = null
+        update_boundary_raster_safety_relevance()
+    }
+
+    private fun boundary_raster_continuity_scene(
+        active: ReferenceBoundaryRasterBand,
+        viewport: Viewport,
+        settingsKey: Long,
+        packageGeneration: Long,
+    ): BoundaryRasterScene? {
+        val safety = ready_boundary_raster_safety_scene?.takeIf { scene ->
+            scene.matches_environment(settingsKey, packageGeneration) &&
+                scene.covers(viewport)
+        }
+        val resident = resident_boundary_raster_scene?.takeIf { scene ->
+            scene.matches_environment(settingsKey, packageGeneration) &&
+                scene.covers(viewport)
+        }
+        val selected_band = reference_boundary_raster_continuity_band(
+            active = active,
+            safety = safety?.band,
+            resident = resident?.band,
+        )
+        return when (selected_band) {
+            safety?.band -> safety
+            resident?.band -> resident
+            else -> null
+        }
+    }
+
+    private fun capture_settled_boundary_raster_scene(
+        band: ReferenceBoundaryRasterBand,
+        cells: List<ReferenceBoundaryRasterCell>,
+        keys: List<ReferenceBoundaryRasterKey>,
+        window: BoundaryRasterCellWindow,
+    ) {
+        val bounds = window.core_bounds()
+        val current = settled_boundary_raster_scene
+        if (current?.band == band && current.bounds == bounds) return
+
+        val core_keys = LinkedHashSet<ReferenceBoundaryRasterKey>()
+        var bytes = 0L
+        for (index in cells.indices) {
+            if (!cells[index].coreVisible) continue
+            val key = keys[index]
+            val tile = boundary_raster_cache[key] ?: return
+            bytes += tile.byteCount
+            if (bytes > BOUNDARY_RASTER_RESIDENT_CACHE_BYTES) return
+            core_keys += key
+        }
+        if (core_keys.isEmpty()) return
+        settled_boundary_raster_scene = BoundaryRasterScene(
+            band = band,
+            bounds = bounds,
+            keys = core_keys,
+        )
+    }
+
+    private fun update_boundary_raster_safety_relevance() {
+        val ready = ready_boundary_raster_safety_scene
+        val pending = pending_boundary_raster_safety_scene
+        val resident = resident_boundary_raster_scene
+        val fading = boundary_raster_fade?.previous
+        if (ready == null && pending == null && resident == null && fading == null) {
+            relevant_boundary_raster_safety_keys = emptySet()
+            return
+        }
+        val keys = HashSet<ReferenceBoundaryRasterKey>(
+            (ready?.keys?.size ?: 0) +
+                (pending?.keys?.size ?: 0) +
+                (resident?.keys?.size ?: 0) +
+                (fading?.keys?.size ?: 0),
+        )
+        ready?.keys?.let(keys::addAll)
+        pending?.keys?.let(keys::addAll)
+        resident?.keys?.let(keys::addAll)
+        fading?.keys?.let(keys::addAll)
+        relevant_boundary_raster_safety_keys = keys
+    }
+
+    private fun draw_boundary_raster_safety_scene(
+        canvas: Canvas,
+        viewport: Viewport,
+        scene: BoundaryRasterScene,
+        alpha: Int = 255,
+    ): BoundaryRasterDrawResult {
+        build_boundary_raster_cells(
+            output = boundary_raster_safety_draw_cells,
+            window = boundary_raster_safety_draw_cell_window,
+            viewport = viewport,
+            raster_zoom = scene.band.rasterZoom,
+            padding_cells = 0,
+        )
+        val keys = boundary_raster_safety_draw_cell_window.keys_for(
+            scene.band,
+            boundary_raster_safety_draw_cells,
+        )
+        boundary_raster_paint.alpha = alpha
+        var boundaries = 0
+        for (index in keys.indices) {
+            val key = keys[index]
+            if (key !in scene.keys) {
+                boundary_raster_paint.alpha = 255
+                return BoundaryRasterDrawResult(boundaries, false, 0)
+            }
+            val tile = boundary_raster_cache[key]
+            if (tile == null) {
+                boundary_raster_paint.alpha = 255
+                return BoundaryRasterDrawResult(boundaries, false, 0)
+            }
+            draw_boundary_raster(
+                canvas = canvas,
+                viewport = viewport,
+                cell = boundary_raster_safety_draw_cells[index],
+                tile = tile,
+            )
+            boundaries += tile.boundaries
+        }
+        boundary_raster_paint.alpha = 255
+        return BoundaryRasterDrawResult(boundaries, true, 0)
+    }
+
+    private fun invalidate_boundary_raster_relevance() {
+        relevant_boundary_raster_desired_band = null
+        relevant_boundary_raster_active_band = null
+        relevant_boundary_raster_cell_revision = -1
+        relevant_boundary_raster_draw_cell_revision = -1
     }
 
     private fun request_boundary_raster(
@@ -1534,7 +2163,8 @@ internal class ReferenceDictionaryOverlayRenderer(
     }
 
     private fun boundary_raster_request_is_relevant(key: ReferenceBoundaryRasterKey): Boolean {
-        return key in relevant_boundary_raster_keys
+        return key in relevant_boundary_raster_keys ||
+            key in relevant_boundary_raster_safety_keys
     }
 
     private fun render_boundary_raster(request: BoundaryRasterRequest): BoundaryRasterTile? {
@@ -1750,9 +2380,10 @@ internal class ReferenceDictionaryOverlayRenderer(
         return appended
     }
 
-    private fun publish_completed_boundary_rasters() {
+    private fun publish_completed_boundary_rasters(): Boolean {
+        var published = false
         while (true) {
-            val prepared = completed_boundary_rasters.poll() ?: return
+            val prepared = completed_boundary_rasters.poll() ?: return published
             val requested = boundary_raster_requests.remove(prepared.key)
             val tile = prepared.tile
             if (!requested || tile == null ||
@@ -1763,6 +2394,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 continue
             }
             put_boundary_raster(tile)
+            published = true
         }
     }
 
@@ -1777,33 +2409,46 @@ internal class ReferenceDictionaryOverlayRenderer(
     }
 
     private fun trim_boundary_raster_cache() {
-        while (boundary_raster_cache_bytes > BOUNDARY_RASTER_CACHE_BYTES) {
-            val iterator = boundary_raster_cache.entries.iterator()
-            var removed = false
-            while (iterator.hasNext()) {
-                val entry = iterator.next()
-                if (entry.key in relevant_boundary_raster_keys) continue
-                iterator.remove()
-                boundary_raster_cache_bytes -= entry.value.byteCount
-                entry.value.bitmap.recycle()
-                removed = true
-                break
-            }
-            if (!removed) return
+        if (boundary_raster_cache_bytes <= BOUNDARY_RASTER_CACHE_BYTES) return
+        val iterator = boundary_raster_cache.entries.iterator()
+        while (boundary_raster_cache_bytes > BOUNDARY_RASTER_CACHE_BYTES &&
+            iterator.hasNext()
+        ) {
+            val entry = iterator.next()
+            if (entry.key in relevant_boundary_raster_keys ||
+                entry.key in relevant_boundary_raster_safety_keys
+            ) continue
+            iterator.remove()
+            boundary_raster_cache_bytes -= entry.value.byteCount
+            entry.value.bitmap.recycle()
         }
     }
 
-    private fun promote_boundary_raster_band(next: ReferenceBoundaryRasterBand) {
+    private fun promote_boundary_raster_band(
+        next: ReferenceBoundaryRasterBand,
+        displayed_scene: BoundaryRasterScene?,
+        now_ms: Long,
+    ) {
         val previous = active_boundary_raster_band
         if (previous != null && previous != next) {
-            boundary_raster_band_history.remove(previous)
-            boundary_raster_band_history.addFirst(previous)
-            while (boundary_raster_band_history.size > BOUNDARY_RASTER_HISTORY_LIMIT) {
-                boundary_raster_band_history.removeLast()
+            val settled_previous = settled_boundary_raster_scene
+                ?.takeIf { scene -> scene.band == previous }
+            if (settled_previous != null) {
+                resident_boundary_raster_scene = settled_previous
             }
+            val fade_source = displayed_scene ?: settled_previous
+            boundary_raster_fade = fade_source?.let { scene ->
+                BoundaryRasterFade(
+                    previous = scene,
+                    currentBand = next,
+                    startMs = now_ms,
+                )
+            }
+            update_boundary_raster_safety_relevance()
         }
         active_boundary_raster_band = next
         pending_boundary_raster_band = null
+        settled_boundary_raster_scene = null
     }
 
     private fun draw_boundary_raster(
@@ -1855,48 +2500,100 @@ internal class ReferenceDictionaryOverlayRenderer(
             (child_left + active_tile_scale).toFloat(),
             (child_top + active_tile_scale).toFloat(),
         )
-        for (band in boundary_raster_band_history) {
-            if (band.packageGeneration != active_band.packageGeneration ||
-                band.settingsKey != active_band.settingsKey ||
-                band.rasterZoom > cell.zoom
-            ) continue
-            val factor = 1 shl (cell.zoom - band.rasterZoom)
-            val parent_draw_x = Math.floorDiv(cell.drawX, factor)
-            val parent_y = Math.floorDiv(cell.y, factor)
-            val parent_limit = 1 shl band.rasterZoom
-            val parent_x = Math.floorMod(parent_draw_x, parent_limit)
-            val key = ReferenceBoundaryRasterKey(band, parent_x, parent_y)
-            val tile = boundary_raster_cache[key] ?: continue
-            draw_boundary_raster(
-                canvas = canvas,
-                viewport = viewport,
-                cell = ReferenceBoundaryRasterCell(
-                    zoom = band.rasterZoom,
-                    x = parent_x,
-                    drawX = parent_draw_x,
-                    y = parent_y,
-                    coreVisible = true,
-                    requestPriority = 0,
-                ),
-                tile = tile,
-                clip = child_clip,
-            )
-            return tile.boundaries
-        }
-        return -1
+        val safety = draw_boundary_raster_scene_fallback(
+            canvas,
+            viewport,
+            cell,
+            child_clip,
+            active_band,
+            ready_boundary_raster_safety_scene,
+        )
+        if (safety >= 0) return safety
+        val resident = draw_boundary_raster_scene_fallback(
+            canvas,
+            viewport,
+            cell,
+            child_clip,
+            active_band,
+            resident_boundary_raster_scene,
+        )
+        if (resident >= 0) return resident
+        return draw_boundary_raster_scene_fallback(
+            canvas,
+            viewport,
+            cell,
+            child_clip,
+            active_band,
+            boundary_raster_fade?.previous,
+        )
+    }
+
+    private fun draw_boundary_raster_scene_fallback(
+        canvas: Canvas,
+        viewport: Viewport,
+        cell: ReferenceBoundaryRasterCell,
+        child_clip: RectF,
+        active_band: ReferenceBoundaryRasterBand,
+        scene: BoundaryRasterScene?,
+    ): Int {
+        val band = scene?.band ?: return -1
+        if (!scene.matches_environment(
+                settingsKey = active_band.settingsKey,
+                packageGeneration = active_band.packageGeneration,
+            ) ||
+            band.rasterZoom > cell.zoom
+        ) return -1
+
+        val factor = 1 shl (cell.zoom - band.rasterZoom)
+        val parent_draw_x = Math.floorDiv(cell.drawX, factor)
+        val parent_y = Math.floorDiv(cell.y, factor)
+        val parent_limit = 1 shl band.rasterZoom
+        val parent_x = Math.floorMod(parent_draw_x, parent_limit)
+        val key = ReferenceBoundaryRasterKey(band, parent_x, parent_y)
+        val tile = boundary_raster_cache[key] ?: return -1
+        if (key !in scene.keys) return -1
+        draw_boundary_raster(
+            canvas = canvas,
+            viewport = viewport,
+            cell = ReferenceBoundaryRasterCell(
+                zoom = band.rasterZoom,
+                x = parent_x,
+                drawX = parent_draw_x,
+                y = parent_y,
+                coreVisible = true,
+                requestPriority = 0,
+            ),
+            tile = tile,
+            clip = child_clip,
+        )
+        return tile.boundaries
     }
 
     private fun clear_boundary_rasters() {
         active_boundary_raster_band = null
         pending_boundary_raster_band = null
         relevant_boundary_raster_keys = emptySet()
-        boundary_raster_band_history.clear()
+        pending_boundary_raster_safety_scene = null
+        ready_boundary_raster_safety_scene = null
+        settled_boundary_raster_scene = null
+        resident_boundary_raster_scene = null
+        boundary_raster_fade = null
+        relevant_boundary_raster_safety_keys = emptySet()
         boundary_raster_requests.clear()
         boundary_raster_disk_misses.clear()
         boundary_raster_disk_namespaces.clear()
         boundary_raster_cache.values.forEach { tile -> tile.bitmap.recycle() }
         boundary_raster_cache.clear()
         boundary_raster_cache_bytes = 0L
+        boundary_raster_cells.clear()
+        boundary_raster_draw_cells.clear()
+        boundary_raster_cell_window.invalidate()
+        boundary_raster_draw_cell_window.invalidate()
+        boundary_raster_safety_cells.clear()
+        boundary_raster_safety_cell_window.invalidate()
+        boundary_raster_safety_draw_cells.clear()
+        boundary_raster_safety_draw_cell_window.invalidate()
+        invalidate_boundary_raster_relevance()
         while (true) {
             val prepared = completed_boundary_rasters.poll() ?: break
             prepared.tile?.bitmap?.recycle()
@@ -2021,35 +2718,62 @@ internal class ReferenceDictionaryOverlayRenderer(
         options: RetainedReferenceOptions,
         label_avoid_rects: List<ReferenceScreenRect>,
         interaction_active: Boolean,
-        now_ms: Long,
     ) {
-        if (interaction_active) return
         val prepared = retained_label_coordinator.take() ?: return
         val frame = prepared.frame ?: return
         val key = prepared.request.token.key
         val current_generation = package_generation.get()
-        if (frame.options != options || frame.package_generation != current_generation ||
-            key.labelAvoidRects != label_avoid_rects
-        ) return
-        val valid = when (key.role) {
-            RetainedFrameRole.TARGET -> frame.matches_exact(
-                viewport = viewport,
-                next_tile_zoom = target_tile_zoom,
-                next = options,
-                current_package_generation = current_generation,
-            )
-            RetainedFrameRole.FALLBACK -> fallback_tile_zoom != null && frame.matches_exact(
-                viewport = viewport,
-                next_tile_zoom = fallback_tile_zoom,
-                next = options,
-                current_package_generation = current_generation,
-            )
-        }
-        if (!valid) return
-        if (key.role == RetainedFrameRole.TARGET) {
-            replace_retained_frame(frame)
+        val environment_matches =
+            frame.options == options &&
+                frame.package_generation == current_generation &&
+                key.labelAvoidRects == label_avoid_rects &&
+                frame.is_drawable()
+        val visible_at_current_viewport = if (environment_matches) {
+            retained_frame_destination(frame, viewport, retained_destination)
+            frame.has_visible_content(viewport, retained_destination)
         } else {
-            replace_retained_fallback_frame(frame)
+            false
+        }
+        when (key.role) {
+            RetainedFrameRole.TARGET -> when (
+                reference_retained_completed_target_disposition(
+                    environmentMatches = environment_matches,
+                    matchesCurrentTarget = visible_at_current_viewport &&
+                        frame.matches_exact(
+                        viewport = viewport,
+                        next_tile_zoom = target_tile_zoom,
+                        next = options,
+                        current_package_generation = current_generation,
+                    ),
+                    interactionActive = interaction_active,
+                )
+            ) {
+                ReferenceRetainedCompletedTargetDisposition.PUBLISH ->
+                    publish_retained_target_frame(
+                        frame = frame,
+                        viewport = viewport,
+                        target_tile_zoom = target_tile_zoom,
+                        fallback_tile_zoom = fallback_tile_zoom,
+                        options = options,
+                        current_generation = current_generation,
+                    )
+                ReferenceRetainedCompletedTargetDisposition.REMEMBER ->
+                    retained_frame_history.remember(frame)
+                ReferenceRetainedCompletedTargetDisposition.DISCARD -> Unit
+            }
+            RetainedFrameRole.FALLBACK -> when {
+                !environment_matches -> Unit
+                !interaction_active &&
+                    visible_at_current_viewport &&
+                    fallback_tile_zoom != null &&
+                    frame.matches_exact(
+                    viewport = viewport,
+                    next_tile_zoom = fallback_tile_zoom,
+                    next = options,
+                    current_package_generation = current_generation,
+                ) -> replace_retained_fallback_frame(frame)
+                else -> retained_frame_history.remember(frame)
+            }
         }
     }
 
@@ -2212,6 +2936,13 @@ internal class ReferenceDictionaryOverlayRenderer(
             vertical_padding = vertical_padding,
             keep_planning = keep_planning,
         ) ?: return null
+        val label_coverage = ReferenceRetainedLabelCoverage(
+            width = frame_width.toDouble(),
+            height = frame_height.toDouble(),
+        )
+        for (label in content.labels) {
+            label_coverage.add(label.collisionShape.bounds)
+        }
         return RetainedReferenceFrame(
             boundary_batches = boundary_batches,
             zoom = viewport.zoom,
@@ -2226,6 +2957,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             package_generation = package_generation_snapshot,
             boundaries_drawn = content.boundaries,
             labels = content.labels,
+            label_coverage = label_coverage,
         )
     }
 
@@ -2539,6 +3271,60 @@ internal class ReferenceDictionaryOverlayRenderer(
         destination: ReferenceRetainedDestination,
     ): RetainedReferenceFrame? {
         val primary = retained_frame
+        val established = displayed_retained_frame ?: primary
+        var closer_future: RetainedReferenceFrame? = null
+        var closest_zoom_distance = Double.POSITIVE_INFINITY
+        if (established != null && primary != null && primary !== established &&
+            primary.zoom > established.zoom &&
+            reference_retained_zoom_ahead_can_handoff(
+                establishedZoom = established.zoom,
+                viewportZoom = viewport.zoom,
+                minimumLead = ZOOM_AHEAD_HANDOFF_LEAD,
+            ) &&
+            retained_frame_is_emergency_eligible(
+                frame = primary,
+                viewport = viewport,
+                options = options,
+                target_tile_zoom = target_tile_zoom,
+                fallback_tile_zoom = fallback_tile_zoom,
+                destination = candidate_destination,
+            )
+        ) {
+            closer_future = primary
+            closest_zoom_distance = kotlin.math.abs(primary.zoom - viewport.zoom)
+        }
+        if (established != null) {
+            for (previous in retained_frame_history) {
+                val zoom_distance = kotlin.math.abs(previous.zoom - viewport.zoom)
+                if (previous === established ||
+                    previous.zoom <= established.zoom ||
+                    zoom_distance >= closest_zoom_distance ||
+                    !reference_retained_zoom_ahead_can_handoff(
+                        establishedZoom = established.zoom,
+                        viewportZoom = viewport.zoom,
+                        minimumLead = ZOOM_AHEAD_HANDOFF_LEAD,
+                    ) ||
+                    !retained_frame_is_emergency_eligible(
+                        frame = previous,
+                        viewport = viewport,
+                        options = options,
+                        target_tile_zoom = target_tile_zoom,
+                        fallback_tile_zoom = fallback_tile_zoom,
+                        destination = candidate_destination,
+                    )
+                ) {
+                    continue
+                }
+                closer_future = previous
+                closest_zoom_distance = zoom_distance
+            }
+        }
+        if (closer_future != null) {
+            if (closer_future !== primary) promote_retained_frame(closer_future)
+            retained_frame_destination(closer_future, viewport, destination)
+            return closer_future
+        }
+
         if (primary != null && retained_frame_is_eligible(
                 primary,
                 canvas,
@@ -2550,6 +3336,31 @@ internal class ReferenceDictionaryOverlayRenderer(
             )
         ) {
             return primary
+        }
+        var covering_target_history: RetainedReferenceFrame? = null
+        for (previous in retained_frame_history) {
+            if (previous !== primary &&
+                previous.matches_environment(
+                    viewport = viewport,
+                    next = options,
+                    current_package_generation = package_generation.get(),
+                ) &&
+                previous.is_drawable() &&
+                retained_target_frame_can_settle(
+                    frame = previous,
+                    viewport = viewport,
+                    target_tile_zoom = target_tile_zoom,
+                    fallback_tile_zoom = fallback_tile_zoom,
+                    destination = destination,
+                )
+            ) {
+                covering_target_history = previous
+                break
+            }
+        }
+        if (covering_target_history != null) {
+            promote_retained_frame(covering_target_history)
+            return covering_target_history
         }
         val fallback = retained_fallback_frame
         if (fallback != null && fallback !== primary && retained_frame_is_eligible(
@@ -2564,6 +3375,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         ) {
             return fallback
         }
+        var historical: RetainedReferenceFrame? = null
         for (previous in retained_frame_history) {
             if (previous !== primary && previous !== fallback && retained_frame_is_eligible(
                     previous,
@@ -2575,10 +3387,119 @@ internal class ReferenceDictionaryOverlayRenderer(
                     destination,
                 )
             ) {
+                historical = previous
+                break
+            }
+        }
+        if (historical != null) {
+            promote_retained_frame(historical)
+            return historical
+        }
+
+        val displayed = displayed_retained_frame
+        if (displayed != null && retained_frame_is_emergency_eligible(
+                frame = displayed,
+                viewport = viewport,
+                options = options,
+                target_tile_zoom = target_tile_zoom,
+                fallback_tile_zoom = fallback_tile_zoom,
+                destination = destination,
+            )
+        ) {
+            return displayed
+        }
+        if (primary != null && primary !== displayed &&
+            retained_frame_is_emergency_eligible(
+                frame = primary,
+                viewport = viewport,
+                options = options,
+                target_tile_zoom = target_tile_zoom,
+                fallback_tile_zoom = fallback_tile_zoom,
+                destination = destination,
+            )
+        ) {
+            return primary
+        }
+        if (fallback != null && fallback !== displayed && fallback !== primary &&
+            retained_frame_is_emergency_eligible(
+                frame = fallback,
+                viewport = viewport,
+                options = options,
+                target_tile_zoom = target_tile_zoom,
+                fallback_tile_zoom = fallback_tile_zoom,
+                destination = destination,
+            )
+        ) {
+            return fallback
+        }
+        for (previous in retained_frame_history) {
+            if (previous !== displayed && previous !== primary && previous !== fallback &&
+                retained_frame_is_emergency_eligible(
+                    frame = previous,
+                    viewport = viewport,
+                    options = options,
+                    target_tile_zoom = target_tile_zoom,
+                    fallback_tile_zoom = fallback_tile_zoom,
+                    destination = destination,
+                )
+            ) {
                 return previous
             }
         }
         return null
+    }
+
+    private fun retained_history_has_exact_target(
+        viewport: Viewport,
+        tile_zoom: Int,
+        options: RetainedReferenceOptions,
+    ): Boolean {
+        val current_generation = package_generation.get()
+        for (frame in retained_frame_history) {
+            if (frame.matches_exact(
+                    viewport = viewport,
+                    next_tile_zoom = tile_zoom,
+                    next = options,
+                    current_package_generation = current_generation,
+                )
+            ) return true
+        }
+        return false
+    }
+
+    private fun retained_frames_have_covering_target(
+        viewport: Viewport,
+        tile_zoom: Int,
+        options: RetainedReferenceOptions,
+    ): Boolean {
+        val current_generation = package_generation.get()
+        val active = retained_frame
+        if (active != null &&
+            active.matches_environment(viewport, options, current_generation) &&
+            retained_target_frame_can_settle(
+                frame = active,
+                viewport = viewport,
+                target_tile_zoom = tile_zoom,
+                fallback_tile_zoom = null,
+                destination = candidate_destination,
+            )
+        ) {
+            return true
+        }
+        for (frame in retained_frame_history) {
+            if (frame.matches_environment(viewport, options, current_generation) &&
+                retained_target_frame_can_settle(
+                    frame = frame,
+                    viewport = viewport,
+                    target_tile_zoom = tile_zoom,
+                    fallback_tile_zoom = null,
+                    destination = candidate_destination,
+                )
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun retained_frame_is_eligible(
@@ -2600,7 +3521,53 @@ internal class ReferenceDictionaryOverlayRenderer(
             !frame.is_drawable()
         ) return false
         retained_frame_destination(frame, viewport, destination)
-        return reference_retained_covers_viewport(destination, viewport)
+        return reference_retained_covers_viewport(destination, viewport) &&
+            frame.has_visible_content(viewport, destination)
+    }
+
+    private fun retained_frame_is_emergency_eligible(
+        frame: RetainedReferenceFrame,
+        viewport: Viewport,
+        options: RetainedReferenceOptions,
+        target_tile_zoom: Int,
+        fallback_tile_zoom: Int?,
+        destination: ReferenceRetainedDestination,
+    ): Boolean {
+        if (!frame.matches_options(options) ||
+            frame.package_generation != package_generation.get() ||
+            !ReferenceDictionaryLodPolicy.can_reuse_scene_during_interaction(
+                frame.tile_zoom,
+                target_tile_zoom,
+                fallback_tile_zoom,
+            ) ||
+            !frame.is_drawable()
+        ) return false
+        retained_frame_destination(frame, viewport, destination)
+        return reference_retained_covers_viewport(destination, viewport) &&
+            frame.has_visible_content(viewport, destination)
+    }
+
+    private fun retained_fallback_needs_build(
+        canvas: Canvas,
+        viewport: Viewport,
+        options: RetainedReferenceOptions,
+        target_tile_zoom: Int,
+        fallback_tile_zoom: Int?,
+    ): Boolean {
+        val fallback = retained_fallback_frame
+        return fallback_tile_zoom != null && (
+            fallback == null ||
+                fallback.tile_zoom != fallback_tile_zoom ||
+                !retained_frame_is_eligible(
+                    frame = fallback,
+                    canvas = canvas,
+                    viewport = viewport,
+                    options = options,
+                    target_tile_zoom = target_tile_zoom,
+                    fallback_tile_zoom = fallback_tile_zoom,
+                    destination = fallback_destination,
+                )
+            )
     }
 
     private fun draw_retained_frame_with_transition(
@@ -2610,33 +3577,91 @@ internal class ReferenceDictionaryOverlayRenderer(
         now_ms: Long,
         destination: ReferenceRetainedDestination? = null,
     ) {
-        val previously_displayed = displayed_retained_frame
-        if (previously_displayed != null && previously_displayed !== frame &&
-            previously_displayed.options == frame.options &&
-            previously_displayed.package_generation == frame.package_generation
-        ) {
-            retained_fade = retained_reference_fade(previously_displayed, frame, now_ms)
+        val current_destination = destination ?: retained_destination.also {
+            retained_frame_destination(frame, viewport, it)
         }
-        displayed_retained_frame = frame
-        val fade = retained_fade
-        if (fade == null || fade.previous === frame || !fade.previous.is_drawable() ||
-            fade.previous.options != frame.options ||
-            fade.previous.package_generation != frame.package_generation
+        var established = displayed_retained_frame
+        var carried_fade_elapsed_ms = 0L
+        val interrupted_fade = retained_fade
+        if (established != null &&
+            interrupted_fade != null &&
+            interrupted_fade.previous === established &&
+            interrupted_fade.current !== frame &&
+            established.options == frame.options &&
+            established.package_generation == frame.package_generation &&
+            established.is_drawable()
         ) {
+            val interrupted_elapsed_ms = (now_ms - interrupted_fade.start_ms)
+                .coerceIn(0L, RETAINED_FRAME_FADE_MS.toLong())
+            if (frame === interrupted_fade.previous) {
+                established = interrupted_fade.current
+                carried_fade_elapsed_ms =
+                    RETAINED_FRAME_FADE_MS.toLong() - interrupted_elapsed_ms
+            } else {
+                val carry = reference_retained_fade_carry(
+                    previous = interrupted_fade.previous,
+                    current = interrupted_fade.current,
+                    elapsedMs = interrupted_elapsed_ms,
+                    durationMs = RETAINED_FRAME_FADE_MS.toLong(),
+                )
+                established = carry.established
+                carried_fade_elapsed_ms = carry.elapsedMs
+            }
+            displayed_retained_frame = established
             cleanup_retained_fade()
-            draw_retained_frame(canvas, viewport, frame, destination = destination)
+        }
+        if (established == null || established === frame ||
+            established.options != frame.options ||
+            established.package_generation != frame.package_generation ||
+            !established.is_drawable()
+        ) {
+            displayed_retained_frame = reference_retained_displayed_frame(
+                established = established,
+                requested = frame,
+                transition_complete = true,
+            )
+            cleanup_retained_fade()
+            draw_retained_frame(canvas, viewport, frame, destination = current_destination)
             return
         }
+
+        val active_fade = retained_fade
+        if (active_fade == null ||
+            active_fade.previous !== established ||
+            active_fade.current !== frame
+        ) {
+            retained_frame_destination(established, viewport, fading_destination)
+            retained_fade = retained_reference_fade(
+                previous = established,
+                current = frame,
+                previous_destination = fading_destination,
+                current_destination = current_destination,
+                start_ms = now_ms - carried_fade_elapsed_ms,
+            )
+        }
+        val fade = requireNotNull(retained_fade)
         val raw_progress = ((now_ms - fade.start_ms).toFloat() / RETAINED_FRAME_FADE_MS)
             .coerceIn(0f, 1f)
         if (raw_progress >= 1f) {
+            displayed_retained_frame = reference_retained_displayed_frame(
+                established = established,
+                requested = frame,
+                transition_complete = true,
+            )
             cleanup_retained_fade()
-            draw_retained_frame(canvas, viewport, frame, destination = destination)
+            draw_retained_frame(canvas, viewport, frame, destination = current_destination)
             return
         }
+        displayed_retained_frame = reference_retained_displayed_frame(
+            established = established,
+            requested = frame,
+            transition_complete = false,
+        )
         val eased_progress = raw_progress * raw_progress * (3f - 2f * raw_progress)
         val previous_alpha = (255f * (1f - eased_progress)).roundToInt().coerceIn(0, 255)
         val current_alpha = (255f * eased_progress).roundToInt().coerceIn(0, 255)
+        val leaving_label_alpha = reference_retained_leaving_label_alpha(raw_progress)
+        val entering_label_alpha = reference_retained_entering_label_alpha(raw_progress)
         retained_frame_destination(fade.previous, viewport, fading_destination)
         draw_retained_frame(
             canvas = canvas,
@@ -2646,9 +3671,6 @@ internal class ReferenceDictionaryOverlayRenderer(
             destination = fading_destination,
             draw_labels = false,
         )
-        val current_destination = destination ?: retained_destination.also {
-            retained_frame_destination(frame, viewport, it)
-        }
         draw_retained_frame(
             canvas = canvas,
             viewport = viewport,
@@ -2662,7 +3684,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             viewport = viewport,
             frame = fade.previous,
             destination = fading_destination,
-            alpha = previous_alpha,
+            alpha = leaving_label_alpha,
             labels = fade.labels.leaving,
         )
         draw_retained_labels(
@@ -2670,7 +3692,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             viewport = viewport,
             frame = frame,
             destination = current_destination,
-            alpha = current_alpha,
+            alpha = entering_label_alpha,
             fully_visible = fade.labels.continuing_current,
         )
         request_redraw()
@@ -2747,13 +3769,23 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
     }
 
-    private fun retained_frame_covers_viewport(
+    private fun retained_target_frame_can_settle(
         frame: RetainedReferenceFrame,
         viewport: Viewport,
+        target_tile_zoom: Int,
+        fallback_tile_zoom: Int?,
         destination: ReferenceRetainedDestination,
     ): Boolean {
         retained_frame_destination(frame, viewport, destination)
-        return reference_retained_covers_viewport(destination, viewport)
+        return frame.has_visible_content(viewport, destination) &&
+            reference_retained_scene_can_settle(
+            destination = destination,
+            viewport = viewport,
+            frameZoom = frame.zoom,
+            frameTileZoom = frame.tile_zoom,
+            targetTileZoom = target_tile_zoom,
+            fallbackTileZoom = fallback_tile_zoom,
+        )
     }
 
     private fun retained_frame_destination(
@@ -2783,23 +3815,134 @@ internal class ReferenceDictionaryOverlayRenderer(
         )
     }
 
+    private fun stage_zoom_ahead_labels(
+        viewport: Viewport,
+        source_zoom: Int,
+        labels_enabled: Boolean,
+        label_text_scale: Float,
+        place_labels_enabled: Boolean,
+        water_labels_enabled: Boolean,
+        region_labels_enabled: Boolean,
+        public_lands_enabled: Boolean,
+        filter_mask: ReferenceFilterMask,
+        label_avoid_rects: List<ReferenceScreenRect>,
+        options: RetainedReferenceOptions,
+    ): Int {
+        if (!labels_enabled) {
+            clear_zoom_ahead_desired_tile_keys()
+            return 0
+        }
+        if (retained_label_coordinator.hasCurrentRequest()) return 0
+        var future_viewport: Viewport? = null
+        var step = 1
+        while (step <= ZOOM_AHEAD_PRESENTATION_STEPS) {
+            val future_zoom = reference_retained_zoom_ahead_target(
+                viewportZoom = viewport.zoom,
+                step = step,
+                interval = ZOOM_AHEAD_PRESENTATION_DELTA,
+                maximumZoom = MAX_ZOOM.toDouble(),
+            ) ?: break
+            val candidate = reference_retained_viewport_at_zoom(
+                viewport = viewport,
+                targetZoom = future_zoom,
+            ) ?: break
+            if (!retained_frames_have_covering_target(candidate, source_zoom, options)) {
+                future_viewport = candidate
+                break
+            }
+            step++
+        }
+        if (future_viewport == null) {
+            clear_zoom_ahead_desired_tile_keys()
+            return 0
+        }
+
+        val future_frame_viewport = retained_frame_viewport(
+            viewport = future_viewport,
+            tile_zoom = source_zoom,
+        )
+        build_visible_tile_list(
+            output = zoom_ahead_visible_tiles,
+            viewport = future_frame_viewport,
+            core_viewport = future_viewport,
+            tile_zoom = source_zoom,
+            outline_visibility_zoom = viewport.zoom,
+        )
+        if (zoom_ahead_visible_tiles.isEmpty()) {
+            clear_zoom_ahead_desired_tile_keys()
+            return 0
+        }
+
+        val generation = update_zoom_ahead_desired_tile_keys(zoom_ahead_visible_tiles)
+        zoom_ahead_draw_tiles.clear()
+        var missing = 0
+        var requested = 0
+        for (tile in zoom_ahead_visible_tiles) {
+            val parsed = synchronized(tile_cache) {
+                tile_cache.get(tile.cache_key(), tile.low_zoom_profile())
+            }
+            if (parsed == null) {
+                missing++
+                if (requested < ZOOM_AHEAD_TILE_PREFETCH_REQUESTS_PER_DRAW) {
+                    requested += request_tile_if_needed(tile, generation)
+                }
+            } else {
+                zoom_ahead_draw_tiles += DictionaryTileDrawRef(
+                    tile = parsed,
+                    draw_x = tile.draw_x,
+                    core_visible = tile.core_visible,
+                )
+            }
+        }
+        if (missing > 0) return requested
+
+        clear_zoom_ahead_desired_tile_keys()
+        request_retained_label_frame(
+            role = RetainedFrameRole.TARGET,
+            viewport = future_viewport,
+            frame_viewport = future_frame_viewport,
+            tile_zoom = source_zoom,
+            tiles = zoom_ahead_draw_tiles,
+            labels_enabled = true,
+            label_text_scale = label_text_scale,
+            place_labels_enabled = place_labels_enabled,
+            water_labels_enabled = water_labels_enabled,
+            region_labels_enabled = region_labels_enabled,
+            public_lands_enabled = public_lands_enabled,
+            filter_mask = filter_mask,
+            label_avoid_rects = label_avoid_rects,
+            options = options,
+            package_generation_snapshot = package_generation.get(),
+        )
+        return 0
+    }
+
     private fun retained_frame_padding_px(
         viewport: Viewport,
         tile_zoom: Int,
     ): Int {
-        val longest_side = max(viewport.width, viewport.height)
-        val visual_padding = (longest_side * RETAINED_FRAME_PADDING_FRACTION)
-            .roundToInt()
-            .coerceIn(RETAINED_FRAME_PADDING_MIN_PX, RETAINED_FRAME_PADDING_MAX_PX)
         val tile_size_px = MAP_TILE_SIZE * 2.0.pow(viewport.zoom - tile_zoom)
-        val tile_budget_padding = reference_retained_padding_px(
-            viewport_width = viewport.width,
-            viewport_height = viewport.height,
-            tile_size_px = tile_size_px,
-            maximum_dimension = MAX_RETAINED_FRAME_SIZE,
-            maximum_tiles = MAX_TARGET_SCENE_TILES,
+        return reference_retained_scene_padding_px(
+            viewportWidth = viewport.width,
+            viewportHeight = viewport.height,
+            tileSizePx = tile_size_px,
+            maximumDimension = MAX_RETAINED_FRAME_SIZE,
+            maximumTiles = MAX_TARGET_SCENE_TILES,
+            repeatingWorldWidthPx = retained_repeating_world_width_px(
+                viewport,
+                tile_zoom,
+            ),
         )
-        return minOf(visual_padding, tile_budget_padding)
+    }
+
+    private fun retained_repeating_world_width_px(
+        viewport: Viewport,
+        tile_zoom: Int,
+    ): Double? {
+        if (tile_zoom != ReferenceDictionaryLodPolicy.LOW_ZOOM_SOURCE_LOD ||
+            viewport.zoom > ReferenceDictionaryLodPolicy.LOW_ZOOM_SOURCE_LOD
+        ) return null
+        return MAP_TILE_SIZE * 2.0.pow(viewport.zoom)
     }
 
     private fun replace_retained_frame(next: RetainedReferenceFrame?) {
@@ -2810,20 +3953,93 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
     }
 
+    private fun publish_retained_target_frame(
+        frame: RetainedReferenceFrame,
+        viewport: Viewport,
+        target_tile_zoom: Int,
+        fallback_tile_zoom: Int?,
+        options: RetainedReferenceOptions,
+        current_generation: Long,
+    ) {
+        val active = retained_frame
+        if (active == null) {
+            replace_retained_frame(frame)
+            return
+        }
+        if (active.matches_exact(
+                viewport = viewport,
+                next_tile_zoom = target_tile_zoom,
+                next = options,
+                current_package_generation = current_generation,
+            )
+        ) return
+        if (active.matches_environment(viewport, options, current_generation) &&
+            retained_target_frame_can_settle(
+                frame = active,
+                viewport = viewport,
+                target_tile_zoom = target_tile_zoom,
+                fallback_tile_zoom = fallback_tile_zoom,
+                destination = retained_destination,
+            )
+        ) {
+            retained_frame_history.remember(frame)
+            return
+        }
+        replace_retained_frame(frame)
+    }
+
+    private fun promote_retained_frame(next: RetainedReferenceFrame) {
+        if (retained_frame === next) return
+        retained_frame_history.remove(next)
+        replace_retained_frame(next)
+    }
+
     private fun retained_reference_fade(
         previous: RetainedReferenceFrame,
         current: RetainedReferenceFrame,
+        previous_destination: ReferenceRetainedDestination,
+        current_destination: ReferenceRetainedDestination,
         start_ms: Long,
     ): RetainedReferenceFade {
         return RetainedReferenceFade(
             previous = previous,
+            current = current,
             labels = reference_retained_label_transition(
                 previous = previous.labels,
                 current = current.labels,
                 identity = DictionaryLabelCandidate::occurrenceId,
+                samePlacement = { old, next ->
+                    reference_retained_label_anchor_is_stable(
+                        previousAnchor = old.anchor,
+                        previousDestination = previous_destination,
+                        previousFrameWidth = previous.width,
+                        currentAnchor = next.anchor,
+                        currentDestination = current_destination,
+                        currentFrameWidth = current.width,
+                    )
+                },
             ),
             start_ms = start_ms,
         )
+    }
+
+    private fun retained_scene_padding_for_viewport(
+        viewport: Viewport,
+        tile_zoom: Int,
+    ): Int {
+        val active = retained_frame
+        if (active != null &&
+            active.tile_zoom == tile_zoom &&
+            kotlin.math.abs(active.zoom - viewport.zoom) < EXACT_VIEWPORT_EPSILON &&
+            active.visible_width == ceil(viewport.width).toInt().coerceAtLeast(1) &&
+            active.visible_height == ceil(viewport.height).toInt().coerceAtLeast(1)
+        ) {
+            return minOf(
+                (active.width - active.visible_width) / 2,
+                (active.height - active.visible_height) / 2,
+            ).coerceAtLeast(0)
+        }
+        return retained_frame_padding_px(viewport, tile_zoom)
     }
 
     private fun replace_retained_fallback_frame(next: RetainedReferenceFrame?) {
@@ -5361,6 +6577,34 @@ internal class ReferenceDictionaryOverlayRenderer(
         val tile: BoundaryRasterTile?,
     )
 
+    private data class BoundaryRasterScene(
+        val band: ReferenceBoundaryRasterBand,
+        val bounds: ReferenceBoundaryRasterWindowBounds,
+        val keys: Set<ReferenceBoundaryRasterKey>,
+    ) {
+        fun matches_environment(settingsKey: Long, packageGeneration: Long): Boolean {
+            return band.settingsKey == settingsKey &&
+                band.packageGeneration == packageGeneration
+        }
+
+        fun covers(viewport: Viewport): Boolean {
+            return reference_boundary_raster_window_covers(
+                bounds = bounds,
+                viewportZoom = viewport.zoom,
+                centerX = viewport.center_x,
+                centerY = viewport.center_y,
+                viewportWidth = viewport.width,
+                viewportHeight = viewport.height,
+            )
+        }
+    }
+
+    private data class BoundaryRasterFade(
+        val previous: BoundaryRasterScene,
+        val currentBand: ReferenceBoundaryRasterBand,
+        val startMs: Long,
+    )
+
     private data class BoundaryRasterTile(
         val key: ReferenceBoundaryRasterKey,
         val bitmap: Bitmap,
@@ -5368,6 +6612,121 @@ internal class ReferenceDictionaryOverlayRenderer(
         val boundaries: Int,
         val byteCount: Long,
     )
+
+    private class BoundaryRasterCellWindow {
+        private var raster_zoom = Int.MIN_VALUE
+        private var padding_cells = 0
+        private var core_first_x = 0
+        private var core_first_y = 0
+        private var core_last_x = 0
+        private var core_last_y = 0
+        private var center_x = 0
+        private var center_y = 0
+        private var key_band: ReferenceBoundaryRasterBand? = null
+        private var key_revision = -1
+        private val keys = ArrayList<ReferenceBoundaryRasterKey>()
+        private var bounds_revision = -1
+        private var cached_bounds: ReferenceBoundaryRasterWindowBounds? = null
+        private var core_bounds_revision = -1
+        private var cached_core_bounds: ReferenceBoundaryRasterWindowBounds? = null
+        var revision = 0
+            private set
+
+        fun matches(
+            next_raster_zoom: Int,
+            next_padding_cells: Int,
+            next_core_first_x: Int,
+            next_core_first_y: Int,
+            next_core_last_x: Int,
+            next_core_last_y: Int,
+            next_center_x: Int,
+            next_center_y: Int,
+        ): Boolean {
+            return raster_zoom == next_raster_zoom &&
+                padding_cells == next_padding_cells &&
+                core_first_x == next_core_first_x &&
+                core_first_y == next_core_first_y &&
+                core_last_x == next_core_last_x &&
+                core_last_y == next_core_last_y &&
+                center_x == next_center_x &&
+                center_y == next_center_y
+        }
+
+        fun update(
+            next_raster_zoom: Int,
+            next_padding_cells: Int,
+            next_core_first_x: Int,
+            next_core_first_y: Int,
+            next_core_last_x: Int,
+            next_core_last_y: Int,
+            next_center_x: Int,
+            next_center_y: Int,
+        ) {
+            raster_zoom = next_raster_zoom
+            padding_cells = next_padding_cells
+            core_first_x = next_core_first_x
+            core_first_y = next_core_first_y
+            core_last_x = next_core_last_x
+            core_last_y = next_core_last_y
+            center_x = next_center_x
+            center_y = next_center_y
+            revision++
+        }
+
+        fun keys_for(
+            band: ReferenceBoundaryRasterBand,
+            cells: List<ReferenceBoundaryRasterCell>,
+        ): List<ReferenceBoundaryRasterKey> {
+            if (key_band == band && key_revision == revision) return keys
+            keys.clear()
+            for (cell in cells) {
+                keys += ReferenceBoundaryRasterKey(band, cell.x, cell.y)
+            }
+            key_band = band
+            key_revision = revision
+            return keys
+        }
+
+        fun bounds(): ReferenceBoundaryRasterWindowBounds {
+            if (bounds_revision == revision) return requireNotNull(cached_bounds)
+            val tile_limit = 1 shl raster_zoom
+            val bounds = ReferenceBoundaryRasterWindowBounds(
+                rasterZoom = raster_zoom,
+                firstDrawX = core_first_x - padding_cells,
+                lastDrawX = core_last_x + padding_cells,
+                firstY = (core_first_y - padding_cells).coerceAtLeast(0),
+                lastY = (core_last_y + padding_cells).coerceAtMost(tile_limit - 1),
+            )
+            cached_bounds = bounds
+            bounds_revision = revision
+            return bounds
+        }
+
+        fun core_bounds(): ReferenceBoundaryRasterWindowBounds {
+            if (core_bounds_revision == revision) return requireNotNull(cached_core_bounds)
+            val tile_limit = 1 shl raster_zoom
+            val bounds = ReferenceBoundaryRasterWindowBounds(
+                rasterZoom = raster_zoom,
+                firstDrawX = core_first_x,
+                lastDrawX = core_last_x,
+                firstY = core_first_y.coerceAtLeast(0),
+                lastY = core_last_y.coerceAtMost(tile_limit - 1),
+            )
+            cached_core_bounds = bounds
+            core_bounds_revision = revision
+            return bounds
+        }
+
+        fun invalidate() {
+            if (raster_zoom != Int.MIN_VALUE) {
+                raster_zoom = Int.MIN_VALUE
+                revision++
+            }
+            key_band = null
+            key_revision = -1
+            keys.clear()
+        }
+    }
 
     private data class BoundaryRasterDrawResult(
         val boundaries: Int,
@@ -5703,11 +7062,23 @@ internal class ReferenceDictionaryOverlayRenderer(
         val package_generation: Long,
         val boundaries_drawn: Int,
         val labels: List<DictionaryLabelCandidate>,
+        val label_coverage: ReferenceRetainedLabelCoverage,
     ) {
         val labels_drawn: Int get() = labels.size
 
         fun matches_options(next: RetainedReferenceOptions): Boolean {
             return options == next
+        }
+
+        fun matches_environment(
+            viewport: Viewport,
+            next: RetainedReferenceOptions,
+            current_package_generation: Long,
+        ): Boolean {
+            return matches_options(next) &&
+                package_generation == current_package_generation &&
+                visible_width == ceil(viewport.width).toInt().coerceAtLeast(1) &&
+                visible_height == ceil(viewport.height).toInt().coerceAtLeast(1)
         }
 
         fun matches_exact(
@@ -5716,23 +7087,38 @@ internal class ReferenceDictionaryOverlayRenderer(
             next: RetainedReferenceOptions,
             current_package_generation: Long,
         ): Boolean {
-            return matches_options(next) &&
+            return matches_environment(viewport, next, current_package_generation) &&
                     tile_zoom == next_tile_zoom &&
-                    package_generation == current_package_generation &&
-                    visible_width == ceil(viewport.width).toInt().coerceAtLeast(1) &&
-                    visible_height == ceil(viewport.height).toInt().coerceAtLeast(1) &&
                     kotlin.math.abs(zoom - viewport.zoom) < EXACT_VIEWPORT_EPSILON &&
                     kotlin.math.abs(center_x - viewport.center_x) < EXACT_VIEWPORT_EPSILON &&
                     kotlin.math.abs(center_y - viewport.center_y) < EXACT_VIEWPORT_EPSILON
         }
 
         fun has_content(): Boolean {
-            return labels.isNotEmpty() ||
-                boundary_batches.isNotEmpty()
+            return reference_retained_scene_has_content(
+                labelCount = labels.size,
+                boundaryBatchCount = boundary_batches.size,
+            )
         }
 
         fun is_drawable(): Boolean {
-            return options.labels_enabled || boundary_batches.isNotEmpty()
+            return has_content()
+        }
+
+        fun has_visible_content(
+            viewport: Viewport,
+            destination: ReferenceRetainedDestination,
+        ): Boolean {
+            if (boundary_batches.isNotEmpty()) return true
+            if (labels.isEmpty()) return false
+            val zoom_scale = (destination.right - destination.left) / width
+            if (!zoom_scale.isFinite() || zoom_scale <= 0.0) return false
+            return label_coverage.intersects(
+                left = -destination.left / zoom_scale,
+                top = -destination.top / zoom_scale,
+                right = (viewport.width - destination.left) / zoom_scale,
+                bottom = (viewport.height - destination.top) / zoom_scale,
+            )
         }
     }
 
@@ -5743,6 +7129,7 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private data class RetainedReferenceFade(
         val previous: RetainedReferenceFrame,
+        val current: RetainedReferenceFrame,
         val labels: ReferenceRetainedLabelTransition<DictionaryLabelCandidate>,
         val start_ms: Long
     )
@@ -5776,18 +7163,22 @@ internal class ReferenceDictionaryOverlayRenderer(
         const val WATER_CURVED_SOURCE_DISTANCE_FRACTION = 1f
         const val PADDED_TILE_PREFETCH_REQUESTS_PER_DRAW = 2
         const val FALLBACK_TILE_PREFETCH_REQUESTS_PER_DRAW = 4
+        const val ZOOM_AHEAD_TILE_PREFETCH_REQUESTS_PER_DRAW = 2
+        const val ZOOM_AHEAD_PRESENTATION_DELTA = 1.0
+        const val ZOOM_AHEAD_PRESENTATION_STEPS = 4
+        const val ZOOM_AHEAD_HANDOFF_LEAD = 0.25
         const val BOUNDARY_RASTER_GUTTER_PX = 16
         const val BOUNDARY_RASTER_REQUESTS_PER_DRAW = 8
-        const val BOUNDARY_RASTER_HISTORY_LIMIT = 4
+        const val BOUNDARY_RASTER_SAFETY_REQUESTS_PER_DRAW = 4
+        const val BOUNDARY_RASTER_SAFETY_PADDING_CELLS = 1
         const val BOUNDARY_RASTER_CACHE_BYTES = 128L * 1024L * 1024L
-        const val RETAINED_FRAME_PADDING_FRACTION = 0.20f
-        const val RETAINED_FRAME_PADDING_MIN_PX = 128
-        const val RETAINED_FRAME_PADDING_MAX_PX = 512
+        const val BOUNDARY_RASTER_RESIDENT_CACHE_BYTES = 32L * 1024L * 1024L
+        const val BOUNDARY_RASTER_FADE_MS = 220L
         const val RETAINED_FRAME_FADE_MS = 220f
-        const val RETAINED_FRAME_HISTORY_LIMIT = 3
+        const val RETAINED_FRAME_HISTORY_LIMIT = 5
         const val MAX_RETAINED_FRAME_SIZE = 8192
         const val MAX_RETAINED_PADDING_LABELS = 96
-        const val MAX_TARGET_SCENE_TILES = 88
+        const val MAX_TARGET_SCENE_TILES = 160
         const val RETAINED_BITMAP_FAILURE_RETRY_MS = 2_000L
         const val MIN_BOUNDARY_DRAW_SCALE = 0.000_1f
         const val EXACT_VIEWPORT_EPSILON = 0.000_001

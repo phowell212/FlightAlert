@@ -38,6 +38,14 @@ internal data class ReferenceBoundaryRasterKey(
     val y: Int,
 )
 
+internal data class ReferenceBoundaryRasterWindowBounds(
+    val rasterZoom: Int,
+    val firstDrawX: Int,
+    val lastDrawX: Int,
+    val firstY: Int,
+    val lastY: Int,
+)
+
 internal fun reference_boundary_raster_band(
     viewportZoom: Double,
     sourceZoom: Int,
@@ -142,6 +150,118 @@ internal fun reference_boundary_raster_work_is_suspended(
     return interactionActive && hasActiveBand
 }
 
+internal fun reference_boundary_raster_safety_zoom(
+    viewportZoom: Double,
+    minimumZoom: Int,
+): Int {
+    return max(minimumZoom, floor(viewportZoom).toInt() - SAFETY_RASTER_LOD_DELTA)
+}
+
+internal fun reference_boundary_raster_safety_center(
+    center: Double,
+    viewportZoom: Double,
+    safetyZoom: Int,
+): Double {
+    return center * 2.0.pow(safetyZoom - viewportZoom)
+}
+
+internal fun reference_boundary_raster_window_covers(
+    bounds: ReferenceBoundaryRasterWindowBounds,
+    viewportZoom: Double,
+    centerX: Double,
+    centerY: Double,
+    viewportWidth: Float,
+    viewportHeight: Float,
+): Boolean {
+    val tileScale = 256.0 * 2.0.pow(viewportZoom - bounds.rasterZoom)
+    val coreFirstX = floor((centerX - viewportWidth / 2.0) / tileScale).toInt()
+    val coreLastX = floor((centerX + viewportWidth / 2.0) / tileScale).toInt()
+    val tileLimit = 1 shl bounds.rasterZoom
+    val coreFirstY = floor((centerY - viewportHeight / 2.0) / tileScale)
+        .toInt()
+        .coerceAtLeast(0)
+    val coreLastY = floor((centerY + viewportHeight / 2.0) / tileScale)
+        .toInt()
+        .coerceAtMost(tileLimit - 1)
+    if (coreFirstY <= coreLastY &&
+        (coreFirstY < bounds.firstY || coreLastY > bounds.lastY)
+    ) {
+        return false
+    }
+
+    val worldShift = Math.floorDiv(bounds.firstDrawX - coreFirstX, tileLimit)
+    val alignedFirstX = coreFirstX + worldShift * tileLimit
+    val alignedLastX = coreLastX + worldShift * tileLimit
+    return alignedFirstX >= bounds.firstDrawX && alignedLastX <= bounds.lastDrawX ||
+        alignedFirstX + tileLimit >= bounds.firstDrawX &&
+        alignedLastX + tileLimit <= bounds.lastDrawX
+}
+
+internal fun reference_boundary_raster_should_draw_safety(
+    active: ReferenceBoundaryRasterBand,
+    safety: ReferenceBoundaryRasterBand,
+    viewportZoom: Double,
+): Boolean {
+    return reference_boundary_raster_safety_blend(active, safety, viewportZoom) >= 1f
+}
+
+internal fun reference_boundary_raster_safety_blend(
+    active: ReferenceBoundaryRasterBand,
+    safety: ReferenceBoundaryRasterBand,
+    viewportZoom: Double,
+): Float {
+    if (safety.presentationCentizoom >= active.presentationCentizoom) return 0f
+    val blendStartZoom = active.presentationCentizoom / 100.0
+    val blendEndZoom = safety.presentationCentizoom / 100.0
+    return (
+        (blendStartZoom - viewportZoom) /
+            (blendStartZoom - blendEndZoom)
+        )
+        .toFloat()
+        .coerceIn(0f, 1f)
+}
+
+internal fun reference_boundary_raster_continuity_band(
+    active: ReferenceBoundaryRasterBand,
+    safety: ReferenceBoundaryRasterBand?,
+    resident: ReferenceBoundaryRasterBand?,
+): ReferenceBoundaryRasterBand? {
+    var closestLowerBand: ReferenceBoundaryRasterBand? = null
+    if (safety != null && safety.presentationCentizoom < active.presentationCentizoom) {
+        closestLowerBand = safety
+    }
+    if (resident != null &&
+        resident.presentationCentizoom < active.presentationCentizoom &&
+        (closestLowerBand == null ||
+            resident.presentationCentizoom > closestLowerBand.presentationCentizoom)
+    ) {
+        closestLowerBand = resident
+    }
+    return closestLowerBand
+}
+
+internal fun reference_boundary_raster_fade_underlay(
+    elapsedMillis: Long,
+    durationMillis: Long,
+): Float {
+    if (durationMillis <= 0L || elapsedMillis >= durationMillis) return 0f
+    if (elapsedMillis <= 0L) return 1f
+    val progress = elapsedMillis.toFloat() / durationMillis
+    val easedProgress = progress * progress * (3f - 2f * progress)
+    return 1f - easedProgress
+}
+
+internal fun reference_boundary_raster_padding_cells(
+    retainedPaddingPx: Int,
+    rasterCellScreenPx: Double,
+    interactionActive: Boolean,
+): Int {
+    if (interactionActive) return 1
+    return ceil(retainedPaddingPx.coerceAtLeast(0) / rasterCellScreenPx)
+        .toInt()
+        .coerceAtLeast(1)
+}
+
 internal fun reference_boundary_raster_completion_is_current(
     requestPackageGeneration: Long,
     currentPackageGeneration: Long,
@@ -220,4 +340,5 @@ private fun clip_reference_boundary_edge(
 }
 
 private const val MINIMUM_LOW_ZOOM_RASTER_LOD = 2
+private const val SAFETY_RASTER_LOD_DELTA = 2
 private const val BOUNDARY_RASTER_CANCELLATION_MASK = 255

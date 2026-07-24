@@ -15,12 +15,19 @@ internal object ReferenceDictionaryLodPolicy {
         } else {
             maxOf(MINIMUM_PHONE_OVERZOOM_LOD, floor(viewportZoom - PHONE_OVERZOOM).toInt())
         }
-        val minimumZoom = availableZooms.minOrNull() ?: return null
-        val maximumZoom = availableZooms.maxOrNull() ?: return null
-        return targetZoom.coerceIn(minimumZoom, maximumZoom)
-            .takeIf { it in availableZooms }
-            ?: availableZooms.filter { it <= targetZoom }.maxOrNull()
-            ?: minimumZoom
+        var minimumZoom = Int.MAX_VALUE
+        var maximumZoom = Int.MIN_VALUE
+        var bestBelowTarget = Int.MIN_VALUE
+        for (zoom in availableZooms) {
+            if (zoom < minimumZoom) minimumZoom = zoom
+            if (zoom > maximumZoom) maximumZoom = zoom
+            if (zoom <= targetZoom && zoom > bestBelowTarget) {
+                bestBelowTarget = zoom
+            }
+        }
+        val clampedTarget = targetZoom.coerceIn(minimumZoom, maximumZoom)
+        if (clampedTarget in availableZooms) return clampedTarget
+        return bestBelowTarget.takeUnless { it == Int.MIN_VALUE } ?: minimumZoom
     }
 
     fun select_fallback(
@@ -28,9 +35,7 @@ internal object ReferenceDictionaryLodPolicy {
         targetZoom: Int,
         availableZooms: Set<Int>,
     ): Int? {
-        if (viewportZoom < LOW_ZOOM_SOURCE_LOD && targetZoom == LOW_ZOOM_SOURCE_LOD) {
-            return null
-        }
+        if (targetZoom == LOW_ZOOM_SOURCE_LOD) return null
         var fallback: Int? = null
         for (zoom in availableZooms) {
             if (zoom >= targetZoom || targetZoom - zoom > MAX_FALLBACK_DELTA) continue
@@ -42,6 +47,15 @@ internal object ReferenceDictionaryLodPolicy {
     fun can_reuse_scene(sceneZoom: Int, targetZoom: Int, fallbackZoom: Int?): Boolean {
         return sceneZoom in targetZoom..targetZoom + 1 ||
             (fallbackZoom != null && sceneZoom in fallbackZoom until targetZoom)
+    }
+
+    fun can_reuse_scene_during_interaction(
+        sceneZoom: Int,
+        targetZoom: Int,
+        fallbackZoom: Int?,
+    ): Boolean {
+        return can_reuse_scene(sceneZoom, targetZoom, fallbackZoom) ||
+            sceneZoom < targetZoom
     }
 
     fun outline_decode_profile(viewport_zoom: Double, source_zoom: Int): Int? {
@@ -68,6 +82,6 @@ internal object ReferenceDictionaryLodPolicy {
     private const val PHONE_OVERZOOM_START = 8.0
     private const val PHONE_OVERZOOM = 1.5
     private const val MINIMUM_PHONE_OVERZOOM_LOD = 7
-    private const val LOW_ZOOM_SOURCE_LOD = 4
+    const val LOW_ZOOM_SOURCE_LOD = 4
     private const val MAX_FALLBACK_DELTA = 2
 }
