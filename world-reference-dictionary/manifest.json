@@ -22,7 +22,7 @@
       { "tileCount": 4194304, "xMax": 2047, "xMin": 0, "yMax": 2047, "yMin": 0, "z": 11 }
     ]
   },
-  "packageId": "world-reference-dictionary-v4",
+  "packageId": "world-reference-dictionary",
   "payloadSchema": "flightalert.reference.renderer-tile.v1",
   "presentationPolicySha256": "dce9bd4b789c0528318dbb184e17efe7465f444550ba0180efd82e1cb7219154",
   "rendererSemanticStreamSha256": "a4698b39604059738a5ec834a0645587e74549de2c037030105ec3bf92b5ccf7",

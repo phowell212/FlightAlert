@@ -372,7 +372,7 @@ internal class ReferenceDictionaryPackage private constructor(
     }
 
     companion object {
-        const val REFERENCE_PACKAGE_ID = "world-reference-dictionary-v4"
+        const val REFERENCE_PACKAGE_ID = "world-reference-dictionary"
         const val RENDER_PACKAGE_ID = "world-reference-dictionary-v5"
         private const val RECORDS_FILE_NAME = "world-reference-records.bin"
         private const val INDEX_FILE_NAME = "world-reference-tile-index.bin"

@@ -42,7 +42,7 @@ This file contains durable repository constraints. It is not a backlog, roadmap,
 - Maintain one buildable Android project. Do not create duplicate source trees, manifests, or Gradle projects.
 - Gradle and Android Studio project configuration is intentionally local-only. Do not add those files to Git.
 - Do not modify, delete, or commit user-local Android Studio state. Keep IDE files, `local.properties`, build outputs, generated files, temporary media, comparison artifacts, agent scratch files, and secrets out of Git.
-- `references/` contains large, immutable runtime dictionary data, not experiment tooling. Do not copy, rewrite, hash, or include it in broad text scans unless the task requires it. If the assets move or change names, update every corresponding Kotlin path and format expectation.
+- `world-reference-dictionary/` contains large, immutable runtime dictionary data, not experiment tooling. Do not copy, rewrite, hash, or include it in broad text scans unless the task requires it. If the assets move or change names, update every corresponding Kotlin path and format expectation.
 - Keep `README.md` public-facing and accurate. Keep only reusable agent constraints here; do not add task prompts, plans, run logs, generated evidence, or stale experiment notes.
 - Prefer HTTPS. Never hardcode credentials, API keys, tokens, personal device IDs, or private test artifacts. Avoid exposing sensitive details in lock-screen notifications.
 

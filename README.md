@@ -1,35 +1,28 @@
 # Flight Alert
 
-Flight Alert is a native Kotlin Android app that gives drone pilots map-first awareness of nearby aircraft. It combines live public traffic feeds with maps, aircraft details, configurable filters, aviation layers, and proximity alerts.
+### Nearby aircraft, rendered for drone pilots—not airline passengers.
 
-Flight Alert is supplemental situational awareness only. It is not a certified detect-and-avoid system.
+Flight Alert turns an Android phone or tablet into a map-first aircraft-awareness display. It combines live public traffic, aviation context, and a worldwide offline reference dictionary so a pilot can see what is nearby, what it is doing, and whether it is entering a configured alert volume.
 
-Current version: **1.10** &middot; Minimum Android version: **Android 10 (API 29)**
+Current release: **1.10** · Minimum Android version: **Android 10 (API 29)**
 
-## Features
+> Flight Alert is supplemental situational awareness. It is not a certified detect-and-avoid system.
 
-- Live aircraft from Airplanes.Live, with OpenSky fallback.
-- Street, no-label, and satellite maps.
-- Aircraft identity, altitude, motion, source freshness, route, trace, registry data, and photos when sources provide them.
-- Search and filters for aircraft class, altitude, range, airborne state, report age, and alert-volume membership.
-- Configurable horizontal and vertical alert volumes with extreme-priority notifications.
-- FAA airspace, airport, and North Atlantic Track layers.
-- Worldwide OpenStreetMap-derived labels, waterways, and administrative boundaries from the included reference dictionary.
+## One screen, four jobs
 
-Unavailable source data is shown as loading or unavailable; the app does not invent missing values.
+**See traffic.** Aircraft from Airplanes.Live, with OpenSky fallback, are drawn over street, no-label, or satellite maps with source age and motion kept visible.
 
-## Repository layout
+**Understand the aircraft.** Selection opens identity, altitude, route, trace, registry, and photo details when the underlying providers actually have them.
 
-```text
-app/            Android application source and resources
-references/     Runtime reference dictionary data
-AGENTS.md       Repository guidance for coding agents
-README.md       Project and setup documentation
-```
+**Read the airspace.** FAA airspace, airports, North Atlantic Tracks, and the bundled OpenStreetMap-derived labels, waterways, and administrative boundaries share the same map.
 
-Gradle, Android Studio, and other local project configuration are intentionally not tracked. They remain in configured development checkouts but are not part of the public Git tree.
+**Know when it matters.** Horizontal and vertical alert volumes drive proximity warnings and extreme-priority notifications. Map filters change what is drawn; they do not silently remove traffic from alert monitoring.
 
-`references/world-reference-dictionary-v4/` holds the complete dictionary used by the app:
+## The two halves of this repository
+
+`app/` is the native Kotlin Android application.
+
+`world-reference-dictionary/` is the immutable runtime map dictionary shipped beside it. It contains:
 
 ```text
 class-catalog.bin
@@ -38,54 +31,40 @@ world-reference-records.part-0001-of-0195.bin ... part-0195-of-0195.bin
 world-reference-tile-index.part-0001-of-0002.bin ... part-0002-of-0002.bin
 ```
 
-The 197 binary parts are ordinary Git files no larger than 95 MiB. Flight Alert reads them directly as two logical files; no download or reassembly step is required after cloning. The directory's exact combined size is **19,495,730,581 bytes** (19.50 GB / 18.16 GiB). Allow additional space for Git's object database, the Android SDK, Gradle cache, and APK build output.
+The 197 binary parts are ordinary Git files no larger than 95 MiB. Flight Alert reads them as two logical files without a download or reassembly step. Their exact combined size is **19,495,730,581 bytes** (19.50 GB / 18.16 GiB), so allow extra room for Git, the Android SDK, Gradle, and APK output.
 
-## Build and install
+Gradle and Android Studio configuration stay local to configured development checkouts; the public tree contains the application source and the data it consumes.
 
-Requirements:
+## Build and load it
 
-- Android Studio with its bundled JDK, or an equivalent Gradle-compatible JDK.
-- Android SDK Platform 37 and Android SDK Platform Tools.
-- An Android 10 or newer device with USB debugging enabled and at least 20 GB free for the dictionary and app.
+You need Android Studio with its bundled JDK, Android SDK Platform 37, Platform Tools, and an Android 10 or newer device with USB debugging enabled.
 
-Build from a configured local Android Studio project, or use its local Gradle wrapper:
+From a configured local checkout:
 
 ```powershell
 .\gradlew.bat assembleDebug
-```
-
-The APK is created at `build/outputs/apk/debug/Flight Alert-debug.apk`. Install it, then copy the included dictionary to the app's external-files directory:
-
-```powershell
 adb install -r ".\build\outputs\apk\debug\Flight Alert-debug.apk"
 
 $deviceReferences = "/sdcard/Android/data/com.flightalert/files/references"
 adb shell mkdir -p $deviceReferences
-adb push ".\references\world-reference-dictionary-v4" "$deviceReferences/"
+adb push ".\world-reference-dictionary" "$deviceReferences/"
 ```
 
-Launch Flight Alert and grant the requested permissions.
+Launch Flight Alert and grant Location, Notifications, Foreground-service location, and Internet access when Android asks for them.
 
-## Sources and attribution
+## Missing data stays missing
 
-- Aircraft traffic and metadata: Airplanes.Live and OpenSky.
-- Flight traces: Airplanes.Live and ADSB.lol.
-- Registry and aircraft photos: FAA Registry and PlaneSpotters where available.
-- Maps: CARTO using OpenStreetMap data, and Esri World Imagery.
-- Aviation layers: FAA public services.
-- Reference dictionary: OpenStreetMap planet data dated 2026-06-29.
+Public ADS-B and MLAT feeds can be delayed, incomplete, or rate-limited. Small drones and non-transmitting aircraft generally cannot be detected. Device altitude can also be inaccurate.
 
-Map and reference data: [&copy; OpenStreetMap contributors](https://www.openstreetmap.org/copyright). The derived reference database is made available under the [Open Data Commons Open Database License 1.0](https://opendatacommons.org/licenses/odbl/1-0/).
+Flight Alert therefore shows `Loading` or `Unavailable` instead of inventing identity, position, altitude, route, trace, ownership, or safety claims. Vertical separation is unavailable when either altitude is missing, and environmental-impact values remain estimates rather than measured fuel burn.
 
-Other providers retain their respective terms and attribution.
+## Data and attribution
 
-## Safety and permissions
+- Live traffic and metadata: Airplanes.Live and OpenSky
+- Flight traces: Airplanes.Live and ADSB.lol
+- Registry and aircraft photos: FAA Registry and PlaneSpotters
+- Base maps: CARTO/OpenStreetMap and Esri World Imagery
+- Aviation layers: FAA public services
+- Offline reference dictionary: OpenStreetMap planet data dated 2026-06-29
 
-- Public ADS-B and MLAT feeds can be delayed, incomplete, rate-limited, or missing aircraft. Small drones and non-transmitting aircraft generally cannot be detected.
-- Device altitude accuracy varies. Vertical separation is unavailable when either altitude is missing.
-- Map filters affect visible traffic; alert monitoring continues against the complete live feed.
-- Environmental-impact figures are estimates, not measured fuel burn.
-- **Location** centers the map and calculates alert separation.
-- **Notifications** deliver extreme-priority aircraft alerts.
-- **Foreground-service location** keeps monitoring active in the background.
-- **Internet** loads traffic, maps, traces, metadata, photos, and aviation layers.
+Map and reference data: [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright). The derived reference database is available under the [Open Data Commons Open Database License 1.0](https://opendatacommons.org/licenses/odbl/1-0/). Other providers retain their respective terms and attribution.
