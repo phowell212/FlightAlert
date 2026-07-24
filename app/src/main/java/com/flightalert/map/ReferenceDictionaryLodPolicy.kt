@@ -3,6 +3,7 @@ package com.flightalert.map
 import kotlin.math.floor
 
 internal object ReferenceDictionaryLodPolicy {
+    const val LABEL_ONLY_OUTLINE_PROFILE = 0
     const val LOW_ZOOM_OUTLINE_PROFILE = 400
 
     fun select(viewportZoom: Double, availableZooms: Set<Int>): Int? {

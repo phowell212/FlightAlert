@@ -6,9 +6,7 @@ import java.security.MessageDigest
 internal fun reference_boundary_raster_disk_cacheable(
     band: ReferenceBoundaryRasterBand,
 ): Boolean {
-    return band.sourceZoom == LOW_ZOOM_REFERENCE_SOURCE &&
-        band.presentationCentizoom in 0 until LOW_ZOOM_REFERENCE_SOURCE * 100 &&
-        band.presentationCentizoom % 100 == 0
+    return band.sourceZoom <= MAX_DISK_CACHED_REFERENCE_SOURCE
 }
 
 internal fun reference_boundary_raster_disk_namespace(
@@ -41,4 +39,4 @@ internal const val REFERENCE_BOUNDARY_RASTER_CACHE_ROOT =
     "reference_boundary_raster_tiles"
 private const val REFERENCE_BOUNDARY_RASTER_CACHE_VERSION =
     "reference-boundary-raster-cache-v2"
-private const val LOW_ZOOM_REFERENCE_SOURCE = 4
+private const val MAX_DISK_CACHED_REFERENCE_SOURCE = 6

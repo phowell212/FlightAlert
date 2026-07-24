@@ -1015,7 +1015,8 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     private fun request_tile_if_needed(
         tile: VisibleDictionaryTile,
-        generation: Long
+        generation: Long,
+        additionally_relevant: (() -> Boolean)? = null,
     ): Int {
         val cache_key = tile.cache_key()
         synchronized(tile_cache) {
@@ -1028,7 +1029,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                 if (request_became_obsolete) {
                     false
                 } else {
-                    val relevant = tile_request_still_relevant(cache_key, generation)
+                    val relevant = tile_request_still_relevant(cache_key, generation) ||
+                        additionally_relevant?.invoke() == true
                     if (!relevant) request_became_obsolete = true
                     relevant
                 }
@@ -1188,10 +1190,17 @@ internal class ReferenceDictionaryOverlayRenderer(
         val center_tile_x = floor(viewport.center_x * tile_world_scale / MAP_TILE_SIZE).toInt()
         val center_tile_y = floor(viewport.center_y * tile_world_scale / MAP_TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
-        val outline_visibility_centizoom = ReferenceDictionaryLodPolicy.outline_decode_profile(
-            outline_visibility_zoom,
-            tile_zoom,
-        )
+        val outline_visibility_centizoom =
+            if (package_snapshot?.info?.runtime_schema ==
+                ReferenceDictionaryRuntimeSchema.RENDER_TILE_V1
+            ) {
+                ReferenceDictionaryLodPolicy.LABEL_ONLY_OUTLINE_PROFILE
+            } else {
+                ReferenceDictionaryLodPolicy.outline_decode_profile(
+                    outline_visibility_zoom,
+                    tile_zoom,
+                )
+            }
         for (ty in first_tile_y..last_tile_y) {
             if (ty !in 0 until max_tile) continue
             for (tx_raw in first_tile_x..last_tile_x) {
@@ -2056,6 +2065,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                     source_requests += request_tile_if_needed(
                         source_tile,
                         tile_request_generation,
+                        additionally_relevant = {
+                            boundary_raster_request_is_relevant(key)
+                        },
                     )
                 }
             }
@@ -7220,7 +7232,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         const val RETAINED_FRAME_HISTORY_LIMIT = 5
         const val MAX_RETAINED_FRAME_SIZE = 8192
         const val MAX_RETAINED_PADDING_LABELS = 96
-        const val MAX_TARGET_SCENE_TILES = 160
+        const val MAX_TARGET_SCENE_TILES = 64
         const val RETAINED_BITMAP_FAILURE_RETRY_MS = 2_000L
         const val MIN_BOUNDARY_DRAW_SCALE = 0.000_1f
         const val EXACT_VIEWPORT_EPSILON = 0.000_001

@@ -112,7 +112,7 @@ internal object ReferenceDictionaryRenderTileCodec {
             requireRender(geometryKind != ReferenceDictionaryBinaryGeometryKind.POINT) {
                 "render-ready outline geometry must be a path or polygon"
             }
-            if (!skipGeometry(reader, geometryKind, control)) return null
+            if (!skipGeometry(reader, control)) return null
             requireRender(!reader.boolean("sourced-text presence")) {
                 "render-ready outlines forbid text"
             }
@@ -311,7 +311,6 @@ internal object ReferenceDictionaryRenderTileCodec {
 
     private fun skipGeometry(
         reader: Reader,
-        kind: ReferenceDictionaryBinaryGeometryKind,
         control: DecodeControl,
     ): Boolean {
         val partCount = reader.u32Int("geometry part count")
@@ -322,29 +321,14 @@ internal object ReferenceDictionaryRenderTileCodec {
         requireRender(pointCount in 1..MAX_GEOMETRY_POINTS) {
             "render-ready geometry point count exceeds its bound"
         }
-        requireRender(partCount <= pointCount && pointCount <= reader.remaining / 8) {
+        val byteCount = partCount.toLong() * 4L + pointCount.toLong() * 8L
+        requireRender(partCount <= pointCount && byteCount <= reader.remaining.toLong()) {
             "render-ready geometry counts exceed the remaining tile"
         }
         if (!control.keepDecoding()) return false
-        val parts = IntArray(partCount)
-        for (index in parts.indices) {
-            if (index % PART_CANCELLATION_INTERVAL == 0 && !control.keepDecoding()) return false
-            parts[index] = reader.u32Int("geometry part offset")
-        }
-        validatePartOffsets(kind, parts, pointCount)
-        val coordinateOffset = reader.position
-        if (kind == ReferenceDictionaryBinaryGeometryKind.POLYGON) {
-            parts.forEachIndexed { index, start ->
-                if (index % PART_CANCELLATION_INTERVAL == 0 && !control.keepDecoding()) {
-                    return false
-                }
-                val end = if (index + 1 < parts.size) parts[index + 1] else pointCount
-                requireRender(reader.pointsMatch(coordinateOffset, start, end - 1)) {
-                    "render-ready polygon ring is not exactly closed"
-                }
-            }
-        }
-        return reader.skipFiniteFloat32(pointCount * 2, control)
+        // Hidden geometry is never rendered; its verified tile bytes only need a bounded skip.
+        reader.skip(byteCount.toInt())
+        return control.keepDecoding()
     }
 
     private fun validatePartOffsets(
@@ -417,7 +401,7 @@ internal object ReferenceDictionaryRenderTileCodec {
         }
     }
 
-    private fun requireRender(condition: Boolean, message: () -> String) {
+    private inline fun requireRender(condition: Boolean, message: () -> String) {
         if (!condition) throw ReferenceDictionaryBinaryTileException(message())
     }
 
@@ -427,7 +411,6 @@ internal object ReferenceDictionaryRenderTileCodec {
     private class Reader(private val bytes: ByteArray) {
         private var offset = 0
         val remaining: Int get() = bytes.size - offset
-        val position: Int get() = offset
 
         fun take(length: Int): ByteArray {
             requireRender(length >= 0 && length <= remaining) {
@@ -471,40 +454,11 @@ internal object ReferenceDictionaryRenderTileCodec {
 
         fun f32(): Float = Float.fromBits(i32())
 
-        fun pointsMatch(coordinateOffset: Int, firstPoint: Int, secondPoint: Int): Boolean {
-            val firstOffset = coordinateOffset + firstPoint * 8
-            val secondOffset = coordinateOffset + secondPoint * 8
-            requireRender(
-                firstOffset >= offset && secondOffset >= offset &&
-                    firstOffset + 8 <= bytes.size && secondOffset + 8 <= bytes.size,
-            ) { "render-ready reference bytes are truncated" }
-            for (index in 0 until 8) {
-                if (bytes[firstOffset + index] != bytes[secondOffset + index]) return false
-            }
-            return true
-        }
-
-        fun skipFiniteFloat32(count: Int, control: DecodeControl): Boolean {
-            requireRender(count >= 0 && count <= remaining / 4) {
+        fun skip(length: Int) {
+            requireRender(length >= 0 && length <= remaining) {
                 "render-ready reference bytes are truncated"
             }
-            val end = offset + count * 4
-            var skipped = 0
-            while (offset < end) {
-                if (skipped % FLOAT_CANCELLATION_INTERVAL == 0 && !control.keepDecoding()) {
-                    return false
-                }
-                val bits = bytes[offset].toInt() and 0xff or
-                    ((bytes[offset + 1].toInt() and 0xff) shl 8) or
-                    ((bytes[offset + 2].toInt() and 0xff) shl 16) or
-                    ((bytes[offset + 3].toInt() and 0xff) shl 24)
-                requireRender(bits and 0x7f80_0000 != 0x7f80_0000) {
-                    "render-ready geometry coordinate is non-finite"
-                }
-                offset += 4
-                skipped += 1
-            }
-            return true
+            offset += length
         }
 
         fun finish() {
