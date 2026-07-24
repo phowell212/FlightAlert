@@ -206,6 +206,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val label_scaled_density = sp(1f)
     private var retained_frame: RetainedReferenceFrame? = null
     private var retained_fallback_frame: RetainedReferenceFrame? = null
+    private var partial_label_frame: RetainedReferenceFrame? = null
     private var retained_fade: RetainedReferenceFade? = null
     private var displayed_retained_frame: RetainedReferenceFrame? = null
     private var retained_label_interaction_active = false
@@ -690,27 +691,12 @@ internal class ReferenceDictionaryOverlayRenderer(
             )
         }
 
-        if (!ready && core_missing > 0) {
-            return ReferenceDictionaryOverlayDrawStats(
-                available = true,
-                ready = layer_ready,
-                visible_tiles = visible_tiles.size,
-                loaded_tiles = draw_tiles.size,
-                requested_tiles = maxOf(requested, missing),
-                boundaries_drawn = boundary_raster.boundaries,
-                labels_drawn = 0,
-                retained_frame_drawn = false,
-                fading = false,
-            )
-        }
-
         if (!ready) {
-            val counts = draw_reference_content(
-                canvas = canvas,
+            val partial = partial_label_frame_for(
                 viewport = viewport,
+                tile_zoom = tile_zoom,
                 tiles = core_draw_tiles,
                 labels_enabled = labels_enabled,
-                borders_enabled = false,
                 label_text_scale = label_text_scale,
                 place_labels_enabled = place_labels_enabled,
                 water_labels_enabled = water_labels_enabled,
@@ -718,7 +704,11 @@ internal class ReferenceDictionaryOverlayRenderer(
                 public_lands_enabled = public_lands_enabled,
                 filter_mask = filter_mask,
                 label_avoid_rects = label_avoid_rects,
+                options = options,
             )
+            partial?.let { frame ->
+                draw_retained_frame_with_transition(canvas, viewport, frame, now_ms)
+            }
             return ReferenceDictionaryOverlayDrawStats(
                 available = true,
                 ready = false,
@@ -726,9 +716,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 loaded_tiles = draw_tiles.size,
                 requested_tiles = maxOf(requested, missing),
                 boundaries_drawn = boundary_raster.boundaries,
-                labels_drawn = counts.labels,
-                retained_frame_drawn = false,
-                fading = false,
+                labels_drawn = partial?.labels_drawn ?: 0,
+                retained_frame_drawn = partial != null,
+                fading = partial != null && retained_fade != null,
             )
         }
 
@@ -747,7 +737,8 @@ internal class ReferenceDictionaryOverlayRenderer(
                     fallback_tile_zoom = fallback_zoom,
                     destination = retained_destination,
                 )
-            ) {
+                ) {
+                partial_label_frame = null
                 if (fallback_needs_build && fallback_ready &&
                     !retained_label_coordinator.hasCurrentRequest()
                 ) {
@@ -840,6 +831,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 now_ms = now_ms,
             )
             if (retained != null) {
+                partial_label_frame = null
                 return ReferenceDictionaryOverlayDrawStats(
                     available = true,
                     ready = layer_ready,
@@ -852,6 +844,28 @@ internal class ReferenceDictionaryOverlayRenderer(
                     fading = retained_fade != null,
                 )
             }
+        }
+
+        partial_label_frame?.takeIf { frame ->
+            frame.matches_exact(
+                viewport = viewport,
+                next_tile_zoom = tile_zoom,
+                next = options,
+                current_package_generation = package_generation.get(),
+            )
+        }?.let { partial ->
+            draw_retained_frame_with_transition(canvas, viewport, partial, now_ms)
+            return ReferenceDictionaryOverlayDrawStats(
+                available = true,
+                ready = layer_ready,
+                visible_tiles = visible_tiles.size,
+                loaded_tiles = draw_tiles.size,
+                requested_tiles = if (layer_ready) 0 else maxOf(requested, missing),
+                boundaries_drawn = boundary_raster.boundaries,
+                labels_drawn = partial.labels_drawn,
+                retained_frame_drawn = true,
+                fading = retained_fade != null,
+            )
         }
 
         val counts = draw_reference_content(
@@ -4064,9 +4078,58 @@ internal class ReferenceDictionaryOverlayRenderer(
         retained_fade = null
     }
 
+    private fun partial_label_frame_for(
+        viewport: Viewport,
+        tile_zoom: Int,
+        tiles: List<DictionaryTileDrawRef>,
+        labels_enabled: Boolean,
+        label_text_scale: Float,
+        place_labels_enabled: Boolean,
+        water_labels_enabled: Boolean,
+        region_labels_enabled: Boolean,
+        public_lands_enabled: Boolean,
+        filter_mask: ReferenceFilterMask,
+        label_avoid_rects: List<ReferenceScreenRect>,
+        options: RetainedReferenceOptions,
+    ): RetainedReferenceFrame? {
+        val package_generation_snapshot = package_generation.get()
+        partial_label_frame?.takeIf { frame ->
+            frame.matches_exact(
+                viewport = viewport,
+                next_tile_zoom = tile_zoom,
+                next = options,
+                current_package_generation = package_generation_snapshot,
+            )
+        }?.let { return it }
+        partial_label_frame = null
+        if (!labels_enabled || viewport.zoom >= MIN_PATH_LABEL_ZOOM || tiles.isEmpty()) return null
+
+        // Freeze the first partial point-label plan so incoming tiles cannot make labels jump.
+        return create_retained_frame(
+            boundary_batches = emptyList(),
+            viewport = viewport,
+            frame_viewport = viewport,
+            tile_zoom = tile_zoom,
+            tiles = tiles,
+            labels_enabled = true,
+            borders_enabled = false,
+            label_text_scale = label_text_scale,
+            place_labels_enabled = place_labels_enabled,
+            water_labels_enabled = water_labels_enabled,
+            region_labels_enabled = region_labels_enabled,
+            public_lands_enabled = public_lands_enabled,
+            filter_mask = filter_mask,
+            label_avoid_rects = label_avoid_rects,
+            options = options,
+            package_generation_snapshot = package_generation_snapshot,
+        )?.takeIf { frame -> frame.labels.isNotEmpty() }
+            ?.also { frame -> partial_label_frame = frame }
+    }
+
     private fun clear_retained_frames() {
         retained_frame = null
         retained_fallback_frame = null
+        partial_label_frame = null
         retained_fade = null
         displayed_retained_frame = null
         retained_frame_history.clear()
@@ -7219,7 +7282,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         const val FALLBACK_TILE_PREFETCH_REQUESTS_PER_DRAW = 4
         const val ZOOM_AHEAD_TILE_PREFETCH_REQUESTS_PER_DRAW = 2
         const val ZOOM_AHEAD_PRESENTATION_DELTA = 1.0
-        const val ZOOM_AHEAD_PRESENTATION_STEPS = 4
+        const val ZOOM_AHEAD_PRESENTATION_STEPS = 0
         const val ZOOM_AHEAD_HANDOFF_LEAD = 0.25
         const val BOUNDARY_RASTER_GUTTER_PX = 16
         const val BOUNDARY_RASTER_REQUESTS_PER_DRAW = 8
