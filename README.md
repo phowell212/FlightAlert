@@ -1,6 +1,6 @@
 # Flight Alert
 
-### Nearby aircraft, rendered for drone pilots—not airline passengers.
+### Nearby and far away aircraft, rendered for drone pilots.
 
 Flight Alert turns an Android phone or tablet into a map-first aircraft-awareness display. It combines live public traffic, aviation context, and a worldwide offline reference dictionary so a pilot can see what is nearby, what it is doing, and whether it is entering a configured alert volume.
 
