@@ -40,5 +40,5 @@ internal fun reference_boundary_raster_disk_namespace(
 internal const val REFERENCE_BOUNDARY_RASTER_CACHE_ROOT =
     "reference_boundary_raster_tiles"
 private const val REFERENCE_BOUNDARY_RASTER_CACHE_VERSION =
-    "reference-boundary-raster-cache-v1"
+    "reference-boundary-raster-cache-v2"
 private const val LOW_ZOOM_REFERENCE_SOURCE = 4
