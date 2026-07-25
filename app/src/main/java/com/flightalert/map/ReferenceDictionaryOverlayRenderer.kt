@@ -213,10 +213,6 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val retained_frame_history =
         ReferenceRetainedSceneHistory<RetainedReferenceFrame>(RETAINED_FRAME_HISTORY_LIMIT)
 
-    init {
-        request_package_probe_if_due()
-    }
-
     fun draw(
         canvas: Canvas,
         viewport: Viewport,
@@ -901,6 +897,10 @@ internal class ReferenceDictionaryOverlayRenderer(
 
     fun package_check_pending(): Boolean {
         return package_probe_pending.get() != null
+    }
+
+    fun prepare() {
+        request_package_probe_if_due()
     }
 
     fun reference_class_catalog(): ReferenceClassCatalog? {

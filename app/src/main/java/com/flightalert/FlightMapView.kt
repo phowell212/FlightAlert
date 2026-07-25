@@ -55,9 +55,9 @@ import com.flightalert.aircraft.AircraftRegistryResolver
 import com.flightalert.aircraft.RegistryCountrySource
 import com.flightalert.aircraft.TrafficDisplay
 import com.flightalert.aircraft.aircraft_identity_key
+import com.flightalert.alerts.AircraftAlertService
 import com.flightalert.alerts.AlertAircraft
 import com.flightalert.alerts.AlertAircraftClassifier
-import com.flightalert.alerts.AircraftAlertService
 import com.flightalert.alerts.AlertPositionProjector
 import com.flightalert.alerts.MonitoringNotificationHiderService
 import com.flightalert.alerts.ProjectedAlertPosition
@@ -115,20 +115,19 @@ import com.flightalert.map.AviationLayerRenderer
 import com.flightalert.map.AviationLayerSnapshot
 import com.flightalert.map.AviationLayerStyle
 import com.flightalert.map.AviationLayerVisibility
+import com.flightalert.map.AviationSelection
 import com.flightalert.map.AviationSelectionKey
 import com.flightalert.map.AviationSelectionPolicy
-import com.flightalert.map.AviationSelection
 import com.flightalert.map.Bounds
 import com.flightalert.map.DeviceHeadingProvider
-import com.flightalert.map.FilterId
 import com.flightalert.map.FilterState
-import com.flightalert.map.ReferenceClassCatalog
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapMeasurementFormatter
 import com.flightalert.map.MapProjection
 import com.flightalert.map.MapTileRenderState
 import com.flightalert.map.MapTileRenderStyle
 import com.flightalert.map.MapTileRenderer
+import com.flightalert.map.ReferenceClassCatalog
 import com.flightalert.map.ReferenceLabelAvoidance
 import com.flightalert.map.ReferenceScreenRect
 import com.flightalert.map.ScaleLabel
@@ -166,8 +165,8 @@ import com.flightalert.traffic.TrafficOverlayStateBuilder
 import com.flightalert.traffic.TrafficOverlayStyle
 import com.flightalert.traffic.TrafficScreenProjector
 import com.flightalert.traffic.TrafficSelectionHitTester
-import com.flightalert.traffic.TrafficSpriteFootprints
 import com.flightalert.traffic.TrafficSpatialEntry
+import com.flightalert.traffic.TrafficSpriteFootprints
 import com.flightalert.ui.AviationLayersPanelState
 import com.flightalert.ui.FilterPanelAction
 import com.flightalert.ui.FiltersPanelState
@@ -817,10 +816,13 @@ class FlightMapView(
     }
 
     fun defer_initial_satellite_map_until_reference_check_finishes() {
+        if (map_source != TileSource.SATELLITE || !map_borders_enabled) return
+        map_tile_renderer.prepare_reference_dictionary()
         viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
             override fun onPreDraw(): Boolean {
                 if (
                     map_source != TileSource.SATELLITE ||
+                    !map_borders_enabled ||
                     !map_tile_renderer.reference_package_check_pending()
                 ) {
                     viewTreeObserver.removeOnPreDrawListener(this)
@@ -3016,7 +3018,7 @@ class FlightMapView(
 
     private fun reference_filter_catalog_for_panel(): ReferenceClassCatalog? {
         return reference_filter_catalog_cache.update(
-            map_tile_renderer.reference_class_catalog(),
+            if (map_borders_enabled) map_tile_renderer.reference_class_catalog() else null,
         ) {
             reference_filters_panel_plan_cache_key = null
             reference_filters_panel_plan_cache = null
@@ -3957,12 +3959,13 @@ class FlightMapView(
     }
 
     private fun active_map_labels_enabled(): Boolean {
-        return if (map_source == TileSource.SATELLITE) true else map_labels_enabled
+        return if (map_source == TileSource.SATELLITE) map_borders_enabled else map_labels_enabled
     }
 
     private fun set_map_borders_enabled(enabled: Boolean) {
         if (map_borders_enabled == enabled) return
         map_borders_enabled = enabled
+        if (!enabled) map_tile_renderer.clear_reference_dictionary()
         map_tile_renderer.reset_transitions()
         prefs.edit { putBoolean(FlightAlertSettings.KEY_MAP_BORDERS_ENABLED, map_borders_enabled) }
         map_status = "Loading ${map_source.display_name.lowercase(Locale.US)} tiles"

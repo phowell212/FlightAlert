@@ -75,6 +75,10 @@ internal class SatelliteMapTileRenderer(
         return dictionary_reference_renderer.package_check_pending()
     }
 
+    fun prepare_reference_dictionary() {
+        dictionary_reference_renderer.prepare()
+    }
+
     private fun draw_reference_layers(
         canvas: Canvas,
         viewport: Viewport,
@@ -126,6 +130,10 @@ internal class SatelliteMapTileRenderer(
             fallback_drawn = 0,
             fading = false
         )
+    }
+
+    fun clear_reference_dictionary() {
+        dictionary_reference_renderer.clear()
     }
 
     fun clear() {

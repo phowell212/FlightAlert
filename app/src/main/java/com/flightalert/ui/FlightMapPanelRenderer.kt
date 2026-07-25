@@ -277,7 +277,7 @@ class FlightMapPanelRenderer(
         chrome.draw_choice_button(
             canvas,
             chrome.layout.map_borders_button_bounds(rect),
-            if (compact) "Borders" else "Countries + borders",
+            "Borders + labels",
             state.borders_enabled
         )
         draw_map_label_text_slider(

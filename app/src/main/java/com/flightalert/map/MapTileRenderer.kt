@@ -72,6 +72,14 @@ class MapTileRenderer(
         return satellite_renderer.reference_package_check_pending()
     }
 
+    fun prepare_reference_dictionary() {
+        satellite_renderer.prepare_reference_dictionary()
+    }
+
+    fun clear_reference_dictionary() {
+        satellite_renderer.clear_reference_dictionary()
+    }
+
     fun clear() {
         street_renderer.clear()
         satellite_renderer.clear()
