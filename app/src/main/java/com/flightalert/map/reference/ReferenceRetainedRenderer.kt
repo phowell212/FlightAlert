@@ -1784,4 +1784,3 @@ internal data class RetainedReferenceFade(
     val labels: ReferenceRetainedLabelTransition<DictionaryLabelCandidate>,
     val start_ms: Long
 )
-

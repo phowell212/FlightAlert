@@ -276,4 +276,3 @@ internal data class RetainedReferenceOptions(
     val filter_mask_key: Int,
     val label_text_scale_key: Int
 )
-
