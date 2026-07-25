@@ -22,7 +22,7 @@ adb install -r ".\build\outputs\apk\debug\Flight Alert-debug.apk"
 
 $deviceReferences = "/sdcard/Android/data/com.flightalert/files/references"
 adb shell mkdir -p $deviceReferences
-adb push ".\world-reference-dictionary" "$deviceReferences/"
+adb push ".\references\world-reference-dictionary-v5" "$deviceReferences/"
 ```
 
 ## Data and attribution
