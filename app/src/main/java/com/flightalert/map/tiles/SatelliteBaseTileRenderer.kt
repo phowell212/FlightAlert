@@ -6,7 +6,7 @@
     "PropertyName",
 )
 
-package com.flightalert.map
+package com.flightalert.map.tiles
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -19,6 +19,7 @@ import android.os.SystemClock
 import com.flightalert.MAP_TILE_CACHE_MAX_AGE_MS
 import com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES
 import com.flightalert.details.throwable_safe_https_url
+import com.flightalert.map.*
 import com.flightalert.ui.smooth_step
 import java.io.File
 import java.net.HttpURLConnection

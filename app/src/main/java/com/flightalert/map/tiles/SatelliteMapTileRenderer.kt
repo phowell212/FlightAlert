@@ -6,11 +6,12 @@
     "PropertyName",
 )
 
-package com.flightalert.map
+package com.flightalert.map.tiles
 
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
+import com.flightalert.map.*
 import java.util.concurrent.atomic.AtomicLong
 
 // Satellite imagery stays independent of local dictionary labels and borders.

@@ -378,7 +378,3 @@ object ReferencePresentationPolicy {
         return (quotient + if (remainder * 2L >= denominator) 1L else 0L).toInt()
     }
 }
-
-internal inline fun policy_require(condition: Boolean, message: () -> String) {
-    if (!condition) throw ReferencePolicyException(message())
-}

@@ -3,6 +3,10 @@ package com.flightalert.map
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 
+internal inline fun policy_require(condition: Boolean, message: () -> String) {
+    if (!condition) throw ReferencePolicyException(message())
+}
+
 internal fun require_sha256(value: String?, label: String): String {
     policy_require(value != null && value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }) {
         "$label must be 64 lowercase hexadecimal characters"

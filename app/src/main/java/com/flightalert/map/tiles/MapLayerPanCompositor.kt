@@ -6,12 +6,13 @@
     "PropertyName",
 )
 
-package com.flightalert.map
+package com.flightalert.map.tiles
 
 import android.graphics.Canvas
 import android.graphics.RenderNode
 import android.os.SystemClock
 import androidx.core.graphics.withTranslation
+import com.flightalert.map.Viewport
 import kotlin.math.abs
 import kotlin.math.ceil
 

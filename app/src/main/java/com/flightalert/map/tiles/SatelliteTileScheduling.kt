@@ -1,4 +1,4 @@
-package com.flightalert.map
+package com.flightalert.map.tiles
 
 internal enum class SatelliteBaseRequestKind {
     VISIBLE_PARENT,
@@ -6,6 +6,15 @@ internal enum class SatelliteBaseRequestKind {
     UPPER_PREFETCH,
     BUFFER_EXACT,
     BUFFER_PARENT
+}
+
+internal data class SatelliteBaseTileRequestOrder(
+    val generation: Long,
+    val kind: SatelliteBaseRequestKind,
+    val parentDepth: Int = 0,
+    val sequence: Long
+) {
+    val priority: Int = SatelliteBaseTilePolicy.priority(kind, parentDepth)
 }
 
 internal object SatelliteBaseTilePolicy {
@@ -54,4 +63,23 @@ internal object SatelliteBaseTilePolicy {
     private const val UPPER_PREFETCH_PRIORITY = 5
     private const val BUFFER_EXACT_PRIORITY = 10
     private const val BUFFER_PARENT_PRIORITY_BASE = 24
+}
+
+internal object SatelliteBaseTileScheduler {
+    fun compare(
+        first: SatelliteBaseTileRequestOrder,
+        second: SatelliteBaseTileRequestOrder
+    ): Int {
+        if (first.generation != second.generation) {
+            return second.generation.compareTo(first.generation)
+        }
+        if (first.priority != second.priority) {
+            return first.priority.compareTo(second.priority)
+        }
+        return first.sequence.compareTo(second.sequence)
+    }
+
+    fun ordered(requests: Collection<SatelliteBaseTileRequestOrder>): List<SatelliteBaseTileRequestOrder> {
+        return requests.sortedWith(::compare)
+    }
 }

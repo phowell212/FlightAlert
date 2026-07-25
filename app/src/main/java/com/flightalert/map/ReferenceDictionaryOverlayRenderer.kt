@@ -24,6 +24,7 @@ import android.os.SystemClock
 import androidx.core.graphics.withSave
 import com.flightalert.MAX_ZOOM
 import com.flightalert.MIN_ZOOM
+import com.flightalert.map.tiles.MapTileDiskCache
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
