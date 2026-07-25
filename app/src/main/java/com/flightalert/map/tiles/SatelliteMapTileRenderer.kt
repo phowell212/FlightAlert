@@ -12,6 +12,8 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import com.flightalert.map.*
+import com.flightalert.map.reference.ReferenceDictionaryOverlayRenderer
+import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
 import java.util.concurrent.atomic.AtomicLong
 
 // Satellite imagery stays independent of local dictionary labels and borders.

@@ -17,6 +17,9 @@ import com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES
 import com.flightalert.map.tiles.ProcessMapTileDiskCaches
 import com.flightalert.map.tiles.SatelliteMapTileRenderer
 import com.flightalert.map.tiles.StreetMapTileRenderer
+import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
+import com.flightalert.map.reference.dictionary.FilterState
+import com.flightalert.map.reference.labels.ReferenceScreenRect
 import java.io.File
 
 class MapTileRenderer(

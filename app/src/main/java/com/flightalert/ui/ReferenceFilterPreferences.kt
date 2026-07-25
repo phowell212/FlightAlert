@@ -2,9 +2,9 @@
 
 package com.flightalert.ui
 
-import com.flightalert.map.FilterId
-import com.flightalert.map.FilterState
-import com.flightalert.map.ReferencePolicyException
+import com.flightalert.map.reference.FilterId
+import com.flightalert.map.reference.dictionary.FilterState
+import com.flightalert.map.reference.ReferencePolicyException
 
 object ReferenceFilterPreferences {
     const val schema = "flight-alert-reference-filters-v1"

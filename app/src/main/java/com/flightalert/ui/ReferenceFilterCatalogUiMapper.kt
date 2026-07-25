@@ -1,14 +1,14 @@
 package com.flightalert.ui
 
-import com.flightalert.map.CatalogControlStatus
-import com.flightalert.map.FilterId
-import com.flightalert.map.FilterKind
-import com.flightalert.map.FilterState
-import com.flightalert.map.FontSlant
-import com.flightalert.map.LinePattern
-import com.flightalert.map.ReferenceClassCatalog
-import com.flightalert.map.ReferencePresentationPolicy
-import com.flightalert.map.SemanticSubtype
+import com.flightalert.map.reference.CatalogControlStatus
+import com.flightalert.map.reference.FilterId
+import com.flightalert.map.reference.FilterKind
+import com.flightalert.map.reference.FontSlant
+import com.flightalert.map.reference.LinePattern
+import com.flightalert.map.reference.ReferencePresentationPolicy
+import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
+import com.flightalert.map.reference.dictionary.FilterState
+import com.flightalert.map.reference.SemanticSubtype
 import java.util.Collections
 
 object ReferenceFilterCatalogUiMapper {

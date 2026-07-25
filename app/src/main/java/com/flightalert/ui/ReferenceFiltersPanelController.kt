@@ -1,8 +1,8 @@
 package com.flightalert.ui
 
-import com.flightalert.map.FilterId
-import com.flightalert.map.FilterState
-import com.flightalert.map.ReferenceClassCatalog
+import com.flightalert.map.reference.FilterId
+import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
+import com.flightalert.map.reference.dictionary.FilterState
 
 data class ReferenceFiltersPanelSession(
     val selectedTab: ReferenceFiltersTab = ReferenceFiltersTab.TRAFFIC,

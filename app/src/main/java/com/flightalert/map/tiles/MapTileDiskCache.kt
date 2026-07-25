@@ -1,7 +1,7 @@
 package com.flightalert.map.tiles
 
 import android.os.Process
-import com.flightalert.map.REFERENCE_BOUNDARY_RASTER_CACHE_ROOT
+import com.flightalert.map.reference.borders.REFERENCE_BOUNDARY_RASTER_CACHE_ROOT
 import java.io.Closeable
 import java.io.File
 import java.nio.file.Files
