@@ -74,7 +74,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val with_alpha: (Int, Int) -> Int,
     private val request_redraw: () -> Unit
 ) : Closeable {
-    private val package_store = ReferenceDictionaryPackageStore(context)
+    private val tile_repository = ReferenceTileRepository(context, request_redraw)
     private val boundary_raster_disk_root = File(
         context.cacheDir,
         REFERENCE_BOUNDARY_RASTER_CACHE_ROOT,
@@ -96,11 +96,6 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val retained_label_workspace = LabelPlanningWorkspace(
         Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG),
     )
-    private val requested_tiles = HashSet<String>()
-    private val desired_tile_keys = HashSet<String>()
-    private val next_desired_tile_keys = HashSet<String>()
-    private val zoom_ahead_desired_tile_keys = HashSet<String>()
-    private val next_zoom_ahead_desired_tile_keys = HashSet<String>()
     private val retained_destination = ReferenceRetainedDestination()
     private val fallback_destination = ReferenceRetainedDestination()
     private val fading_destination = ReferenceRetainedDestination()
@@ -112,29 +107,9 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val boundary_raster_destination = RectF()
     private val boundary_raster_paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     @Volatile
-    private var package_snapshot: PackageSnapshot? = null
-    @Volatile
-    private var package_retry_after_ms = 0L
-    private val package_probe_pending = AtomicReference<PackageProbe?>()
-    private val package_generation = AtomicLong()
-    private val package_lifecycle_lock = ReentrantLock()
-    @Volatile
     private var closed = false
-    private val content_revision = AtomicLong()
-    private val request_generation = AtomicLong()
-    private val tile_cache = ReferenceDictionaryTileMemoryCache<ParsedDictionaryTile>(
-        normalLimit = MAX_MEMORY_TILES,
-        lowZoomLimit = MAX_LOW_ZOOM_MEMORY_TILES,
-    )
+    private val lifecycle_lock = ReentrantLock()
     private val worker_id = AtomicInteger()
-    private val tile_executor = Executors.newFixedThreadPool(DICTIONARY_TILE_WORKERS) { runnable ->
-        Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            runnable.run()
-        }, "flightalert-reference-dictionary-${worker_id.incrementAndGet()}").apply {
-            isDaemon = true
-        }
-    }
     private val retained_bitmap_executor = Executors.newSingleThreadExecutor { runnable ->
         Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT)
@@ -236,9 +211,9 @@ internal class ReferenceDictionaryOverlayRenderer(
         if (!labels_enabled && !borders_enabled) {
             return ready_empty_stats()
         }
-        val snapshot = package_snapshot
+        val snapshot = tile_repository.snapshot()
         if (snapshot == null) {
-            request_package_probe_if_due()
+            tile_repository.prepare()
             return unavailable_stats()
         }
         val package_info = snapshot.info
@@ -272,7 +247,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         )
         if (interaction_started) {
             retained_label_coordinator.cancel()
-            clear_zoom_ahead_desired_tile_keys()
+            tile_repository.clear_zoom_ahead_desired_tile_keys()
         }
         retained_label_interaction_active = interaction_active
         val groups = ReferenceDictionaryLayerGroups(
@@ -294,7 +269,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             settled_target.matches_environment(
                 viewport = viewport,
                 next = options,
-                current_package_generation = package_generation.get(),
+                current_package_generation = tile_repository.package_generation(),
             ) &&
             retained_target_frame_can_settle(
                 frame = settled_target,
@@ -349,7 +324,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                         groups = groups,
                         filter_mask = filter_mask,
                         interaction_active = false,
-                        tile_request_generation = request_generation.get(),
+                        tile_request_generation = tile_repository.request_generation(),
                         now_ms = now_ms,
                     )
                 } else {
@@ -391,7 +366,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             reference_boundary_raster_band_is_compatible(
                 active = active_boundary_raster_band,
                 settingsKey = boundary_raster_settings_key(groups, filter_mask),
-                packageGeneration = package_generation.get(),
+                packageGeneration = tile_repository.package_generation(),
             )
         if (reference_should_defer_target_work(
                 interactionActive = interaction_active,
@@ -401,7 +376,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 compatibleActiveBoundaryBand = compatible_active_boundary_band,
             )
         ) {
-            val generation = request_generation.get()
+            val generation = tile_repository.request_generation()
             val boundary_raster = if (borders_enabled) {
                 draw_boundary_raster_layer(
                     canvas = canvas,
@@ -464,7 +439,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         } else {
             fallback_visible_tiles.clear()
         }
-        val generation = update_desired_tile_keys(
+        val generation = tile_repository.update_desired_tile_keys(
+            target_tiles = visible_tiles,
             fallback_tiles = fallback_visible_tiles,
             include_target_tiles = true,
         )
@@ -474,9 +450,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         var fallback_prefetch_requests = 0
         var requested = zoom_ahead_requests
         for (tile in fallback_visible_tiles) {
-            val parsed = synchronized(tile_cache) {
-                tile_cache.get(tile.cache_key(), tile.low_zoom_profile())
-            }
+            val parsed = tile_repository.tile(tile)
             if (parsed != null) {
                 fallback_draw_tiles += DictionaryTileDrawRef(
                     tile = parsed,
@@ -486,7 +460,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             } else {
                 fallback_missing++
                 if (fallback_prefetch_requests < FALLBACK_TILE_PREFETCH_REQUESTS_PER_DRAW) {
-                    val queued = request_tile_if_needed(tile, generation)
+                    val queued = tile_repository.request_tile_if_needed(tile, generation)
                     requested += queued
                     fallback_prefetch_requests += queued
                 }
@@ -499,10 +473,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         var core_missing = 0
         var padded_prefetch_requests = 0
         for (tile in visible_tiles) {
-            val cache_key = tile.cache_key()
-            val parsed = synchronized(tile_cache) {
-                tile_cache.get(cache_key, tile.low_zoom_profile())
-            }
+            val parsed = tile_repository.tile(tile)
             if (parsed != null) {
                 val reference = DictionaryTileDrawRef(
                     tile = parsed,
@@ -515,9 +486,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                 missing++
                 if (tile.core_visible) {
                     core_missing++
-                    requested += request_tile_if_needed(tile, generation)
+                    requested += tile_repository.request_tile_if_needed(tile, generation)
                 } else if (padded_prefetch_requests < PADDED_TILE_PREFETCH_REQUESTS_PER_DRAW) {
-                    val queued = request_tile_if_needed(tile, generation)
+                    val queued = tile_repository.request_tile_if_needed(tile, generation)
                     requested += queued
                     padded_prefetch_requests += queued
                 }
@@ -629,7 +600,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 filter_mask = filter_mask,
                 label_avoid_rects = label_avoid_rects,
                 options = options,
-                package_generation_snapshot = package_generation.get(),
+                package_generation_snapshot = tile_repository.package_generation(),
             )
             val retained = draw_retained_frame_if_available(
                 canvas,
@@ -730,7 +701,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 target.matches_environment(
                     viewport = viewport,
                     next = options,
-                    current_package_generation = package_generation.get(),
+                    current_package_generation = tile_repository.package_generation(),
                 ) &&
                 retained_target_frame_can_settle(
                     frame = target,
@@ -759,7 +730,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                         filter_mask = filter_mask,
                         label_avoid_rects = label_avoid_rects,
                         options = options,
-                        package_generation_snapshot = package_generation.get(),
+                        package_generation_snapshot = tile_repository.package_generation(),
                     )
                 } else if (
                     reference_retained_scene_should_stage(retained_destination, viewport) &&
@@ -785,7 +756,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                         filter_mask = filter_mask,
                         label_avoid_rects = label_avoid_rects,
                         options = options,
-                        package_generation_snapshot = package_generation.get(),
+                        package_generation_snapshot = tile_repository.package_generation(),
                     )
                 }
                 draw_retained_frame_with_transition(
@@ -822,7 +793,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 filter_mask = filter_mask,
                 label_avoid_rects = label_avoid_rects,
                 options = options,
-                package_generation_snapshot = package_generation.get(),
+                package_generation_snapshot = tile_repository.package_generation(),
             )
             val retained = draw_retained_frame_if_available(
                 canvas = canvas,
@@ -853,7 +824,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 viewport = viewport,
                 next_tile_zoom = tile_zoom,
                 next = options,
-                current_package_generation = package_generation.get(),
+                current_package_generation = tile_repository.package_generation(),
             )
         }?.let { partial ->
             draw_retained_frame_with_transition(canvas, viewport, partial, now_ms)
@@ -897,296 +868,49 @@ internal class ReferenceDictionaryOverlayRenderer(
         )
     }
 
-    fun content_revision(): Long {
-        return content_revision.get()
-    }
+    fun content_revision(): Long = tile_repository.content_revision()
 
-    fun package_check_pending(): Boolean {
-        return package_probe_pending.get() != null
-    }
+    fun package_check_pending(): Boolean = tile_repository.package_check_pending()
 
-    fun prepare() {
-        request_package_probe_if_due()
-    }
+    fun prepare() = tile_repository.prepare()
 
-    fun reference_class_catalog(): ReferenceClassCatalog? {
-        val snapshot = package_snapshot
-        if (snapshot != null) return snapshot.catalog
-        request_package_probe_if_due()
-        return null
-    }
+    fun reference_class_catalog(): ReferenceClassCatalog? =
+        tile_repository.reference_class_catalog()
 
     fun clear() {
-        package_lifecycle_lock.lock()
-        try {
-            synchronized(tile_cache) {
-                package_generation.incrementAndGet()
-                package_snapshot = null
-                package_retry_after_ms = 0L
-                tile_cache.clear()
-                requested_tiles.clear()
-                desired_tile_keys.clear()
-                zoom_ahead_desired_tile_keys.clear()
-                next_zoom_ahead_desired_tile_keys.clear()
-            }
-            package_probe_pending.set(null)
-            cancel_pending_retained_bitmap()
-            retained_label_coordinator.cancel()
-            retained_label_interaction_active = false
-            clear_retained_frames()
-            clear_boundary_rasters()
-            content_revision.incrementAndGet()
-            package_store.close()
-        } finally {
-            package_lifecycle_lock.unlock()
-        }
+        tile_repository.clear()
+        clear_renderer_state()
     }
 
     fun reset_retained_frame() {
         cancel_pending_retained_bitmap()
         retained_label_coordinator.cancel()
-        clear_zoom_ahead_desired_tile_keys()
+        tile_repository.clear_zoom_ahead_desired_tile_keys()
         retained_label_interaction_active = false
         clear_retained_frames()
     }
 
     override fun close() {
-        package_lifecycle_lock.lock()
+        lifecycle_lock.lock()
         try {
             if (closed) return
             closed = true
             retained_bitmap_executor.shutdownNow()
             retained_label_executor.shutdownNow()
             boundary_raster_executor.shutdownNow()
-            tile_executor.shutdownNow()
-            clear()
+            tile_repository.close()
+            clear_renderer_state()
         } finally {
-            package_lifecycle_lock.unlock()
+            lifecycle_lock.unlock()
         }
     }
 
-    private fun request_package_probe_if_due() {
-        if (package_snapshot != null) return
-        if (!package_lifecycle_lock.tryLock()) return
-        try {
-            if (package_snapshot != null) return
-            val now_ms = SystemClock.elapsedRealtime()
-            if (now_ms < package_retry_after_ms) return
-            val probe = PackageProbe(package_generation.get())
-            if (!package_probe_pending.compareAndSet(null, probe)) return
-            enqueue_package_probe(probe)
-        } finally {
-            package_lifecycle_lock.unlock()
-        }
-    }
-
-    private fun enqueue_package_probe(probe: PackageProbe) {
-        try {
-            tile_executor.execute(probe)
-        } catch (_: RejectedExecutionException) {
-            package_probe_pending.compareAndSet(probe, null)
-        }
-    }
-
-    private fun probe_package(probe: PackageProbe) {
-        var published = false
-        package_lifecycle_lock.lock()
-        try {
-            if (!package_probe_is_current(probe)) return
-            val info = package_store.package_info_if_available()
-            val catalog = if (info != null) {
-                package_store.reference_class_catalog_if_available()
-            } else {
-                null
-            }
-            val loaded = if (info != null && catalog != null) PackageSnapshot(info, catalog) else null
-            synchronized(tile_cache) {
-                if (!package_probe_is_current(probe)) return
-                if (loaded == null) {
-                    package_retry_after_ms = SystemClock.elapsedRealtime() +
-                        ReferenceDictionaryPackageStore.PACKAGE_MISSING_RETRY_MS
-                } else {
-                    package_snapshot = loaded
-                    package_retry_after_ms = 0L
-                    published = true
-                }
-            }
-        } catch (_: Exception) {
-            synchronized(tile_cache) {
-                if (package_probe_is_current(probe)) {
-                    package_retry_after_ms = SystemClock.elapsedRealtime() +
-                        ReferenceDictionaryPackageStore.PACKAGE_MISSING_RETRY_MS
-                }
-            }
-        } finally {
-            package_probe_pending.compareAndSet(probe, null)
-            try {
-                if (published) request_redraw()
-            } finally {
-                package_lifecycle_lock.unlock()
-            }
-        }
-    }
-
-    private fun package_probe_is_current(probe: PackageProbe): Boolean {
-        return package_probe_pending.get() === probe &&
-            package_generation.get() == probe.generation
-    }
-
-    private fun request_tile_if_needed(
-        tile: VisibleDictionaryTile,
-        generation: Long,
-        additionally_relevant: (() -> Boolean)? = null,
-    ): Int {
-        val cache_key = tile.cache_key()
-        synchronized(tile_cache) {
-            if (tile_cache.contains(cache_key, tile.low_zoom_profile())) return 0
-            if (!requested_tiles.add(cache_key)) return 0
-        }
-        tile_executor.execute {
-            var request_became_obsolete = false
-            val keep_loading = {
-                if (request_became_obsolete) {
-                    false
-                } else {
-                    val relevant = tile_request_still_relevant(cache_key, generation) ||
-                        additionally_relevant?.invoke() == true
-                    if (!relevant) request_became_obsolete = true
-                    relevant
-                }
-            }
-            var published = false
-            try {
-                if (!keep_loading()) return@execute
-                val payload = package_store.read_tile_payload(
-                    z = tile.z,
-                    x = tile.x,
-                    y = tile.y,
-                    request_is_relevant = keep_loading,
-                )
-                if (!keep_loading()) return@execute
-                val parsed = if (payload != null) {
-                    parse_tile_payload(
-                        payload = payload,
-                        outline_visibility_centizoom = tile.outline_visibility_centizoom,
-                        request_is_relevant = keep_loading,
-                    ) ?: return@execute
-                } else {
-                    empty_parsed_tile(tile)
-                }
-                synchronized(tile_cache) {
-                    if (!keep_loading()) return@synchronized
-                    tile_cache.put(cache_key, tile.low_zoom_profile(), parsed)
-                    content_revision.incrementAndGet()
-                    published = true
-                }
-            } catch (_: Exception) {
-                synchronized(tile_cache) {
-                    if (keep_loading()) {
-                        tile_cache.put(
-                            cache_key,
-                            tile.low_zoom_profile(),
-                            empty_parsed_tile(tile),
-                        )
-                        content_revision.incrementAndGet()
-                        published = true
-                    }
-                }
-            } finally {
-                var replacement_generation: Long? = null
-                synchronized(tile_cache) {
-                    requested_tiles.remove(cache_key)
-                    if (
-                        request_became_obsolete &&
-                        !tile_cache.contains(cache_key, tile.low_zoom_profile()) &&
-                        (
-                            desired_tile_keys.contains(cache_key) ||
-                                zoom_ahead_desired_tile_keys.contains(cache_key)
-                            )
-                    ) {
-                        replacement_generation = request_generation.get()
-                    }
-                }
-                replacement_generation?.let { current_generation ->
-                    try {
-                        request_tile_if_needed(tile, current_generation)
-                    } catch (_: RejectedExecutionException) {
-                        synchronized(tile_cache) {
-                            requested_tiles.remove(cache_key)
-                        }
-                    }
-                }
-                if (published || keep_loading()) {
-                    request_redraw()
-                }
-            }
-        }
-        return 1
-    }
-
-    private fun update_desired_tile_keys(
-        fallback_tiles: List<VisibleDictionaryTile> = emptyList(),
-        include_target_tiles: Boolean = true,
-    ): Long {
-        return synchronized(tile_cache) {
-            next_desired_tile_keys.clear()
-            if (include_target_tiles) {
-                visible_tiles.forEach { tile ->
-                    next_desired_tile_keys += tile.cache_key()
-                }
-            }
-            fallback_tiles.forEach { tile -> next_desired_tile_keys += tile.cache_key() }
-            val changed = desired_tile_keys != next_desired_tile_keys
-            if (changed) {
-                desired_tile_keys.clear()
-                desired_tile_keys += next_desired_tile_keys
-                request_generation.incrementAndGet()
-            } else {
-                request_generation.get()
-            }
-        }
-    }
-
-    private fun tile_request_still_relevant(cache_key: String, generation: Long): Boolean {
-        if (generation == request_generation.get()) return true
-        return synchronized(tile_cache) {
-            desired_tile_keys.contains(cache_key) ||
-                zoom_ahead_desired_tile_keys.contains(cache_key)
-        }
-    }
-
-    private fun update_zoom_ahead_desired_tile_keys(
-        tiles: List<VisibleDictionaryTile>,
-    ): Long {
-        return synchronized(tile_cache) {
-            next_zoom_ahead_desired_tile_keys.clear()
-            for (tile in tiles) {
-                next_zoom_ahead_desired_tile_keys += tile.cache_key()
-            }
-            if (zoom_ahead_desired_tile_keys != next_zoom_ahead_desired_tile_keys) {
-                zoom_ahead_desired_tile_keys.clear()
-                zoom_ahead_desired_tile_keys += next_zoom_ahead_desired_tile_keys
-                request_generation.incrementAndGet()
-            } else {
-                request_generation.get()
-            }
-        }
-    }
-
-    private fun clear_zoom_ahead_desired_tile_keys() {
-        synchronized(tile_cache) {
-            if (zoom_ahead_desired_tile_keys.isEmpty()) return
-            zoom_ahead_desired_tile_keys.clear()
-            request_generation.incrementAndGet()
-        }
-    }
-
-    private fun empty_parsed_tile(tile: VisibleDictionaryTile): ParsedDictionaryTile {
-        return ParsedDictionaryTile(
-            coordinate = ReferenceDictionaryTileCoordinate(z = tile.z, x = tile.x, y = tile.y),
-            boundaries = emptyList(),
-            labels = emptyList()
-        )
+    private fun clear_renderer_state() {
+        cancel_pending_retained_bitmap()
+        retained_label_coordinator.cancel()
+        retained_label_interaction_active = false
+        clear_retained_frames()
+        clear_boundary_rasters()
     }
 
     private fun build_visible_tile_list(
@@ -1211,7 +935,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         val center_tile_y = floor(viewport.center_y * tile_world_scale / MAP_TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
         val outline_visibility_centizoom =
-            if (package_snapshot?.info?.runtime_schema ==
+            if (tile_repository.snapshot()?.info?.runtime_schema ==
                 ReferenceDictionaryRuntimeSchema.RENDER_TILE_V1
             ) {
                 ReferenceDictionaryLodPolicy.LABEL_ONLY_OUTLINE_PROFILE
@@ -1316,7 +1040,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 active = active,
                 viewport = viewport,
                 settingsKey = settings_key,
-                packageGeneration = package_generation.get(),
+                packageGeneration = tile_repository.package_generation(),
             )
         }
         val continuity_blend = if (continuity_scene != null) {
@@ -1484,7 +1208,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         if (raster_fade != null && raster_fade.currentBand == draw_band &&
             raster_fade.previous.matches_environment(
                 settingsKey = settings_key,
-                packageGeneration = package_generation.get(),
+                packageGeneration = tile_repository.package_generation(),
             ) &&
             raster_fade.previous.covers(viewport)
         ) {
@@ -1582,7 +1306,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         freeze_active_band: Boolean,
     ): ReferenceBoundaryRasterBand {
         val active = active_boundary_raster_band
-        val current_package_generation = package_generation.get()
+        val current_package_generation = tile_repository.package_generation()
         if (freeze_active_band && reference_boundary_raster_band_is_compatible(
                 active = active,
                 settingsKey = settings_key,
@@ -1758,13 +1482,13 @@ internal class ReferenceDictionaryOverlayRenderer(
         tileRequestGeneration: Long,
         requestBudget: Int,
     ): Int {
-        val snapshot = package_snapshot ?: return 0
+        val snapshot = tile_repository.snapshot() ?: return 0
         val safety_zoom = reference_boundary_raster_safety_zoom(viewport.zoom, MIN_ZOOM)
         val safety_source_zoom = dictionary_tile_zoom(
             safety_zoom.toDouble(),
             snapshot.info.zooms,
         ) ?: return 0
-        val current_package_generation = package_generation.get()
+        val current_package_generation = tile_repository.package_generation()
         val ready_band = ready_boundary_raster_safety_scene?.band
         val pending_band = pending_boundary_raster_safety_scene?.band
         val band = when {
@@ -2071,18 +1795,13 @@ internal class ReferenceDictionaryOverlayRenderer(
                                 key.band.sourceZoom,
                             ),
                     )
-                    val parsed = synchronized(tile_cache) {
-                        tile_cache.get(
-                            source_tile.cache_key(),
-                            source_tile.low_zoom_profile(),
-                        )
-                    }
+                    val parsed = tile_repository.tile(source_tile)
                     if (parsed != null) {
                         source_tiles += BoundaryRasterSourceTile(parsed, raw_x, raw_y)
                         continue
                     }
                     missing_source = true
-                    source_requests += request_tile_if_needed(
+                    source_requests += tile_repository.request_tile_if_needed(
                         source_tile,
                         tile_request_generation,
                         additionally_relevant = {
@@ -2117,7 +1836,7 @@ internal class ReferenceDictionaryOverlayRenderer(
     private fun boundary_raster_disk_file(key: ReferenceBoundaryRasterKey): File? {
         val band = key.band
         if (!reference_boundary_raster_disk_cacheable(band)) return null
-        val snapshot = package_snapshot ?: return null
+        val snapshot = tile_repository.snapshot() ?: return null
         val semantic_sha256 = snapshot.catalog.renderer_semantic_stream_sha256 ?: return null
         val namespace = boundary_raster_disk_namespaces[band]
             ?: reference_boundary_raster_disk_namespace(
@@ -2171,11 +1890,11 @@ internal class ReferenceDictionaryOverlayRenderer(
         disk_file_missed: Boolean = false,
         persistence: Pair<File, ByteArray>? = null,
     ) {
-        package_lifecycle_lock.lock()
+        lifecycle_lock.lock()
         try {
             if (!reference_boundary_raster_completion_is_current(
                     requestPackageGeneration = prepared.key.band.packageGeneration,
-                    currentPackageGeneration = package_generation.get(),
+                    currentPackageGeneration = tile_repository.package_generation(),
                     rendererClosed = closed,
                 )
             ) {
@@ -2190,7 +1909,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             }
             request_redraw()
         } finally {
-            package_lifecycle_lock.unlock()
+            lifecycle_lock.unlock()
         }
     }
 
@@ -2419,7 +2138,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             val requested = boundary_raster_requests.remove(prepared.key)
             val tile = prepared.tile
             if (!requested || tile == null ||
-                prepared.key.band.packageGeneration != package_generation.get() ||
+                prepared.key.band.packageGeneration != tile_repository.package_generation() ||
                 !boundary_raster_request_is_relevant(prepared.key)
             ) {
                 tile?.bitmap?.recycle()
@@ -2754,7 +2473,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         val prepared = retained_label_coordinator.take() ?: return
         val frame = prepared.frame ?: return
         val key = prepared.request.token.key
-        val current_generation = package_generation.get()
+        val current_generation = tile_repository.package_generation()
         val environment_matches =
             frame.options == options &&
                 frame.package_generation == current_generation &&
@@ -2834,7 +2553,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         val visible_height = ceil(viewport.height).toInt().coerceAtLeast(1)
         val request_width = ceil(request.content_viewport.width).toInt().coerceAtLeast(1)
         val request_height = ceil(request.content_viewport.height).toInt().coerceAtLeast(1)
-        val current_generation = package_generation.get()
+        val current_generation = tile_repository.package_generation()
         val valid = prepared.complete && borders_enabled &&
             key.package_generation == current_generation &&
             key.place_labels_enabled == place_labels_enabled &&
@@ -3375,7 +3094,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 previous.matches_environment(
                     viewport = viewport,
                     next = options,
-                    current_package_generation = package_generation.get(),
+                    current_package_generation = tile_repository.package_generation(),
                 ) &&
                 previous.is_drawable() &&
                 retained_target_frame_can_settle(
@@ -3486,7 +3205,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         tile_zoom: Int,
         options: RetainedReferenceOptions,
     ): Boolean {
-        val current_generation = package_generation.get()
+        val current_generation = tile_repository.package_generation()
         for (frame in retained_frame_history) {
             if (frame.matches_exact(
                     viewport = viewport,
@@ -3504,7 +3223,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         tile_zoom: Int,
         options: RetainedReferenceOptions,
     ): Boolean {
-        val current_generation = package_generation.get()
+        val current_generation = tile_repository.package_generation()
         val active = retained_frame
         if (active != null &&
             active.matches_environment(viewport, options, current_generation) &&
@@ -3544,7 +3263,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         destination: ReferenceRetainedDestination,
     ): Boolean {
         if (!frame.matches_options(options) ||
-            frame.package_generation != package_generation.get() ||
+            frame.package_generation != tile_repository.package_generation() ||
             !ReferenceDictionaryLodPolicy.can_reuse_scene(
                 frame.tile_zoom,
                 target_tile_zoom,
@@ -3566,7 +3285,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         destination: ReferenceRetainedDestination,
     ): Boolean {
         if (!frame.matches_options(options) ||
-            frame.package_generation != package_generation.get() ||
+            frame.package_generation != tile_repository.package_generation() ||
             !ReferenceDictionaryLodPolicy.can_reuse_scene_during_interaction(
                 frame.tile_zoom,
                 target_tile_zoom,
@@ -3861,7 +3580,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         options: RetainedReferenceOptions,
     ): Int {
         if (!labels_enabled) {
-            clear_zoom_ahead_desired_tile_keys()
+            tile_repository.clear_zoom_ahead_desired_tile_keys()
             return 0
         }
         if (retained_label_coordinator.hasCurrentRequest()) return 0
@@ -3885,7 +3604,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             step++
         }
         if (future_viewport == null) {
-            clear_zoom_ahead_desired_tile_keys()
+            tile_repository.clear_zoom_ahead_desired_tile_keys()
             return 0
         }
 
@@ -3901,22 +3620,20 @@ internal class ReferenceDictionaryOverlayRenderer(
             outline_visibility_zoom = viewport.zoom,
         )
         if (zoom_ahead_visible_tiles.isEmpty()) {
-            clear_zoom_ahead_desired_tile_keys()
+            tile_repository.clear_zoom_ahead_desired_tile_keys()
             return 0
         }
 
-        val generation = update_zoom_ahead_desired_tile_keys(zoom_ahead_visible_tiles)
+        val generation = tile_repository.update_zoom_ahead_desired_tile_keys(zoom_ahead_visible_tiles)
         zoom_ahead_draw_tiles.clear()
         var missing = 0
         var requested = 0
         for (tile in zoom_ahead_visible_tiles) {
-            val parsed = synchronized(tile_cache) {
-                tile_cache.get(tile.cache_key(), tile.low_zoom_profile())
-            }
+            val parsed = tile_repository.tile(tile)
             if (parsed == null) {
                 missing++
                 if (requested < ZOOM_AHEAD_TILE_PREFETCH_REQUESTS_PER_DRAW) {
-                    requested += request_tile_if_needed(tile, generation)
+                    requested += tile_repository.request_tile_if_needed(tile, generation)
                 }
             } else {
                 zoom_ahead_draw_tiles += DictionaryTileDrawRef(
@@ -3928,7 +3645,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
         if (missing > 0) return requested
 
-        clear_zoom_ahead_desired_tile_keys()
+        tile_repository.clear_zoom_ahead_desired_tile_keys()
         request_retained_label_frame(
             role = RetainedFrameRole.TARGET,
             viewport = future_viewport,
@@ -3944,7 +3661,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
             options = options,
-            package_generation_snapshot = package_generation.get(),
+            package_generation_snapshot = tile_repository.package_generation(),
         )
         return 0
     }
@@ -4098,7 +3815,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
         options: RetainedReferenceOptions,
     ): RetainedReferenceFrame? {
-        val package_generation_snapshot = package_generation.get()
+        val package_generation_snapshot = tile_repository.package_generation()
         partial_label_frame?.takeIf { frame ->
             frame.matches_exact(
                 viewport = viewport,
@@ -5435,347 +5152,6 @@ internal class ReferenceDictionaryOverlayRenderer(
         )
     }
 
-    private fun parse_tile_payload(
-        payload: ReferenceDictionaryTilePayload,
-        outline_visibility_centizoom: Int? = null,
-        request_is_relevant: () -> Boolean,
-    ): ParsedDictionaryTile? {
-        if (!request_is_relevant()) return null
-        if (payload.runtime_schema == ReferenceDictionaryRuntimeSchema.BINARY_V3 ||
-            payload.runtime_schema == ReferenceDictionaryRuntimeSchema.RENDER_TILE_V1
-        ) {
-            return parse_binary_tile_payload(
-                payload,
-                outline_visibility_centizoom,
-                request_is_relevant,
-            )
-        }
-        val root = JSONObject(payload.raw_json)
-        if (!request_is_relevant()) return null
-        val records = root.optJSONObject("records") ?: JSONObject()
-        val hot_fields = payload.runtime_schema == ReferenceDictionaryRuntimeSchema.HOT_JSON_V2
-        val parsed = ParsedDictionaryTile(
-            coordinate = payload.coordinate,
-            boundaries = parse_line_records(
-                records = records.optJSONArray("boundaries"),
-                hot_fields = hot_fields
-            ),
-            labels = parse_label_records(
-                records = records.optJSONArray("labels"),
-                z = payload.coordinate.z,
-                hot_fields = hot_fields
-            )
-        )
-        return if (request_is_relevant()) parsed else null
-    }
-
-    private fun parse_binary_tile_payload(
-        payload: ReferenceDictionaryTilePayload,
-        outline_visibility_centizoom: Int?,
-        request_is_relevant: () -> Boolean,
-    ): ParsedDictionaryTile? {
-        val decoded = when (payload.runtime_schema) {
-            ReferenceDictionaryRuntimeSchema.BINARY_V3 -> {
-                if (!request_is_relevant()) return null
-                val tile = ReferenceDictionaryBinaryTileCodec.decode(
-                    payload.coordinate,
-                    payload.raw_bytes,
-                )
-                if (request_is_relevant()) tile else return null
-            }
-
-            ReferenceDictionaryRuntimeSchema.RENDER_TILE_V1 ->
-                ReferenceDictionaryRenderTileCodec.decodeIfRelevant(
-                    payload.coordinate,
-                    payload.raw_bytes,
-                    outlineVisibilityCentizoom = outline_visibility_centizoom,
-                    requestIsRelevant = request_is_relevant,
-                ) ?: return null
-
-            else -> error("reference payload is not a binary render tile")
-        }
-        val boundaries = ArrayList<DictionaryLineRecord>()
-        val labels = ArrayList<DictionaryLabelRecord>()
-        decoded.records.forEachIndexed { index, record ->
-            if (
-                index % PRESENTATION_CANCELLATION_INTERVAL == 0 &&
-                !request_is_relevant()
-            ) {
-                return null
-            }
-            when (val model = ReferenceDictionaryBinaryPresenter.present(record)) {
-                is ReferenceDictionaryBinaryDrawModel.Label -> {
-                    val resolved = model.resolvedStyle
-                    val text_size_sp = model.visibility.textSizeMilliSp / 1_000f
-                    val presentation_subtype =
-                        ReferenceLabelRuntimePresentationPolicy.presentationSubtype(
-                            model.subtype,
-                            model.text.primaryText,
-                        )
-                    val runtime_typography = ReferenceLabelRuntimePresentationPolicy.typography(
-                        presentation_subtype,
-                        model.prominenceTier,
-                        model.completeGeometryMeasureBucket,
-                    )
-                    val source_kind = binary_source_kind(model.subtype)
-                    val geometry = if (
-                        model.geometry.kind == ReferenceDictionaryBinaryGeometryKind.POINT
-                    ) {
-                        null
-                    } else {
-                        binary_geometry(model.geometry, request_is_relevant) ?: return null
-                    }
-                    labels += DictionaryLabelRecord(
-                        text = model.text.primaryText,
-                        source_layer = "",
-                        source_kind = source_kind,
-                        line_label = model.lineLabel,
-                        drawable = true,
-                        protected_area = model.subtype == SemanticSubtype.PROTECTED_LAND,
-                        layer_group = binary_layer_group(model.filterId),
-                        filter_id = model.filterId,
-                        priority = model.priority,
-                        color = resolved.color_argb.toInt(),
-                        base_text_size_sp = text_size_sp,
-                        alpha = alpha_milli_to_byte(resolved.alpha_milli),
-                        halo_color = resolved.halo_argb.toInt(),
-                        halo_width_dp = text_size_sp * resolved.halo_width_milli_em / 1_000f,
-                        halo_alpha = alpha_milli_to_byte(resolved.halo_alpha_milli),
-                        typeface_style = binary_typeface_style(model.style),
-                        letter_spacing_em = model.visibility.letterSpacingMilliEm / 1_000f,
-                        rotation = 0f,
-                        rank = null,
-                        min_zoom = model.visibility.minimumZoomCenti / 100.0,
-                        max_zoom = ReferencePresentationPolicy.label_display_max_zoom_centi / 100.0,
-                        anchor = if (model.geometry.kind == ReferenceDictionaryBinaryGeometryKind.POINT) {
-                            DictionaryPoint(
-                                model.geometry.localCoordinates[0],
-                                model.geometry.localCoordinates[1],
-                            )
-                        } else {
-                            null
-                        },
-                        geometry = geometry,
-                        sourced_text = model.text,
-                        dedupe_key = model.labelCandidateId.toString(16),
-                        is_water = binary_water_label(model.subtype),
-                        candidate_id = model.labelCandidateId,
-                        source_feature_id = model.featureId,
-                        presentation_subtype = presentation_subtype,
-                        prominence_tier = model.prominenceTier,
-                        complete_geometry_measure_bucket = model.completeGeometryMeasureBucket,
-                        low_zoom_country_rank = if (
-                            model.subtype == SemanticSubtype.COUNTRY_TERRITORY
-                        ) {
-                            reference_low_zoom_country_rank(model.featureId)
-                        } else {
-                            UNKNOWN_LOW_ZOOM_COUNTRY_RANK
-                        },
-                        runtime_typography = runtime_typography,
-                        visibility_rule = model.visibilityRule,
-                        repeat_spacing_px = model.repeatSpacingPx,
-                        posting_world_wrap = record.postingWorldWrap,
-                    )
-                }
-
-                is ReferenceDictionaryBinaryDrawModel.Outline -> {
-                    val resolved = model.resolvedStyle
-                    val geometry = binary_geometry(
-                        model.geometry,
-                        request_is_relevant,
-                    ) ?: return null
-                    boundaries += DictionaryLineRecord(
-                        source_layer = "",
-                        source_kind = binary_source_kind(model.subtype),
-                        class_name = model.subtype.name,
-                        protected_area = model.subtype == SemanticSubtype.PROTECTED_AREA_OUTLINE,
-                        layer_group = binary_layer_group(model.filterId),
-                        filter_id = model.filterId,
-                        geometry = geometry,
-                        visibility_rule = if (
-                            model.subtype == SemanticSubtype.STATE_PROVINCE_BOUNDARY
-                        ) {
-                            model.visibility.copy(full_alpha_zoom_centi = 700)
-                        } else {
-                            model.visibility
-                        },
-                        draw_order = if (
-                            model.subtype == SemanticSubtype.INTERNATIONAL_BOUNDARY
-                        ) {
-                            24
-                        } else {
-                            model.drawOrder
-                        },
-                        priority = model.priority,
-                        source_feature_id = model.featureId,
-                        dedupe_id = model.dedupeId,
-                        posting_world_wrap = record.postingWorldWrap,
-                        style = boundary_display_style(
-                            model.subtype,
-                            DictionaryLineStyle(
-                                color = resolved.color_argb.toInt(),
-                                stroke_width_dp = model.style.line_width_milli_dp / 1_000f,
-                                halo_width_dp = resolved.line_halo_width_milli_dp / 1_000f,
-                                alpha = alpha_milli_to_byte(resolved.alpha_milli),
-                                halo_alpha = alpha_milli_to_byte(resolved.halo_alpha_milli),
-                                halo_color = resolved.halo_argb.toInt(),
-                                dash_pattern_dp = resolved.dash_milli_dp.map { it / 1_000f },
-                                dash_phase_dp = resolved.dash_phase_milli_dp / 1_000f,
-                                stroke_cap = if (resolved.line_cap == "butt") {
-                                    Paint.Cap.BUTT
-                                } else {
-                                    Paint.Cap.ROUND
-                                },
-                                stroke_join = if (resolved.line_join == "miter") {
-                                    Paint.Join.MITER
-                                } else {
-                                    Paint.Join.ROUND
-                                },
-                            ),
-                        ),
-                    )
-                }
-            }
-        }
-        if (!request_is_relevant()) return null
-        boundaries.sortBy { it.style.stroke_width_dp }
-        if (!request_is_relevant()) return null
-        return ParsedDictionaryTile(
-            coordinate = decoded.coordinate,
-            boundaries = boundaries,
-            labels = labels,
-        )
-    }
-
-    // Keep the verified dictionary policy immutable; only its final on-screen treatment changes.
-    private fun boundary_display_style(
-        subtype: SemanticSubtype,
-        canonical_style: DictionaryLineStyle,
-    ): DictionaryLineStyle = when (subtype) {
-        SemanticSubtype.INTERNATIONAL_BOUNDARY -> canonical_style.copy(
-            color = Color.rgb(238, 242, 244),
-            stroke_width_dp = 1.55f,
-            halo_width_dp = 0.9f,
-            alpha = 230,
-            halo_alpha = 166,
-            dash_pattern_dp = emptyList(),
-        )
-
-        SemanticSubtype.STATE_PROVINCE_BOUNDARY -> canonical_style.copy(
-            color = Color.rgb(210, 218, 222),
-            stroke_width_dp = 0.75f,
-            halo_width_dp = 0.15f,
-            alpha = 120,
-            halo_alpha = 25,
-            dash_pattern_dp = listOf(0.9f, 2.7f),
-            stroke_cap = Paint.Cap.ROUND,
-        )
-
-        else -> canonical_style
-    }
-
-    private fun binary_geometry(
-        geometry: ReferenceDictionaryBinaryGeometry,
-        request_is_relevant: () -> Boolean,
-    ): DictionaryGeometry? {
-        val rings = ArrayList<DictionaryRing>(geometry.partOffsets.size)
-        val total_points = geometry.localCoordinates.size / 2
-        geometry.partOffsets.forEachIndexed { index, start ->
-            if (!request_is_relevant()) return null
-            val end = if (index + 1 < geometry.partOffsets.size) {
-                geometry.partOffsets[index + 1]
-            } else {
-                total_points
-            }
-            val point_count = end - start
-            if (point_count > 0) {
-                rings += DictionaryRing(
-                    points = geometry.localCoordinates.copyOfRange(start * 2, end * 2),
-                    point_count = point_count,
-                )
-            }
-        }
-        return DictionaryGeometry(
-            rings = rings,
-            bounds = DictionaryBounds(
-                geometry.localBounds[0],
-                geometry.localBounds[1],
-                geometry.localBounds[2],
-                geometry.localBounds[3],
-            ),
-        )
-    }
-
-    private fun binary_layer_group(filter_id: FilterId): ReferenceDictionaryLayerGroup {
-        return when (filter_id) {
-            FilterId.LABELS_PLACES,
-            FilterId.LABELS_ISLANDS -> ReferenceDictionaryLayerGroup.PLACES
-
-            FilterId.LABELS_MAJOR_WATER,
-            FilterId.LABELS_RIVERS,
-            FilterId.LABELS_STREAMS,
-            FilterId.LABELS_CANALS,
-            FilterId.OUTLINES_COASTLINES,
-            FilterId.OUTLINES_WATER_BOUNDARIES -> ReferenceDictionaryLayerGroup.WATER
-
-            FilterId.LABELS_PROTECTED_LANDS,
-            FilterId.OUTLINES_PROTECTED_AREAS -> ReferenceDictionaryLayerGroup.PUBLIC_LANDS
-
-            else -> ReferenceDictionaryLayerGroup.REGIONS
-        }
-    }
-
-    private fun binary_source_kind(subtype: SemanticSubtype): String {
-        return when (subtype) {
-            SemanticSubtype.OCEAN_SEA,
-            SemanticSubtype.BAY_SOUND,
-            SemanticSubtype.LAKE_RESERVOIR,
-            SemanticSubtype.RIVER,
-            SemanticSubtype.STREAM_CREEK,
-            SemanticSubtype.CANAL_CHANNEL,
-            SemanticSubtype.UNSPECIFIED_WATERCOURSE,
-            SemanticSubtype.COASTLINE,
-            SemanticSubtype.WATERSHED_WATER_BOUNDARY -> "water"
-
-            SemanticSubtype.COUNTRY_TERRITORY,
-            SemanticSubtype.FIRST_ORDER_REGION,
-            SemanticSubtype.SECOND_LOCAL_REGION,
-            SemanticSubtype.INTERNATIONAL_BOUNDARY,
-            SemanticSubtype.STATE_PROVINCE_BOUNDARY,
-            SemanticSubtype.COUNTY_LOCAL_BOUNDARY,
-            SemanticSubtype.OTHER_ADMIN_BOUNDARY -> "admin"
-
-            else -> "place"
-        }
-    }
-
-    private fun binary_water_label(subtype: SemanticSubtype): Boolean {
-        return subtype in setOf(
-            SemanticSubtype.OCEAN_SEA,
-            SemanticSubtype.BAY_SOUND,
-            SemanticSubtype.LAKE_RESERVOIR,
-            SemanticSubtype.RIVER,
-            SemanticSubtype.STREAM_CREEK,
-            SemanticSubtype.CANAL_CHANNEL,
-            SemanticSubtype.UNSPECIFIED_WATERCOURSE,
-        )
-    }
-
-    private fun binary_typeface_style(style: StyleSpec): Int {
-        val bold = style.font_weight >= 600
-        val italic = style.font_slant == FontSlant.ITALIC
-        return when {
-            bold && italic -> Typeface.BOLD_ITALIC
-            bold -> Typeface.BOLD
-            italic -> Typeface.ITALIC
-            else -> Typeface.NORMAL
-        }
-    }
-
-    private fun alpha_milli_to_byte(value: Int): Int {
-        return ((value.coerceIn(0, 1_000) * 255) + 500) / 1_000
-    }
-
     private fun scaled_alpha_byte(
         base_alpha: Int,
         visibility_alpha_milli: Int,
@@ -5785,301 +5161,6 @@ internal class ReferenceDictionaryOverlayRenderer(
             base_alpha.coerceIn(0, 255) * visibility_alpha_milli.coerceIn(0, 1_000) + 500
             ) / 1_000
         return (visible_alpha * frame_alpha.coerceIn(0, 255) + 127) / 255
-    }
-
-    private fun parse_line_records(
-        records: JSONArray?,
-        hot_fields: Boolean
-    ): List<DictionaryLineRecord> {
-        if (records == null || records.length() <= 0) return emptyList()
-        return buildList(records.length()) {
-            for (index in 0 until records.length()) {
-                val record = records.optJSONObject(index) ?: continue
-                val source_layer = record.optString("sourceLayer", "")
-                val baked_layer_group = if (hot_fields) record.layer_group_or_null() else null
-                val source_kind = record.optString("sourceKind", "")
-                    .ifBlank { source_kind_for_group(baked_layer_group) ?: "" }
-                val class_name = record.optString("class", "")
-                val protected_area = record.optional_boolean("protectedArea")
-                    ?: if (baked_layer_group != null) {
-                        baked_layer_group == ReferenceDictionaryLayerGroup.PUBLIC_LANDS
-                    } else {
-                        protected_area_line(
-                            source_layer = source_layer,
-                            source_kind = source_kind,
-                            class_name = class_name
-                        )
-                    }
-                val layer_group = baked_layer_group ?: line_layer_group(
-                    source_layer = source_layer,
-                    source_kind = source_kind,
-                    class_name = class_name,
-                    protected_area = protected_area
-                )
-                val geometry = parse_geometry(record.optJSONObject("geometry")) ?: continue
-                add(
-                    DictionaryLineRecord(
-                        source_layer = source_layer,
-                        source_kind = source_kind,
-                        class_name = class_name,
-                        protected_area = protected_area,
-                        layer_group = layer_group,
-                        geometry = geometry,
-                        style = line_style_for(
-                            source_layer = source_layer,
-                            source_kind = source_kind,
-                            class_name = class_name,
-                            layer_group = layer_group
-                        )
-                    )
-                )
-            }
-        }
-    }
-
-    private fun parse_label_records(
-        records: JSONArray?,
-        z: Int,
-        hot_fields: Boolean
-    ): List<DictionaryLabelRecord> {
-        if (records == null || records.length() <= 0) return emptyList()
-        return buildList(records.length()) {
-            for (index in 0 until records.length()) {
-                val record = records.optJSONObject(index) ?: continue
-                val text = record.optString("text", "").trim()
-                if (text.isEmpty()) continue
-                val source_layer = record.optString("sourceLayer", "")
-                val baked_layer_group = if (hot_fields) record.layer_group_or_null() else null
-                val source_kind = record.optString("sourceKind", "")
-                    .ifBlank { source_kind_for_group(baked_layer_group) ?: "" }
-                val label_placement = record.optString("labelPlacement", "")
-                    .ifBlank { if (record.optBoolean("lineLabel", false)) "line" else "" }
-                val rank = record.optional_int("rank")
-                val class_name = record.optString("class", "")
-                val protected_area = record.optional_boolean("protectedArea")
-                    ?: if (baked_layer_group != null) {
-                        baked_layer_group == ReferenceDictionaryLayerGroup.PUBLIC_LANDS
-                    } else {
-                        protected_area_label(
-                            text = text,
-                            source_layer = source_layer,
-                            source_kind = source_kind,
-                            class_name = class_name
-                        )
-                    }
-                val layer_group = baked_layer_group ?: label_layer_group(
-                    source_kind = source_kind,
-                    source_layer = source_layer,
-                    protected_area = protected_area
-                )
-                if (!should_draw_label(
-                        text = text,
-                        source_kind = source_kind,
-                        source_layer = source_layer,
-                        label_placement = label_placement,
-                        rank = rank,
-                        protected_area = protected_area,
-                        z = z
-                    )
-                ) {
-                    continue
-                }
-                val line_label = label_placement == "line"
-                val anchor = parse_point(record.optJSONObject("anchor"))
-                val geometry = if (line_label || anchor == null) {
-                    parse_geometry(record.optJSONObject("geometry"))
-                } else {
-                    null
-                }
-                val style_template = label_style_template_for(
-                    text = text,
-                    source_kind = source_kind,
-                    source_layer = source_layer,
-                    label_placement = label_placement,
-                    rank = rank,
-                    protected_area = protected_area,
-                    z = z
-                )
-                add(
-                    DictionaryLabelRecord(
-                        text = text,
-                        source_layer = source_layer,
-                        source_kind = source_kind,
-                        line_label = line_label,
-                        drawable = true,
-                        protected_area = protected_area,
-                        layer_group = layer_group,
-                        priority = record.optional_int("priority") ?: label_priority(
-                            text = text,
-                            source_kind = source_kind,
-                            source_layer = source_layer,
-                            label_placement = label_placement,
-                            rank = rank,
-                            protected_area = protected_area,
-                            z = z
-                        ),
-                        color = style_template.color,
-                        base_text_size_sp = style_template.text_size_sp,
-                        alpha = style_template.alpha,
-                        halo_width_dp = style_template.halo_width_dp,
-                        halo_alpha = style_template.halo_alpha,
-                        typeface_style = style_template.typeface_style,
-                        rotation = if (source_kind == "water" && geometry?.bounds != null) {
-                            label_rotation(geometry.bounds)
-                        } else {
-                            0f
-                        },
-                        rank = rank,
-                        min_zoom = record.optional_double("minZoom")
-                            ?: record.optional_double("minzoom"),
-                        max_zoom = record.optional_double("maxZoom")
-                            ?: record.optional_double("maxzoom"),
-                        anchor = anchor,
-                        geometry = geometry,
-                        dedupe_key = "$source_kind:${text.lowercase()}",
-                        is_water = source_kind == "water",
-                    )
-                )
-            }
-        }
-    }
-
-    private fun parse_geometry(geometry: JSONObject?): DictionaryGeometry? {
-        if (geometry == null) return null
-        val rings_json = geometry.optJSONArray("rings")
-        val rings = if (rings_json != null) {
-            buildList(rings_json.length()) {
-                for (index in 0 until rings_json.length()) {
-                    parse_ring(rings_json.optJSONArray(index))?.let { add(it) }
-                }
-            }
-        } else {
-            emptyList()
-        }
-        val bounds = geometry.optJSONObject("bounds")?.let { bounds_json ->
-            DictionaryBounds(
-                min_x = bounds_json.optDouble("minX").toFloat(),
-                min_y = bounds_json.optDouble("minY").toFloat(),
-                max_x = bounds_json.optDouble("maxX").toFloat(),
-                max_y = bounds_json.optDouble("maxY").toFloat()
-            )
-        }
-        return DictionaryGeometry(rings = rings, bounds = bounds)
-    }
-
-    private fun parse_ring(ring: JSONArray?): DictionaryRing? {
-        if (ring == null || ring.length() < 2) return null
-        val points = FloatArray(ring.length() * 2)
-        var count = 0
-        for (index in 0 until ring.length()) {
-            val point = ring.optJSONArray(index) ?: continue
-            points[count * 2] = point.optDouble(0).toFloat()
-            points[count * 2 + 1] = point.optDouble(1).toFloat()
-            count++
-        }
-        if (count < 2) return null
-        return DictionaryRing(points = points.copyOf(count * 2), point_count = count)
-    }
-
-    private fun parse_point(point: JSONObject?): DictionaryPoint? {
-        if (point == null) return null
-        return DictionaryPoint(
-            x = point.optDouble("x").toFloat(),
-            y = point.optDouble("y").toFloat()
-        )
-    }
-
-    private fun should_draw_label(
-        text: String,
-        source_kind: String,
-        source_layer: String,
-        label_placement: String,
-        rank: Int?,
-        protected_area: Boolean,
-        z: Int
-    ): Boolean {
-        if (text.length > MAX_LABEL_TEXT_LENGTH) return false
-        if (source_kind == "transportation") return false
-        if (source_layer.contains("Road", ignoreCase = true)) return false
-        if (source_layer.contains("Spot elevation", ignoreCase = true)) return false
-        if (ROAD_SHIELD_LABEL.matches(text) && source_layer != "Graticule/label") {
-            return false
-        }
-        if (z <= 8 && source_layer.contains("Graticule")) return false
-        if (source_kind == "water") {
-            if (label_placement == "line") return true
-            return rank == null || rank <= water_point_rank_limit(z)
-        }
-        if (source_kind == "admin") return rank == null || rank <= admin_rank_limit(z)
-        if (source_kind == "county") return z <= 9 && (rank == null || rank <= 24)
-        if (protected_area) {
-            return rank == null || rank <= protected_area_rank_limit(z)
-        }
-        if (source_kind == "place") {
-            val limit = place_rank_limit(z, source_layer)
-            return (rank == null && source_layer.contains("City", ignoreCase = true)) ||
-                    (rank != null && rank <= limit)
-        }
-        return rank != null && rank <= 24
-    }
-
-    private fun place_rank_limit(z: Int, source_layer: String): Int {
-        val base = when {
-            z <= 8 -> 12
-            z <= 10 -> 22
-            z == 11 -> 34
-            else -> 46
-        }
-        return if (source_layer.contains("City", ignoreCase = true)) base + 14 else base
-    }
-
-    private fun water_point_rank_limit(z: Int): Int {
-        return when {
-            z <= 8 -> 28
-            z <= 10 -> 20
-            else -> 34
-        }
-    }
-
-    private fun admin_rank_limit(z: Int): Int {
-        return if (z <= 8) 36 else 24
-    }
-
-    private fun protected_area_rank_limit(z: Int): Int {
-        return when {
-            z <= 8 -> 18
-            z <= 10 -> 32
-            else -> 48
-        }
-    }
-
-    private fun label_priority(
-        text: String,
-        source_kind: String,
-        source_layer: String,
-        label_placement: String,
-        rank: Int?,
-        protected_area: Boolean,
-        z: Int
-    ): Int {
-        val hierarchy_rank = hierarchy_rank(
-            source_kind = source_kind,
-            source_layer = source_layer,
-            rank = rank
-        )
-        var priority = when {
-            protected_area -> 172
-            source_kind == "water" -> if (label_placement == "line") 38 else 128
-            source_kind == "admin" -> 56
-            source_kind == "place" && source_layer.contains("City", ignoreCase = true) -> 86
-            source_kind == "place" -> 158
-            source_kind == "county" -> 138
-            else -> 260
-        }
-        priority += hierarchy_rank
-        if (text.length <= 4) priority += 72
-        if (z <= 8 && source_kind == "place") priority += 18
-        return priority
     }
 
     private fun label_style_for(
@@ -6152,375 +5233,6 @@ internal class ReferenceDictionaryOverlayRenderer(
         else -> false
     }
 
-    private fun label_style_template_for(
-        text: String,
-        source_kind: String,
-        source_layer: String,
-        label_placement: String,
-        rank: Int?,
-        protected_area: Boolean,
-        z: Int
-    ): DictionaryLabelStyleTemplate {
-        val tier = hierarchy_tier(
-            source_kind = source_kind,
-            source_layer = source_layer,
-            rank = rank
-        )
-        if (protected_area) {
-            return DictionaryLabelStyleTemplate(
-                color = Color.rgb(178, 213, 174),
-                text_size_sp = hierarchy_size(12.4f, tier + 1, 0.45f),
-                alpha = hierarchy_alpha(196, tier + 1, 12),
-                halo_width_dp = hierarchy_halo(2.05f, tier + 1),
-                halo_alpha = hierarchy_alpha(198, tier + 1, 12),
-                typeface_style = Typeface.NORMAL
-            )
-        }
-        return when (source_kind) {
-            "water" -> DictionaryLabelStyleTemplate(
-                color = Color.rgb(172, 222, 247),
-                text_size_sp = if (label_placement == "line") {
-                    hierarchy_size(14.2f, tier, 0.8f)
-                } else {
-                    hierarchy_size(12.6f, tier, 0.55f)
-                },
-                alpha = hierarchy_alpha(238, tier, 14),
-                halo_width_dp = hierarchy_halo(2.25f, tier),
-                halo_alpha = hierarchy_alpha(226, tier, 10),
-                typeface_style = Typeface.ITALIC
-            )
-
-            "county" -> DictionaryLabelStyleTemplate(
-                color = Color.rgb(222, 232, 240),
-                text_size_sp = hierarchy_size(12.4f, tier, 0.45f),
-                alpha = hierarchy_alpha(186, tier + 1, 16),
-                halo_width_dp = hierarchy_halo(2.0f, tier + 1),
-                halo_alpha = hierarchy_alpha(190, tier + 1, 14),
-                typeface_style = Typeface.NORMAL
-            )
-
-            "admin" -> DictionaryLabelStyleTemplate(
-                color = Color.rgb(238, 246, 252),
-                text_size_sp = hierarchy_size(14.8f, tier, 0.75f),
-                alpha = hierarchy_alpha(230, tier, 12),
-                halo_width_dp = hierarchy_halo(2.45f, tier),
-                halo_alpha = hierarchy_alpha(224, tier, 10),
-                typeface_style = Typeface.BOLD
-            )
-
-            "place" -> DictionaryLabelStyleTemplate(
-                color = Color.rgb(248, 251, 255),
-                text_size_sp = hierarchy_size(
-                    if (source_layer.contains("City", ignoreCase = true)) 14.3f else 12.7f,
-                    tier,
-                    0.7f
-                ),
-                alpha = hierarchy_alpha(238, tier, 14),
-                halo_width_dp = hierarchy_halo(2.5f, tier),
-                halo_alpha = hierarchy_alpha(230, tier, 10),
-                typeface_style = if (tier <= 1) Typeface.BOLD else Typeface.NORMAL
-            )
-
-            else -> DictionaryLabelStyleTemplate(
-                color = Color.rgb(242, 247, 251),
-                text_size_sp = if (z >= 12) 12.5f else 13.5f,
-                alpha = 226,
-                halo_width_dp = 2.4f,
-                halo_alpha = 220,
-                typeface_style = Typeface.NORMAL
-            )
-        }
-    }
-
-    private fun hierarchy_rank(
-        source_kind: String,
-        source_layer: String,
-        rank: Int?
-    ): Int {
-        if (rank != null) return rank.coerceIn(0, 160)
-        return when {
-            source_kind == "admin" -> 10
-            source_kind == "water" -> 18
-            source_kind == "place" && source_layer.contains("City", ignoreCase = true) -> 24
-            source_kind == "county" -> 46
-            else -> 80
-        }
-    }
-
-    private fun hierarchy_tier(
-        source_kind: String,
-        source_layer: String,
-        rank: Int?
-    ): Int {
-        val normalized_rank = hierarchy_rank(source_kind, source_layer, rank)
-        return when {
-            normalized_rank <= 10 -> 0
-            normalized_rank <= 24 -> 1
-            normalized_rank <= 46 -> 2
-            else -> 3
-        }
-    }
-
-    private fun hierarchy_size(base_sp: Float, tier: Int, step_sp: Float): Float {
-        return (base_sp - tier.coerceIn(0, 3) * step_sp).coerceAtLeast(10.8f)
-    }
-
-    private fun hierarchy_alpha(base: Int, tier: Int, step: Int): Int {
-        return (base - tier.coerceIn(0, 4) * step).coerceIn(128, 245)
-    }
-
-    private fun hierarchy_halo(base_dp: Float, tier: Int): Float {
-        return (base_dp - tier.coerceIn(0, 3) * 0.18f).coerceAtLeast(1.7f)
-    }
-
-    private fun protected_area_label(
-        text: String,
-        source_layer: String,
-        source_kind: String,
-        class_name: String = ""
-    ): Boolean {
-        if (source_kind == "water" || source_kind == "county") return false
-        val text_terms = reference_terms(text)
-        val metadata_terms = reference_terms(source_layer, source_kind, class_name)
-        if (protected_area_terms(text_terms) || protected_area_terms(metadata_terms)) {
-            return true
-        }
-        return text_terms.endsWith(" park ") ||
-                text_terms.contains(" parks ") ||
-                text_terms.contains(" wildlife ") ||
-                text_terms.contains(" parkway ") ||
-                text_terms.contains(" gameland ") ||
-                text_terms.contains(" gamelands ") ||
-                metadata_terms.contains(" park ") ||
-                metadata_terms.contains(" parks ") ||
-                metadata_terms.contains(" wildlife ") ||
-                metadata_terms.contains(" parkway ") ||
-                metadata_terms.contains(" forest ") ||
-                metadata_terms.contains(" forests ") ||
-                metadata_terms.contains(" gameland ") ||
-                metadata_terms.contains(" gamelands ")
-    }
-
-    private fun protected_area_line(
-        source_layer: String,
-        source_kind: String,
-        class_name: String
-    ): Boolean {
-        if (source_kind == "water" || source_kind == "county") return false
-        val terms = reference_terms(source_layer, source_kind, class_name)
-        return protected_area_terms(terms) ||
-                terms.contains(" park ") ||
-                terms.contains(" parks ") ||
-                terms.contains(" wildlife ") ||
-                terms.contains(" parkway ") ||
-                terms.contains(" forest ") ||
-                terms.contains(" forests ") ||
-                terms.contains(" gameland ") ||
-                terms.contains(" gamelands ")
-    }
-
-    private fun protected_area_terms(terms: String): Boolean {
-        return terms.contains(" wildlife refuge ") ||
-                terms.contains(" national wildlife ") ||
-                terms.contains(" wildlife area ") ||
-                terms.contains(" wildlife areas ") ||
-                terms.contains(" wildlife sanctuary ") ||
-                terms.contains(" wildlife sanctuaries ") ||
-                terms.contains(" refuge ") ||
-                terms.contains(" national park ") ||
-                terms.contains(" national parks ") ||
-                terms.contains(" national capital parks ") ||
-                terms.contains(" state park ") ||
-                terms.contains(" county park ") ||
-                terms.contains(" regional park ") ||
-                terms.contains(" military park ") ||
-                terms.contains(" memorial parkway ") ||
-                terms.contains(" national forest ") ||
-                terms.contains(" state forest ") ||
-                terms.contains(" forest preserve ") ||
-                terms.contains(" nature preserve ") ||
-                terms.contains(" preserve ") ||
-                terms.contains(" wilderness ") ||
-                terms.contains(" national monument ") ||
-                terms.contains(" national battlefield ") ||
-                terms.contains(" national historic ") ||
-                terms.contains(" national seashore ") ||
-                terms.contains(" national seashores ") ||
-                terms.contains(" recreation area ") ||
-                terms.contains(" management area ") ||
-                terms.contains(" conservation ") ||
-                terms.contains(" natural area ") ||
-                terms.contains(" game land ") ||
-                terms.contains(" game lands ") ||
-                terms.contains(" gameland ") ||
-                terms.contains(" gamelands ") ||
-                terms.contains(" state gameland ") ||
-                terms.contains(" state gamelands ") ||
-                terms.contains(" game refuge ") ||
-                terms.contains(" wildlife management ")
-    }
-
-    private fun reference_terms(vararg values: String): String {
-        val compact = REFERENCE_TOKEN_SEPARATOR
-            .replace(values.joinToString(" ").lowercase(), " ")
-            .trim()
-        return if (compact.isEmpty()) " " else " $compact "
-    }
-
-    private fun JSONObject.layer_group_or_null(): ReferenceDictionaryLayerGroup? {
-        val raw = optString("layerGroup")
-            .ifBlank { optString("group") }
-            .ifBlank { optString("g") }
-            .trim()
-            .uppercase()
-        return when (raw) {
-            "PLACES", "PLACE" -> ReferenceDictionaryLayerGroup.PLACES
-            "WATER", "HYDRO" -> ReferenceDictionaryLayerGroup.WATER
-            "REGIONS", "REGION", "ADMIN", "BOUNDARIES", "BORDERS" ->
-                ReferenceDictionaryLayerGroup.REGIONS
-            "PUBLIC_LANDS", "PUBLICLANDS", "PARKS", "PARK_FOREST" ->
-                ReferenceDictionaryLayerGroup.PUBLIC_LANDS
-            "TRANSPORTATION", "TRANSPORT", "STREETS", "ROADS" ->
-                ReferenceDictionaryLayerGroup.TRANSPORTATION
-            "OTHER" -> ReferenceDictionaryLayerGroup.OTHER
-            else -> null
-        }
-    }
-
-    private fun source_kind_for_group(group: ReferenceDictionaryLayerGroup?): String? {
-        return when (group) {
-            ReferenceDictionaryLayerGroup.PLACES -> "place"
-            ReferenceDictionaryLayerGroup.WATER -> "water"
-            ReferenceDictionaryLayerGroup.REGIONS -> "admin"
-            ReferenceDictionaryLayerGroup.PUBLIC_LANDS -> "place"
-            ReferenceDictionaryLayerGroup.TRANSPORTATION -> "transportation"
-            ReferenceDictionaryLayerGroup.OTHER,
-            null -> null
-        }
-    }
-
-    private fun label_layer_group(
-        source_kind: String,
-        source_layer: String,
-        protected_area: Boolean
-    ): ReferenceDictionaryLayerGroup {
-        if (protected_area) return ReferenceDictionaryLayerGroup.PUBLIC_LANDS
-        return when {
-            source_kind == "water" -> ReferenceDictionaryLayerGroup.WATER
-            source_kind == "admin" || source_kind == "county" -> ReferenceDictionaryLayerGroup.REGIONS
-            source_kind == "place" -> ReferenceDictionaryLayerGroup.PLACES
-            source_layer.contains("City", ignoreCase = true) -> ReferenceDictionaryLayerGroup.PLACES
-            source_layer.contains("Admin", ignoreCase = true) -> ReferenceDictionaryLayerGroup.REGIONS
-            else -> ReferenceDictionaryLayerGroup.PLACES
-        }
-    }
-
-    private fun line_layer_group(
-        source_layer: String,
-        source_kind: String,
-        class_name: String,
-        protected_area: Boolean
-    ): ReferenceDictionaryLayerGroup {
-        if (protected_area) return ReferenceDictionaryLayerGroup.PUBLIC_LANDS
-        if (water_line_feature(source_layer, source_kind, class_name)) {
-            return ReferenceDictionaryLayerGroup.WATER
-        }
-        return when (source_kind) {
-            "water" -> ReferenceDictionaryLayerGroup.WATER
-            "admin", "county" -> ReferenceDictionaryLayerGroup.REGIONS
-            else -> ReferenceDictionaryLayerGroup.REGIONS
-        }
-    }
-
-    private fun water_line_feature(
-        source_layer: String,
-        source_kind: String,
-        class_name: String
-    ): Boolean {
-        if (source_kind == "water") return true
-        val terms = reference_terms(source_layer, source_kind, class_name)
-        return terms.contains(" water ") ||
-                terms.contains(" waterbody ") ||
-                terms.contains(" water bodies ") ||
-                terms.contains(" ocean ") ||
-                terms.contains(" sea ") ||
-                terms.contains(" bay ") ||
-                terms.contains(" lake ") ||
-                terms.contains(" river ") ||
-                terms.contains(" stream ") ||
-                terms.contains(" coastline ") ||
-                terms.contains(" shoreline ") ||
-                terms.contains(" marine ") ||
-                terms.contains(" hydro ")
-    }
-
-    private fun line_style_for(
-        source_layer: String,
-        source_kind: String,
-        class_name: String,
-        layer_group: ReferenceDictionaryLayerGroup
-    ): DictionaryLineStyle {
-        val source = source_layer.lowercase()
-        val normalized_class = class_name.lowercase()
-        return when {
-            layer_group == ReferenceDictionaryLayerGroup.WATER ||
-                    water_line_feature(source_layer, source_kind, class_name) -> DictionaryLineStyle(
-                color = Color.rgb(166, 214, 236),
-                stroke_width_dp = 0.58f,
-                halo_width_dp = 0.82f,
-                alpha = 112,
-                halo_alpha = 56
-            )
-
-            source.contains("admin0") || normalized_class.contains("country") -> DictionaryLineStyle(
-                color = Color.WHITE,
-                stroke_width_dp = 1.65f,
-                halo_width_dp = 2.25f,
-                alpha = 202,
-                halo_alpha = 148
-            )
-
-            source.contains("admin1") || normalized_class.contains("state") -> DictionaryLineStyle(
-                color = Color.rgb(250, 253, 255),
-                stroke_width_dp = 1.3f,
-                halo_width_dp = 1.95f,
-                alpha = 184,
-                halo_alpha = 126
-            )
-
-            source.contains("admin2") || source_kind == "county" -> DictionaryLineStyle(
-                color = Color.rgb(238, 246, 252),
-                stroke_width_dp = 0.82f,
-                halo_width_dp = 1.35f,
-                alpha = 124,
-                halo_alpha = 82
-            )
-
-            source.contains("forest") || source.contains("park") -> DictionaryLineStyle(
-                color = Color.rgb(145, 220, 156),
-                stroke_width_dp = 0.62f,
-                halo_width_dp = 1.05f,
-                alpha = 82,
-                halo_alpha = 58
-            )
-
-            else -> DictionaryLineStyle(
-                color = Color.rgb(232, 244, 255),
-                stroke_width_dp = 0.8f,
-                halo_width_dp = 1.25f,
-                alpha = 112,
-                halo_alpha = 74
-            )
-        }
-    }
-
-    private fun label_rotation(bounds: DictionaryBounds): Float {
-        val dx = bounds.max_x - bounds.min_x
-        val dy = bounds.max_y - bounds.min_y
-        if (dx < 40f || dy < 40f) return 0f
-        return (atan2(dy, dx) * 180f / Math.PI.toFloat() - 12f).coerceIn(-24f, 24f)
-    }
-
     private fun label_bbox(
         text: String,
         x: Float,
@@ -6570,50 +5282,6 @@ internal class ReferenceDictionaryOverlayRenderer(
             fading = false
         )
     }
-
-    private fun JSONObject.optional_int(key: String): Int? {
-        if (isNull(key)) return null
-        return optDouble(key).takeIf { it.isFinite() }?.roundToInt()
-    }
-
-    private fun JSONObject.optional_double(key: String): Double? {
-        if (isNull(key)) return null
-        return optDouble(key).takeIf { it.isFinite() }
-    }
-
-    private fun JSONObject.optional_boolean(key: String): Boolean? {
-        if (!has(key) || isNull(key)) return null
-        return optBoolean(key)
-    }
-
-    private data class VisibleDictionaryTile(
-        val z: Int,
-        val x: Int,
-        val draw_x: Int,
-        val y: Int,
-        val core_visible: Boolean,
-        val request_priority: Int,
-        val outline_visibility_centizoom: Int? = null,
-    ) {
-        fun cache_key(): String {
-            val visibility = outline_visibility_centizoom ?: return "$z/$x/$y"
-            return "$z/$x/$y@outline-$visibility"
-        }
-
-        fun low_zoom_profile(): Boolean =
-            outline_visibility_centizoom == ReferenceDictionaryLodPolicy.LOW_ZOOM_OUTLINE_PROFILE
-    }
-
-    private data class DictionaryTileDrawRef(
-        val tile: ParsedDictionaryTile,
-        val draw_x: Int,
-        val core_visible: Boolean,
-    )
-
-    private data class DictionaryLineRecordRef(
-        val tile: DictionaryTileDrawRef,
-        val record: DictionaryLineRecord,
-    )
 
     private data class BoundaryPathBatchKey(
         val draw_order: Int,
@@ -6947,229 +5615,6 @@ internal class ReferenceDictionaryOverlayRenderer(
         val plannedCandidateIds = HashSet<ReferenceLabelCandidateKey>(256)
         val acceptedLabels = ArrayList<DictionaryLabelCandidate>(128)
     }
-
-    private data class DictionaryLabelRecordRef(
-        val tile: DictionaryTileDrawRef,
-        val record: DictionaryLabelRecord,
-        val layout_priority: Int,
-        val layout_feature_id: ULong,
-        val encounter_order: Int,
-    )
-
-    private data class ParsedDictionaryTile(
-        val coordinate: ReferenceDictionaryTileCoordinate,
-        val boundaries: List<DictionaryLineRecord>,
-        val labels: List<DictionaryLabelRecord>
-    )
-
-    private data class PackageSnapshot(
-        val info: ReferenceDictionaryPackageInfo,
-        val catalog: ReferenceClassCatalog,
-    )
-
-    private inner class PackageProbe(
-        val generation: Long,
-    ) : Runnable {
-        override fun run() {
-            probe_package(this)
-        }
-    }
-
-    private data class DictionaryLineRecord(
-        val source_layer: String,
-        val source_kind: String,
-        val class_name: String,
-        val protected_area: Boolean,
-        val layer_group: ReferenceDictionaryLayerGroup,
-        val filter_id: FilterId? = null,
-        val geometry: DictionaryGeometry,
-        val visibility_rule: OutlineVisibilityRule? = null,
-        val draw_order: Int = 0,
-        val priority: Int = 0,
-        val source_feature_id: ULong = 0uL,
-        val dedupe_id: ULong? = null,
-        val posting_world_wrap: Int = 0,
-        val style: DictionaryLineStyle
-    )
-
-    private data class DictionaryLabelRecord(
-        val text: String,
-        val source_layer: String,
-        val source_kind: String,
-        val line_label: Boolean,
-        val drawable: Boolean,
-        val protected_area: Boolean,
-        val layer_group: ReferenceDictionaryLayerGroup,
-        val filter_id: FilterId? = null,
-        val priority: Int,
-        val color: Int,
-        val base_text_size_sp: Float,
-        val alpha: Int,
-        val halo_color: Int = Color.rgb(7, 20, 25),
-        val halo_width_dp: Float,
-        val halo_alpha: Int,
-        val typeface_style: Int,
-        val letter_spacing_em: Float = 0f,
-        val rotation: Float,
-        val rank: Int?,
-        val min_zoom: Double?,
-        val max_zoom: Double?,
-        val anchor: DictionaryPoint?,
-        val geometry: DictionaryGeometry?,
-        val sourced_text: SourcedMapText? = null,
-        val dedupe_key: String? = null,
-        val is_water: Boolean? = null,
-        val candidate_id: ULong? = null,
-        val source_feature_id: ULong? = null,
-        val presentation_subtype: SemanticSubtype? = null,
-        val prominence_tier: ProminenceTier? = null,
-        val complete_geometry_measure_bucket: Int = 0,
-        val low_zoom_country_rank: Int = UNKNOWN_LOW_ZOOM_COUNTRY_RANK,
-        val runtime_typography: ReferenceLabelRuntimeTypography? = null,
-        val visibility_rule: LabelVisibilityRule? = null,
-        val repeat_spacing_px: Int? = null,
-        val posting_world_wrap: Int = 0,
-    ) {
-        fun visible_at(zoom: Double): Boolean {
-            if (min_zoom != null && zoom + 0.01 < min_zoom) return false
-            if (max_zoom != null && zoom - 0.01 > max_zoom) return false
-            return true
-        }
-    }
-
-    private data class DictionaryGeometry(
-        val rings: List<DictionaryRing>,
-        val bounds: DictionaryBounds?
-    )
-
-    private data class DictionaryRing(
-        val points: FloatArray,
-        val point_count: Int
-    )
-
-    private data class DictionaryBounds(
-        val min_x: Float,
-        val min_y: Float,
-        val max_x: Float,
-        val max_y: Float
-    )
-
-    private data class DictionaryPoint(
-        val x: Float,
-        val y: Float
-    )
-
-    private data class DictionaryScreenPoint(
-        val x: Float,
-        val y: Float
-    )
-
-    private data class DictionaryLineStyle(
-        val color: Int,
-        val stroke_width_dp: Float,
-        val halo_width_dp: Float,
-        val alpha: Int,
-        val halo_alpha: Int,
-        val halo_color: Int = Color.rgb(4, 10, 14),
-        val dash_pattern_dp: List<Float> = emptyList(),
-        val dash_phase_dp: Float = 0f,
-        val stroke_cap: Paint.Cap = Paint.Cap.ROUND,
-        val stroke_join: Paint.Join = Paint.Join.ROUND,
-    )
-
-    private data class DictionaryLabelStyle(
-        val color: Int,
-        val text_size: Float,
-        val alpha: Int,
-        val halo_color: Int,
-        val halo_width_dp: Float,
-        val halo_width_milli_em: Int,
-        val halo_alpha: Int,
-        val font_weight: Int,
-        val italic: Boolean,
-        val letter_spacing_em: Float,
-    )
-
-    private data class DictionaryLabelStyleTemplate(
-        val color: Int,
-        val text_size_sp: Float,
-        val alpha: Int,
-        val halo_width_dp: Float,
-        val halo_alpha: Int,
-        val typeface_style: Int
-    )
-
-    private data class DictionaryLabelCandidate(
-        val text: String,
-        val source_kind: String,
-        val presentation: SourcedMapTextPresentationPlan?,
-        val style: DictionaryLabelStyle,
-        override val occurrenceId: ReferenceLabelOccurrenceId,
-        override val featureId: ULong,
-        override val priority: Int,
-        override val placementRank: Int,
-        override val protectedArea: Boolean,
-        override val waterLine: Boolean,
-        override val anchor: ReferencePathLabelPoint,
-        override val collisionShape: ReferenceLabelCollisionShape,
-        val rotation: Float = 0f,
-        val path_points: List<ReferencePathLabelPoint>? = null,
-    ) : ReferenceLabelLayoutCandidate {
-        val x: Float get() = anchor.x.toFloat()
-        val y: Float get() = anchor.y.toFloat()
-    }
-
-    private data class ReferenceDrawCounts(
-        val boundaries: Int,
-        val labels: Int
-    )
-
-    private data class RetainedReferenceContent(
-        val boundaries: Int,
-        val labels: List<DictionaryLabelCandidate>,
-    )
-
-    private enum class ReferenceDictionaryLayerGroup {
-        PLACES,
-        WATER,
-        REGIONS,
-        PUBLIC_LANDS,
-        TRANSPORTATION,
-        OTHER
-    }
-
-    private data class ReferenceDictionaryLayerGroups(
-        val places: Boolean,
-        val water: Boolean,
-        val regions: Boolean,
-        val public_lands: Boolean
-    ) {
-        val cache_suffix: String =
-            "${if (places) 'p' else '-'}${if (water) 'w' else '-'}" +
-                    "${if (regions) 'r' else '-'}${if (public_lands) 'l' else '-'}"
-
-        fun enabled(group: ReferenceDictionaryLayerGroup): Boolean {
-            return when (group) {
-                ReferenceDictionaryLayerGroup.PLACES -> places
-                ReferenceDictionaryLayerGroup.WATER -> water
-                ReferenceDictionaryLayerGroup.REGIONS -> regions
-                ReferenceDictionaryLayerGroup.PUBLIC_LANDS -> public_lands
-                ReferenceDictionaryLayerGroup.TRANSPORTATION,
-                ReferenceDictionaryLayerGroup.OTHER -> false
-            }
-        }
-    }
-
-    private data class RetainedReferenceOptions(
-        val labels_enabled: Boolean,
-        val borders_enabled: Boolean,
-        val place_labels_enabled: Boolean,
-        val water_labels_enabled: Boolean,
-        val region_labels_enabled: Boolean,
-        val public_lands_enabled: Boolean,
-        val filter_mask_key: Int,
-        val label_text_scale_key: Int
-    )
 
     private data class RetainedReferenceFrame(
         val boundary_batches: List<BoundaryPathBatch>,
