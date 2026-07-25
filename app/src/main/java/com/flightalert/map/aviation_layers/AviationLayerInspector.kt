@@ -1,8 +1,9 @@
-package com.flightalert.map
+package com.flightalert.map.aviation_layers
 
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
+import com.flightalert.map.*
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min

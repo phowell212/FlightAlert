@@ -1,5 +1,6 @@
-package com.flightalert.map
+package com.flightalert.map.aviation_layers
 
+import com.flightalert.map.*
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.io.IOException

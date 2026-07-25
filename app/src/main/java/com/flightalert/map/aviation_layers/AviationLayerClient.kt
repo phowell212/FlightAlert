@@ -14,8 +14,9 @@
     "unused"
 )
 
-package com.flightalert.map
+package com.flightalert.map.aviation_layers
 
+import com.flightalert.map.*
 import java.net.URL
 
 class AviationLayerClient(

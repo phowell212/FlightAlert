@@ -14,7 +14,7 @@
     "unused"
 )
 
-package com.flightalert.map
+package com.flightalert.map.aviation_layers
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -28,6 +28,7 @@ import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withTranslation
 import com.flightalert.TILE_SIZE
 import com.flightalert.ThemeTreatment
+import com.flightalert.map.*
 import com.flightalert.ui.lerp
 import com.flightalert.ui.smooth_step
 import com.flightalert.ui.with_alpha

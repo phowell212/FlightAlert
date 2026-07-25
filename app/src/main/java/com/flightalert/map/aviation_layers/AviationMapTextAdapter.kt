@@ -1,4 +1,6 @@
-package com.flightalert.map
+package com.flightalert.map.aviation_layers
+
+import com.flightalert.map.*
 
 /**
  * Exact provider fields used to construct an aviation map label.

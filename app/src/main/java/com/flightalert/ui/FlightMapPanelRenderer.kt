@@ -28,9 +28,9 @@ import android.graphics.Typeface
 import android.os.SystemClock
 import androidx.core.graphics.withSave
 import com.flightalert.alerts.MonitoringNotificationHiderStatus
-import com.flightalert.map.AviationLayerKind
-import com.flightalert.map.AviationLayerSnapshot
-import com.flightalert.map.AviationLayerState
+import com.flightalert.map.aviation_layers.AviationLayerKind
+import com.flightalert.map.aviation_layers.AviationLayerSnapshot
+import com.flightalert.map.aviation_layers.AviationLayerState
 import com.flightalert.map.TileSource
 import com.flightalert.map.UnitSystem
 import com.flightalert.traffic.AircraftTypeFilter

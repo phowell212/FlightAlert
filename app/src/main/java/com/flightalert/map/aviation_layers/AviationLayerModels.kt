@@ -1,6 +1,7 @@
-package com.flightalert.map
+package com.flightalert.map.aviation_layers
 
 import com.flightalert.ThemeTreatment
+import com.flightalert.map.*
 import java.net.URL
 import java.util.Collections
 import kotlin.math.max
