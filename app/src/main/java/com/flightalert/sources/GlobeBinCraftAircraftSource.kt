@@ -19,6 +19,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.BitSet
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -52,6 +53,9 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
 
     @Volatile
     private var latest: GlobeSnapshot? = null
+
+    @Volatile
+    private var latest_query: GlobeQuery? = null
 
     @Volatile
     private var extraction_paused_until_elapsed_ms = 0L
@@ -107,6 +111,7 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         if (running) schedule_fetch(0L)
     }
 
+    @Synchronized
     @Suppress("UNUSED_PARAMETER")
     fun latest_snapshot(
         bounds: FeedBounds,
@@ -119,18 +124,26 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         val snapshot = latest ?: return null
         if (snapshot.viewport_generation != viewport.generation) return null
         if (SystemClock.elapsedRealtime() - snapshot.received_elapsed_ms > MAX_SNAPSHOT_AGE_MS) return null
-        if (snapshot.aircraft.isEmpty() && snapshot.partial_coverage) return null
-        val normalized_search =
-            exact_search?.trim()?.uppercase(Locale.US)?.takeIf { it.isNotBlank() }
-        val filtered = ArrayList<FeedAircraft>(snapshot.aircraft.size)
-        snapshot.aircraft.forEach { aircraft ->
-            if (normalized_search == null || aircraft.matches_search(normalized_search)) {
-                filtered += aircraft.with_distance_from(own_lat, own_lon)
-            }
+        if (snapshot.store.aircraft.isEmpty() && snapshot.partial_coverage) return null
+        val query_bounds = bounds.to_globe_query_bounds()
+        val normalized_search = normalize_globe_search_key(exact_search)
+        val cached_query = latest_query
+        if (cached_query != null &&
+            cached_query.content_revision == snapshot.content_revision &&
+            cached_query.own_lat_bits == own_lat.toBits() &&
+            cached_query.own_lon_bits == own_lon.toBits() &&
+            cached_query.bounds == query_bounds &&
+            cached_query.normalized_search == normalized_search
+        ) {
+            return cached_query.result
+        }
+        val queried = snapshot.store.query(query_bounds, normalized_search)
+        val filtered = ArrayList<FeedAircraft>(queried.size)
+        queried.forEach { aircraft ->
+            filtered += aircraft.with_distance_from(own_lat, own_lon)
         }
         filtered.sortBy { it.distance_m }
-        if (normalized_search != null && filtered.isEmpty()) return null
-        return FeedResult(
+        val result = FeedResult(
             status = FeedStatus.OK,
             source = FeedSource.AIRPLANES_LIVE_GLOBE,
             aircraft = filtered,
@@ -138,6 +151,15 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
             query_count = 0,
             partial_coverage = snapshot.partial_coverage
         )
+        latest_query = GlobeQuery(
+            content_revision = snapshot.content_revision,
+            own_lat_bits = own_lat.toBits(),
+            own_lon_bits = own_lon.toBits(),
+            bounds = query_bounds,
+            normalized_search = normalized_search,
+            result = result
+        )
+        return result
     }
 
     fun pause_inventory_extraction(duration_ms: Long) {
@@ -166,11 +188,10 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         }
         running = false
         handler.removeCallbacks(fetcher)
-        fetch_in_progress = false
         if (clear_snapshot) {
             latest = null
+            latest_query = null
             pending_viewport = null
-            viewport_generation = 0L
         }
     }
 
@@ -208,17 +229,29 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
                         schedule_fetch(STARTUP_RETRY_MS)
                         return@post
                     }
-                    if (snapshot == null || (snapshot.aircraft.isEmpty() && snapshot.partial_coverage)) {
+                    if (snapshot == null || (snapshot.store.aircraft.isEmpty() && snapshot.partial_coverage)) {
                         schedule_fetch(STARTUP_RETRY_MS)
                         return@post
                     }
+                    val received_elapsed_ms = SystemClock.elapsedRealtime()
+                    val current = latest
+                    if (current != null &&
+                        current.viewport_generation == viewport.generation &&
+                        current.content_revision == snapshot.content_revision
+                    ) {
+                        latest = current.copy(received_elapsed_ms = received_elapsed_ms)
+                        schedule_fetch(next_cadence_delay_ms(fetch_started_elapsed_ms))
+                        return@post
+                    }
                     val next = GlobeSnapshot(
-                        aircraft = snapshot.aircraft,
+                        store = snapshot.store,
                         epoch_sec = snapshot.epoch_sec,
-                        received_elapsed_ms = SystemClock.elapsedRealtime(),
+                        received_elapsed_ms = received_elapsed_ms,
                         partial_coverage = snapshot.partial_coverage,
-                        viewport_generation = viewport.generation
+                        viewport_generation = viewport.generation,
+                        content_revision = snapshot.content_revision
                     )
+                    latest_query = null
                     latest = next
                     on_snapshot_updated?.invoke()
                     schedule_fetch(next_cadence_delay_ms(fetch_started_elapsed_ms))
@@ -248,18 +281,22 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         return copy(distance_m = globe_distance_meters(own_lat, own_lon, lat, lon))
     }
 
-    private fun FeedAircraft.matches_search(search: String): Boolean {
-        return icao24.uppercase(Locale.US).contains(search) ||
-                callsign.uppercase(Locale.US).replace(" ", "").contains(search.replace(" ", "")) ||
-                registration?.uppercase(Locale.US)?.contains(search) == true
-    }
-
     private data class GlobeSnapshot(
-        val aircraft: List<FeedAircraft>,
+        val store: GlobeAircraftStore,
         val epoch_sec: Double,
         val received_elapsed_ms: Long,
         val partial_coverage: Boolean,
-        val viewport_generation: Long
+        val viewport_generation: Long,
+        val content_revision: Long
+    )
+
+    private data class GlobeQuery(
+        val content_revision: Long,
+        val own_lat_bits: Long,
+        val own_lon_bits: Long,
+        val bounds: GlobeQueryBounds,
+        val normalized_search: String?,
+        val result: FeedResult
     )
 
     private data class GlobeViewport(
@@ -306,12 +343,170 @@ internal fun globe_distance_meters(lat1: Double, lon1: Double, lat2: Double, lon
 internal const val GLOBE_EARTH_RADIUS_M = 6371000.0
 
 internal data class GlobeBinCraftSnapshot(
-    val aircraft: List<FeedAircraft>,
+    val store: GlobeAircraftStore,
     val epoch_sec: Double,
-    val partial_coverage: Boolean
+    val partial_coverage: Boolean,
+    val content_revision: Long = 0L
 )
 
+internal class GlobeAircraftStore private constructor(
+    val aircraft: List<FeedAircraft>,
+    private val exact_key_index: Map<String, IntArray>,
+    private val spatial_index: GlobeAircraftSpatialIndex
+) {
+    fun query(bounds: GlobeQueryBounds, exact_key: String?): List<FeedAircraft> {
+        val selected = BitSet(aircraft.size)
+        spatial_index.select(bounds, aircraft, selected)
+        exact_key?.let { exact_key_index[it]?.forEach(selected::set) }
+        val result = ArrayList<FeedAircraft>(selected.cardinality())
+        var index = selected.nextSetBit(0)
+        while (index >= 0) {
+            result += aircraft[index]
+            index = selected.nextSetBit(index + 1)
+        }
+        return result
+    }
+
+    companion object {
+        fun from(parsed: List<FeedAircraft>): GlobeAircraftStore {
+            val aircraft = parsed.toList()
+            val mutable_exact_index = HashMap<String, MutableList<Int>>()
+            aircraft.forEachIndexed { index, item ->
+                val icao_key = normalize_globe_search_key(item.icao24)
+                val callsign_key = normalize_globe_search_key(item.callsign)
+                val registration_key = normalize_globe_search_key(item.registration)
+                mutable_exact_index.add_key(icao_key, index)
+                if (callsign_key != icao_key) mutable_exact_index.add_key(callsign_key, index)
+                if (registration_key != icao_key && registration_key != callsign_key) {
+                    mutable_exact_index.add_key(registration_key, index)
+                }
+            }
+            return GlobeAircraftStore(
+                aircraft = aircraft,
+                exact_key_index = mutable_exact_index.mapValues { it.value.toIntArray() },
+                spatial_index = GlobeAircraftSpatialIndex.from(aircraft)
+            )
+        }
+
+        private fun MutableMap<String, MutableList<Int>>.add_key(key: String?, index: Int) {
+            if (key != null) getOrPut(key) { ArrayList(1) } += index
+        }
+    }
+}
+
+internal data class GlobeQueryBounds(
+    val min_lat: Double,
+    val min_lon: Double,
+    val max_lat: Double,
+    val max_lon: Double,
+    val wraps_longitude: Boolean
+) {
+    fun contains(lat: Double, lon: Double): Boolean {
+        if (lat !in min_lat..max_lat) return false
+        return if (wraps_longitude) lon >= min_lon || lon <= max_lon else lon in min_lon..max_lon
+    }
+}
+
+internal class GlobeAircraftSpatialIndex private constructor(
+    private val cells: Array<IntArray?>
+) {
+    fun select(bounds: GlobeQueryBounds, aircraft: List<FeedAircraft>, selected: BitSet) {
+        val min_row = latitude_cell(bounds.min_lat)
+        val max_row = latitude_cell(bounds.max_lat)
+        if (bounds.wraps_longitude) {
+            select(min_row, max_row, longitude_cell(bounds.min_lon), LONGITUDE_CELLS - 1, bounds, aircraft, selected)
+            select(min_row, max_row, 0, longitude_cell(bounds.max_lon), bounds, aircraft, selected)
+        } else {
+            select(
+                min_row,
+                max_row,
+                longitude_cell(bounds.min_lon),
+                longitude_cell(bounds.max_lon),
+                bounds,
+                aircraft,
+                selected
+            )
+        }
+    }
+
+    private fun select(
+        min_row: Int,
+        max_row: Int,
+        min_column: Int,
+        max_column: Int,
+        bounds: GlobeQueryBounds,
+        aircraft: List<FeedAircraft>,
+        selected: BitSet
+    ) {
+        for (row in min_row..max_row) {
+            for (column in min_column..max_column) {
+                cells[row * LONGITUDE_CELLS + column]?.forEach { index ->
+                    val item = aircraft[index]
+                    if (bounds.contains(item.lat, item.lon)) selected.set(index)
+                }
+            }
+        }
+    }
+
+    companion object {
+        private const val CELL_DEGREES = 2.0
+        private const val LATITUDE_CELLS = 90
+        private const val LONGITUDE_CELLS = 180
+        private const val CELL_COUNT = LATITUDE_CELLS * LONGITUDE_CELLS
+
+        fun from(aircraft: List<FeedAircraft>): GlobeAircraftSpatialIndex {
+            val mutable_cells = arrayOfNulls<MutableList<Int>>(CELL_COUNT)
+            aircraft.forEachIndexed { index, item ->
+                val cell = latitude_cell(item.lat) * LONGITUDE_CELLS + longitude_cell(item.lon)
+                mutable_cells[cell] =
+                    (mutable_cells[cell] ?: ArrayList<Int>().also { mutable_cells[cell] = it })
+                        .also { it += index }
+            }
+            return GlobeAircraftSpatialIndex(
+                Array(CELL_COUNT) { index -> mutable_cells[index]?.toIntArray() }
+            )
+        }
+
+        private fun latitude_cell(lat: Double): Int {
+            return ((lat.coerceIn(-90.0, 90.0) + 90.0) / CELL_DEGREES)
+                .toInt()
+                .coerceIn(0, LATITUDE_CELLS - 1)
+        }
+
+        private fun longitude_cell(lon: Double): Int {
+            return ((lon.coerceIn(-180.0, 180.0) + 180.0) / CELL_DEGREES)
+                .toInt()
+                .coerceIn(0, LONGITUDE_CELLS - 1)
+        }
+    }
+}
+
+private fun FeedBounds.to_globe_query_bounds(): GlobeQueryBounds {
+    val min_latitude = kotlin.math.min(min_lat, max_lat).coerceIn(-90.0, 90.0)
+    val max_latitude = kotlin.math.max(min_lat, max_lat).coerceIn(-90.0, 90.0)
+    val min_longitude = min_lon.coerceIn(-180.0, 180.0)
+    val max_longitude = max_lon.coerceIn(-180.0, 180.0)
+    return GlobeQueryBounds(
+        min_lat = min_latitude,
+        min_lon = min_longitude,
+        max_lat = max_latitude,
+        max_lon = max_longitude,
+        wraps_longitude = min_longitude > max_longitude
+    )
+}
+
+private fun normalize_globe_search_key(value: String?): String? {
+    return value
+        ?.uppercase(Locale.US)
+        ?.filter { it.isLetterOrDigit() || it == '-' }
+        ?.takeIf { it.isNotBlank() }
+}
+
 internal class GlobeBinCraftClient(private val user_agent: String) {
+    private var content_revision = 0L
+    private var cached_compressed: ByteArray? = null
+    private var cached_snapshot: GlobeBinCraftSnapshot? = null
+
     fun fetch(bounds: FeedBounds): GlobeBinCraftSnapshot? {
         var connection: HttpURLConnection? = null
         return try {
@@ -344,8 +539,20 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 return null
             }
             val compressed = connection.inputStream.use { it.readBytes() }
+            val previous_snapshot = cached_snapshot
+            if (previous_snapshot != null &&
+                cached_compressed?.contentEquals(compressed) == true
+            ) {
+                return previous_snapshot
+            }
             val decoded = ZstdInputStream(ByteArrayInputStream(compressed)).use { it.readBytes() }
-            parse(decoded)
+            parse(decoded)?.let {
+                content_revision += 1L
+                it.copy(content_revision = content_revision).also { versioned ->
+                    cached_compressed = compressed
+                    cached_snapshot = versioned
+                }
+            }
         } catch (_: Exception) {
             null
         } finally {
@@ -379,7 +586,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
             offset += stride
         }
         return GlobeBinCraftSnapshot(
-            aircraft = parsed,
+            store = GlobeAircraftStore.from(parsed),
             epoch_sec = now_sec,
             partial_coverage = parsed.isEmpty() && (global_with_position > 0 || messages > 0 || message_rate > 0.0)
         )

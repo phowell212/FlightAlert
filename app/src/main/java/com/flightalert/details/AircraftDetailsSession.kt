@@ -47,6 +47,7 @@ import com.flightalert.ui.AircraftFeedMode
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.pow
@@ -601,7 +602,15 @@ class AircraftDetailsCoordinator(
             photo_in_flight.addAndGet(listOf(should_run_exact, should_run_fallback).count { it })
 
             if (should_run_fallback) {
-                executor.execute {
+                execute_in_background(on_rejected = {
+                    photo_in_flight.decrementAndGet()
+                    maybe_post_final_photo_unavailable()
+                }) {
+                    if (!is_current_request(requested_id, request_token)) {
+                        photo_in_flight.decrementAndGet()
+                        maybe_post_final_photo_unavailable()
+                        return@execute_in_background
+                    }
                     val photo = runCatching {
                         aircraft_photo_fetcher.fetch_fallback_photo(
                             aircraft,
@@ -632,7 +641,15 @@ class AircraftDetailsCoordinator(
             }
 
             if (should_run_exact) {
-                executor.execute {
+                execute_in_background(on_rejected = {
+                    photo_in_flight.decrementAndGet()
+                    maybe_post_final_photo_unavailable()
+                }) {
+                    if (!is_current_request(requested_id, request_token)) {
+                        photo_in_flight.decrementAndGet()
+                        maybe_post_final_photo_unavailable()
+                        return@execute_in_background
+                    }
                     val exact = runCatching {
                         aircraft_photo_fetcher.fetch_exact_aircraft_photo(
                             aircraft,
@@ -652,7 +669,18 @@ class AircraftDetailsCoordinator(
         }
 
         candidates.forEach { candidate ->
-            executor.execute {
+            execute_in_background(on_rejected = {
+                val still_loading = remaining.decrementAndGet() > 0
+                if (!still_loading) {
+                    post_to_main { on_details_unavailable(requested_id, request_token) }
+                    maybe_post_final_photo_unavailable()
+                }
+            }) {
+                if (!is_current_request(requested_id, request_token)) {
+                    remaining.decrementAndGet()
+                    maybe_post_final_photo_unavailable()
+                    return@execute_in_background
+                }
                 val details = runCatching { candidate.fetch() }.getOrNull()
                 val merged = synchronized(detail_lock) {
                     if (details != null) {
@@ -692,12 +720,30 @@ class AircraftDetailsCoordinator(
         on_gallery: (String, Long, List<AircraftPhotoGalleryItem>) -> Unit
     ) {
         val requested_id = aircraft.icao24
-        executor.execute {
+        execute_in_background(on_rejected = {
+            post_to_main {
+                if (is_current_request(requested_id, request_token)) {
+                    on_gallery(requested_id, request_token, emptyList())
+                }
+            }
+        }) {
+            if (!is_current_request(requested_id, request_token)) return@execute_in_background
             val items = aircraft_photo_fetcher.fetch_gallery(aircraft, details)
             post_to_main {
                 if (!is_current_request(requested_id, request_token)) return@post_to_main
                 on_gallery(requested_id, request_token, items)
             }
+        }
+    }
+
+    private fun execute_in_background(
+        on_rejected: () -> Unit,
+        task: () -> Unit
+    ) {
+        try {
+            executor.execute(task)
+        } catch (_: RejectedExecutionException) {
+            on_rejected()
         }
     }
 

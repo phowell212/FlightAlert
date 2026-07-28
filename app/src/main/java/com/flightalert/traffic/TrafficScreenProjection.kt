@@ -126,7 +126,9 @@ internal class TrafficScreenProjector(
         aircraft: Aircraft,
         now_epoch_sec: Double,
         uses_path_endpoint: Boolean,
-        path_display_position: GeoPoint?
+        path_display_position: GeoPoint?,
+        color: Int = 0,
+        color_theme_key: Int = 0
     ): TrafficSpatialEntry {
         val projected_display = if (uses_path_endpoint) {
             null
@@ -162,7 +164,9 @@ internal class TrafficScreenProjector(
             projected_velocity_x_zoom_zero = projected_velocity.x.toDouble(),
             projected_velocity_y_zoom_zero = projected_velocity.y.toDouble(),
             projected_motion_remaining_sec = motion_remaining_sec,
-            projection_epoch_sec = now_epoch_sec
+            projection_epoch_sec = now_epoch_sec,
+            color = color,
+            color_theme_key = color_theme_key
         )
     }
 

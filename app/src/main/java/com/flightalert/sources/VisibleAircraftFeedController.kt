@@ -22,6 +22,7 @@ import com.flightalert.aircraft.Aircraft
 import com.flightalert.ui.AircraftFeedMode
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 
 class VisibleAircraftFeedController(
     private val aircraft_traffic_feed: AircraftTrafficFeed,
@@ -33,15 +34,12 @@ class VisibleAircraftFeedController(
     private val has_usable_viewport: () -> Boolean,
     private val build_request: () -> VisibleAircraftRequest,
     private val current_total_aircraft: () -> Int,
-    private val should_defer_for_interaction: (Long) -> Boolean,
-    private val delay_after_interaction: (Long) -> Long,
     private val set_aircraft_status: (String) -> Unit,
     private val request_redraw: () -> Unit,
-    private val apply_result: (FeedResult, Long, String) -> Unit,
+    private val apply_result: (FeedResult, Long, String, FeedPublicationPhase) -> Unit,
     private val refresh_ms: Long,
     private val force_refresh_ms: Long,
     private val in_flight_retry_ms: Long,
-    private val map_interaction_refresh_delay_ms: Long,
     private val hybrid_supplement_retry_ms: Long,
     private val globe_snapshot_refresh_ms: Long,
     private val api_grace_ms: Long,
@@ -64,10 +62,6 @@ class VisibleAircraftFeedController(
             return
         }
         val now = SystemClock.elapsedRealtime()
-        if (force && should_defer_for_interaction(now)) {
-            schedule_refresh(delay_after_interaction(now), force = true)
-            return
-        }
         if (fetch_in_flight) {
             schedule_refresh(in_flight_retry_ms, force)
             return
@@ -92,7 +86,14 @@ class VisibleAircraftFeedController(
             request.feed_mode
         )
         val publish_intermediate_results = current_total_aircraft() < ready_aircraft_min
-        executor.execute {
+        execute_in_background(on_rejected = {
+            if (is_current_token(token)) {
+                fetch_in_flight = false
+                set_aircraft_status("Aircraft feed waiting for background capacity")
+                schedule_refresh(in_flight_retry_ms, force = true)
+                request_redraw()
+            }
+        }) {
             try {
                 aircraft_traffic_feed.fetch_aircraft(
                     feed_bounds = request.feed_bounds,
@@ -103,11 +104,16 @@ class VisibleAircraftFeedController(
                     feed_mode = request.feed_mode,
                     on_intermediate_result = { result ->
                         if (publish_intermediate_results) {
-                            apply_result(result, token, signature)
+                            apply_result(
+                                result,
+                                token,
+                                signature,
+                                FeedPublicationPhase.FEED_INTERMEDIATE
+                            )
                         }
                     }
                 )?.let { result ->
-                    apply_result(result, token, signature)
+                    apply_result(result, token, signature, FeedPublicationPhase.FINAL)
                 }
             } catch (_: Exception) {
                 if (is_current_token(token)) {
@@ -129,11 +135,7 @@ class VisibleAircraftFeedController(
     }
 
     fun request_after_map_interaction() {
-        if (current_total_aircraft() < ready_aircraft_min) {
-            request_if_needed(force = true)
-        } else {
-            schedule_refresh(map_interaction_refresh_delay_ms, force = true)
-        }
+        request_if_needed(force = true)
     }
 
     fun publish_startup_globe_snapshot_if_needed(feed_mode: AircraftFeedMode) {
@@ -146,10 +148,6 @@ class VisibleAircraftFeedController(
         if (!has_location() || !has_usable_viewport()) return
         val now = SystemClock.elapsedRealtime()
         val startup_publish = current_total_aircraft() < ready_aircraft_min
-        if (!startup_publish && should_defer_for_interaction(now)) {
-            schedule_refresh(delay_after_interaction(now), force = true)
-            return
-        }
         if (!startup_publish && fetch_in_flight && now - last_fetch_elapsed_ms < api_grace_ms) return
         if (!startup_publish &&
             now - last_globe_snapshot_publish_elapsed_ms < globe_publish_interval_floor_ms()
@@ -166,24 +164,45 @@ class VisibleAircraftFeedController(
             fetch_signature = signature
         }
         last_globe_snapshot_publish_elapsed_ms = now
-        executor.execute {
+        execute_in_background {
             val result = source.latest_snapshot(
                 request.feed_bounds,
                 request.own_lat,
                 request.own_lon,
                 request.exact_search
-            ) ?: return@execute
+            ) ?: return@execute_in_background
             if (result.status == FeedStatus.OK) {
                 if (publish_while_fetching) {
                     post_to_main {
                         if (fetch_in_flight && is_current_token(token)) {
-                            apply_result(result, token, result_signature)
+                            apply_result(
+                                result,
+                                token,
+                                result_signature,
+                                FeedPublicationPhase.GLOBE_INTERMEDIATE
+                            )
                         }
                     }
                 } else {
-                    apply_result(result, token, result_signature)
+                    apply_result(
+                        result,
+                        token,
+                        result_signature,
+                        FeedPublicationPhase.GLOBE_INTERMEDIATE
+                    )
                 }
             }
+        }
+    }
+
+    private fun execute_in_background(
+        on_rejected: () -> Unit = {},
+        task: () -> Unit
+    ) {
+        try {
+            executor.execute(task)
+        } catch (_: RejectedExecutionException) {
+            on_rejected()
         }
     }
 
@@ -210,7 +229,7 @@ class VisibleAircraftFeedController(
     }
 
     fun is_current_fetch(token: Long, signature: String): Boolean {
-        return fetch_token == token || fetch_signature == signature
+        return fetch_token == token && fetch_signature == signature
     }
 
     fun is_current_token(token: Long): Boolean {

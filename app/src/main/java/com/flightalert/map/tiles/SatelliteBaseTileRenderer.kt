@@ -27,11 +27,13 @@ import java.net.URL
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -88,6 +90,9 @@ internal class SatelliteBaseTileRenderer(
     private val requested_tiles = mutableSetOf<String>()
     private val current_tile_request_generations = mutableMapOf<String, Long>()
     private var current_tile_request_generation = 0L
+    private val tile_request_admission_lock = Any()
+    @Volatile
+    private var closed = false
     private val tile_request_frame = TileRequestFrame()
     private val satellite_tile_worker_id = AtomicInteger()
     private val satellite_tile_task_sequence = AtomicLong()
@@ -160,49 +165,36 @@ internal class SatelliteBaseTileRenderer(
             return status
         }
 
-        val result = draw_tiles_direct(
-            canvas = canvas,
-            viewport = viewport,
-            state = state,
-            style = style,
-            allow_speculative_requests = true,
-            include_retained_interim = true,
-            draw_lower_lod_pixels = true
-        )
-        if (result.reusable_for_pan_cache &&
-            should_record_pan_cache(
+        if (should_record_pan_cache(
                 key = pan_cache_key,
-                content_revision = map_content_revision.get(),
-                now_ms = now_ms
+                content_revision = content_revision,
+                now_ms = now_ms,
             )
         ) {
-            val record_revision = map_content_revision.get()
-            pan_compositor.record_for_future(
-                canvas = canvas,
-                viewport = viewport,
-                key = pan_cache_key,
-                content_revision = record_revision,
-                padding = MAP_PAN_CACHE_PADDING_PX
-            ) { recording_canvas, cache_viewport ->
-                if (!satellite_pan_cache_recording_ready(cache_viewport, state)) {
-                    return@record_for_future MapLayerPanCacheRecordResult(
-                        status = result.status,
-                        reusable = false
-                    )
-                }
-                val visual_state = snapshot_visual_state()
-                try {
+            val cache_viewport = viewport.copy(
+                width = ceil(viewport.width + MAP_PAN_CACHE_PADDING_PX * 2f),
+                height = ceil(viewport.height + MAP_PAN_CACHE_PADDING_PX * 2f),
+            )
+            if (satellite_pan_cache_recording_ready(cache_viewport, state, now_ms)) {
+                pan_compositor.record_and_draw_current(
+                    canvas = canvas,
+                    record_viewport = viewport,
+                    draw_viewport = viewport,
+                    key = pan_cache_key,
+                    content_revision = content_revision,
+                    padding = MAP_PAN_CACHE_PADDING_PX
+                ) { recording_canvas, padded_viewport ->
                     val recording_now_ms = SystemClock.elapsedRealtime()
                     val recorded_result = draw_tiles_direct(
                         canvas = recording_canvas,
-                        viewport = cache_viewport,
+                        viewport = padded_viewport,
                         state = state,
                         style = style,
                         allow_speculative_requests = false,
                         draw_reference_layers = false,
                         include_retained_interim = false,
                         draw_lower_lod_pixels = satellite_pan_cache_lower_lod_pixels_needed(
-                            cache_viewport,
+                            padded_viewport,
                             state,
                             recording_now_ms
                         ),
@@ -211,14 +203,31 @@ internal class SatelliteBaseTileRenderer(
                     MapLayerPanCacheRecordResult(
                         status = recorded_result.status,
                         reusable = recorded_result.reusable_for_pan_cache &&
-                                map_content_revision.get() == record_revision
+                            map_content_revision.get() == content_revision
                     )
-                } finally {
-                    restore_visual_state(visual_state)
+                }?.let { recorded ->
+                    val label_stats = overlay_drawer.draw(
+                        canvas = canvas,
+                        viewport = viewport,
+                        state = state,
+                        lod = satellite_lod_state(viewport),
+                        now_ms = now_ms
+                    )
+                    if (label_stats.fading) request_redraw()
+                    return recorded.status
                 }
             }
         }
-        return result.status
+
+        return draw_tiles_direct(
+            canvas = canvas,
+            viewport = viewport,
+            state = state,
+            style = style,
+            allow_speculative_requests = true,
+            include_retained_interim = true,
+            draw_lower_lod_pixels = true
+        ).status
     }
 
     private fun draw_tiles_direct(
@@ -418,24 +427,25 @@ internal class SatelliteBaseTileRenderer(
 
     private fun satellite_pan_cache_recording_ready(
         viewport: Viewport,
-        state: MapTileRenderState
+        state: MapTileRenderState,
+        now_ms: Long,
     ): Boolean {
         val lod = satellite_lod_state(viewport)
         if (!satellite_tile_grid_fully_available(
                 viewport = viewport,
                 state = state,
-                tile_zoom = lod.lower_tile_zoom
+                tile_zoom = lod.lower_tile_zoom,
+                require_settled_at_ms = now_ms,
             )
-        ) {
-            return false
-        }
+        ) return false
         return !lod.has_upper_lod ||
-                lod.upper_lod_alpha <= MIN_LAYER_ALPHA ||
-                satellite_tile_grid_fully_available(
-                    viewport = viewport,
-                    state = state,
-                    tile_zoom = lod.upper_tile_zoom
-                )
+            lod.upper_lod_alpha <= MIN_LAYER_ALPHA ||
+            satellite_tile_grid_fully_available(
+                viewport = viewport,
+                state = state,
+                tile_zoom = lod.upper_tile_zoom,
+                require_settled_at_ms = now_ms,
+            )
     }
 
     private fun satellite_pan_cache_lower_lod_pixels_needed(
@@ -470,24 +480,7 @@ internal class SatelliteBaseTileRenderer(
         )
     }
 
-    private fun snapshot_visual_state(): SatelliteVisualStateSnapshot {
-        return SatelliteVisualStateSnapshot(
-            interim_tiles = LinkedHashMap(interim_tiles),
-            last_satellite_buffer_request_key = last_satellite_buffer_request_key,
-            last_satellite_buffer_request_ms = last_satellite_buffer_request_ms,
-            last_satellite_prefetch_request_key = last_satellite_prefetch_request_key,
-            last_satellite_prefetch_request_ms = last_satellite_prefetch_request_ms
-        )
-    }
 
-    private fun restore_visual_state(snapshot: SatelliteVisualStateSnapshot) {
-        interim_tiles.clear()
-        interim_tiles.putAll(snapshot.interim_tiles)
-        last_satellite_buffer_request_key = snapshot.last_satellite_buffer_request_key
-        last_satellite_buffer_request_ms = snapshot.last_satellite_buffer_request_ms
-        last_satellite_prefetch_request_key = snapshot.last_satellite_prefetch_request_key
-        last_satellite_prefetch_request_ms = snapshot.last_satellite_prefetch_request_ms
-    }
 
     fun clear() {
         pan_compositor.clear()
@@ -513,7 +506,10 @@ internal class SatelliteBaseTileRenderer(
     }
 
     fun shutdown() {
-        satellite_tile_executor.shutdownNow()
+        synchronized(tile_cache) { closed = true }
+        satellite_tile_executor.shutdownNow().forEach { task ->
+            (task as? SatelliteTileRequestTask)?.discard()
+        }
     }
 
     private fun draw_tile_grid_layer(
@@ -733,6 +729,9 @@ internal class SatelliteBaseTileRenderer(
         interim_tiles[key]?.let { return it.bitmap }
         return null
     }
+
+    private fun memory_tile_bitmap(key: String): Bitmap? =
+        synchronized(tile_cache) { tile_cache[key] }
 
     private fun draw_tile_bitmap(
         canvas: Canvas,
@@ -1205,7 +1204,7 @@ internal class SatelliteBaseTileRenderer(
         request_kind: SatelliteBaseRequestKind,
         parent_depth: Int = 0
     ) {
-        if (tile_bitmap(z, x, y, key, state) != null) {
+        if (closed || tile_bitmap(z, x, y, key, state) != null) {
             return
         }
         synchronized(requested_tiles) {
@@ -1214,8 +1213,9 @@ internal class SatelliteBaseTileRenderer(
             }
             requested_tiles += key
         }
-        satellite_tile_executor.execute(
+        submit_tile_request(
             SatelliteTileRequestTask(
+                key = key,
                 order = SatelliteBaseTileRequestOrder(
                     generation = request_generation,
                     kind = request_kind,
@@ -1227,11 +1227,11 @@ internal class SatelliteBaseTileRenderer(
                     var redrew_when_loaded = false
                     var skipped_stale_request = false
                     try {
-                        if (should_skip_stale_tile_request(key)) {
+                        if (closed || should_skip_stale_tile_request(key)) {
                             skipped_stale_request = true
                             return@tileTask
                         }
-                        if (tile_bitmap(z, x, y, key, state) != null) {
+                        if (memory_tile_bitmap(key) != null) {
                             skipped_stale_request = true
                             return@tileTask
                         }
@@ -1240,10 +1240,22 @@ internal class SatelliteBaseTileRenderer(
                             file = file,
                             max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
                         ) { cached ->
-                            BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+                            if (closed) null else {
+                                BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+                            }
                         }
                         if (bitmap != null) {
-                            synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
+                            if (closed ||
+                                should_skip_stale_tile_request(key) ||
+                                !publish_tile_if_open(key, bitmap)
+                            ) {
+                                bitmap.recycle()
+                                skipped_stale_request = true
+                            }
+                            return@tileTask
+                        }
+                        if (closed || should_skip_stale_tile_request(key)) {
+                            skipped_stale_request = true
                             return@tileTask
                         }
                         val url = https_url(
@@ -1254,7 +1266,7 @@ internal class SatelliteBaseTileRenderer(
                                 state.map_labels_enabled
                             )
                         ) ?: run {
-                            report_status("Map tiles unavailable")
+                            if (!closed) report_status("Map tiles unavailable")
                             return@tileTask
                         }
                         connection = (url.openConnection() as HttpURLConnection).apply {
@@ -1264,7 +1276,15 @@ internal class SatelliteBaseTileRenderer(
                             setRequestProperty("User-Agent", state.user_agent)
                         }
                         if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                            if (closed) {
+                                skipped_stale_request = true
+                                return@tileTask
+                            }
                             val bytes = connection.inputStream.use { it.readBytes() }
+                            if (closed || should_skip_stale_tile_request(key)) {
+                                skipped_stale_request = true
+                                return@tileTask
+                            }
                             val bitmap = BitmapFactory.decodeByteArray(
                                 bytes,
                                 0,
@@ -1272,24 +1292,69 @@ internal class SatelliteBaseTileRenderer(
                                 decode_options()
                             )
                             if (bitmap != null) {
-                                synchronized(tile_cache) { put_tile_in_memory(key, bitmap) }
-                                redrew_when_loaded = true
-                                request_redraw()
-                                write_tile_file_async(file, bytes)
+                                if (!should_skip_stale_tile_request(key) &&
+                                    publish_tile_if_open(key, bitmap)
+                                ) {
+                                    redrew_when_loaded = true
+                                    if (!closed) request_redraw()
+                                    write_tile_file_async(file, bytes)
+                                } else {
+                                    bitmap.recycle()
+                                    skipped_stale_request = true
+                                }
                             }
-                        } else {
+                        } else if (!closed) {
                             connection.errorStream?.close()
                             report_status("Map tiles unavailable")
                         }
                     } catch (_: Exception) {
-                        report_status("Map network unavailable")
+                        if (!closed) report_status("Map network unavailable")
                     } finally {
                         connection?.disconnect()
-                        synchronized(requested_tiles) { requested_tiles -= key }
-                        if (!redrew_when_loaded && !skipped_stale_request) request_redraw()
+                        release_requested_tile(key)
+                        if (!closed && !redrew_when_loaded && !skipped_stale_request) {
+                            request_redraw()
+                        }
                     }
                 })
         )
+    }
+
+    private fun submit_tile_request(task: SatelliteTileRequestTask) {
+        var discarded: SatelliteTileRequestTask? = null
+        var submitted = false
+        synchronized(tile_request_admission_lock) {
+            if (!closed && !satellite_tile_executor.isShutdown) {
+                val queue = satellite_tile_executor.queue
+                if (queue.size >= MAX_PENDING_TILE_REQUESTS) {
+                    var worst: SatelliteTileRequestTask? = null
+                    for (queued in queue) {
+                        val candidate = queued as? SatelliteTileRequestTask ?: continue
+                        if (worst == null || candidate.compareTo(worst) > 0) worst = candidate
+                    }
+                    if (worst != null &&
+                        task.compareTo(worst) < 0 &&
+                        queue.remove(worst)
+                    ) {
+                        discarded = worst
+                    }
+                }
+                if (queue.size < MAX_PENDING_TILE_REQUESTS) {
+                    try {
+                        satellite_tile_executor.execute(task)
+                        submitted = true
+                    } catch (_: RejectedExecutionException) {
+                        // Cleanup below releases rejected work.
+                    }
+                }
+            }
+        }
+        discarded?.discard()
+        if (!submitted) task.discard()
+    }
+
+    private fun release_requested_tile(key: String) {
+        synchronized(requested_tiles) { requested_tiles -= key }
     }
 
     private fun begin_tile_request_generation(): TileRequestFrame {
@@ -1328,7 +1393,15 @@ internal class SatelliteBaseTileRenderer(
     }
 
     private fun write_tile_file_async(file: File, bytes: ByteArray) {
-        map_tile_disk_cache.write_async(file, bytes)
+        if (!closed) map_tile_disk_cache.write_async(file, bytes)
+    }
+
+    private fun publish_tile_if_open(key: String, bitmap: Bitmap): Boolean {
+        synchronized(tile_cache) {
+            if (closed) return false
+            put_tile_in_memory(key, bitmap)
+            return true
+        }
     }
 
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
@@ -1345,7 +1418,9 @@ internal class SatelliteBaseTileRenderer(
     }
 
     private fun satellite_tile_load_alpha(key: String, now_ms: Long): Float {
-        val loaded_at = tile_loaded_elapsed_ms[key] ?: 0L
+        val loaded_at = synchronized(tile_cache) {
+            tile_loaded_elapsed_ms[key] ?: 0L
+        }
         return if (loaded_at > 0L) {
             smooth_step(
                 0f,
@@ -1393,11 +1468,14 @@ internal class SatelliteBaseTileRenderer(
 
     private fun https_url(value: String): URL? = throwable_safe_https_url(value)
 
-    private class SatelliteTileRequestTask(
+    private inner class SatelliteTileRequestTask(
+        private val key: String,
         private val order: SatelliteBaseTileRequestOrder,
         private val action: () -> Unit
     ) : Runnable, Comparable<Runnable> {
         override fun run() = action()
+
+        fun discard() = release_requested_tile(key)
 
         override fun compareTo(other: Runnable): Int {
             val task = other as? SatelliteTileRequestTask ?: return -1
@@ -1418,14 +1496,6 @@ internal class SatelliteBaseTileRenderer(
     private data class SatellitePanCacheKey(
         val cache_key: String,
         val map_empty: Int
-    )
-
-    private data class SatelliteVisualStateSnapshot(
-        val interim_tiles: LinkedHashMap<String, InterimRasterTile>,
-        val last_satellite_buffer_request_key: String?,
-        val last_satellite_buffer_request_ms: Long,
-        val last_satellite_prefetch_request_key: String?,
-        val last_satellite_prefetch_request_ms: Long
     )
 
     private companion object {
@@ -1451,8 +1521,10 @@ internal class SatelliteBaseTileRenderer(
         const val MIN_LAYER_ALPHA = 0.01f
         const val SATELLITE_TILE_DISK_WORKER_KEEP_ALIVE_MS = 15_000L
         const val SATELLITE_TILE_NETWORK_THREADS = 4
+        const val MAX_PENDING_TILE_REQUESTS = 192
         const val CURRENT_TILE_REQUEST_HISTORY_MAX = 900
         const val CURRENT_TILE_REQUEST_HISTORY_AGE = 6L
         const val CURRENT_TILE_REQUEST_STALE_GENERATIONS = 2L
     }
+
 }

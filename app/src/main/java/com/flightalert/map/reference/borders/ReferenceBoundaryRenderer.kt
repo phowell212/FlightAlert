@@ -23,9 +23,12 @@ import java.io.File
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.Executors
+import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.*
 
@@ -54,7 +57,15 @@ internal class ReferenceBoundaryRenderer(
     private var closed = false
     private val lifecycle_lock = ReentrantLock()
     private val worker_id = AtomicInteger()
-    private val boundary_raster_executor = Executors.newFixedThreadPool(2) { runnable ->
+    private val boundary_raster_task_sequence = AtomicLong()
+    private val boundary_raster_admission_lock = Any()
+    private val boundary_raster_executor = ThreadPoolExecutor(
+        BOUNDARY_RASTER_WORKERS,
+        BOUNDARY_RASTER_WORKERS,
+        0L,
+        TimeUnit.MILLISECONDS,
+        PriorityBlockingQueue(),
+    ) { runnable ->
         Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             runnable.run()
@@ -66,7 +77,8 @@ internal class ReferenceBoundaryRenderer(
         override fun initialValue(): BoundaryRasterWorkspace = BoundaryRasterWorkspace()
     }
     private val completed_boundary_rasters = ConcurrentLinkedQueue<PreparedBoundaryRaster>()
-    private val boundary_raster_requests = HashSet<ReferenceBoundaryRasterKey>()
+    private val boundary_raster_requests =
+        ConcurrentHashMap.newKeySet<ReferenceBoundaryRasterKey>()
     private val boundary_raster_disk_misses =
         ConcurrentHashMap.newKeySet<ReferenceBoundaryRasterKey>()
     private val boundary_raster_disk_namespaces =
@@ -163,7 +175,9 @@ internal class ReferenceBoundaryRenderer(
         try {
             if (closed) return
             closed = true
-            boundary_raster_executor.shutdownNow()
+            boundary_raster_executor.shutdownNow().forEach { task ->
+                (task as? BoundaryRasterTask)?.discard()
+            }
             clear()
         } finally {
             lifecycle_lock.unlock()
@@ -301,6 +315,7 @@ internal class ReferenceBoundaryRenderer(
             relevant_boundary_raster_cell_revision = boundary_raster_cell_window.revision
             relevant_boundary_raster_draw_cell_revision =
                 boundary_raster_draw_cell_window.revision
+            purge_obsolete_boundary_raster_tasks()
         }
         trim_boundary_raster_cache()
 
@@ -319,6 +334,8 @@ internal class ReferenceBoundaryRenderer(
                 groups = groups,
                 filter_mask = filter_mask,
                 tile_request_generation = tile_request_generation,
+                core_visible = cell.coreVisible,
+                request_priority = cell.requestPriority,
             )
         }
 
@@ -448,6 +465,8 @@ internal class ReferenceBoundaryRenderer(
                     groups = groups,
                     filter_mask = filter_mask,
                     tile_request_generation = tile_request_generation,
+                    core_visible = cell.coreVisible,
+                    request_priority = cell.requestPriority,
                 )
             }
         }
@@ -730,17 +749,21 @@ internal class ReferenceBoundaryRenderer(
         if (requestBudget <= 0) return 0
 
         var requested = 0
-        for (key in pending.keys) {
+        for ((index, key) in pending.keys.withIndex()) {
             if (boundary_raster_cache.containsKey(key) ||
                 boundary_raster_requests.contains(key)
             ) {
                 continue
             }
+            val cell = boundary_raster_safety_cells[index]
             requested += request_boundary_raster(
                 key = key,
                 groups = groups,
                 filter_mask = filterMask,
                 tile_request_generation = tileRequestGeneration,
+                core_visible = false,
+                request_priority = cell.requestPriority,
+                continuity_request = true,
             )
             if (requested >= requestBudget) break
         }
@@ -818,6 +841,7 @@ internal class ReferenceBoundaryRenderer(
         val fading = boundary_raster_fade?.previous
         if (ready == null && pending == null && resident == null && fading == null) {
             relevant_boundary_raster_safety_keys = emptySet()
+            purge_obsolete_boundary_raster_tasks()
             return
         }
         val keys = HashSet<ReferenceBoundaryRasterKey>(
@@ -831,6 +855,7 @@ internal class ReferenceBoundaryRenderer(
         resident?.keys?.let(keys::addAll)
         fading?.keys?.let(keys::addAll)
         relevant_boundary_raster_safety_keys = keys
+        purge_obsolete_boundary_raster_tasks()
     }
 
     private fun draw_boundary_raster_safety_scene(
@@ -887,6 +912,9 @@ internal class ReferenceBoundaryRenderer(
         groups: ReferenceDictionaryLayerGroups,
         filter_mask: ReferenceFilterMask,
         tile_request_generation: Long,
+        core_visible: Boolean,
+        request_priority: Int,
+        continuity_request: Boolean = false,
     ): Int {
         if (boundary_raster_executor.isShutdown ||
             boundary_raster_cache.containsKey(key) ||
@@ -896,17 +924,28 @@ internal class ReferenceBoundaryRenderer(
         }
         val disk_file = boundary_raster_disk_file(key)
         if (disk_file != null && key !in boundary_raster_disk_misses) {
-            boundary_raster_requests.add(key)
-            boundary_raster_executor.execute {
-                val should_read = boundary_raster_request_is_relevant(key)
-                val tile = if (should_read) read_boundary_raster_from_disk(key, disk_file) else null
-                val prepared = PreparedBoundaryRaster(key, tile)
-                publish_boundary_raster_completion(
-                    prepared = prepared,
-                    disk_file_missed = should_read && tile == null,
-                )
-            }
-            return 1
+            if (!boundary_raster_requests.add(key)) return 0
+            val task = BoundaryRasterTask(
+                key = key,
+                core_visible = core_visible,
+                request_priority = request_priority,
+                continuity_request = continuity_request,
+                sequence = boundary_raster_task_sequence.incrementAndGet(),
+                action = {
+                    val should_read = boundary_raster_request_is_relevant(key)
+                    val tile = if (should_read) {
+                        read_boundary_raster_from_disk(key, disk_file)
+                    } else {
+                        null
+                    }
+                    val prepared = PreparedBoundaryRaster(key, tile)
+                    publish_boundary_raster_completion(
+                        prepared = prepared,
+                        disk_file_missed = should_read && tile == null,
+                    )
+                },
+            )
+            return if (submit_boundary_raster_task(task)) 1 else 0
         }
         val source = reference_boundary_raster_source(
             rasterZoom = key.band.rasterZoom,
@@ -956,8 +995,8 @@ internal class ReferenceBoundaryRenderer(
                         x = normalized_x,
                         draw_x = raw_x,
                         y = raw_y,
-                        core_visible = true,
-                        request_priority = 0,
+                        core_visible = core_visible && !continuity_request,
+                        request_priority = request_priority,
                         outline_visibility_centizoom =
                             ReferenceDictionaryLodPolicy.outline_decode_profile(
                                 key.band.presentationCentizoom,
@@ -983,23 +1022,97 @@ internal class ReferenceBoundaryRenderer(
         if (missing_source) return source_requests
         if (!boundary_raster_requests.add(key)) return 0
         val request = BoundaryRasterRequest(key, source, source_tiles, groups, filter_mask)
-        boundary_raster_executor.execute {
-            val prepared = PreparedBoundaryRaster(
-                key,
-                if (boundary_raster_request_is_relevant(key)) {
-                    render_boundary_raster(request)
-                } else {
-                    null
-                },
-            )
-            val persistence = prepared.tile?.let { tile ->
-                boundary_raster_disk_file(key)?.let { file ->
-                    encode_boundary_raster_png(tile)?.let { bytes -> file to bytes }
+        val task = BoundaryRasterTask(
+            key = key,
+            core_visible = core_visible,
+            request_priority = request_priority,
+            continuity_request = continuity_request,
+            sequence = boundary_raster_task_sequence.incrementAndGet(),
+            action = {
+                val prepared = PreparedBoundaryRaster(
+                    key,
+                    if (boundary_raster_request_is_relevant(key)) {
+                        render_boundary_raster(request)
+                    } else {
+                        null
+                    },
+                )
+                val persistence = prepared.tile?.let { tile ->
+                    boundary_raster_disk_file(key)?.let { file ->
+                        encode_boundary_raster_png(tile)?.let { bytes -> file to bytes }
+                    }
+                }
+                publish_boundary_raster_completion(prepared, persistence = persistence)
+            },
+        )
+        return if (submit_boundary_raster_task(task)) 1 else 0
+    }
+
+    private fun submit_boundary_raster_task(task: BoundaryRasterTask): Boolean {
+        val discarded = ArrayList<BoundaryRasterTask>()
+        var submitted = false
+        synchronized(boundary_raster_admission_lock) {
+            purge_obsolete_boundary_raster_tasks_locked(discarded)
+            if (!closed && !boundary_raster_executor.isShutdown && task.is_relevant()) {
+                val queue = boundary_raster_executor.queue
+                if (queue.size >= MAX_PENDING_BOUNDARY_RASTER_REQUESTS) {
+                    var worst: BoundaryRasterTask? = null
+                    for (queued in queue) {
+                        val candidate = queued as? BoundaryRasterTask ?: continue
+                        if (worst == null || candidate.compareTo(worst) > 0) {
+                            worst = candidate
+                        }
+                    }
+                    if (worst != null &&
+                        task.compareTo(worst) < 0 &&
+                        queue.remove(worst)
+                    ) {
+                        discarded += worst
+                    }
+                }
+                if (queue.size < MAX_PENDING_BOUNDARY_RASTER_REQUESTS) {
+                    try {
+                        boundary_raster_executor.execute(task)
+                        submitted = true
+                    } catch (_: RejectedExecutionException) {
+                        // Cleanup below releases rejected work.
+                    }
                 }
             }
-            publish_boundary_raster_completion(prepared, persistence = persistence)
         }
-        return 1
+        discarded.forEach(BoundaryRasterTask::discard)
+        if (!submitted) task.discard()
+        return submitted
+    }
+
+    private fun purge_obsolete_boundary_raster_tasks() {
+        val discarded = ArrayList<BoundaryRasterTask>()
+        synchronized(boundary_raster_admission_lock) {
+            purge_obsolete_boundary_raster_tasks_locked(discarded)
+        }
+        discarded.forEach(BoundaryRasterTask::discard)
+    }
+
+    private fun purge_obsolete_boundary_raster_tasks_locked(
+        discarded: MutableList<BoundaryRasterTask>,
+    ) {
+        val queue = boundary_raster_executor.queue
+        for (queued in queue) {
+            val task = queued as? BoundaryRasterTask ?: continue
+            if (!task.is_relevant() && queue.remove(task)) discarded += task
+        }
+    }
+
+    private fun discard_queued_boundary_raster_tasks() {
+        val discarded = ArrayList<BoundaryRasterTask>()
+        synchronized(boundary_raster_admission_lock) {
+            val queue = boundary_raster_executor.queue
+            for (queued in queue) {
+                val task = queued as? BoundaryRasterTask ?: continue
+                if (queue.remove(task)) discarded += task
+            }
+        }
+        discarded.forEach(BoundaryRasterTask::discard)
     }
 
     private fun boundary_raster_disk_file(key: ReferenceBoundaryRasterKey): File? {
@@ -1068,6 +1181,7 @@ internal class ReferenceBoundaryRenderer(
                 )
             ) {
                 prepared.tile?.bitmap?.recycle()
+                boundary_raster_requests.remove(prepared.key)
                 return
             }
             if (disk_file_missed) boundary_raster_disk_misses.add(prepared.key)
@@ -1499,6 +1613,7 @@ internal class ReferenceBoundaryRenderer(
         resident_boundary_raster_scene = null
         boundary_raster_fade = null
         relevant_boundary_raster_safety_keys = emptySet()
+        discard_queued_boundary_raster_tasks()
         boundary_raster_requests.clear()
         boundary_raster_disk_misses.clear()
         boundary_raster_disk_namespaces.clear()
@@ -1760,10 +1875,49 @@ internal class ReferenceBoundaryRenderer(
         return true
     }
 
+    private inner class BoundaryRasterTask(
+        private val key: ReferenceBoundaryRasterKey,
+        private val core_visible: Boolean,
+        private val request_priority: Int,
+        private val continuity_request: Boolean,
+        private val sequence: Long,
+        private val action: () -> Unit,
+    ) : Runnable, Comparable<Runnable> {
+        override fun run() {
+            try {
+                action()
+            } catch (_: Exception) {
+                publish_boundary_raster_completion(PreparedBoundaryRaster(key, null))
+            }
+        }
+
+        fun is_relevant(): Boolean =
+            !closed && boundary_raster_request_is_relevant(key)
+
+        fun discard() {
+            boundary_raster_requests.remove(key)
+        }
+
+        override fun compareTo(other: Runnable): Int {
+            val task = other as? BoundaryRasterTask ?: return -1
+            if (continuity_request != task.continuity_request) {
+                return if (continuity_request) 1 else -1
+            }
+            if (core_visible != task.core_visible) {
+                return if (core_visible) -1 else 1
+            }
+            if (request_priority != task.request_priority) {
+                return request_priority.compareTo(task.request_priority)
+            }
+            return sequence.compareTo(task.sequence)
+        }
+    }
 
     private companion object {
         const val MAP_TILE_SIZE = 256.0
         const val DICTIONARY_EXTENT = 4096.0
+        const val BOUNDARY_RASTER_WORKERS = 2
+        const val MAX_PENDING_BOUNDARY_RASTER_REQUESTS = 96
         const val BOUNDARY_RASTER_GUTTER_PX = 16
         const val BOUNDARY_RASTER_REQUESTS_PER_DRAW = 8
         const val BOUNDARY_RASTER_SAFETY_REQUESTS_PER_DRAW = 4

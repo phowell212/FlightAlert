@@ -16,15 +16,11 @@
 
 package com.flightalert.map.aviation_layers
 
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PorterDuff
 import android.graphics.RectF
-import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withTranslation
 import com.flightalert.TILE_SIZE
 import com.flightalert.ThemeTreatment
@@ -203,28 +199,34 @@ internal object AviationAirspaceRenderPolicy {
     private data class LongitudeSpan(val min: Double, val max: Double)
 }
 
-internal class AviationAirspacePreparationTracker {
-    private var restrictedSource: List<AviationAirspaceFeature>? = null
-    private var atcSource: List<AviationAirspaceFeature>? = null
+internal data class AviationPreparedAirspaceLayer(
+    val source: List<AviationAirspaceFeature>,
+    val features: List<PreparedAirspaceFeature>
+)
 
-    fun shouldPrepareRestricted(
-        source: List<AviationAirspaceFeature>,
-        enabled: Boolean
-    ): Boolean {
-        if (!enabled || restrictedSource === source) return false
-        restrictedSource = source
-        return true
-    }
+internal data class AviationAirspacePreparation(
+    val restricted: AviationPreparedAirspaceLayer? = null,
+    val atc: AviationPreparedAirspaceLayer? = null
+)
 
-    fun shouldPrepareAtc(
-        source: List<AviationAirspaceFeature>,
-        enabled: Boolean
-    ): Boolean {
-        if (!enabled || atcSource === source) return false
-        atcSource = source
-        return true
-    }
-}
+internal data class PreparedAirspaceFeature(
+    val source: AviationAirspaceFeature,
+    val map_text: SourcedMapText,
+    val center: AviationLayerPoint,
+    val point_count: Int,
+    val min_unwrapped_lon: Double,
+    val max_unwrapped_lon: Double,
+    val polygons: List<PreparedAirspacePolygon>
+)
+
+internal data class PreparedAirspacePolygon(
+    val point_count: Int,
+    val path: Path,
+    val min_x: Float,
+    val max_x: Float,
+    val min_y: Float,
+    val max_y: Float
+)
 
 internal class AviationLayerRenderer(
     private val paint: Paint,
@@ -236,18 +238,65 @@ internal class AviationLayerRenderer(
     private val ellipsize: (String, Float) -> String,
     private val now_epoch_ms: () -> Long = System::currentTimeMillis
 ) {
-    private val airspace_preparation_tracker = AviationAirspacePreparationTracker()
     private val selection_hit_collector = AviationSelectionHitCollector(
         lat_lon_to_world = MapProjection::lat_lon_to_world,
         world_to_lat_lon = MapProjection::world_to_lat_lon
     )
     private var prepared_restricted_airspaces: List<PreparedAirspaceFeature> = emptyList()
+    private var prepared_restricted_source: List<AviationAirspaceFeature>? = null
     private var prepared_atc_boundaries: List<PreparedAirspaceFeature> = emptyList()
+    private var prepared_atc_source: List<AviationAirspaceFeature>? = null
     private val layer_label_rects = ArrayList<RectF>(16)
-    private var settled_cache_bitmap: Bitmap? = null
-    private var settled_cache_canvas: Canvas? = null
-    private var settled_cache_key: SettledLayerCacheKey? = null
-    private val settled_cache_matrix = Matrix()
+
+    fun shutdown() = Unit
+
+    fun prepare_airspaces(
+        snapshot: AviationLayerSnapshot,
+        requested_kinds: Set<AviationLayerKind>,
+        should_continue: () -> Boolean
+    ): AviationAirspacePreparation? {
+        val restricted = if (AviationLayerKind.RESTRICTED_AIRSPACES in requested_kinds) {
+            AviationPreparedAirspaceLayer(
+                source = snapshot.restricted_airspaces,
+                features = prepare_airspace_features(
+                    snapshot.restricted_airspaces,
+                    should_continue
+                ) ?: return null
+            )
+        } else {
+            null
+        }
+        val atc = if (AviationLayerKind.ATC_BOUNDARIES in requested_kinds) {
+            AviationPreparedAirspaceLayer(
+                source = snapshot.atc_boundaries,
+                features = prepare_airspace_features(
+                    snapshot.atc_boundaries,
+                    should_continue
+                ) ?: return null
+            )
+        } else {
+            null
+        }
+        return AviationAirspacePreparation(restricted = restricted, atc = atc)
+    }
+
+    fun publish_airspaces(
+        snapshot: AviationLayerSnapshot,
+        preparation: AviationAirspacePreparation
+    ) {
+        preparation.restricted
+            ?.takeIf { it.source === snapshot.restricted_airspaces }
+            ?.let {
+                prepared_restricted_source = it.source
+                prepared_restricted_airspaces = it.features
+            }
+        preparation.atc
+            ?.takeIf { it.source === snapshot.atc_boundaries }
+            ?.let {
+                prepared_atc_source = it.source
+                prepared_atc_boundaries = it.features
+            }
+    }
 
     fun draw_layers(
         canvas: Canvas,
@@ -260,45 +309,6 @@ internal class AviationLayerRenderer(
         interaction_active: Boolean = false
     ) {
         val draw_time_epoch_ms = if (visibility.oceanic_tracks_enabled) now_epoch_ms() else 0L
-        prepare_snapshot_if_needed(snapshot, visibility)
-        if (interaction_active && draw_transformed_settled_cache(
-                canvas,
-                viewport,
-                snapshot,
-                visibility,
-                style,
-                selection,
-                draw_time_epoch_ms
-            )
-        ) {
-            return
-        }
-        if (!interaction_active && draw_settled_cache_if_current(
-                canvas,
-                viewport,
-                snapshot,
-                visible_bounds,
-                visibility,
-                style,
-                selection,
-                draw_time_epoch_ms
-            )
-        ) {
-            return
-        }
-        if (!interaction_active && draw_into_settled_cache(
-                canvas,
-                viewport,
-                snapshot,
-                visible_bounds,
-                visibility,
-                style,
-                selection,
-                draw_time_epoch_ms
-            )
-        ) {
-            return
-        }
         draw_layers_direct(
             canvas = canvas,
             viewport = viewport,
@@ -332,176 +342,6 @@ internal class AviationLayerRenderer(
         now_epoch_ms = now_epoch_ms
     )
 
-    private fun draw_settled_cache_if_current(
-        canvas: Canvas,
-        viewport: Viewport,
-        snapshot: AviationLayerSnapshot,
-        visible_bounds: AviationGeoBounds,
-        visibility: AviationLayerVisibility,
-        style: AviationLayerStyle,
-        selection: AviationSelection?,
-        draw_time_epoch_ms: Long
-    ): Boolean {
-        val bitmap = settled_cache_bitmap ?: return false
-        val key = settled_cache_key ?: return false
-        if (key != settled_layer_cache_key(
-                viewport,
-                snapshot,
-                visible_bounds,
-                visibility,
-                style,
-                selection,
-                draw_time_epoch_ms
-            )
-        ) return false
-        canvas.drawBitmap(bitmap, 0f, 0f, null)
-        return true
-    }
-
-    private fun draw_transformed_settled_cache(
-        canvas: Canvas,
-        viewport: Viewport,
-        snapshot: AviationLayerSnapshot,
-        visibility: AviationLayerVisibility,
-        style: AviationLayerStyle,
-        selection: AviationSelection?,
-        draw_time_epoch_ms: Long
-    ): Boolean {
-        val bitmap = settled_cache_bitmap ?: return false
-        val key = settled_cache_key ?: return false
-        if (bitmap.isRecycled) return false
-        if (key.snapshot_identity != System.identityHashCode(snapshot) ||
-            key.width != viewport.width.toInt() ||
-            key.height != viewport.height.toInt() ||
-            key.visibility != visibility ||
-            key.style != style ||
-            key.nat_temporal_state_token != nat_temporal_state_token(
-                snapshot,
-                visibility,
-                draw_time_epoch_ms
-            ) ||
-            key.selection_key != selection?.key
-        ) {
-            return false
-        }
-        val zoom_delta = viewport.zoom - key.zoom
-        if (abs(zoom_delta) > MAX_TRANSFORMED_CACHE_ZOOM_DELTA) return false
-        val scale = 2.0.pow(zoom_delta).toFloat()
-        if (scale <= 0f || !scale.isFinite()) return false
-        val translation_x =
-            (key.center_x * scale - viewport.center_x + viewport.width / 2.0 - key.width * scale / 2.0).toFloat()
-        val translation_y =
-            (key.center_y * scale - viewport.center_y + viewport.height / 2.0 - key.height * scale / 2.0).toFloat()
-        if (abs(translation_x) > viewport.width * MAX_TRANSFORMED_CACHE_TRANSLATION_FRACTION ||
-            abs(translation_y) > viewport.height * MAX_TRANSFORMED_CACHE_TRANSLATION_FRACTION
-        ) {
-            return false
-        }
-        settled_cache_matrix.reset()
-        settled_cache_matrix.setScale(scale, scale)
-        settled_cache_matrix.postTranslate(translation_x, translation_y)
-        canvas.drawBitmap(bitmap, settled_cache_matrix, null)
-        return true
-    }
-
-    private fun draw_into_settled_cache(
-        canvas: Canvas,
-        viewport: Viewport,
-        snapshot: AviationLayerSnapshot,
-        visible_bounds: AviationGeoBounds,
-        visibility: AviationLayerVisibility,
-        style: AviationLayerStyle,
-        selection: AviationSelection?,
-        draw_time_epoch_ms: Long
-    ): Boolean {
-        val layer_canvas = settled_cache_canvas_for(viewport) ?: return false
-        val bitmap = settled_cache_bitmap ?: return false
-        layer_canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-        draw_layers_direct(
-            canvas = layer_canvas,
-            viewport = viewport,
-            snapshot = snapshot,
-            visible_bounds = visible_bounds,
-            visibility = visibility,
-            style = style,
-            selection = selection,
-            interaction_active = false,
-            draw_time_epoch_ms = draw_time_epoch_ms
-        )
-        settled_cache_key = settled_layer_cache_key(
-            viewport,
-            snapshot,
-            visible_bounds,
-            visibility,
-            style,
-            selection,
-            draw_time_epoch_ms
-        )
-        canvas.drawBitmap(bitmap, 0f, 0f, null)
-        return true
-    }
-
-    private fun settled_cache_canvas_for(viewport: Viewport): Canvas? {
-        val width = viewport.width.toInt().coerceAtLeast(1)
-        val height = viewport.height.toInt().coerceAtLeast(1)
-        val current = settled_cache_bitmap
-        if (current != null && current.width == width && current.height == height && !current.isRecycled) {
-            return settled_cache_canvas
-        }
-        current?.recycle()
-        return try {
-            val bitmap = createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            settled_cache_bitmap = bitmap
-            settled_cache_canvas = Canvas(bitmap)
-            settled_cache_key = null
-            settled_cache_canvas
-        } catch (_: OutOfMemoryError) {
-            settled_cache_bitmap = null
-            settled_cache_canvas = null
-            settled_cache_key = null
-            null
-        }
-    }
-
-    private fun settled_layer_cache_key(
-        viewport: Viewport,
-        snapshot: AviationLayerSnapshot,
-        visible_bounds: AviationGeoBounds,
-        visibility: AviationLayerVisibility,
-        style: AviationLayerStyle,
-        selection: AviationSelection?,
-        draw_time_epoch_ms: Long
-    ): SettledLayerCacheKey {
-        val binding = AviationLayerRenderCachePolicy.binding(snapshot, selection)
-        return SettledLayerCacheKey(
-            snapshot_identity = binding.snapshot_identity,
-            width = viewport.width.toInt(),
-            height = viewport.height.toInt(),
-            zoom = viewport.zoom,
-            center_x = viewport.center_x,
-            center_y = viewport.center_y,
-            visible_bounds = visible_bounds,
-            visibility = visibility,
-            style = style,
-            nat_temporal_state_token = nat_temporal_state_token(
-                snapshot,
-                visibility,
-                draw_time_epoch_ms
-            ),
-            selection_key = binding.selection_key
-        )
-    }
-
-    private fun nat_temporal_state_token(
-        snapshot: AviationLayerSnapshot,
-        visibility: AviationLayerVisibility,
-        draw_time_epoch_ms: Long
-    ): Long = if (visibility.oceanic_tracks_enabled) {
-        AviationNatRenderPolicy.temporal_state_token(snapshot.oceanic_tracks, draw_time_epoch_ms)
-    } else {
-        0L
-    }
-
     private fun draw_layers_direct(
         canvas: Canvas,
         viewport: Viewport,
@@ -517,11 +357,31 @@ internal class AviationLayerRenderer(
         selection_hit_collector.begin_draw(snapshot, viewport, visible_bounds, visibility)
         val selected_restricted_airspace =
             (selection as? AviationSelection.SpecialUse)?.feature
+        val restricted_airspaces =
+            if (visibility.restricted_airspaces_enabled) {
+                airspaces_for_draw(
+                    source = snapshot.restricted_airspaces,
+                    prepared_source = prepared_restricted_source,
+                    prepared = prepared_restricted_airspaces
+                )
+            } else {
+                emptyList()
+            }
+        val atc_boundaries =
+            if (visibility.atc_boundaries_enabled) {
+                airspaces_for_draw(
+                    source = snapshot.atc_boundaries,
+                    prepared_source = prepared_atc_source,
+                    prepared = prepared_atc_boundaries
+                )
+            } else {
+                emptyList()
+            }
         if (visibility.restricted_airspaces_enabled) {
             draw_airspace_layer(
                 canvas = canvas,
                 viewport = viewport,
-                features = prepared_restricted_airspaces,
+                features = restricted_airspaces,
                 visible_bounds = visible_bounds,
                 excluded_feature = selected_restricted_airspace,
                 stroke = restricted_airspace_stroke(style),
@@ -537,7 +397,7 @@ internal class AviationLayerRenderer(
                 }
                 ?.let { selected ->
                     val selected_prepared =
-                        prepared_restricted_airspaces.firstOrNull { it.source == selected }
+                        restricted_airspaces.firstOrNull { it.source == selected }
                             ?: prepare_airspace_feature(selected)
                             ?: return@let
                     draw_selected_airspace(canvas, viewport, selected, style)
@@ -555,13 +415,13 @@ internal class AviationLayerRenderer(
         if (visibility.atc_boundaries_enabled) {
             val focused_atc_feature = focused_airspace_feature(
                 viewport = viewport,
-                features = prepared_atc_boundaries,
+                features = atc_boundaries,
                 visible_bounds = visible_bounds
             )
             draw_airspace_layer(
                 canvas = canvas,
                 viewport = viewport,
-                features = prepared_atc_boundaries,
+                features = atc_boundaries,
                 visible_bounds = visible_bounds,
                 excluded_feature = null,
                 stroke = style.accent_blue,
@@ -582,6 +442,7 @@ internal class AviationLayerRenderer(
                         canvas = canvas,
                         viewport = viewport,
                         feature = selected,
+                        prepared_features = atc_boundaries,
                         halo = style.panel,
                         core = style.accent_blue
                     )
@@ -622,37 +483,42 @@ internal class AviationLayerRenderer(
         }
     }
 
-    private fun prepare_snapshot_if_needed(
-        snapshot: AviationLayerSnapshot,
-        visibility: AviationLayerVisibility
-    ) {
-        if (airspace_preparation_tracker.shouldPrepareRestricted(
-                snapshot.restricted_airspaces,
-                visibility.restricted_airspaces_enabled
-            )
-        ) {
-            prepared_restricted_airspaces = prepare_airspace_features(snapshot.restricted_airspaces)
+    private fun prepare_airspace_features(
+        features: List<AviationAirspaceFeature>,
+        should_continue: () -> Boolean
+    ): List<PreparedAirspaceFeature>? {
+        val prepared = ArrayList<PreparedAirspaceFeature>(features.size)
+        for (feature in features) {
+            if (!should_continue()) return null
+            prepare_airspace_feature(feature, should_continue)?.let(prepared::add)
         }
-        if (airspace_preparation_tracker.shouldPrepareAtc(
-                snapshot.atc_boundaries,
-                visibility.atc_boundaries_enabled
-            )
-        ) {
-            prepared_atc_boundaries = prepare_airspace_features(snapshot.atc_boundaries)
-        }
+        if (!should_continue()) return null
+        prepared.sortBy { it.point_count }
+        return prepared
     }
 
-    private fun prepare_airspace_features(features: List<AviationAirspaceFeature>): List<PreparedAirspaceFeature> {
-        return features
-            .mapNotNull(::prepare_airspace_feature)
-            .sortedBy { it.point_count }
+    private fun airspaces_for_draw(
+        source: List<AviationAirspaceFeature>,
+        prepared_source: List<AviationAirspaceFeature>?,
+        prepared: List<PreparedAirspaceFeature>
+    ): List<PreparedAirspaceFeature> {
+        if (prepared_source === source) return prepared
+        return prepare_airspace_features(source) { true }.orEmpty()
     }
 
-    private fun prepare_airspace_feature(feature: AviationAirspaceFeature): PreparedAirspaceFeature? {
+    private fun prepare_airspace_feature(
+        feature: AviationAirspaceFeature,
+        should_continue: () -> Boolean = { true }
+    ): PreparedAirspaceFeature? {
         val polygons = ArrayList<PreparedAirspacePolygon>(feature.geometry.polygons.size)
         val feature_anchor_lon = feature.geometry.polygons.first().shell.first().lon
-        AviationAirspaceRenderPolicy.forEachSourcePolygon(feature) { polygon ->
-            prepare_airspace_polygon(polygon, feature_anchor_lon)?.let(polygons::add)
+        for (polygon in feature.geometry.polygons) {
+            if (!should_continue()) return null
+            prepare_airspace_polygon(
+                polygon,
+                feature_anchor_lon,
+                should_continue
+            )?.let(polygons::add)
         }
         if (polygons.isEmpty()) return null
         val center_geo = MapProjection.world_to_lat_lon(
@@ -675,7 +541,8 @@ internal class AviationLayerRenderer(
 
     private fun prepare_airspace_polygon(
         polygon: AviationPolygon,
-        feature_anchor_lon: Double
+        feature_anchor_lon: Double,
+        should_continue: () -> Boolean
     ): PreparedAirspacePolygon? {
         val world_path = Path()
         world_path.fillType = Path.FillType.EVEN_ODD
@@ -688,10 +555,15 @@ internal class AviationLayerRenderer(
             polygon.shell.first().lon,
             feature_anchor_lon
         )
-        AviationAirspaceRenderPolicy.forEachSourceRing(polygon) { ring ->
+        for (ring in polygon.all_rings) {
             var ring_point_index = 0
             var previous_lon = polygon_anchor_lon
-            ring.forEach { point ->
+            for (point in ring) {
+                if (point_count and PREPARATION_CANCELLATION_MASK == 0 &&
+                    !should_continue()
+                ) {
+                    return null
+                }
                 val unwrapped_lon = AviationAirspaceRenderPolicy.unwrapLongitude(
                     point.lon,
                     previous_lon
@@ -890,10 +762,11 @@ internal class AviationLayerRenderer(
         canvas: Canvas,
         viewport: Viewport,
         feature: AviationAirspaceFeature,
+        prepared_features: List<PreparedAirspaceFeature>,
         halo: Int,
         core: Int
     ) {
-        val prepared = prepared_atc_boundaries.firstOrNull { it.source == feature }
+        val prepared = prepared_features.firstOrNull { it.source == feature }
             ?: prepare_airspace_feature(feature)
             ?: return
         stroke_paint.style = Paint.Style.STROKE
@@ -1384,16 +1257,6 @@ internal class AviationLayerRenderer(
         }
     }
 
-    private data class PreparedAirspaceFeature(
-        val source: AviationAirspaceFeature,
-        val map_text: SourcedMapText,
-        val center: AviationLayerPoint,
-        val point_count: Int,
-        val min_unwrapped_lon: Double,
-        val max_unwrapped_lon: Double,
-        val polygons: List<PreparedAirspacePolygon>
-    )
-
     private data class PreparedSourcedMapLabelLine(
         val text: String,
         val text_size: Float,
@@ -1410,34 +1273,10 @@ internal class AviationLayerRenderer(
         val collision_center_offset: Float,
     )
 
-    private data class PreparedAirspacePolygon(
-        val point_count: Int,
-        val path: Path,
-        val min_x: Float,
-        val max_x: Float,
-        val min_y: Float,
-        val max_y: Float
-    )
-
-    private data class SettledLayerCacheKey(
-        val snapshot_identity: Int,
-        val width: Int,
-        val height: Int,
-        val zoom: Double,
-        val center_x: Double,
-        val center_y: Double,
-        val visible_bounds: AviationGeoBounds,
-        val visibility: AviationLayerVisibility,
-        val style: AviationLayerStyle,
-        val nat_temporal_state_token: Long,
-        val selection_key: AviationSelectionKey?
-    )
-
     private companion object {
         const val TILE_SIZE = 256
         const val MAX_WRAPPED_RING_COPIES = 8
-        const val MAX_TRANSFORMED_CACHE_ZOOM_DELTA = 1.6
-        const val MAX_TRANSFORMED_CACHE_TRANSLATION_FRACTION = 0.65f
+        const val PREPARATION_CANCELLATION_MASK = 127
         const val AIRSPACE_LABEL_MIN_ZOOM = 7.2
         const val OCEANIC_TRACK_MIN_ZOOM = 3.0
     }

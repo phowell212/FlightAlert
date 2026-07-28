@@ -84,16 +84,20 @@ internal class MapTileDiskCache(
 ) : Closeable {
     private val cache_root = cache_root.toPath().toAbsolutePath().normalize()
     private val write_lock = Any()
+    private val pending_write_lock = Any()
     private val state_lock = Any()
     private var entries = HashMap<Path, CacheEntry>()
     private var eviction_order = new_eviction_order()
     private val pinned_paths = HashMap<Path, Int>()
     private val evicting_paths = HashSet<Path>()
     private val write_reserved_paths = HashSet<Path>()
-    private val pending_accesses = ArrayList<PendingAccess>()
+    private val pending_writes = LinkedHashMap<Path, ByteArray>()
+    private val pending_accesses = LinkedHashMap<Path, PendingAccess>()
     private val initialization_task_scheduled = AtomicBoolean()
     private val initialization_retry_requested = AtomicBoolean()
     private val temp_sequence = AtomicLong()
+    private var pending_write_bytes = 0L
+    private var write_drain_scheduled = false
     private var total_bytes = 0L
     private var access_sequence = 0L
     private var pending_access_sequence = 0L
@@ -105,12 +109,34 @@ internal class MapTileDiskCache(
     }
 
     fun write_async(file: File, bytes: ByteArray) {
-        schedule {
-            synchronized(write_lock) {
-                if (!initialize_and_trim()) return@synchronized
-                publish(file, bytes)
+        if (
+            bytes.size.toLong() > max_bytes ||
+            bytes.size.toLong() > MAX_PENDING_WRITE_BYTES
+        ) return
+        val path = runCatching {
+            canonical_tile_path(file, require_regular_file = false)
+        }.getOrNull() ?: return
+        val should_schedule = synchronized(pending_write_lock) {
+            pending_writes.remove(path)?.let { replaced ->
+                pending_write_bytes -= replaced.size.toLong()
+            }
+            pending_writes[path] = bytes
+            pending_write_bytes += bytes.size.toLong()
+            while (pending_write_bytes > MAX_PENDING_WRITE_BYTES) {
+                val iterator = pending_writes.entries.iterator()
+                if (!iterator.hasNext()) break
+                val evicted = iterator.next().value
+                iterator.remove()
+                pending_write_bytes -= evicted.size.toLong()
+            }
+            if (write_drain_scheduled || pending_writes.isEmpty()) {
+                false
+            } else {
+                write_drain_scheduled = true
+                true
             }
         }
+        if (should_schedule) schedule_write_drain()
     }
 
     fun <T> read_if_fresh(
@@ -148,12 +174,18 @@ internal class MapTileDiskCache(
                         mark_used_locked(path)
                     } else {
                         pending_access_sequence += 1L
-                        pending_accesses += PendingAccess(
+                        pending_accesses.remove(path)
+                        pending_accesses[path] = PendingAccess(
                             path = path,
                             size = metadata.size,
                             modified = metadata.modified,
                             completion_order = pending_access_sequence,
                         )
+                        while (pending_accesses.size > MAX_PENDING_ACCESS_PATHS) {
+                            val iterator = pending_accesses.entries.iterator()
+                            iterator.next()
+                            iterator.remove()
+                        }
                     }
                 }
                 val remaining = (pinned_paths[path] ?: 1) - 1
@@ -168,6 +200,45 @@ internal class MapTileDiskCache(
 
     override fun close() {
         (executor as? ExecutorService)?.shutdownNow()
+    }
+
+    private fun drain_pending_writes() {
+        try {
+            while (true) {
+                val pending = synchronized(pending_write_lock) {
+                    val iterator = pending_writes.entries.iterator()
+                    if (!iterator.hasNext()) return
+                    val next = iterator.next()
+                    val pending = next.key.toFile() to next.value
+                    iterator.remove()
+                    pending_write_bytes -= pending.second.size.toLong()
+                    pending
+                }
+                synchronized(write_lock) {
+                    if (initialize_and_trim()) publish(pending.first, pending.second)
+                }
+            }
+        } finally {
+            val should_schedule = synchronized(pending_write_lock) {
+                write_drain_scheduled = false
+                if (pending_writes.isEmpty()) {
+                    false
+                } else {
+                    write_drain_scheduled = true
+                    true
+                }
+            }
+            if (should_schedule) schedule_write_drain()
+        }
+    }
+
+    private fun schedule_write_drain() {
+        if (schedule(::drain_pending_writes)) return
+        synchronized(pending_write_lock) {
+            pending_writes.clear()
+            pending_write_bytes = 0L
+            write_drain_scheduled = false
+        }
     }
 
     private fun initialize_and_trim(): Boolean {
@@ -454,7 +525,7 @@ internal class MapTileDiskCache(
 
     private fun replay_pending_accesses_locked(after_completion_order: Long): Long {
         var latest = after_completion_order
-        pending_accesses.asSequence()
+        pending_accesses.values.asSequence()
             .filter { it.completion_order > after_completion_order }
             .sortedBy { it.completion_order }
             .forEach { access ->
@@ -631,6 +702,12 @@ internal class MapTileDiskCache(
     )
 
     private companion object {
+        // Disk persistence is opportunistic; bound encoded bytes awaiting the single writer.
+        const val MAX_PENDING_WRITE_BYTES = 32L * 1024L * 1024L
+
+        // Startup reads need only the latest recency for a bounded set of unique tile paths.
+        const val MAX_PENDING_ACCESS_PATHS = 4_096
+
         fun new_eviction_order(): TreeSet<EvictionRecord> = TreeSet(
             compareBy<EvictionRecord>({ it.last_used_order }, { it.relative_path }),
         )

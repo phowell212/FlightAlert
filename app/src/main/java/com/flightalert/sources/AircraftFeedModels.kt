@@ -91,6 +91,12 @@ enum class FeedStatus {
     UNAVAILABLE
 }
 
+enum class FeedPublicationPhase(val precedence: Int) {
+    GLOBE_INTERMEDIATE(0),
+    FEED_INTERMEDIATE(1),
+    FINAL(2)
+}
+
 enum class FeedSource(val display_name: String) {
     OPENSKY("OpenSky"),
     AIRPLANES_LIVE("Airplanes.Live"),

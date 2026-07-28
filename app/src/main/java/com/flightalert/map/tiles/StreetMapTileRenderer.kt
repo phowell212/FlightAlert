@@ -24,6 +24,7 @@ import java.net.URL
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,6 +47,14 @@ internal class StreetMapTileRenderer(
     private val label_tile_cache = LinkedHashMap<String, Bitmap>(MAX_LABEL_MEMORY_TILES, 0.75f, true)
     private val requested_tiles_lock = Any()
     private val requested_tiles = mutableSetOf<String>()
+    private val requested_tile_generations = mutableMapOf<String, Long>()
+    private val tile_request_admission_lock = Any()
+    private val active_tile_connections_lock = Any()
+    private val active_tile_connections = mutableMapOf<String, HttpURLConnection>()
+    @Volatile
+    private var closed = false
+    @Volatile
+    private var published_tile_request_generation = 0L
     private val worker_id = AtomicInteger()
     private val tile_request_generation = AtomicLong()
     private val tile_task_sequence = AtomicLong()
@@ -118,11 +127,13 @@ internal class StreetMapTileRenderer(
             )
         }
         val label_note = if (!state.map_labels_enabled) " no-label" else ""
-        return if (base_stats.requested == 0 && base_stats.loaded > 0) {
+        val status = if (base_stats.requested == 0 && base_stats.loaded > 0) {
             "${TileSource.STREET.display_name}$label_note loaded"
         } else {
             "Loading ${TileSource.STREET.display_name.lowercase(Locale.US)}$label_note tiles"
         }
+        publish_desired_tile_generation(request_generation)
+        return status
     }
 
     private fun draw_tile_grid(
@@ -276,17 +287,27 @@ internal class StreetMapTileRenderer(
         }
         synchronized(requested_tiles_lock) {
             requested_tiles.clear()
+            requested_tile_generations.clear()
         }
     }
 
     fun reset_transitions() {
         synchronized(requested_tiles_lock) {
             requested_tiles.clear()
+            requested_tile_generations.clear()
         }
     }
 
     fun shutdown() {
-        tile_executor.shutdownNow()
+        synchronized(tile_cache) { closed = true }
+        synchronized(label_tile_cache) { closed = true }
+        synchronized(active_tile_connections_lock) {
+            active_tile_connections.values.forEach(HttpURLConnection::disconnect)
+            active_tile_connections.clear()
+        }
+        tile_executor.shutdownNow().forEach { task ->
+            (task as? TileRequestTask)?.discard()
+        }
         clear()
     }
 
@@ -334,12 +355,14 @@ internal class StreetMapTileRenderer(
         request_generation: Long,
         request_priority: Int
     ) {
-        if (memory_tile_bitmap(key) != null) return
+        if (closed || memory_tile_bitmap(key) != null) return
         synchronized(requested_tiles_lock) {
+            requested_tile_generations[key] = request_generation
             if (!requested_tiles.add(key)) return
         }
-        tile_executor.execute(
+        submit_tile_request(
             TileRequestTask(
+                key = key,
                 generation = request_generation,
                 priority = request_priority,
                 sequence = tile_task_sequence.incrementAndGet(),
@@ -348,6 +371,77 @@ internal class StreetMapTileRenderer(
                 }
             )
         )
+    }
+
+    private fun submit_tile_request(task: TileRequestTask) {
+        var discarded: TileRequestTask? = null
+        var submitted = false
+        synchronized(tile_request_admission_lock) {
+            if (!closed && !tile_executor.isShutdown) {
+                val queue = tile_executor.queue
+                if (queue.size >= MAX_PENDING_TILE_REQUESTS) {
+                    var worst: TileRequestTask? = null
+                    for (queued in queue) {
+                        val candidate = queued as? TileRequestTask ?: continue
+                        if (worst == null || candidate.compareTo(worst) > 0) worst = candidate
+                    }
+                    if (worst != null &&
+                        task.compareTo(worst) < 0 &&
+                        queue.remove(worst)
+                    ) {
+                        discarded = worst
+                    }
+                }
+                if (queue.size < MAX_PENDING_TILE_REQUESTS) {
+                    try {
+                        tile_executor.execute(task)
+                        submitted = true
+                    } catch (_: RejectedExecutionException) {
+                        // Cleanup below releases rejected work.
+                    }
+                }
+            }
+        }
+        discarded?.discard()
+        if (!submitted) task.discard()
+    }
+
+    private fun release_requested_tile(key: String) {
+        synchronized(requested_tiles_lock) {
+            requested_tiles.remove(key)
+            requested_tile_generations.remove(key)
+        }
+    }
+
+    private fun tile_request_is_current(key: String): Boolean {
+        if (closed) return false
+        val published_generation = published_tile_request_generation
+        return synchronized(requested_tiles_lock) {
+            (requested_tile_generations[key] ?: Long.MIN_VALUE) >= published_generation
+        }
+    }
+
+    private fun publish_desired_tile_generation(generation: Long) {
+        published_tile_request_generation = generation
+        val discarded = ArrayList<TileRequestTask>()
+        synchronized(tile_request_admission_lock) {
+            val iterator = tile_executor.queue.iterator()
+            while (iterator.hasNext()) {
+                val task = iterator.next() as? TileRequestTask ?: continue
+                if (!task.is_desired_for(generation)) {
+                    iterator.remove()
+                    discarded += task
+                }
+            }
+        }
+        discarded.forEach(TileRequestTask::discard)
+        val stale_connections = synchronized(active_tile_connections_lock) {
+            active_tile_connections
+                .filterKeys { key -> !tile_request_is_current(key) }
+                .values
+                .toList()
+        }
+        stale_connections.forEach(HttpURLConnection::disconnect)
     }
 
     private fun load_tile(
@@ -363,7 +457,7 @@ internal class StreetMapTileRenderer(
         var redrew_when_loaded = false
         var skipped_loaded_request = false
         try {
-            if (memory_tile_bitmap(key) != null) {
+            if (!tile_request_is_current(key) || memory_tile_bitmap(key) != null) {
                 skipped_loaded_request = true
                 return
             }
@@ -372,15 +466,26 @@ internal class StreetMapTileRenderer(
                 file = file,
                 max_age_ms = MAP_TILE_CACHE_MAX_AGE_MS,
             ) { cached ->
-                BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+                if (!tile_request_is_current(key)) {
+                    null
+                } else {
+                    BitmapFactory.decodeFile(cached.absolutePath, decode_options())
+                }
             }
             if (bitmap != null) {
-                put_tile_in_memory(key, bitmap)
+                if (!tile_request_is_current(key) || !put_tile_in_memory(key, bitmap)) {
+                    bitmap.recycle()
+                    skipped_loaded_request = true
+                }
+                return
+            }
+            if (!tile_request_is_current(key)) {
+                skipped_loaded_request = true
                 return
             }
             val url = https_url(tile_url(z, x, y))
                 ?: run {
-                    report_status("Map tiles unavailable")
+                    if (!closed) report_status("Map tiles unavailable")
                     return
                 }
             connection = (url.openConnection() as HttpURLConnection).apply {
@@ -389,8 +494,23 @@ internal class StreetMapTileRenderer(
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", state.user_agent)
             }
+            synchronized(active_tile_connections_lock) {
+                if (!tile_request_is_current(key)) {
+                    skipped_loaded_request = true
+                    return
+                }
+                active_tile_connections[key] = connection
+            }
             if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                if (!tile_request_is_current(key)) {
+                    skipped_loaded_request = true
+                    return
+                }
                 val bytes = connection.inputStream.use { it.readBytes() }
+                if (!tile_request_is_current(key)) {
+                    skipped_loaded_request = true
+                    return
+                }
                 val downloaded = BitmapFactory.decodeByteArray(
                     bytes,
                     0,
@@ -398,26 +518,37 @@ internal class StreetMapTileRenderer(
                     decode_options()
                 )
                 if (downloaded != null) {
-                    put_tile_in_memory(key, downloaded)
-                    redrew_when_loaded = true
-                    request_redraw()
-                    write_tile_file_async(file, bytes)
+                    if (tile_request_is_current(key) &&
+                        put_tile_in_memory(key, downloaded)
+                    ) {
+                        redrew_when_loaded = true
+                        request_redraw()
+                        write_tile_file_async(file, bytes)
+                    } else {
+                        downloaded.recycle()
+                        skipped_loaded_request = true
+                    }
                 }
-            } else {
+            } else if (tile_request_is_current(key)) {
                 connection.errorStream?.close()
                 report_status("Map tiles unavailable")
             }
         } catch (_: Exception) {
-            report_status("Map network unavailable")
+            if (tile_request_is_current(key)) report_status("Map network unavailable")
         } finally {
+            synchronized(active_tile_connections_lock) {
+                if (active_tile_connections[key] === connection) {
+                    active_tile_connections.remove(key)
+                }
+            }
             connection?.disconnect()
-            synchronized(requested_tiles_lock) { requested_tiles.remove(key) }
-            if (!redrew_when_loaded && !skipped_loaded_request) request_redraw()
+            release_requested_tile(key)
+            if (!closed && !redrew_when_loaded && !skipped_loaded_request) request_redraw()
         }
     }
 
     private fun write_tile_file_async(file: File, bytes: ByteArray) {
-        map_tile_disk_cache.write_async(file, bytes)
+        if (!closed) map_tile_disk_cache.write_async(file, bytes)
     }
 
     private fun memory_tile_bitmap(key: String): Bitmap? {
@@ -425,10 +556,13 @@ internal class StreetMapTileRenderer(
         return synchronized(cache) { cache[key] }
     }
 
-    private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
+    private fun put_tile_in_memory(key: String, bitmap: Bitmap): Boolean {
+        if (closed) return false
         val cache = memory_cache_for_key(key)
         synchronized(cache) {
+            if (closed) return false
             put_tile_in_memory_locked(cache, key, bitmap)
+            return true
         }
     }
 
@@ -633,13 +767,21 @@ internal class StreetMapTileRenderer(
 
     private fun https_url(value: String): URL? = throwable_safe_https_url(value)
 
-    private class TileRequestTask(
+    private inner class TileRequestTask(
+        private val key: String,
         private val generation: Long,
         private val priority: Int,
         private val sequence: Long,
         private val action: () -> Unit
     ) : Runnable, Comparable<Runnable> {
         override fun run() = action()
+
+        fun discard() = release_requested_tile(key)
+
+        fun is_desired_for(published_generation: Long): Boolean =
+            synchronized(requested_tiles_lock) {
+                (requested_tile_generations[key] ?: Long.MIN_VALUE) >= published_generation
+            }
 
         override fun compareTo(other: Runnable): Int {
             val task = other as? TileRequestTask ?: return -1
@@ -655,6 +797,7 @@ internal class StreetMapTileRenderer(
         const val MAX_MEMORY_TILES = 320
         const val MAX_LABEL_MEMORY_TILES = 192
         const val TILE_NETWORK_THREADS = 6
+        const val MAX_PENDING_TILE_REQUESTS = 192
         const val TILE_WORKER_KEEP_ALIVE_MS = 15_000L
         const val STREET_PARENT_REQUEST_DEPTH = 3
         const val STREET_CHILD_FALLBACK_DEPTH = 2

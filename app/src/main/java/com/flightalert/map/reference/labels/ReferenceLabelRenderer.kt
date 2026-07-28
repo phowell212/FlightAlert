@@ -55,6 +55,275 @@ internal class ReferenceLabelRenderer(
         return ui_workspace.acceptedLabels.size
     }
 
+    fun prepare_label_plan(
+        workspace: LabelPlanningWorkspace,
+        viewport: Viewport,
+        tiles: List<DictionaryTileDrawRef>,
+        label_text_scale: Float,
+        groups: ReferenceDictionaryLayerGroups,
+        filter_mask: ReferenceFilterMask,
+        include_buffer_tiles: Boolean = false,
+        excluded_rect: ReferenceScreenRect? = null,
+        keep_planning: () -> Boolean,
+    ): PreparedLabelPlan? {
+        if (!keep_planning()) return null
+        workspace.recordRefs.clear()
+        var encounter_order = 0
+        for (tile in tiles) {
+            if (!include_buffer_tiles && !tile.core_visible) continue
+            for (record in tile.tile.labels) {
+                if (encounter_order and 63 == 0 && !keep_planning()) return null
+                if (!label_record_visible_for_admission(record, viewport.zoom, groups, filter_mask)) {
+                    continue
+                }
+                if (!label_record_intersects_viewport(viewport, tile, record)) continue
+                workspace.recordRefs += DictionaryLabelRecordRef(
+                    tile = tile,
+                    record = record,
+                    layout_priority = reference_low_zoom_label_priority(
+                        record.priority,
+                        record.low_zoom_country_rank,
+                        viewport.zoom,
+                    ),
+                    layout_feature_id = layout_feature_id(record),
+                    encounter_order = encounter_order++,
+                )
+            }
+        }
+        workspace.recordRefs.sortWith(
+            compareBy<DictionaryLabelRecordRef> { it.layout_priority }
+                .thenBy { it.layout_feature_id }
+                .thenBy { it.encounter_order },
+        )
+        val prepared_records = ArrayList<PreparedLabelRecord>(workspace.recordRefs.size)
+        for (record_ref in workspace.recordRefs) {
+            if (!keep_planning()) return null
+            val record = record_ref.record
+            val rendered_world_copy = rendered_label_world_copy(record_ref.tile, record)
+            val candidate_key = record.candidate_id?.let { candidate_id ->
+                ReferenceLabelCandidateKey(candidate_id, rendered_world_copy)
+            }
+            val style = label_style_for(record, label_text_scale, viewport.zoom)
+            val has_line_geometry = record.line_label &&
+                record.geometry?.rings?.any { ring -> ring.point_count >= 2 } == true
+            val line = if (has_line_geometry) {
+                prepare_line_label(
+                    workspace = workspace,
+                    viewport = viewport,
+                    tile = record_ref.tile,
+                    record = record,
+                    style = style,
+                    label_text_scale = label_text_scale,
+                    rendered_world_copy = rendered_world_copy,
+                    keep_planning = keep_planning,
+                )
+            } else {
+                null
+            }
+            val point = when {
+                !record.line_label -> point_label_candidate(
+                    workspace,
+                    viewport,
+                    record_ref.tile,
+                    record,
+                    style,
+                    rendered_world_copy,
+                )
+                line != null && record.candidate_id == null && !line.isWater ->
+                    point_label_candidate(
+                        workspace,
+                        viewport,
+                        record_ref.tile,
+                        record,
+                        style,
+                        rendered_world_copy,
+                    )
+                else -> null
+            }
+            prepared_records += PreparedLabelRecord(
+                recordRef = record_ref,
+                renderedWorldCopy = rendered_world_copy,
+                candidateKey = candidate_key,
+                line = line,
+                point = point,
+            )
+        }
+        workspace.recordRefs.clear()
+        if (!keep_planning()) return null
+        return PreparedLabelPlan(
+            records = prepared_records,
+            excludedRect = excluded_rect,
+        )
+    }
+
+    fun resolve_label_plan(
+        workspace: LabelPlanningWorkspace,
+        plan: PreparedLabelPlan,
+        viewport: Viewport,
+        label_avoid_rects: List<ReferenceScreenRect>,
+        fixed_candidates: List<DictionaryLabelCandidate> = emptyList(),
+        preferred_occurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
+        preferred_candidate_keys: Set<ReferenceLabelCandidateKey> = emptySet(),
+        label_budget_override: Int? = null,
+        protected_area_budget_override: Int? = null,
+        keep_planning: () -> Boolean,
+    ): Boolean {
+        if (!keep_planning()) return abandon_label_plan(workspace)
+        workspace.candidates.clear()
+        workspace.plannedCandidateIds.clear()
+        workspace.acceptedLabels.clear()
+        var preferred_seeds: List<DictionaryLabelCandidate> = emptyList()
+        val selection_scratch: ArrayList<DictionaryLabelCandidate>?
+        if (preferred_occurrences.isEmpty()) {
+            selection_scratch = null
+        } else {
+            val seed_candidates = ArrayList<DictionaryLabelCandidate>()
+            val seed_candidate_keys = HashSet<ReferenceLabelCandidateKey>()
+            val prepass_complete = ReferenceLabelAdmissionPolicy.visitPreferredSeedRecords(
+                records = plan.records,
+                preferredLookupKeys = preferred_candidate_keys,
+                lookupKey = { prepared ->
+                    ReferenceLabelCandidateKey(
+                        layout_candidate_id(prepared.recordRef.record),
+                        prepared.renderedWorldCopy,
+                    )
+                },
+                recordCandidateId = { prepared -> prepared.recordRef.record.candidate_id },
+                dedupeKey = { candidate_id, lookup_key ->
+                    ReferenceLabelCandidateKey(candidate_id, lookup_key.rendered_world_copy)
+                },
+                visit = { prepared, _, dedupe_key ->
+                    keep_planning() && append_prepared_label_candidates(
+                        prepared = prepared,
+                        label_avoid_rects = label_avoid_rects,
+                        excluded_rect = plan.excludedRect,
+                        candidate_key = dedupe_key,
+                        planned_candidate_ids = seed_candidate_keys,
+                        output = seed_candidates,
+                        keep_planning = keep_planning,
+                    )
+                },
+            )
+            if (!prepass_complete) return abandon_label_plan(workspace)
+            val retained_seeds = ArrayList<DictionaryLabelCandidate>()
+            ReferenceLabelAdmissionPolicy.retainPreferredSeeds(
+                candidates = seed_candidates,
+                preferredOccurrences = preferred_occurrences,
+                occurrenceId = DictionaryLabelCandidate::occurrenceId,
+                output = retained_seeds,
+            )
+            preferred_seeds = retained_seeds
+            selection_scratch = ArrayList()
+        }
+        val budget = label_budget_override ?: label_budget(viewport)
+        var selection_threshold = ReferenceLabelAdmissionPolicy.initial_threshold(budget)
+        var last_selected_candidate_count = -1
+        var record_index = 0
+        while (record_index < plan.records.size) {
+            if (!keep_planning()) return abandon_label_plan(workspace)
+            val first_ref = plan.records[record_index].recordRef
+            val block_priority = first_ref.layout_priority
+            val block_feature_id = first_ref.layout_feature_id
+            do {
+                val prepared = plan.records[record_index]
+                if (!append_prepared_label_candidates(
+                        prepared = prepared,
+                        label_avoid_rects = label_avoid_rects,
+                        excluded_rect = plan.excludedRect,
+                        candidate_key = prepared.candidateKey,
+                        planned_candidate_ids = workspace.plannedCandidateIds,
+                        output = workspace.candidates,
+                        keep_planning = keep_planning,
+                    )
+                ) {
+                    return abandon_label_plan(workspace)
+                }
+                record_index++
+            } while (
+                record_index < plan.records.size &&
+                    plan.records[record_index].recordRef.layout_priority == block_priority &&
+                    plan.records[record_index].recordRef.layout_feature_id == block_feature_id
+            )
+            if (workspace.candidates.size >= selection_threshold) {
+                accept_label_candidates(
+                    workspace = workspace,
+                    viewport = viewport,
+                    label_avoid_rects = label_avoid_rects,
+                    fixed_candidates = fixed_candidates,
+                    preferred_occurrences = preferred_occurrences,
+                    preferred_seeds = preferred_seeds,
+                    priority_frontier = block_priority,
+                    selection_scratch = selection_scratch,
+                    label_budget = budget,
+                    protected_area_budget = protected_area_budget_override
+                        ?: protected_area_label_budget(viewport),
+                )
+                last_selected_candidate_count = workspace.candidates.size
+                if (workspace.acceptedLabels.size >= budget) break
+                selection_threshold =
+                    ReferenceLabelAdmissionPolicy.next_threshold(workspace.candidates.size)
+            }
+        }
+        if (
+            workspace.acceptedLabels.size < budget &&
+            last_selected_candidate_count != workspace.candidates.size
+        ) {
+            accept_label_candidates(
+                workspace = workspace,
+                viewport = viewport,
+                label_avoid_rects = label_avoid_rects,
+                fixed_candidates = fixed_candidates,
+                preferred_occurrences = preferred_occurrences,
+                preferred_seeds = preferred_seeds,
+                priority_frontier =
+                    plan.records.getOrNull(record_index - 1)?.recordRef?.layout_priority,
+                selection_scratch = selection_scratch,
+                label_budget = budget,
+                protected_area_budget = protected_area_budget_override
+                    ?: protected_area_label_budget(viewport),
+            )
+        }
+        if (!keep_planning()) return abandon_label_plan(workspace)
+        return true
+    }
+
+    private fun append_prepared_label_candidates(
+        prepared: PreparedLabelRecord,
+        label_avoid_rects: List<ReferenceScreenRect>,
+        excluded_rect: ReferenceScreenRect?,
+        candidate_key: ReferenceLabelCandidateKey?,
+        planned_candidate_ids: MutableSet<ReferenceLabelCandidateKey>,
+        output: MutableList<DictionaryLabelCandidate>,
+        keep_planning: () -> Boolean,
+    ): Boolean {
+        if (!keep_planning()) return false
+        if (candidate_key != null && candidate_key in planned_candidate_ids) {
+            return true
+        }
+        val line_candidates = prepared.line?.let { line ->
+            resolve_line_label(line, label_avoid_rects)
+        }.orEmpty()
+        if (!keep_planning()) return false
+        val candidates = if (line_candidates.isNotEmpty()) {
+            line_candidates
+        } else {
+            listOfNotNull(prepared.point)
+        }
+        var added = false
+        for (candidate in candidates) {
+            if (
+                excluded_rect != null &&
+                !label_is_outside(candidate.collisionShape.bounds, excluded_rect)
+            ) {
+                continue
+            }
+            output += candidate
+            added = true
+        }
+        if (added) candidate_key?.let(planned_candidate_ids::add)
+        return true
+    }
+
     fun plan_labels(
         workspace: LabelPlanningWorkspace,
         viewport: Viewport,
@@ -384,8 +653,46 @@ internal class ReferenceLabelRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
         rendered_world_copy: Long,
     ): List<DictionaryLabelCandidate> {
+        val prepared = prepare_line_label(
+            workspace = workspace,
+            viewport = viewport,
+            tile = tile,
+            record = record,
+            style = style,
+            label_text_scale = label_text_scale,
+            rendered_world_copy = rendered_world_copy,
+            keep_planning = ALWAYS_KEEP_LABEL_PLAN,
+        ) ?: return emptyList()
+        val candidates = resolve_line_label(prepared, label_avoid_rects)
+        if (candidates.isNotEmpty()) return candidates
+        return if (record.candidate_id == null && !prepared.isWater) {
+            listOfNotNull(
+                point_label_candidate(
+                    workspace,
+                    viewport,
+                    tile,
+                    record,
+                    style,
+                    rendered_world_copy,
+                ),
+            )
+        } else {
+            emptyList()
+        }
+    }
+
+    private fun prepare_line_label(
+        workspace: LabelPlanningWorkspace,
+        viewport: Viewport,
+        tile: DictionaryTileDrawRef,
+        record: DictionaryLabelRecord,
+        style: DictionaryLabelStyle,
+        label_text_scale: Float,
+        rendered_world_copy: Long,
+        keep_planning: () -> Boolean,
+    ): PreparedLineLabel? {
         val is_water = record.is_water ?: (record.source_kind == "water")
-        val geometry = record.geometry ?: return emptyList()
+        val geometry = record.geometry ?: return null
         val scale = 2.0.pow(viewport.zoom - tile.tile.coordinate.z)
         val local_to_screen = (MAP_TILE_SIZE / DICTIONARY_EXTENT) * scale
         val left_world = viewport.center_x - viewport.width / 2.0
@@ -407,19 +714,18 @@ internal class ReferenceLabelRenderer(
                 bottom = viewport.height.toDouble(),
             ),
         )
-        if (prepared_path.parts.isEmpty()) return emptyList()
+        if (prepared_path.parts.isEmpty() || !keep_planning()) return null
         val candidate_id = layout_candidate_id(record)
         val minimum_water_text_size_px =
             label_scaled_density * MIN_WATER_LINE_TEXT_SIZE_SP * label_text_scale
         val viewport_diagonal = hypot(viewport.width.toDouble(), viewport.height.toDouble())
-        var selected_style = style
-        var selected_collision_radius = 0f
-        var placements: List<ReferencePathLabelPlacement> = emptyList()
-        var tangent_fallback_style = style
-        var tangent_fallback_collision_radius = 0f
-        var tangent_fallback_request: ReferencePathLabelRequest? = null
+        val attempts = ArrayList<PreparedLineLabelAttempt>(
+            ReferenceLineLabelFitPolicy.attemptCount(is_water),
+        )
+        var tangent_fallback: PreparedLineLabelAttempt? = null
         var previous_text_size = -1f
         for (attempt_index in 0 until ReferenceLineLabelFitPolicy.attemptCount(is_water)) {
+            if (!keep_planning()) return null
             val fitted_text_size = ReferenceLineLabelFitPolicy.textSizePx(
                 baseTextSizePx = style.text_size,
                 minimumTextSizePx = minimum_water_text_size_px,
@@ -498,7 +804,6 @@ internal class ReferenceLabelRenderer(
                         ?.takeIf { it > 0 }
                         ?: ReferencePresentationPolicy.line_label_repeat_spacing_px,
                     prominenceTier = record.prominence_tier ?: ProminenceTier.LOCAL,
-                    staticAvoidRects = label_avoid_rects,
                     maximumTangentOffsetPx = if (is_water) {
                         0.0
                     } else {
@@ -518,86 +823,95 @@ internal class ReferenceLabelRenderer(
                     },
                     allowTangentFallback = !is_water,
                 )
+            val attempt = PreparedLineLabelAttempt(
+                style = fitted_style,
+                presentation = presentation,
+                collisionRadius = collision_radius,
+                request = attempt_request,
+            )
+            attempts += attempt
             if (is_water) {
-                tangent_fallback_style = fitted_style
-                tangent_fallback_collision_radius = collision_radius
-                tangent_fallback_request = attempt_request.copy(
-                    allowCurvedPlacement = false,
-                    allowTangentFallback = true,
+                tangent_fallback = attempt.copy(
+                    request = attempt_request.copy(
+                        allowCurvedPlacement = false,
+                        allowTangentFallback = true,
+                    ),
                 )
             }
+        }
+        if (!keep_planning()) return null
+        return PreparedLineLabel(
+            record = record,
+            viewportZoom = viewport.zoom,
+            renderedWorldCopy = rendered_world_copy,
+            preparedPath = prepared_path,
+            candidateId = candidate_id,
+            isWater = is_water,
+            attempts = attempts.toList(),
+            tangentFallback = tangent_fallback,
+        )
+    }
+
+    private fun resolve_line_label(
+        prepared: PreparedLineLabel,
+        label_avoid_rects: List<ReferenceScreenRect>,
+    ): List<DictionaryLabelCandidate> {
+        var selected_attempt: PreparedLineLabelAttempt? = null
+        var placements: List<ReferencePathLabelPlacement> = emptyList()
+        for (attempt in prepared.attempts) {
             val attempt_placements = ReferencePathLabelPlanner.planPrepared(
-                attempt_request,
-                prepared_path,
+                attempt.request.copy(staticAvoidRects = label_avoid_rects),
+                prepared.preparedPath,
             )
             val has_curved_placement = attempt_placements.any { placement ->
                 placement.mode == ReferencePathLabelPlacementMode.CURVED
             }
             if (
                 attempt_placements.isNotEmpty() &&
-                ReferenceLineLabelFitPolicy.acceptAttempt(is_water, has_curved_placement)
+                ReferenceLineLabelFitPolicy.acceptAttempt(prepared.isWater, has_curved_placement)
             ) {
-                selected_style = fitted_style
-                selected_collision_radius = collision_radius
+                selected_attempt = attempt
                 placements = attempt_placements
                 break
             }
         }
         if (placements.isEmpty()) {
-            tangent_fallback_request?.let { fallback_request ->
+            prepared.tangentFallback?.let { fallback ->
                 val fallback_placements = ReferencePathLabelPlanner.planPrepared(
-                    fallback_request,
-                    prepared_path,
+                    fallback.request.copy(staticAvoidRects = label_avoid_rects),
+                    prepared.preparedPath,
                 )
                 if (fallback_placements.isNotEmpty()) {
-                    selected_style = tangent_fallback_style
-                    selected_collision_radius = tangent_fallback_collision_radius
+                    selected_attempt = fallback
                     placements = fallback_placements
                 }
             }
         }
-        if (placements.isEmpty()) {
-            return if (record.candidate_id == null && !is_water) {
-                listOfNotNull(
-                    point_label_candidate(
-                        workspace,
-                        viewport,
-                        tile,
-                        record,
-                        style,
-                        rendered_world_copy,
-                    )
-                )
-            } else {
-                emptyList()
-            }
-        }
-        val selected_presentation = record.sourced_text?.let {
-            SourcedMapTextPresentation.plan(it, selected_style.text_size)
-        }
+        val selected = selected_attempt ?: return emptyList()
+        val record = prepared.record
         return ReferenceLineLabelPlacementAdapter.fromPlanner(
             placements,
-            rendered_world_copy,
+            prepared.renderedWorldCopy,
         ).map { option ->
             DictionaryLabelCandidate(
                 text = record.text,
                 source_kind = record.source_kind,
-                presentation = selected_presentation,
-                style = selected_style,
+                presentation = selected.presentation,
+                style = selected.style,
                 occurrenceId = option.occurrenceId,
-                featureId = record.source_feature_id ?: candidate_id,
+                featureId = record.source_feature_id ?: prepared.candidateId,
                 priority = reference_low_zoom_label_priority(
                     record.priority,
                     record.low_zoom_country_rank,
-                    viewport.zoom,
+                    prepared.viewportZoom,
                 ),
                 placementRank = option.placementRank,
                 protectedArea = record.protected_area,
-                waterLine = is_water,
+                waterLine = prepared.isWater,
                 anchor = option.placement.anchor,
                 collisionShape = referencePathCollisionShape(
                     option.placement.presentationPath,
-                    selected_collision_radius.toDouble(),
+                    selected.collisionRadius.toDouble(),
                 ),
                 path_points = option.placement.presentationPath,
             )
@@ -1153,6 +1467,37 @@ internal class ReferenceLabelRenderer(
         const val WATER_CURVED_SOURCE_DISTANCE_FRACTION = 1f
     }
 }
+
+internal data class PreparedLabelPlan(
+    val records: List<PreparedLabelRecord>,
+    val excludedRect: ReferenceScreenRect?,
+)
+
+internal data class PreparedLabelRecord(
+    val recordRef: DictionaryLabelRecordRef,
+    val renderedWorldCopy: Long,
+    val candidateKey: ReferenceLabelCandidateKey?,
+    val line: PreparedLineLabel?,
+    val point: DictionaryLabelCandidate?,
+)
+
+internal data class PreparedLineLabel(
+    val record: DictionaryLabelRecord,
+    val viewportZoom: Double,
+    val renderedWorldCopy: Long,
+    val preparedPath: ReferencePreparedPathGeometry,
+    val candidateId: ULong,
+    val isWater: Boolean,
+    val attempts: List<PreparedLineLabelAttempt>,
+    val tangentFallback: PreparedLineLabelAttempt?,
+)
+
+internal data class PreparedLineLabelAttempt(
+    val style: DictionaryLabelStyle,
+    val presentation: SourcedMapTextPresentationPlan?,
+    val collisionRadius: Float,
+    val request: ReferencePathLabelRequest,
+)
 
 internal class LabelPlanningWorkspace(
     val textPaint: Paint,

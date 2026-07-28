@@ -49,6 +49,20 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
+
+@Suppress("ArrayInDataClass")
+data class PrioritySnapshotPayload(
+    val signature: String,
+    val icao: Array<String>,
+    val callsign: Array<String>,
+    val registration: Array<String>,
+    val distance_feet: DoubleArray,
+    val altitude_feet: DoubleArray,
+    val vertical_feet: DoubleArray,
+    val contact_age_seconds: DoubleArray,
+    val estimated: BooleanArray
+)
 
 // Foreground-backed watcher for drone-flight safety: live position plus live aircraft feed, no stored tracks.
 class AircraftAlertService : Service(), LocationListener {
@@ -790,39 +804,61 @@ class AircraftAlertService : Service(), LocationListener {
             start_service(context, intent)
         }
 
-        fun publish_priority_snapshot(context: Context, priority_aircraft: List<AlertAircraft>) {
+        fun prepare_priority_snapshot(
+            priority_aircraft: List<AlertAircraft>
+        ): PrioritySnapshotPayload {
+            val size = priority_aircraft.size
+            val icao = Array(size) { "" }
+            val callsign = Array(size) { "" }
+            val registration = Array(size) { "" }
+            val distance_feet = DoubleArray(size)
+            val altitude_feet = DoubleArray(size)
+            val vertical_feet = DoubleArray(size)
+            val contact_age_seconds = DoubleArray(size)
+            val estimated = BooleanArray(size)
+            val signature = StringBuilder(size * 24)
+            priority_aircraft.forEachIndexed { index, aircraft ->
+                icao[index] = aircraft.icao24
+                callsign[index] = aircraft.callsign
+                registration[index] = aircraft.registration.orEmpty()
+                distance_feet[index] = aircraft.distance_feet
+                altitude_feet[index] = aircraft.altitude_feet
+                vertical_feet[index] = aircraft.vertical_separation_feet ?: Double.NaN
+                contact_age_seconds[index] = aircraft.contact_age_seconds
+                estimated[index] = aircraft.is_estimated_position
+                if (index > 0) signature.append('|')
+                signature.append(aircraft.icao24)
+                    .append(':')
+                    .append(aircraft.registration.orEmpty())
+                    .append(':')
+                    .append(aircraft.altitude_feet.roundToInt())
+                    .append(':')
+                    .append(aircraft.is_estimated_position)
+            }
+            return PrioritySnapshotPayload(
+                signature = signature.toString(),
+                icao = icao,
+                callsign = callsign,
+                registration = registration,
+                distance_feet = distance_feet,
+                altitude_feet = altitude_feet,
+                vertical_feet = vertical_feet,
+                contact_age_seconds = contact_age_seconds,
+                estimated = estimated
+            )
+        }
+
+        fun publish_priority_snapshot(context: Context, payload: PrioritySnapshotPayload) {
             val intent = Intent(context, AircraftAlertService::class.java).apply {
                 action = ACTION_PRIORITY_SNAPSHOT
-                putExtra(EXTRA_PRIORITY_ICAO, priority_aircraft.map { it.icao24 }.toTypedArray())
-                putExtra(
-                    EXTRA_PRIORITY_CALLSIGN,
-                    priority_aircraft.map { it.callsign }.toTypedArray()
-                )
-                putExtra(
-                    EXTRA_PRIORITY_REGISTRATION,
-                    priority_aircraft.map { it.registration.orEmpty() }.toTypedArray()
-                )
-                putExtra(
-                    EXTRA_PRIORITY_DISTANCE_FEET,
-                    priority_aircraft.map { it.distance_feet }.toDoubleArray()
-                )
-                putExtra(
-                    EXTRA_PRIORITY_ALTITUDE_FEET,
-                    priority_aircraft.map { it.altitude_feet }.toDoubleArray()
-                )
-                putExtra(
-                    EXTRA_PRIORITY_VERTICAL_FEET,
-                    priority_aircraft.map { it.vertical_separation_feet ?: Double.NaN }
-                        .toDoubleArray()
-                )
-                putExtra(
-                    EXTRA_PRIORITY_CONTACT_AGE_SECONDS,
-                    priority_aircraft.map { it.contact_age_seconds }.toDoubleArray()
-                )
-                putExtra(
-                    EXTRA_PRIORITY_ESTIMATED,
-                    priority_aircraft.map { it.is_estimated_position }.toBooleanArray()
-                )
+                putExtra(EXTRA_PRIORITY_ICAO, payload.icao)
+                putExtra(EXTRA_PRIORITY_CALLSIGN, payload.callsign)
+                putExtra(EXTRA_PRIORITY_REGISTRATION, payload.registration)
+                putExtra(EXTRA_PRIORITY_DISTANCE_FEET, payload.distance_feet)
+                putExtra(EXTRA_PRIORITY_ALTITUDE_FEET, payload.altitude_feet)
+                putExtra(EXTRA_PRIORITY_VERTICAL_FEET, payload.vertical_feet)
+                putExtra(EXTRA_PRIORITY_CONTACT_AGE_SECONDS, payload.contact_age_seconds)
+                putExtra(EXTRA_PRIORITY_ESTIMATED, payload.estimated)
             }
             start_service(context, intent)
         }

@@ -212,7 +212,8 @@ object AlertAircraftClassifier {
         priority_enabled: Boolean,
         priority_range_feet: Float,
         now_epoch_sec: Double,
-        is_estimated_position: Boolean = false
+        is_estimated_position: Boolean = false,
+        extreme_priority_only: Boolean = false
     ): AlertAircraft? {
         val altitude_meters = altitude_meters ?: return null
         val contact_time = last_contact_sec ?: position_time_sec ?: return null
@@ -227,6 +228,7 @@ object AlertAircraftClassifier {
                 vertical_separation_feet <= alert_altitude_feet
         val is_alert_aircraft =
             alerts_enabled && contact_is_fresh_for_alert && is_inside_alert_range
+        if (extreme_priority_only && !is_alert_aircraft) return null
         return AlertAircraft(
             icao24 = icao24,
             callsign = callsign,

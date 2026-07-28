@@ -5,8 +5,10 @@ package com.flightalert.map.reference.dictionary
 import android.content.Context
 import android.os.SystemClock
 import java.io.Closeable
-import java.util.concurrent.Executors
+import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -39,7 +41,15 @@ internal class ReferenceTileRepository(
     private val zoom_ahead_desired_tile_keys = HashSet<String>()
     private val next_zoom_ahead_desired_tile_keys = HashSet<String>()
     private val worker_id = AtomicInteger()
-    private val tile_executor = Executors.newFixedThreadPool(DICTIONARY_TILE_WORKERS) { runnable ->
+    private val tile_task_sequence = AtomicLong()
+    private val tile_request_admission_lock = Any()
+    private val tile_executor = ThreadPoolExecutor(
+        DICTIONARY_TILE_WORKERS,
+        DICTIONARY_TILE_WORKERS,
+        0L,
+        TimeUnit.MILLISECONDS,
+        PriorityBlockingQueue(),
+    ) { runnable ->
         Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             runnable.run()
@@ -72,13 +82,16 @@ internal class ReferenceTileRepository(
     fun clear() {
         package_lifecycle_lock.lock()
         try {
+            discard_queued_repository_work()
             synchronized(tile_cache) {
                 package_generation.incrementAndGet()
+                request_generation.incrementAndGet()
                 package_snapshot = null
                 package_retry_after_ms = 0L
                 tile_cache.clear()
                 requested_tiles.clear()
                 desired_tile_keys.clear()
+                next_desired_tile_keys.clear()
                 zoom_ahead_desired_tile_keys.clear()
                 next_zoom_ahead_desired_tile_keys.clear()
             }
@@ -95,7 +108,7 @@ internal class ReferenceTileRepository(
         try {
             if (closed) return
             closed = true
-            tile_executor.shutdownNow()
+            tile_executor.shutdownNow().forEach(::discard_repository_work)
             clear()
         } finally {
             package_lifecycle_lock.unlock()
@@ -118,11 +131,29 @@ internal class ReferenceTileRepository(
     }
 
     private fun enqueue_package_probe(probe: PackageProbe) {
-        try {
-            tile_executor.execute(probe)
-        } catch (_: RejectedExecutionException) {
-            package_probe_pending.compareAndSet(probe, null)
+        val discarded = ArrayList<TileRequestTask>()
+        var submitted = false
+        synchronized(tile_request_admission_lock) {
+            purge_obsolete_tile_requests_locked(discarded)
+            if (!closed && !tile_executor.isShutdown) {
+                val queue = tile_executor.queue
+                if (queue.size >= MAX_PENDING_DICTIONARY_TILE_REQUESTS) {
+                    worst_queued_tile_request(queue)?.let { worst ->
+                        if (queue.remove(worst)) discarded += worst
+                    }
+                }
+                if (queue.size < MAX_PENDING_DICTIONARY_TILE_REQUESTS) {
+                    try {
+                        tile_executor.execute(probe)
+                        submitted = true
+                    } catch (_: RejectedExecutionException) {
+                        // Cleanup below releases rejected work.
+                    }
+                }
+            }
         }
+        discarded.forEach(TileRequestTask::discard)
+        if (!submitted) probe.discard()
     }
 
     private fun probe_package(probe: PackageProbe) {
@@ -176,38 +207,204 @@ internal class ReferenceTileRepository(
         additionally_relevant: (() -> Boolean)? = null,
     ): Int {
         val cache_key = tile.cache_key()
-        synchronized(tile_cache) {
+        val task_package_generation = synchronized(tile_cache) {
             if (tile_cache.contains(cache_key, tile.low_zoom_profile())) return 0
             if (!requested_tiles.add(cache_key)) return 0
+            package_generation.get()
         }
-        tile_executor.execute {
+        val task = TileRequestTask(
+            tile = tile,
+            cache_key = cache_key,
+            generation = generation,
+            package_generation = task_package_generation,
+            additionally_relevant = additionally_relevant,
+            sequence = tile_task_sequence.incrementAndGet(),
+        )
+        return if (submit_tile_request(task)) 1 else 0
+    }
+
+    fun update_desired_tile_keys(
+        target_tiles: List<VisibleDictionaryTile>,
+        fallback_tiles: List<VisibleDictionaryTile> = emptyList(),
+        include_target_tiles: Boolean = true,
+    ): Long {
+        val generation = synchronized(tile_cache) {
+            next_desired_tile_keys.clear()
+            if (include_target_tiles) {
+                target_tiles.forEach { tile ->
+                    next_desired_tile_keys += tile.cache_key()
+                }
+            }
+            fallback_tiles.forEach { tile -> next_desired_tile_keys += tile.cache_key() }
+            val changed = desired_tile_keys != next_desired_tile_keys
+            if (changed) {
+                desired_tile_keys.clear()
+                desired_tile_keys += next_desired_tile_keys
+                request_generation.incrementAndGet()
+            } else {
+                request_generation.get()
+            }
+        }
+        purge_obsolete_tile_requests()
+        return generation
+    }
+
+    private fun tile_request_still_relevant(cache_key: String, generation: Long): Boolean {
+        if (closed) return false
+        if (generation == request_generation.get()) return true
+        return synchronized(tile_cache) {
+            desired_tile_keys.contains(cache_key) ||
+                zoom_ahead_desired_tile_keys.contains(cache_key)
+        }
+    }
+
+    fun update_zoom_ahead_desired_tile_keys(
+        tiles: List<VisibleDictionaryTile>,
+    ): Long {
+        val generation = synchronized(tile_cache) {
+            next_zoom_ahead_desired_tile_keys.clear()
+            for (tile in tiles) {
+                next_zoom_ahead_desired_tile_keys += tile.cache_key()
+            }
+            if (zoom_ahead_desired_tile_keys != next_zoom_ahead_desired_tile_keys) {
+                zoom_ahead_desired_tile_keys.clear()
+                zoom_ahead_desired_tile_keys += next_zoom_ahead_desired_tile_keys
+                request_generation.incrementAndGet()
+            } else {
+                request_generation.get()
+            }
+        }
+        purge_obsolete_tile_requests()
+        return generation
+    }
+
+    fun clear_zoom_ahead_desired_tile_keys() {
+        val changed = synchronized(tile_cache) {
+            if (zoom_ahead_desired_tile_keys.isEmpty()) return@synchronized false
+            zoom_ahead_desired_tile_keys.clear()
+            request_generation.incrementAndGet()
+            true
+        }
+        if (changed) purge_obsolete_tile_requests()
+    }
+
+    private fun empty_parsed_tile(tile: VisibleDictionaryTile): ParsedDictionaryTile {
+        return ParsedDictionaryTile(
+            coordinate = ReferenceDictionaryTileCoordinate(z = tile.z, x = tile.x, y = tile.y),
+            boundaries = emptyList(),
+            labels = emptyList()
+        )
+    }
+
+    private fun submit_tile_request(task: TileRequestTask): Boolean {
+        val discarded = ArrayList<TileRequestTask>()
+        var submitted = false
+        synchronized(tile_request_admission_lock) {
+            purge_obsolete_tile_requests_locked(discarded)
+            if (!closed && !tile_executor.isShutdown && task.is_relevant()) {
+                val queue = tile_executor.queue
+                if (queue.size >= MAX_PENDING_DICTIONARY_TILE_REQUESTS) {
+                    val worst = worst_queued_tile_request(queue)
+                    if (worst != null &&
+                        task.compareTo(worst) < 0 &&
+                        queue.remove(worst)
+                    ) {
+                        discarded += worst
+                    }
+                }
+                if (queue.size < MAX_PENDING_DICTIONARY_TILE_REQUESTS) {
+                    try {
+                        tile_executor.execute(task)
+                        submitted = true
+                    } catch (_: RejectedExecutionException) {
+                        // Cleanup below releases rejected work.
+                    }
+                }
+            }
+        }
+        discarded.forEach(TileRequestTask::discard)
+        if (!submitted) task.discard()
+        return submitted
+    }
+
+    private fun purge_obsolete_tile_requests() {
+        val discarded = ArrayList<TileRequestTask>()
+        synchronized(tile_request_admission_lock) {
+            purge_obsolete_tile_requests_locked(discarded)
+        }
+        discarded.forEach(TileRequestTask::discard)
+    }
+
+    private fun purge_obsolete_tile_requests_locked(discarded: MutableList<TileRequestTask>) {
+        val queue = tile_executor.queue
+        for (queued in queue) {
+            val task = queued as? TileRequestTask ?: continue
+            if (!task.is_relevant() && queue.remove(task)) discarded += task
+        }
+    }
+
+    private fun worst_queued_tile_request(queue: Collection<Runnable>): TileRequestTask? {
+        var worst: TileRequestTask? = null
+        for (queued in queue) {
+            val candidate = queued as? TileRequestTask ?: continue
+            if (worst == null || candidate.compareTo(worst) > 0) worst = candidate
+        }
+        return worst
+    }
+
+    private fun discard_queued_repository_work() {
+        val discarded = ArrayList<Runnable>()
+        synchronized(tile_request_admission_lock) {
+            val queue = tile_executor.queue
+            for (queued in queue) {
+                if (queue.remove(queued)) discarded += queued
+            }
+        }
+        discarded.forEach(::discard_repository_work)
+    }
+
+    private fun discard_repository_work(task: Runnable) {
+        when (task) {
+            is TileRequestTask -> task.discard()
+            is PackageProbe -> task.discard()
+        }
+    }
+
+    private inner class TileRequestTask(
+        private val tile: VisibleDictionaryTile,
+        private val cache_key: String,
+        private val generation: Long,
+        private val package_generation: Long,
+        private val additionally_relevant: (() -> Boolean)?,
+        private val sequence: Long,
+    ) : Runnable, Comparable<Runnable> {
+        override fun run() {
             var request_became_obsolete = false
             val keep_loading = {
                 if (request_became_obsolete) {
                     false
                 } else {
-                    val relevant = tile_request_still_relevant(cache_key, generation) ||
-                        additionally_relevant?.invoke() == true
+                    val relevant = is_relevant()
                     if (!relevant) request_became_obsolete = true
                     relevant
                 }
             }
             var published = false
             try {
-                if (!keep_loading()) return@execute
+                if (!keep_loading()) return
                 val payload = package_store.read_tile_payload(
                     z = tile.z,
                     x = tile.x,
                     y = tile.y,
                     request_is_relevant = keep_loading,
                 )
-                if (!keep_loading()) return@execute
+                if (!keep_loading()) return
                 val parsed = if (payload != null) {
                     tile_decoder.decode(
                         payload = payload,
                         outline_visibility_centizoom = tile.outline_visibility_centizoom,
                         request_is_relevant = keep_loading,
-                    ) ?: return@execute
+                    ) ?: return
                 } else {
                     empty_parsed_tile(tile)
                 }
@@ -245,100 +442,58 @@ internal class ReferenceTileRepository(
                     }
                 }
                 replacement_generation?.let { current_generation ->
-                    try {
-                        request_tile_if_needed(tile, current_generation)
-                    } catch (_: RejectedExecutionException) {
-                        synchronized(tile_cache) {
-                            requested_tiles.remove(cache_key)
-                        }
-                    }
+                    request_tile_if_needed(tile, current_generation)
                 }
-                if (published || keep_loading()) {
-                    request_redraw()
-                }
+                if (published || keep_loading()) request_redraw()
             }
         }
-        return 1
-    }
 
-    fun update_desired_tile_keys(
-        target_tiles: List<VisibleDictionaryTile>,
-        fallback_tiles: List<VisibleDictionaryTile> = emptyList(),
-        include_target_tiles: Boolean = true,
-    ): Long {
-        return synchronized(tile_cache) {
-            next_desired_tile_keys.clear()
-            if (include_target_tiles) {
-                target_tiles.forEach { tile ->
-                    next_desired_tile_keys += tile.cache_key()
-                }
-            }
-            fallback_tiles.forEach { tile -> next_desired_tile_keys += tile.cache_key() }
-            val changed = desired_tile_keys != next_desired_tile_keys
-            if (changed) {
-                desired_tile_keys.clear()
-                desired_tile_keys += next_desired_tile_keys
-                request_generation.incrementAndGet()
-            } else {
-                request_generation.get()
+        fun is_relevant(): Boolean =
+            !closed &&
+                package_generation == this@ReferenceTileRepository.package_generation.get() &&
+                (
+                    tile_request_still_relevant(cache_key, generation) ||
+                        additionally_relevant?.invoke() == true
+                    )
+
+        fun discard() {
+            synchronized(tile_cache) {
+                requested_tiles.remove(cache_key)
             }
         }
-    }
 
-    private fun tile_request_still_relevant(cache_key: String, generation: Long): Boolean {
-        if (generation == request_generation.get()) return true
-        return synchronized(tile_cache) {
-            desired_tile_keys.contains(cache_key) ||
-                zoom_ahead_desired_tile_keys.contains(cache_key)
-        }
-    }
-
-    fun update_zoom_ahead_desired_tile_keys(
-        tiles: List<VisibleDictionaryTile>,
-    ): Long {
-        return synchronized(tile_cache) {
-            next_zoom_ahead_desired_tile_keys.clear()
-            for (tile in tiles) {
-                next_zoom_ahead_desired_tile_keys += tile.cache_key()
+        override fun compareTo(other: Runnable): Int {
+            val task = other as? TileRequestTask ?: return 1
+            if (generation != task.generation) return task.generation.compareTo(generation)
+            if (tile.core_visible != task.tile.core_visible) {
+                return if (tile.core_visible) -1 else 1
             }
-            if (zoom_ahead_desired_tile_keys != next_zoom_ahead_desired_tile_keys) {
-                zoom_ahead_desired_tile_keys.clear()
-                zoom_ahead_desired_tile_keys += next_zoom_ahead_desired_tile_keys
-                request_generation.incrementAndGet()
-            } else {
-                request_generation.get()
+            if (tile.request_priority != task.tile.request_priority) {
+                return tile.request_priority.compareTo(task.tile.request_priority)
             }
+            return sequence.compareTo(task.sequence)
         }
     }
-
-    fun clear_zoom_ahead_desired_tile_keys() {
-        synchronized(tile_cache) {
-            if (zoom_ahead_desired_tile_keys.isEmpty()) return
-            zoom_ahead_desired_tile_keys.clear()
-            request_generation.incrementAndGet()
-        }
-    }
-
-    private fun empty_parsed_tile(tile: VisibleDictionaryTile): ParsedDictionaryTile {
-        return ParsedDictionaryTile(
-            coordinate = ReferenceDictionaryTileCoordinate(z = tile.z, x = tile.x, y = tile.y),
-            boundaries = emptyList(),
-            labels = emptyList()
-        )
-    }
-
 
     private inner class PackageProbe(
         val generation: Long,
-    ) : Runnable {
+    ) : Runnable, Comparable<Runnable> {
         override fun run() {
             probe_package(this)
         }
+
+        fun discard() {
+            package_probe_pending.compareAndSet(this, null)
+        }
+
+        override fun compareTo(other: Runnable): Int =
+            if (other is PackageProbe) 0 else -1
     }
 
     private companion object {
         const val MAX_MEMORY_TILES = 256
         const val MAX_LOW_ZOOM_MEMORY_TILES = 256
         const val DICTIONARY_TILE_WORKERS = 4
+        const val MAX_PENDING_DICTIONARY_TILE_REQUESTS = 192
     }
 }

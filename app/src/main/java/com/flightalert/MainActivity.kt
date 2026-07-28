@@ -112,8 +112,10 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
-    // Android is tearing down the activity; stop the binCraft source worker.
+    // Android is tearing down the activity; release view-owned workers before their source.
     override fun onDestroy() {
+        flight_map_view?.destroy()
+        flight_map_view = null
         globe_bin_craft_aircraft_source?.destroy()
         globe_bin_craft_aircraft_source = null
         super.onDestroy()

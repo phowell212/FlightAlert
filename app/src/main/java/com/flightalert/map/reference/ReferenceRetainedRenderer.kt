@@ -60,6 +60,18 @@ internal class ReferenceRetainedRenderer(
         RetainedLabelPlanKey,
         PreparedRetainedLabelFrame
         > {}
+    private val retained_static_label_plans =
+        ReferenceRetainedSceneHistory<PreparedRetainedStaticLabelPlan>(
+            RETAINED_FRAME_HISTORY_LIMIT,
+        )
+    @Volatile
+    private var requested_retained_static_label_key: RetainedStaticLabelPlanKey? = null
+    private val retained_label_schedule_lock = Any()
+    private var retained_label_pending: RetainedLabelPlanRequest? = null
+    private var retained_label_worker_running = false
+    private val retained_bitmap_schedule_lock = Any()
+    private var retained_bitmap_pending: RetainedBoundaryBitmapRequest? = null
+    private var retained_bitmap_worker_running = false
     @Volatile
     private var failed_retained_bitmap_key: RetainedBoundaryBitmapKey? = null
     @Volatile
@@ -92,11 +104,13 @@ internal class ReferenceRetainedRenderer(
 
     fun has_current_label_request(): Boolean = retained_label_coordinator.hasCurrentRequest()
 
-    fun cancel_label_request() = retained_label_coordinator.cancel()
+    fun cancel_label_request() {
+        cancel_retained_label_plan()
+    }
 
     fun reset() {
         cancel_pending_retained_bitmap()
-        retained_label_coordinator.cancel()
+        cancel_retained_label_plan()
         tile_repository.clear_zoom_ahead_desired_tile_keys()
         retained_label_interaction_active = false
         clear_retained_frames()
@@ -105,9 +119,9 @@ internal class ReferenceRetainedRenderer(
     fun clear() = reset()
 
     override fun close() {
+        reset()
         retained_bitmap_executor.shutdownNow()
         retained_label_executor.shutdownNow()
-        reset()
     }
 
     fun request_retained_label_frame(
@@ -129,54 +143,141 @@ internal class ReferenceRetainedRenderer(
     ) {
         if (!labels_enabled || retained_label_executor.isShutdown) return
         val avoid_rects = label_avoid_rects.toList()
+        val tile_keys = retained_label_tile_keys(tiles)
+        val static_key = RetainedStaticLabelPlanKey(
+            role = role,
+            viewport = viewport,
+            frameViewport = frame_viewport,
+            tileZoom = tile_zoom,
+            tiles = tile_keys,
+            options = options,
+            packageGeneration = package_generation_snapshot,
+        )
         val key = RetainedLabelPlanKey(
             role = role,
             viewport = viewport,
             frameViewport = frame_viewport,
             tileZoom = tile_zoom,
-            tiles = tiles.map { tile ->
-                RetainedLabelTileKey(
-                    z = tile.tile.coordinate.z,
-                    x = tile.tile.coordinate.x,
-                    y = tile.tile.coordinate.y,
-                    drawX = tile.draw_x,
-                    coreVisible = tile.core_visible,
-                    identity = System.identityHashCode(tile.tile),
-                )
-            },
+            tiles = tile_keys,
             options = options,
             packageGeneration = package_generation_snapshot,
-            labelAvoidRects = avoid_rects,
         )
+        requested_retained_static_label_key = static_key
+        if (retained_label_plan_is_available(key)) {
+            cancel_retained_label_plan()
+            return
+        }
         val token = retained_label_coordinator.start(key) ?: return
         val preferred_labels = displayed_retained_frame
             ?.takeIf {
                 it.options == options &&
                     it.package_generation == package_generation_snapshot
             }
-            ?.labels
+            ?.resolved_labels
             ?: emptyList()
-        val request = RetainedLabelPlanRequest(
-            token = token,
-            tiles = tiles.toList(),
-            preferredLabels = preferred_labels,
-            labelsEnabled = labels_enabled,
-            labelTextScale = label_text_scale,
-            placeLabelsEnabled = place_labels_enabled,
-            waterLabelsEnabled = water_labels_enabled,
-            regionLabelsEnabled = region_labels_enabled,
-            publicLandsEnabled = public_lands_enabled,
-            filterMask = filter_mask,
+        enqueue_retained_label_request(
+            RetainedLabelPlanRequest(
+                token = token,
+                staticKey = static_key,
+                tiles = tiles.toList(),
+                preferredLabels = preferred_labels,
+                labelAvoidRects = avoid_rects,
+                labelsEnabled = labels_enabled,
+                labelTextScale = label_text_scale,
+                placeLabelsEnabled = place_labels_enabled,
+                waterLabelsEnabled = water_labels_enabled,
+                regionLabelsEnabled = region_labels_enabled,
+                publicLandsEnabled = public_lands_enabled,
+                filterMask = filter_mask,
+            )
         )
-        retained_label_executor.execute {
-            prepare_and_publish_retained_label_frame(request)
+    }
+
+    private fun retained_label_plan_is_available(key: RetainedLabelPlanKey): Boolean {
+        if (retained_frame?.label_plan_key == key ||
+            retained_fallback_frame?.label_plan_key == key ||
+            partial_label_frame?.label_plan_key == key ||
+            displayed_retained_frame?.label_plan_key == key
+        ) return true
+        return retained_frame_history.any { frame -> frame.label_plan_key == key }
+    }
+
+    private fun enqueue_retained_label_request(request: RetainedLabelPlanRequest) {
+        var schedule_worker = false
+        synchronized(retained_label_schedule_lock) {
+            retained_label_pending = request
+            if (!retained_label_worker_running) {
+                retained_label_worker_running = true
+                schedule_worker = true
+            }
+        }
+        if (!schedule_worker) return
+        try {
+            retained_label_executor.execute(::drain_retained_label_requests)
+        } catch (_: RuntimeException) {
+            synchronized(retained_label_schedule_lock) {
+                retained_label_pending = null
+                retained_label_worker_running = false
+            }
+            cancel_retained_label_plan()
+        }
+    }
+
+    private fun drain_retained_label_requests() {
+        while (true) {
+            val request = synchronized(retained_label_schedule_lock) {
+                retained_label_pending.also { retained_label_pending = null }
+                    ?: run {
+                        retained_label_worker_running = false
+                        return
+                    }
+            }
+            try {
+                prepare_and_publish_retained_label_frame(request)
+            } catch (_: Exception) {
+                retained_label_coordinator.complete(
+                    request = request.token,
+                    value = PreparedRetainedLabelFrame(request, null),
+                    complete = false,
+                )
+            }
         }
     }
 
     private fun prepare_and_publish_retained_label_frame(request: RetainedLabelPlanRequest) {
         if (!retained_label_coordinator.shouldStart(request.token)) return
         val key = request.token.key
-        val keep_planning = { retained_label_coordinator.shouldStart(request.token) }
+        val keep_static_planning = {
+            requested_retained_static_label_key == request.staticKey &&
+                !Thread.currentThread().isInterrupted
+        }
+        val cached_static_plan = synchronized(retained_static_label_plans) {
+            retained_static_label_plans.firstOrNull { plan ->
+                plan.key == request.staticKey
+            }?.also { plan -> retained_static_label_plans.remember(plan) }
+        }
+        val static_plan = cached_static_plan ?: prepare_retained_static_label_plan(
+            key = request.staticKey,
+            tiles = request.tiles,
+            labelTextScale = request.labelTextScale,
+            placeLabelsEnabled = request.placeLabelsEnabled,
+            waterLabelsEnabled = request.waterLabelsEnabled,
+            regionLabelsEnabled = request.regionLabelsEnabled,
+            publicLandsEnabled = request.publicLandsEnabled,
+            filterMask = request.filterMask,
+            workspace = label_renderer.retained_workspace,
+            keep_planning = keep_static_planning,
+        )?.also { prepared ->
+            synchronized(retained_static_label_plans) {
+                if (requested_retained_static_label_key == request.staticKey) {
+                    retained_static_label_plans.remember(prepared)
+                }
+            }
+        }
+        val keep_planning = {
+            retained_label_coordinator.shouldStart(request.token) &&
+                !Thread.currentThread().isInterrupted
+        }
         val preferred_occurrences = HashSet<ReferenceLabelOccurrenceId>(request.preferredLabels.size)
         val preferred_candidate_keys =
             HashSet<ReferenceLabelCandidateKey>(request.preferredLabels.size)
@@ -188,37 +289,108 @@ internal class ReferenceRetainedRenderer(
                 occurrence_id.renderedWorldCopy,
             )
         }
-        val frame = create_retained_frame(
-            boundary_batches = emptyList(),
-            viewport = key.viewport,
-            frame_viewport = key.frameViewport,
-            tile_zoom = key.tileZoom,
-            tiles = request.tiles,
-            labels_enabled = request.labelsEnabled,
-            borders_enabled = false,
-            label_text_scale = request.labelTextScale,
-            place_labels_enabled = request.placeLabelsEnabled,
-            water_labels_enabled = request.waterLabelsEnabled,
-            region_labels_enabled = request.regionLabelsEnabled,
-            public_lands_enabled = request.publicLandsEnabled,
-            filter_mask = request.filterMask,
-            label_avoid_rects = key.labelAvoidRects,
-            options = key.options,
-            package_generation_snapshot = key.packageGeneration,
-            preferred_occurrences = preferred_occurrences,
-            preferred_candidate_keys = preferred_candidate_keys,
-            workspace = label_renderer.retained_workspace,
-            keep_planning = keep_planning,
-        )
-        val complete = frame != null && keep_planning()
+        val frame = if (static_plan != null && keep_planning()) {
+            create_retained_frame(
+                boundary_batches = emptyList(),
+                viewport = key.viewport,
+                frame_viewport = key.frameViewport,
+                tile_zoom = key.tileZoom,
+                tiles = request.tiles,
+                labels_enabled = request.labelsEnabled,
+                borders_enabled = false,
+                label_text_scale = request.labelTextScale,
+                place_labels_enabled = request.placeLabelsEnabled,
+                water_labels_enabled = request.waterLabelsEnabled,
+                region_labels_enabled = request.regionLabelsEnabled,
+                public_lands_enabled = request.publicLandsEnabled,
+                filter_mask = request.filterMask,
+                label_avoid_rects = request.labelAvoidRects,
+                options = key.options,
+                package_generation_snapshot = key.packageGeneration,
+                label_plan_key = key,
+                preferred_occurrences = preferred_occurrences,
+                preferred_candidate_keys = preferred_candidate_keys,
+                workspace = label_renderer.retained_workspace,
+                keep_planning = keep_planning,
+                static_label_plan = static_plan,
+            )
+        } else null
         val completion = retained_label_coordinator.complete(
             request = request.token,
             value = PreparedRetainedLabelFrame(request, frame),
-            complete = complete,
+            complete = frame != null && keep_planning(),
         )
-        if (completion == ReferenceRetainedBitmapCompletion.PUBLISH) {
-            request_redraw()
-        }
+        if (completion == ReferenceRetainedBitmapCompletion.PUBLISH) request_redraw()
+    }
+
+    private fun prepare_retained_static_label_plan(
+        key: RetainedStaticLabelPlanKey,
+        tiles: List<DictionaryTileDrawRef>,
+        labelTextScale: Float,
+        placeLabelsEnabled: Boolean,
+        waterLabelsEnabled: Boolean,
+        regionLabelsEnabled: Boolean,
+        publicLandsEnabled: Boolean,
+        filterMask: ReferenceFilterMask,
+        workspace: LabelPlanningWorkspace,
+        keep_planning: () -> Boolean,
+    ): PreparedRetainedStaticLabelPlan? {
+        val groups = ReferenceDictionaryLayerGroups(
+            places = placeLabelsEnabled,
+            water = waterLabelsEnabled,
+            regions = regionLabelsEnabled,
+            public_lands = publicLandsEnabled,
+        )
+        val core = label_renderer.prepare_label_plan(
+            workspace = workspace,
+            viewport = key.viewport,
+            tiles = tiles,
+            label_text_scale = labelTextScale,
+            groups = groups,
+            filter_mask = filterMask,
+            keep_planning = keep_planning,
+        ) ?: return null
+        val width = ceil(key.viewport.width).toInt().coerceAtLeast(1)
+        val height = ceil(key.viewport.height).toInt().coerceAtLeast(1)
+        val frame_width = ceil(key.frameViewport.width).toInt().coerceAtLeast(1)
+        val frame_height = ceil(key.frameViewport.height).toInt().coerceAtLeast(1)
+        val horizontal_padding = (frame_width - width) / 2.0
+        val vertical_padding = (frame_height - height) / 2.0
+        val core_rect = ReferenceScreenRect(
+            left = horizontal_padding,
+            top = vertical_padding,
+            right = horizontal_padding + key.viewport.width,
+            bottom = vertical_padding + key.viewport.height,
+        )
+        val padding = label_renderer.prepare_label_plan(
+            workspace = workspace,
+            viewport = key.frameViewport,
+            tiles = tiles,
+            label_text_scale = labelTextScale,
+            groups = groups,
+            filter_mask = filterMask,
+            include_buffer_tiles = true,
+            excluded_rect = core_rect,
+            keep_planning = keep_planning,
+        ) ?: return null
+        return PreparedRetainedStaticLabelPlan(
+            key = key,
+            core = core,
+            padding = padding,
+        )
+    }
+
+    private fun retained_label_tile_keys(
+        tiles: List<DictionaryTileDrawRef>,
+    ): List<RetainedLabelTileKey> = tiles.map { tile ->
+        RetainedLabelTileKey(
+            z = tile.tile.coordinate.z,
+            x = tile.tile.coordinate.x,
+            y = tile.tile.coordinate.y,
+            drawX = tile.draw_x,
+            coreVisible = tile.core_visible,
+            identity = System.identityHashCode(tile.tile),
+        )
     }
 
     fun finish_completed_retained_label_frame(
@@ -226,7 +398,6 @@ internal class ReferenceRetainedRenderer(
         target_tile_zoom: Int,
         fallback_tile_zoom: Int?,
         options: RetainedReferenceOptions,
-        label_avoid_rects: List<ReferenceScreenRect>,
         interaction_active: Boolean,
     ) {
         val prepared = retained_label_coordinator.take() ?: return
@@ -236,7 +407,6 @@ internal class ReferenceRetainedRenderer(
         val environment_matches =
             frame.options == options &&
                 frame.package_generation == current_generation &&
-                key.labelAvoidRects == label_avoid_rects &&
                 frame.is_drawable()
         val visible_at_current_viewport = if (environment_matches) {
             retained_frame_destination(frame, viewport, retained_destination)
@@ -357,6 +527,7 @@ internal class ReferenceRetainedRenderer(
 
         val frame = create_retained_frame(
             boundary_batches = prepared.batches,
+            role = key.role,
             viewport = request.content_viewport,
             frame_viewport = request.viewport,
             tile_zoom = request.tile_zoom,
@@ -399,6 +570,7 @@ internal class ReferenceRetainedRenderer(
 
     private fun create_retained_frame(
         boundary_batches: List<BoundaryPathBatch>,
+        role: RetainedFrameRole = RetainedFrameRole.TARGET,
         viewport: Viewport,
         frame_viewport: Viewport,
         tile_zoom: Int,
@@ -414,37 +586,51 @@ internal class ReferenceRetainedRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
         options: RetainedReferenceOptions,
         package_generation_snapshot: Long,
+        label_plan_key: RetainedLabelPlanKey? = null,
         preferred_occurrences: Set<ReferenceLabelOccurrenceId> = emptySet(),
         preferred_candidate_keys: Set<ReferenceLabelCandidateKey> = emptySet(),
         workspace: LabelPlanningWorkspace = label_renderer.ui_workspace,
         keep_planning: () -> Boolean = ALWAYS_KEEP_LABEL_PLAN,
+        static_label_plan: PreparedRetainedStaticLabelPlan? = null,
     ): RetainedReferenceFrame? {
+        val resolved_static_label_plan = if (labels_enabled) {
+            static_label_plan ?: prepare_retained_static_label_plan(
+                key = RetainedStaticLabelPlanKey(
+                    role = role,
+                    viewport = viewport,
+                    frameViewport = frame_viewport,
+                    tileZoom = tile_zoom,
+                    tiles = retained_label_tile_keys(tiles),
+                    options = options,
+                    packageGeneration = package_generation_snapshot,
+                ),
+                tiles = tiles,
+                labelTextScale = label_text_scale,
+                placeLabelsEnabled = place_labels_enabled,
+                waterLabelsEnabled = water_labels_enabled,
+                regionLabelsEnabled = region_labels_enabled,
+                publicLandsEnabled = public_lands_enabled,
+                filterMask = filter_mask,
+                workspace = workspace,
+                keep_planning = keep_planning,
+            ) ?: return null
+        } else {
+            null
+        }
         val width = ceil(viewport.width).toInt().coerceAtLeast(1)
         val height = ceil(viewport.height).toInt().coerceAtLeast(1)
         val frame_width = ceil(frame_viewport.width).toInt().coerceAtLeast(1)
         val frame_height = ceil(frame_viewport.height).toInt().coerceAtLeast(1)
-        val horizontal_padding = (frame_width - width) / 2.0
-        val vertical_padding = (frame_height - height) / 2.0
         val content = draw_retained_scene_content(
             workspace = workspace,
             boundary_batches = boundary_batches,
-            viewport = viewport,
-            frame_viewport = frame_viewport,
-            tiles = tiles,
             labels_enabled = labels_enabled,
             borders_enabled = borders_enabled,
-            label_text_scale = label_text_scale,
-            place_labels_enabled = place_labels_enabled,
-            water_labels_enabled = water_labels_enabled,
-            region_labels_enabled = region_labels_enabled,
-            public_lands_enabled = public_lands_enabled,
-            filter_mask = filter_mask,
             label_avoid_rects = label_avoid_rects,
             preferred_occurrences = preferred_occurrences,
             preferred_candidate_keys = preferred_candidate_keys,
-            horizontal_padding = horizontal_padding,
-            vertical_padding = vertical_padding,
             keep_planning = keep_planning,
+            static_label_plan = resolved_static_label_plan,
         ) ?: return null
         val label_coverage = ReferenceRetainedLabelCoverage(
             width = frame_width.toDouble(),
@@ -465,6 +651,10 @@ internal class ReferenceRetainedRenderer(
             visible_height = height,
             options = options,
             package_generation = package_generation_snapshot,
+            label_plan_key = label_plan_key,
+            static_label_plan = resolved_static_label_plan,
+            preferred_occurrences = preferred_occurrences,
+            preferred_candidate_keys = preferred_candidate_keys,
             boundaries_drawn = content.boundaries,
             labels = content.labels,
             label_coverage = label_coverage,
@@ -522,9 +712,7 @@ internal class ReferenceRetainedRenderer(
             public_lands_enabled = public_lands_enabled,
             filter_mask = filter_mask,
         )
-        retained_bitmap_executor.execute {
-            prepare_and_publish_retained_boundary_bitmap(request)
-        }
+        enqueue_retained_bitmap_request(request)
     }
 
     private fun prepare_and_publish_retained_boundary_bitmap(
@@ -547,6 +735,48 @@ internal class ReferenceRetainedRenderer(
 
             ReferenceRetainedBitmapCompletion.PUBLISH -> request_redraw()
             ReferenceRetainedBitmapCompletion.DISCARD -> Unit
+        }
+    }
+
+    private fun enqueue_retained_bitmap_request(request: RetainedBoundaryBitmapRequest) {
+        var schedule_worker = false
+        synchronized(retained_bitmap_schedule_lock) {
+            retained_bitmap_pending = request
+            if (!retained_bitmap_worker_running) {
+                retained_bitmap_worker_running = true
+                schedule_worker = true
+            }
+        }
+        if (!schedule_worker) return
+        try {
+            retained_bitmap_executor.execute(::drain_retained_bitmap_requests)
+        } catch (_: RuntimeException) {
+            synchronized(retained_bitmap_schedule_lock) {
+                retained_bitmap_pending = null
+                retained_bitmap_worker_running = false
+            }
+            cancel_pending_retained_bitmap()
+        }
+    }
+
+    private fun drain_retained_bitmap_requests() {
+        while (true) {
+            val request = synchronized(retained_bitmap_schedule_lock) {
+                retained_bitmap_pending.also { retained_bitmap_pending = null }
+                    ?: run {
+                        retained_bitmap_worker_running = false
+                        return
+                    }
+            }
+            try {
+                prepare_and_publish_retained_boundary_bitmap(request)
+            } catch (_: Exception) {
+                retained_bitmap_coordinator.complete(
+                    request = request.token,
+                    value = PreparedRetainedBoundaryBitmap(request, emptyList(), false),
+                    complete = false,
+                )
+            }
         }
     }
 
@@ -575,31 +805,32 @@ internal class ReferenceRetainedRenderer(
     }
 
     private fun cancel_pending_retained_bitmap() {
+        synchronized(retained_bitmap_schedule_lock) {
+            retained_bitmap_pending = null
+        }
         retained_bitmap_coordinator.cancel()
         failed_retained_bitmap_key = null
         retained_bitmap_retry_after_ms = 0L
     }
 
+    private fun cancel_retained_label_plan() {
+        requested_retained_static_label_key = null
+        synchronized(retained_label_schedule_lock) {
+            retained_label_pending = null
+        }
+        retained_label_coordinator.cancel()
+    }
+
     private fun draw_retained_scene_content(
         workspace: LabelPlanningWorkspace,
         boundary_batches: List<BoundaryPathBatch>,
-        viewport: Viewport,
-        frame_viewport: Viewport,
-        tiles: List<DictionaryTileDrawRef>,
         labels_enabled: Boolean,
         borders_enabled: Boolean,
-        label_text_scale: Float,
-        place_labels_enabled: Boolean,
-        water_labels_enabled: Boolean,
-        region_labels_enabled: Boolean,
-        public_lands_enabled: Boolean,
-        filter_mask: ReferenceFilterMask,
         label_avoid_rects: List<ReferenceScreenRect>,
         preferred_occurrences: Set<ReferenceLabelOccurrenceId>,
         preferred_candidate_keys: Set<ReferenceLabelCandidateKey>,
-        horizontal_padding: Double,
-        vertical_padding: Double,
         keep_planning: () -> Boolean,
+        static_label_plan: PreparedRetainedStaticLabelPlan?,
     ): RetainedReferenceContent? {
         val boundaries_drawn = if (borders_enabled) {
             boundary_batches.sumOf { batch -> batch.boundaries }
@@ -611,24 +842,47 @@ internal class ReferenceRetainedRenderer(
             )
         }
 
-        val groups = ReferenceDictionaryLayerGroups(
-            places = place_labels_enabled,
-            water = water_labels_enabled,
-            regions = region_labels_enabled,
-            public_lands = public_lands_enabled,
-        )
-        if (!label_renderer.plan_labels(
+        val plan = static_label_plan ?: return null
+        val labels = resolve_retained_static_label_plan(
             workspace = workspace,
-            viewport = viewport,
-            tiles = tiles,
-            label_text_scale = label_text_scale,
-            groups = groups,
-            filter_mask = filter_mask,
+            plan = plan,
             label_avoid_rects = label_avoid_rects,
             preferred_occurrences = preferred_occurrences,
             preferred_candidate_keys = preferred_candidate_keys,
             keep_planning = keep_planning,
-        )) return null
+        ) ?: return null
+        return RetainedReferenceContent(
+            boundaries = boundaries_drawn,
+            labels = labels,
+        )
+    }
+
+    private fun resolve_retained_static_label_plan(
+        workspace: LabelPlanningWorkspace,
+        plan: PreparedRetainedStaticLabelPlan,
+        label_avoid_rects: List<ReferenceScreenRect>,
+        preferred_occurrences: Set<ReferenceLabelOccurrenceId>,
+        preferred_candidate_keys: Set<ReferenceLabelCandidateKey>,
+        keep_planning: () -> Boolean,
+    ): List<DictionaryLabelCandidate>? {
+        val viewport = plan.key.viewport
+        val frame_viewport = plan.key.frameViewport
+        val width = ceil(viewport.width).toInt().coerceAtLeast(1)
+        val height = ceil(viewport.height).toInt().coerceAtLeast(1)
+        val frame_width = ceil(frame_viewport.width).toInt().coerceAtLeast(1)
+        val frame_height = ceil(frame_viewport.height).toInt().coerceAtLeast(1)
+        val horizontal_padding = (frame_width - width) / 2.0
+        val vertical_padding = (frame_height - height) / 2.0
+        val core_plan_complete = label_renderer.resolve_label_plan(
+            workspace = workspace,
+            plan = plan.core,
+            viewport = viewport,
+            label_avoid_rects = label_avoid_rects,
+            preferred_occurrences = preferred_occurrences,
+            preferred_candidate_keys = preferred_candidate_keys,
+            keep_planning = keep_planning,
+        )
+        if (!core_plan_complete) return null
         val core_candidates = workspace.acceptedLabels.map { candidate ->
             translate_label_candidate(candidate, horizontal_padding, vertical_padding)
         }
@@ -655,17 +909,12 @@ internal class ReferenceRetainedRenderer(
             label_renderer.protected_area_label_budget(viewport) * padding_area_ratio
         ).toInt().coerceAtLeast(0)
         if (!keep_planning()) return null
-        if (!label_renderer.plan_labels(
+        val padding_plan_complete = label_renderer.resolve_label_plan(
             workspace = workspace,
+            plan = plan.padding,
             viewport = frame_viewport,
-            tiles = tiles,
-            label_text_scale = label_text_scale,
-            groups = groups,
-            filter_mask = filter_mask,
             label_avoid_rects = shifted_avoid_rects,
-            include_buffer_tiles = true,
             fixed_candidates = core_candidates,
-            excluded_rect = core_rect,
             label_budget_override = (core_candidates.size + padding_budget).coerceAtLeast(1),
             protected_area_budget_override = (
                 core_candidates.count { it.protectedArea } + padding_protected_area_budget
@@ -673,11 +922,9 @@ internal class ReferenceRetainedRenderer(
             preferred_occurrences = preferred_occurrences,
             preferred_candidate_keys = preferred_candidate_keys,
             keep_planning = keep_planning,
-        )) return null
-        return RetainedReferenceContent(
-            boundaries = boundaries_drawn,
-            labels = workspace.acceptedLabels.toList(),
         )
+        if (!padding_plan_complete) return null
+        return workspace.acceptedLabels.toList()
     }
 
     private fun shift_label_avoid_rects(
@@ -731,13 +978,63 @@ internal class ReferenceRetainedRenderer(
         )
     }
 
+    private fun resolve_retained_frame_labels(
+        frame: RetainedReferenceFrame,
+        destination: ReferenceRetainedDestination,
+        label_avoid_rects: List<ReferenceScreenRect>,
+    ) {
+        val plan = frame.static_label_plan
+        if (plan == null) {
+            frame.resolved_labels = emptyList()
+            return
+        }
+        val frame_avoid_rects = label_avoid_rects_in_frame_viewport(
+            frame = frame,
+            destination = destination,
+            label_avoid_rects = label_avoid_rects,
+        )
+        frame.resolved_labels = if (frame_avoid_rects == null) {
+            emptyList()
+        } else {
+            resolve_retained_static_label_plan(
+                workspace = label_renderer.ui_workspace,
+                plan = plan,
+                label_avoid_rects = frame_avoid_rects,
+                preferred_occurrences = frame.preferred_occurrences,
+                preferred_candidate_keys = frame.preferred_candidate_keys,
+                keep_planning = ALWAYS_KEEP_LABEL_PLAN,
+            ) ?: emptyList()
+        }
+    }
+
+    private fun label_avoid_rects_in_frame_viewport(
+        frame: RetainedReferenceFrame,
+        destination: ReferenceRetainedDestination,
+        label_avoid_rects: List<ReferenceScreenRect>,
+    ): List<ReferenceScreenRect>? {
+        if (label_avoid_rects.isEmpty()) return emptyList()
+        val zoom_scale = (destination.right - destination.left) / frame.width
+        if (!zoom_scale.isFinite() || zoom_scale <= 0.0) return null
+        val horizontal_padding = (frame.width - frame.visible_width) / 2.0
+        val vertical_padding = (frame.height - frame.visible_height) / 2.0
+        return label_avoid_rects.map { rect ->
+            ReferenceScreenRect(
+                left = (rect.left - destination.left) / zoom_scale - horizontal_padding,
+                top = (rect.top - destination.top) / zoom_scale - vertical_padding,
+                right = (rect.right - destination.left) / zoom_scale - horizontal_padding,
+                bottom = (rect.bottom - destination.top) / zoom_scale - vertical_padding,
+            )
+        }
+    }
+
     fun draw_retained_frame_if_available(
         canvas: Canvas,
         viewport: Viewport,
         options: RetainedReferenceOptions,
         target_tile_zoom: Int,
         fallback_tile_zoom: Int?,
-        now_ms: Long
+        now_ms: Long,
+        label_avoid_rects: List<ReferenceScreenRect>,
     ): RetainedReferenceFrame? {
         val frame = retained_frame_for_viewport(
             canvas,
@@ -758,6 +1055,7 @@ internal class ReferenceRetainedRenderer(
             frame = frame,
             now_ms = now_ms,
             destination = retained_destination,
+            label_avoid_rects = label_avoid_rects,
         )
         return frame
     }
@@ -1075,11 +1373,13 @@ internal class ReferenceRetainedRenderer(
         viewport: Viewport,
         frame: RetainedReferenceFrame,
         now_ms: Long,
+        label_avoid_rects: List<ReferenceScreenRect>,
         destination: ReferenceRetainedDestination? = null,
     ) {
         val current_destination = destination ?: retained_destination.also {
             retained_frame_destination(frame, viewport, it)
         }
+        resolve_retained_frame_labels(frame, current_destination, label_avoid_rects)
         var established = displayed_retained_frame
         var carried_fade_elapsed_ms = 0L
         val interrupted_fade = retained_fade
@@ -1134,8 +1434,6 @@ internal class ReferenceRetainedRenderer(
             retained_fade = retained_reference_fade(
                 previous = established,
                 current = frame,
-                previous_destination = fading_destination,
-                current_destination = current_destination,
                 start_ms = now_ms - carried_fade_elapsed_ms,
             )
         }
@@ -1163,6 +1461,22 @@ internal class ReferenceRetainedRenderer(
         val leaving_label_alpha = reference_retained_leaving_label_alpha(raw_progress)
         val entering_label_alpha = reference_retained_entering_label_alpha(raw_progress)
         retained_frame_destination(fade.previous, viewport, fading_destination)
+        resolve_retained_frame_labels(fade.previous, fading_destination, label_avoid_rects)
+        val label_transition = reference_retained_label_transition(
+            previous = fade.previous.resolved_labels,
+            current = frame.resolved_labels,
+            identity = DictionaryLabelCandidate::occurrenceId,
+            samePlacement = { old, next ->
+                reference_retained_label_anchor_is_stable(
+                    previousAnchor = old.anchor,
+                    previousDestination = fading_destination,
+                    previousFrameWidth = fade.previous.width,
+                    currentAnchor = next.anchor,
+                    currentDestination = current_destination,
+                    currentFrameWidth = frame.width,
+                )
+            },
+        )
         draw_retained_frame(
             canvas = canvas,
             viewport = viewport,
@@ -1185,7 +1499,7 @@ internal class ReferenceRetainedRenderer(
             frame = fade.previous,
             destination = fading_destination,
             alpha = leaving_label_alpha,
-            labels = fade.labels.leaving,
+            labels = label_transition.leaving,
         )
         draw_retained_labels(
             canvas = canvas,
@@ -1193,7 +1507,7 @@ internal class ReferenceRetainedRenderer(
             frame = frame,
             destination = current_destination,
             alpha = entering_label_alpha,
-            fully_visible = fade.labels.continuing_current,
+            fully_visible = label_transition.continuing_current,
         )
         request_redraw()
     }
@@ -1240,7 +1554,7 @@ internal class ReferenceRetainedRenderer(
         frame: RetainedReferenceFrame,
         destination: ReferenceRetainedDestination,
         alpha: Int = 255,
-        labels: List<DictionaryLabelCandidate> = frame.labels,
+        labels: List<DictionaryLabelCandidate> = frame.resolved_labels,
         fully_visible: BooleanArray? = null,
     ) {
         val zoom_scale = (destination.right - destination.left) / frame.width
@@ -1495,28 +1809,11 @@ internal class ReferenceRetainedRenderer(
     private fun retained_reference_fade(
         previous: RetainedReferenceFrame,
         current: RetainedReferenceFrame,
-        previous_destination: ReferenceRetainedDestination,
-        current_destination: ReferenceRetainedDestination,
         start_ms: Long,
     ): RetainedReferenceFade {
         return RetainedReferenceFade(
             previous = previous,
             current = current,
-            labels = reference_retained_label_transition(
-                previous = previous.labels,
-                current = current.labels,
-                identity = DictionaryLabelCandidate::occurrenceId,
-                samePlacement = { old, next ->
-                    reference_retained_label_anchor_is_stable(
-                        previousAnchor = old.anchor,
-                        previousDestination = previous_destination,
-                        previousFrameWidth = previous.width,
-                        currentAnchor = next.anchor,
-                        currentDestination = current_destination,
-                        currentFrameWidth = current.width,
-                    )
-                },
-            ),
             start_ms = start_ms,
         )
     }
@@ -1605,6 +1902,10 @@ internal class ReferenceRetainedRenderer(
         retained_fade = null
         displayed_retained_frame = null
         retained_frame_history.clear()
+        synchronized(retained_static_label_plans) {
+            retained_static_label_plans.clear()
+        }
+        requested_retained_static_label_key = null
     }
 
 
@@ -1635,6 +1936,16 @@ internal data class RetainedLabelTileKey(
     val identity: Int,
 )
 
+internal data class RetainedStaticLabelPlanKey(
+    val role: RetainedFrameRole,
+    val viewport: Viewport,
+    val frameViewport: Viewport,
+    val tileZoom: Int,
+    val tiles: List<RetainedLabelTileKey>,
+    val options: RetainedReferenceOptions,
+    val packageGeneration: Long,
+)
+
 internal data class RetainedLabelPlanKey(
     val role: RetainedFrameRole,
     val viewport: Viewport,
@@ -1643,13 +1954,14 @@ internal data class RetainedLabelPlanKey(
     val tiles: List<RetainedLabelTileKey>,
     val options: RetainedReferenceOptions,
     val packageGeneration: Long,
-    val labelAvoidRects: List<ReferenceScreenRect>,
 )
 
 internal data class RetainedLabelPlanRequest(
     val token: ReferenceRetainedBitmapRequestToken<RetainedLabelPlanKey>,
+    val staticKey: RetainedStaticLabelPlanKey,
     val tiles: List<DictionaryTileDrawRef>,
     val preferredLabels: List<DictionaryLabelCandidate>,
+    val labelAvoidRects: List<ReferenceScreenRect>,
     val labelsEnabled: Boolean,
     val labelTextScale: Float,
     val placeLabelsEnabled: Boolean,
@@ -1662,6 +1974,12 @@ internal data class RetainedLabelPlanRequest(
 internal data class PreparedRetainedLabelFrame(
     val request: RetainedLabelPlanRequest,
     val frame: RetainedReferenceFrame?,
+)
+
+internal data class PreparedRetainedStaticLabelPlan(
+    val key: RetainedStaticLabelPlanKey,
+    val core: PreparedLabelPlan,
+    val padding: PreparedLabelPlan,
 )
 
 internal data class RetainedBoundaryBitmapTileKey(
@@ -1716,11 +2034,16 @@ internal data class RetainedReferenceFrame(
     val visible_height: Int,
     val options: RetainedReferenceOptions,
     val package_generation: Long,
+    val label_plan_key: RetainedLabelPlanKey?,
+    val static_label_plan: PreparedRetainedStaticLabelPlan?,
+    val preferred_occurrences: Set<ReferenceLabelOccurrenceId>,
+    val preferred_candidate_keys: Set<ReferenceLabelCandidateKey>,
     val boundaries_drawn: Int,
     val labels: List<DictionaryLabelCandidate>,
     val label_coverage: ReferenceRetainedLabelCoverage,
 ) {
-    val labels_drawn: Int get() = labels.size
+    var resolved_labels: List<DictionaryLabelCandidate> = labels
+    val labels_drawn: Int get() = resolved_labels.size
 
     fun matches_options(next: RetainedReferenceOptions): Boolean {
         return options == next
@@ -1781,6 +2104,5 @@ internal data class RetainedReferenceFrame(
 internal data class RetainedReferenceFade(
     val previous: RetainedReferenceFrame,
     val current: RetainedReferenceFrame,
-    val labels: ReferenceRetainedLabelTransition<DictionaryLabelCandidate>,
     val start_ms: Long
 )

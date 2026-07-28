@@ -25,7 +25,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 
-class AviationLayerController(
+internal class AviationLayerController(
     private val client: AviationLayerClient,
     private val run_in_background: (() -> Unit) -> Unit,
     private val post_to_main: (() -> Unit) -> Unit,
@@ -36,7 +36,17 @@ class AviationLayerController(
     private val bounds_padding_fraction: Double,
     private val now_ms: () -> Long = { SystemClock.elapsedRealtime() },
     private val fetch_layers: ((List<AviationLayerBounds>, Boolean, Boolean, Boolean, Boolean) ->
-        AviationLayerSnapshot)? = null
+        AviationLayerSnapshot)? = null,
+    private val run_preparation_in_background: (() -> Unit) -> Unit = run_in_background,
+    private val prepare_airspaces: ((
+        AviationLayerSnapshot,
+        Set<AviationLayerKind>,
+        () -> Boolean
+    ) -> AviationAirspacePreparation?)? = null,
+    private val publish_airspaces: ((
+        AviationLayerSnapshot,
+        AviationAirspacePreparation
+    ) -> Unit)? = null
 ) {
     var snapshot: AviationLayerSnapshot? = null
         private set
@@ -128,11 +138,28 @@ class AviationLayerController(
         val token = AviationLayerFetchToken(requested_kind)
         active_fetch_token = token
         fetch_in_flight = true
-        run_in_background {
+        submit_background(
+            runner = run_in_background,
+            on_rejected = {
+                if (active_fetch_token === token) {
+                    active_fetch_token = null
+                    fetch_in_flight = false
+                    forced_refresh_required_kinds += requested_kinds
+                    status_text =
+                        if (has_enabled_layers(latest_visibility)) {
+                            "Loading aviation layers"
+                        } else {
+                            "Layers off"
+                        }
+                    request_redraw()
+                }
+            }
+        ) {
             var cancelled = false
-            val next_snapshot = try {
+            var next_snapshot: AviationLayerSnapshot? = null
+            try {
                 if (token.cancelled) throw AviationFetchCancelledException()
-                fetch_layers?.invoke(
+                next_snapshot = fetch_layers?.invoke(
                     query_envelopes,
                     requested_kind == AviationLayerKind.ATC_BOUNDARIES,
                     requested_kind == AviationLayerKind.RESTRICTED_AIRSPACES,
@@ -149,20 +176,106 @@ class AviationLayerController(
                 )
             } catch (_: AviationFetchCancelledException) {
                 cancelled = true
-                null
             } catch (_: Exception) {
-                null
+                next_snapshot = null
             }
-            post_to_main {
-                apply_fetch_result(
-                    snapshot = next_snapshot,
-                    requested_kinds = requested_kinds,
-                    query_envelopes = query_envelopes,
-                    token = token,
-                    cancelled = cancelled || token.cancelled
-                )
+            val snapshot_to_prepare = next_snapshot
+            if (!cancelled && snapshot_to_prepare != null && prepare_airspaces != null) {
+                post_to_main {
+                    if (active_fetch_token !== token || token.cancelled) return@post_to_main
+                    publish_fetched_snapshot(
+                        fetched = snapshot_to_prepare,
+                        requested_kinds = requested_kinds,
+                        query_envelopes = query_envelopes
+                    )
+                    submit_background(
+                        runner = run_preparation_in_background,
+                        on_rejected = {
+                            apply_fetch_result(
+                                snapshot = snapshot_to_prepare,
+                                prepared_airspaces = null,
+                                requested_kinds = requested_kinds,
+                                query_envelopes = query_envelopes,
+                                token = token,
+                                cancelled = false
+                            )
+                        }
+                    ) {
+                        var preparation_cancelled = false
+                        val prepared_airspaces = try {
+                            prepare_airspaces.invoke(
+                                snapshot_to_prepare,
+                                requested_kinds.toSet()
+                            ) { !token.cancelled }
+                                ?: throw AviationFetchCancelledException()
+                        } catch (_: AviationFetchCancelledException) {
+                            preparation_cancelled = true
+                            null
+                        } catch (_: Exception) {
+                            null
+                        }
+                        post_to_main {
+                            apply_fetch_result(
+                                snapshot = snapshot_to_prepare,
+                                prepared_airspaces = prepared_airspaces,
+                                requested_kinds = requested_kinds,
+                                query_envelopes = query_envelopes,
+                                token = token,
+                                cancelled = preparation_cancelled || token.cancelled
+                            )
+                        }
+                    }
+                }
+            } else {
+                post_to_main {
+                    apply_fetch_result(
+                        snapshot = next_snapshot,
+                        prepared_airspaces = null,
+                        requested_kinds = requested_kinds,
+                        query_envelopes = query_envelopes,
+                        token = token,
+                        cancelled = cancelled || token.cancelled
+                    )
+                }
             }
         }
+    }
+
+    private fun submit_background(
+        runner: ((() -> Unit) -> Unit),
+        on_rejected: () -> Unit,
+        task: () -> Unit
+    ) {
+        try {
+            runner(task)
+        } catch (_: RuntimeException) {
+            on_rejected()
+        }
+    }
+
+    private fun publish_fetched_snapshot(
+        fetched: AviationLayerSnapshot,
+        requested_kinds: List<AviationLayerKind>,
+        query_envelopes: List<AviationLayerBounds>
+    ) {
+        val requested_kind_set = requested_kinds.toSet()
+        val normalized_snapshot = with_missing_requested_results_as_unavailable(
+            fetched,
+            requested_kind_set,
+            query_envelopes
+        )
+        snapshot = snapshot?.let { previous ->
+            merge_layer_snapshot(
+                previous = previous,
+                fetched = normalized_snapshot,
+                requested_kinds = requested_kind_set,
+                attempted_query_envelopes = query_envelopes
+            )
+        } ?: normalized_snapshot
+        status_text = latest_requested_viewport?.let { viewport ->
+            summary_for_viewport(snapshot, latest_visibility, viewport)
+        } ?: summary(snapshot, latest_visibility)
+        request_redraw()
     }
 
     fun on_visibility_changed(visibility: AviationLayerVisibility) {
@@ -206,6 +319,7 @@ class AviationLayerController(
 
     private fun apply_fetch_result(
         snapshot: AviationLayerSnapshot?,
+        prepared_airspaces: AviationAirspacePreparation?,
         requested_kinds: List<AviationLayerKind>,
         query_envelopes: List<AviationLayerBounds>,
         token: AviationLayerFetchToken,
@@ -276,6 +390,9 @@ class AviationLayerController(
                 attempted_query_envelopes = query_envelopes
             )
         } ?: normalized_snapshot
+        prepared_airspaces?.let { prepared ->
+            this.snapshot?.let { displayed -> publish_airspaces?.invoke(displayed, prepared) }
+        }
         status_text = if (latest_enabled) {
             latest_requested_viewport?.let { viewport ->
                 summary_for_viewport(this.snapshot, latest_visibility, viewport)

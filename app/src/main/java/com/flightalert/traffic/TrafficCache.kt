@@ -12,6 +12,7 @@ import android.os.SystemClock
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftSymbol
 import com.flightalert.aircraft.AircraftSymbolClassifier
+import com.flightalert.alerts.AlertAircraft
 import com.flightalert.map.Viewport
 import com.flightalert.ui.ensure_point_capacity
 import kotlin.math.max
@@ -20,6 +21,7 @@ import kotlin.math.sqrt
 
 internal data class CachedTraffic(
     val aircraft: List<Aircraft>,
+    val aircraft_by_icao: Map<String, Aircraft>,
     val nearest_aircraft: Aircraft?,
     val entries: List<TrafficSpatialEntry>,
     val spatial_index: TrafficSpatialIndex,
@@ -27,6 +29,7 @@ internal data class CachedTraffic(
     val total: Int,
     val hazard_present: Boolean,
     val extreme_priority_aircraft: List<Aircraft>,
+    val priority_notification_aircraft: List<AlertAircraft>,
     val extreme_priority_keys: Set<String>,
     val max_projected_speed_zoom_zero: Double
 )
@@ -78,11 +81,20 @@ internal data class TrafficWorldDotBatch(
     }
 }
 
-internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
+internal class TrafficSpatialIndex(
+    entries: List<TrafficSpatialEntry>,
+    is_cancelled: () -> Boolean = { false }
+) {
     private val cells = arrayOfNulls<MutableList<TrafficSpatialEntry>>(CELL_COUNT * CELL_COUNT)
+    val complete: Boolean
 
     init {
-        entries.forEach { entry ->
+        var completed = true
+        for ((entry_index, entry) in entries.withIndex()) {
+            if (entry_index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) {
+                completed = false
+                break
+            }
             val column =
                 (entry.world_x_zoom_zero / CELL_WORLD_SIZE).toInt().coerceIn(0, CELL_COUNT - 1)
             val row =
@@ -91,6 +103,7 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
             val cell = cells[index] ?: ArrayList<TrafficSpatialEntry>().also { cells[index] = it }
             cell += entry
         }
+        complete = completed
     }
 
     // Pan frames use this grid to ask only the cells near the viewport instead of scanning all aircraft.
@@ -195,6 +208,7 @@ internal class TrafficSpatialIndex(entries: List<TrafficSpatialEntry>) {
         const val WORLD_SIZE = 256.0
         const val CELL_COUNT = 192
         const val CELL_WORLD_SIZE = WORLD_SIZE / CELL_COUNT
+        const val CANCELLATION_CHECK_MASK = 127
     }
 }
 
@@ -214,9 +228,14 @@ internal object TrafficDotGrouper {
 }
 
 internal class TrafficCacheController(
-    private val passes_aircraft_filters: (Aircraft, Double) -> Boolean,
+    private val passes_aircraft_filters: (
+        Aircraft,
+        Double,
+        Double,
+        AlertAircraft?
+    ) -> Boolean,
     private val distance_meters: (Aircraft) -> Double,
-    private val is_hazard_aircraft: (Aircraft) -> Boolean,
+    private val classify_alert_aircraft: (Aircraft, Double) -> AlertAircraft?,
     private val aircraft_icao_key: (Aircraft) -> String,
     private val spatial_entry_for: (Aircraft, Double) -> TrafficSpatialEntry,
     private val alerts_enabled: () -> Boolean,
@@ -226,6 +245,7 @@ internal class TrafficCacheController(
     private var traffic_cache_dirty = true
     private var published_traffic = CachedTraffic(
         aircraft = emptyList(),
+        aircraft_by_icao = emptyMap(),
         nearest_aircraft = null,
         entries = emptyList(),
         spatial_index = TrafficSpatialIndex(emptyList()),
@@ -233,6 +253,7 @@ internal class TrafficCacheController(
         total = 0,
         hazard_present = false,
         extreme_priority_aircraft = emptyList(),
+        priority_notification_aircraft = emptyList(),
         extreme_priority_keys = emptySet(),
         max_projected_speed_zoom_zero = 0.0
     )
@@ -252,45 +273,102 @@ internal class TrafficCacheController(
         return current_cached_traffic()
     }
 
-    fun build_cached_traffic(all: List<Aircraft>): CachedTraffic {
-        val now_epoch_sec = now_epoch_seconds()
+    fun build_cached_traffic(
+        all: List<Aircraft>,
+        now_epoch_sec: Double = now_epoch_seconds()
+    ): CachedTraffic = checkNotNull(
+        build_cached_traffic_or_cancelled(
+            all = all,
+            now_epoch_sec = now_epoch_sec,
+            is_cancelled = { false }
+        )
+    )
+
+    fun build_cached_traffic_or_cancelled(
+        all: List<Aircraft>,
+        now_epoch_sec: Double,
+        is_cancelled: () -> Boolean
+    ): CachedTraffic? {
         val filtered = ArrayList<Aircraft>(all.size)
+        val filtered_by_icao = HashMap<String, Aircraft>(all.size)
         val entries = ArrayList<TrafficSpatialEntry>(all.size)
+        val priority_aircraft = ArrayList<Aircraft>()
+        val priority_alerts = ArrayList<AlertAircraft>()
         var nearest: Aircraft? = null
         var nearest_distance = Double.POSITIVE_INFINITY
-        all.forEach { item ->
-            if (passes_aircraft_filters(item, now_epoch_sec)) {
+        var max_projected_speed_squared = 0.0
+        val prepare_alerts = alerts_enabled()
+        all.forEachIndexed { index, item ->
+            if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
+            val distance = distance_meters(item)
+            val alert = if (prepare_alerts) classify_alert_aircraft(item, now_epoch_sec) else null
+            if (alert?.is_hazard == true) {
+                priority_aircraft += item
+                priority_alerts += alert
+            }
+            if (passes_aircraft_filters(item, now_epoch_sec, distance, alert)) {
                 filtered += item
-                entries += spatial_entry_for(item, now_epoch_sec)
-                val distance = distance_meters(item)
+                filtered_by_icao.putIfAbsent(aircraft_icao_key(item), item)
+                val entry = spatial_entry_for(item, now_epoch_sec)
+                entries += entry
+                if (entry.projected_motion_remaining_sec > 0.0) {
+                    val dx = entry.projected_velocity_x_zoom_zero
+                    val dy = entry.projected_velocity_y_zoom_zero
+                    val speed_squared = dx * dx + dy * dy
+                    if (speed_squared > max_projected_speed_squared) {
+                        max_projected_speed_squared = speed_squared
+                    }
+                }
                 if (distance.isFinite() && distance < nearest_distance) {
                     nearest = item
                     nearest_distance = distance
                 }
             }
         }
-        val world_dot_batch = build_world_dot_batch(entries)
-        val priority_aircraft = if (alerts_enabled()) {
-            // Safety state is based on every real aircraft in the feed, not the current visual filter.
-            all.filter(is_hazard_aircraft)
-        } else {
-            emptyList()
-        }
+        if (is_cancelled()) return null
+        val world_dot_batch = build_world_dot_batch(entries, is_cancelled) ?: return null
+        if (is_cancelled()) return null
+        val spatial_index = TrafficSpatialIndex(entries, is_cancelled)
+        if (!spatial_index.complete || is_cancelled()) return null
+        val max_projected_speed =
+            if (max_projected_speed_squared > 0.0) sqrt(max_projected_speed_squared) else 0.0
+        priority_alerts.sortWith(
+            compareBy<AlertAircraft> { it.altitude_feet }.thenBy { it.distance_feet }
+        )
+        if (is_cancelled()) return null
         val priority_keys =
             priority_aircraft.mapTo(HashSet(priority_aircraft.size)) { aircraft_icao_key(it) }
-        val max_projected_speed = max_projected_speed_zoom_zero(entries)
         return CachedTraffic(
             aircraft = filtered,
+            aircraft_by_icao = filtered_by_icao,
             nearest_aircraft = nearest ?: filtered.firstOrNull(),
             entries = entries,
-            spatial_index = TrafficSpatialIndex(entries),
+            spatial_index = spatial_index,
             world_dot_batch = world_dot_batch,
             total = all.size,
             hazard_present = priority_aircraft.isNotEmpty(),
             extreme_priority_aircraft = priority_aircraft,
+            priority_notification_aircraft = priority_alerts,
             extreme_priority_keys = priority_keys,
             max_projected_speed_zoom_zero = max_projected_speed
         )
+    }
+
+    fun build_priority_notification_aircraft(
+        all: List<Aircraft>,
+        now_epoch_sec: Double = now_epoch_seconds()
+    ): List<AlertAircraft> {
+        if (!alerts_enabled()) return emptyList()
+        val priority_alerts = ArrayList<AlertAircraft>()
+        // Safety state is based on every real aircraft in the feed, not the current visual filter.
+        for (aircraft in all) {
+            val alert = classify_alert_aircraft(aircraft, now_epoch_sec) ?: continue
+            if (alert.is_hazard) priority_alerts += alert
+        }
+        priority_alerts.sortWith(
+            compareBy<AlertAircraft> { it.altitude_feet }.thenBy { it.distance_feet }
+        )
+        return priority_alerts
     }
 
     fun publish_cached_traffic(cache: CachedTraffic) {
@@ -302,19 +380,10 @@ internal class TrafficCacheController(
         return published_traffic
     }
 
-    private fun max_projected_speed_zoom_zero(entries: List<TrafficSpatialEntry>): Double {
-        var max_squared = 0.0
-        for (entry in entries) {
-            if (entry.projected_motion_remaining_sec <= 0.0) continue
-            val dx = entry.projected_velocity_x_zoom_zero
-            val dy = entry.projected_velocity_y_zoom_zero
-            val speed_squared = dx * dx + dy * dy
-            if (speed_squared > max_squared) max_squared = speed_squared
-        }
-        return if (max_squared > 0.0) sqrt(max_squared) else 0.0
-    }
-
-    private fun build_world_dot_batch(entries: List<TrafficSpatialEntry>): TrafficWorldDotBatch {
+    private fun build_world_dot_batch(
+        entries: List<TrafficSpatialEntry>,
+        is_cancelled: () -> Boolean
+    ): TrafficWorldDotBatch? {
         if (entries.isEmpty()) return TrafficWorldDotBatch.empty()
         var outline_points = FloatArray(max(128, entries.size * 2))
         var outline_velocities = FloatArray(max(128, entries.size * 2))
@@ -345,7 +414,8 @@ internal class TrafficCacheController(
                 )
             )
         }
-        for (entry in entries) {
+        for ((index, entry) in entries.withIndex()) {
+            if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
             val x = entry.world_x_zoom_zero.toFloat()
             val y = entry.world_y_zoom_zero.toFloat()
             val motion_limit_sec = entry.projected_motion_remaining_sec.toFloat().coerceAtLeast(0f)
@@ -358,7 +428,7 @@ internal class TrafficCacheController(
             outline_velocities[outline_count - 1] = entry.projected_velocity_y_zoom_zero.toFloat()
             outline_motion_limits[outline_count - 2] = motion_limit_sec
             outline_motion_limits[outline_count - 1] = motion_limit_sec
-            val group = TrafficDotGrouper.dot_group(entry.aircraft)
+            val group = entry.dot_group
             fill_points[group] = ensure_point_capacity(fill_points[group], fill_counts[group] + 2)
             fill_velocities[group] =
                 ensure_point_capacity(fill_velocities[group], fill_counts[group] + 2)
@@ -387,4 +457,7 @@ internal class TrafficCacheController(
         )
     }
 
+    private companion object {
+        const val CANCELLATION_CHECK_MASK = 127
+    }
 }

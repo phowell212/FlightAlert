@@ -111,9 +111,16 @@ class AircraftTrafficFeed(
         }
     }
 
-    // Convert provider feed rows into map aircraft without inventing missing fields.
-    fun map_aircraft(result: FeedResult): List<Aircraft> {
-        return result.aircraft.map { it.to_map_aircraft() }
+    fun map_aircraft_or_cancelled(
+        result: FeedResult,
+        is_cancelled: () -> Boolean
+    ): List<Aircraft>? {
+        val mapped = ArrayList<Aircraft>(result.aircraft.size)
+        result.aircraft.forEachIndexed { index, item ->
+            if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
+            mapped += item.to_map_aircraft()
+        }
+        return mapped
     }
 
     // Turn feed coverage into short UI text so partial coverage stays visible to the user.
@@ -242,6 +249,7 @@ class AircraftTrafficFeed(
             FlightAlertAppSettings.AircraftFeed.HYBRID_GLOBE_STARTUP_GRACE_MS
         const val HYBRID_GLOBE_STARTUP_POLL_MS =
             FlightAlertAppSettings.AircraftFeed.HYBRID_GLOBE_STARTUP_POLL_MS
+        const val CANCELLATION_CHECK_MASK = 127
     }
 
     private fun GlobeBinCraftAircraftSource.await_latest_snapshot(

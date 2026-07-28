@@ -325,6 +325,23 @@ object AircraftFilterEngine {
         return true
     }
 
+    fun passes(
+        aircraft: Aircraft,
+        filters: AircraftFilterState,
+        now_epoch_sec: Double,
+        distance_meters: Double,
+        is_hazard_aircraft: Boolean
+    ): Boolean {
+        if (!matches_search(aircraft, filters.search_query)) return false
+        if (!matches_type(aircraft, filters.aircraft_type)) return false
+        if (!matches_altitude(aircraft, filters.altitude)) return false
+        if (!matches_distance(distance_meters, filters.distance)) return false
+        if (!matches_flight_status(aircraft, filters.flight_status)) return false
+        if (!matches_report_age(aircraft, filters.report_age, now_epoch_sec)) return false
+        if (filters.alert_volume_only && !is_hazard_aircraft) return false
+        return true
+    }
+
     private fun matches_search(aircraft: Aircraft, query: String): Boolean {
         if (query.isBlank()) return true
         return listOf(
@@ -365,8 +382,12 @@ object AircraftFilterEngine {
         aircraft: Aircraft,
         filter: DistanceFilter,
         distance_meters: (Aircraft) -> Double
+    ): Boolean = matches_distance(distance_meters(aircraft), filter)
+
+    private fun matches_distance(
+        meters: Double,
+        filter: DistanceFilter
     ): Boolean {
-        val meters = distance_meters(aircraft)
         return when (filter) {
             DistanceFilter.ANY -> true
             DistanceFilter.WITHIN_5 -> meters <= 5.0 * METERS_PER_STATUTE_MILE

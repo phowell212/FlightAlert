@@ -64,6 +64,77 @@ internal class MapLayerPanCompositor(
             entry = null
             return null
         }
+        if (!draw_entry(canvas, viewport, cached)) return null
+        return cached.status
+    }
+
+    fun record_and_draw_current(
+        canvas: Canvas,
+        record_viewport: Viewport,
+        draw_viewport: Viewport,
+        key: Any,
+        content_revision: Long,
+        padding: Float,
+        record: (Canvas, Viewport) -> MapLayerPanCacheRecordResult?
+    ): MapLayerPanCacheRecordResult? {
+        if (!canvas.isHardwareAccelerated ||
+            padding <= 0f ||
+            record_viewport.width != draw_viewport.width ||
+            record_viewport.height != draw_viewport.height ||
+            abs(record_viewport.zoom - draw_viewport.zoom) > ZOOM_EPSILON
+        ) {
+            return null
+        }
+        val width = ceil(record_viewport.width + padding * 2f).toInt().coerceAtLeast(1)
+        val height = ceil(record_viewport.height + padding * 2f).toInt().coerceAtLeast(1)
+        if (width > MAX_RENDER_NODE_DIMENSION || height > MAX_RENDER_NODE_DIMENSION) return null
+        val draw_x = (record_viewport.center_x - draw_viewport.center_x).toFloat() +
+                record_viewport.width / 2f - width / 2f
+        val draw_y = (record_viewport.center_y - draw_viewport.center_y).toFloat() +
+                record_viewport.height / 2f - height / 2f
+        if (draw_x > 0f ||
+            draw_y > 0f ||
+            draw_x + width < draw_viewport.width ||
+            draw_y + height < draw_viewport.height
+        ) {
+            return null
+        }
+        val node = RenderNode(name)
+        node.setPosition(0, 0, width, height)
+        val cache_viewport = record_viewport.copy(
+            width = width.toFloat(),
+            height = height.toFloat()
+        )
+        val recording_canvas = node.beginRecording(width, height)
+        val result = try {
+            record(recording_canvas, cache_viewport)
+        } finally {
+            node.endRecording()
+        } ?: return null
+        val recorded = Entry(
+            node = node,
+            key = key,
+            content_revision = content_revision,
+            zoom = record_viewport.zoom,
+            center_x = record_viewport.center_x,
+            center_y = record_viewport.center_y,
+            viewport_width = record_viewport.width,
+            viewport_height = record_viewport.height,
+            width = width,
+            height = height,
+            recorded_ms = SystemClock.elapsedRealtime(),
+            status = result.status
+        )
+        if (!draw_entry(canvas, draw_viewport, recorded)) return null
+        if (result.reusable) entry = recorded
+        return result
+    }
+
+    private fun draw_entry(
+        canvas: Canvas,
+        viewport: Viewport,
+        cached: Entry
+    ): Boolean {
         val draw_x = (cached.center_x - viewport.center_x).toFloat() +
                 cached.viewport_width / 2f - cached.width / 2f
         val draw_y = (cached.center_y - viewport.center_y).toFloat() +
@@ -73,53 +144,11 @@ internal class MapLayerPanCompositor(
             draw_x + cached.width < viewport.width ||
             draw_y + cached.height < viewport.height
         ) {
-            return null
+            return false
         }
         canvas.withTranslation(draw_x, draw_y) {
             drawRenderNode(cached.node)
         }
-        return cached.status
-    }
-
-    fun record_for_future(
-        canvas: Canvas,
-        viewport: Viewport,
-        key: Any,
-        content_revision: Long,
-        padding: Float,
-        record: (Canvas, Viewport) -> MapLayerPanCacheRecordResult
-    ): Boolean {
-        if (!canvas.isHardwareAccelerated || padding <= 0f) return false
-        val width = ceil(viewport.width + padding * 2f).toInt().coerceAtLeast(1)
-        val height = ceil(viewport.height + padding * 2f).toInt().coerceAtLeast(1)
-        if (width > MAX_RENDER_NODE_DIMENSION || height > MAX_RENDER_NODE_DIMENSION) return false
-        val node = RenderNode(name)
-        node.setPosition(0, 0, width, height)
-        val cache_viewport = viewport.copy(
-            width = width.toFloat(),
-            height = height.toFloat()
-        )
-        val recording_canvas = node.beginRecording(width, height)
-        val result = try {
-            record(recording_canvas, cache_viewport)
-        } finally {
-            node.endRecording()
-        }
-        if (!result.reusable) return false
-        entry = Entry(
-            node = node,
-            key = key,
-            content_revision = content_revision,
-            zoom = viewport.zoom,
-            center_x = viewport.center_x,
-            center_y = viewport.center_y,
-            viewport_width = viewport.width,
-            viewport_height = viewport.height,
-            width = width,
-            height = height,
-            recorded_ms = SystemClock.elapsedRealtime(),
-            status = result.status
-        )
         return true
     }
 

@@ -25,6 +25,7 @@ import com.flightalert.map.MapProjection
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import org.json.JSONObject
 
 class AircraftOriginLookupController(
@@ -88,7 +89,16 @@ class AircraftOriginLookupController(
         military_origin_request_key = request_key
         military_origin_aircraft_id = aircraft.icao24
         military_origin_status = "Checking track origin"
-        executor.execute {
+        execute_in_background(on_rejected = {
+            if (military_origin_request_key == request_key) {
+                military_origin_request_key = null
+                military_origin_status = "Waiting for origin lookup"
+                request_redraw()
+            }
+        }) {
+            if (!is_selected_key(key) || military_origin_request_key != request_key) {
+                return@execute_in_background
+            }
             val status = military_origin_resolver.resolve_origin(first_point)
             post_to_main {
                 if (is_selected_key(key) && military_origin_request_key == request_key) {
@@ -117,7 +127,16 @@ class AircraftOriginLookupController(
         trace_origin_aircraft_id = aircraft.icao24
         trace_origin_request_key = request_key
         trace_origin_loading = true
-        executor.execute {
+        execute_in_background(on_rejected = {
+            if (trace_origin_request_key == request_key) {
+                trace_origin_request_key = null
+                trace_origin_loading = false
+                request_redraw()
+            }
+        }) {
+            if (!is_selected_key(key) || trace_origin_request_key != request_key) {
+                return@execute_in_background
+            }
             val airport = trace_origin_airport_resolver.resolve_origin_airport(first_point)
             post_to_main {
                 if (is_selected_key(key) && trace_origin_request_key == request_key) {
@@ -126,6 +145,17 @@ class AircraftOriginLookupController(
                     request_redraw()
                 }
             }
+        }
+    }
+
+    private fun execute_in_background(
+        on_rejected: () -> Unit,
+        task: () -> Unit
+    ) {
+        try {
+            executor.execute(task)
+        } catch (_: RejectedExecutionException) {
+            on_rejected()
         }
     }
 
