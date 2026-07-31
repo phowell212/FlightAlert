@@ -22,7 +22,6 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.LinkedHashMap
-import java.util.Locale
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
@@ -39,7 +38,7 @@ internal class StreetMapTileRenderer(
     private val text_paint: Paint,
     private val sp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int,
-    private val report_status: (String) -> Unit,
+    private val report_failure: (MapTileFailureKind) -> Unit,
     private val request_redraw: () -> Unit,
     private val map_tile_disk_cache: MapTileDiskCache,
 ) {
@@ -86,7 +85,7 @@ internal class StreetMapTileRenderer(
         viewport: Viewport,
         state: MapTileRenderState,
         style: MapTileRenderStyle
-    ): String {
+    ): MapTileAvailability {
         paint.style = Paint.Style.FILL
         paint.color = style.map_empty
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
@@ -126,14 +125,11 @@ internal class StreetMapTileRenderer(
                 request_generation = request_generation
             )
         }
-        val label_note = if (!state.map_labels_enabled) " no-label" else ""
-        val status = if (base_stats.requested == 0 && base_stats.loaded > 0) {
-            "${TileSource.STREET.display_name}$label_note loaded"
-        } else {
-            "Loading ${TileSource.STREET.display_name.lowercase(Locale.US)}$label_note tiles"
-        }
         publish_desired_tile_generation(request_generation)
-        return status
+        return MapTileAvailability(
+            loaded = base_stats.loaded,
+            requested = base_stats.requested,
+        )
     }
 
     private fun draw_tile_grid(
@@ -485,7 +481,7 @@ internal class StreetMapTileRenderer(
             }
             val url = https_url(tile_url(z, x, y))
                 ?: run {
-                    if (!closed) report_status("Map tiles unavailable")
+                    if (!closed) report_failure(MapTileFailureKind.PROVIDER_UNAVAILABLE)
                     return
                 }
             connection = (url.openConnection() as HttpURLConnection).apply {
@@ -531,10 +527,10 @@ internal class StreetMapTileRenderer(
                 }
             } else if (tile_request_is_current(key)) {
                 connection.errorStream?.close()
-                report_status("Map tiles unavailable")
+                report_failure(MapTileFailureKind.PROVIDER_UNAVAILABLE)
             }
         } catch (_: Exception) {
-            if (tile_request_is_current(key)) report_status("Map network unavailable")
+            if (tile_request_is_current(key)) report_failure(MapTileFailureKind.NETWORK_UNAVAILABLE)
         } finally {
             synchronized(active_tile_connections_lock) {
                 if (active_tile_connections[key] === connection) {

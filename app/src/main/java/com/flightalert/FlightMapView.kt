@@ -66,6 +66,8 @@ import com.flightalert.details.AircraftDetailsClient
 import com.flightalert.details.AircraftDetailsContentBuilder
 import com.flightalert.details.AircraftDetailsCoordinator
 import com.flightalert.details.AircraftDetailsDrawResult
+import com.flightalert.details.AircraftDetailsEffect
+import com.flightalert.details.AircraftDetailsPage
 import com.flightalert.details.AircraftDetailsMainState
 import com.flightalert.details.AircraftDetailsPanelRenderer
 import com.flightalert.details.AircraftDetailsPanelState
@@ -75,6 +77,7 @@ import com.flightalert.details.AircraftDetailsPrefetchPlanner
 import com.flightalert.details.AircraftDetailsRow
 import com.flightalert.details.AircraftDetailsRowsBuilder
 import com.flightalert.details.AircraftDetailsSession
+import com.flightalert.details.AircraftDetailsSessionHost
 import com.flightalert.details.AircraftDetailsWarmCacheEntry
 import com.flightalert.details.AircraftDetailsWarmRequester
 import com.flightalert.details.AircraftImpactEstimator
@@ -126,6 +129,7 @@ import com.flightalert.map.MapMeasurementFormatter
 import com.flightalert.map.MapProjection
 import com.flightalert.map.MapTileRenderState
 import com.flightalert.map.MapTileRenderStyle
+import com.flightalert.map.MapTileStatusPresenter
 import com.flightalert.map.MapTileRenderer
 import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
 import com.flightalert.map.reference.labels.ReferenceLabelAvoidance
@@ -148,6 +152,9 @@ import com.flightalert.sources.FeedStatus
 import com.flightalert.sources.GlobeBinCraftAircraftSource
 import com.flightalert.sources.MappedGlobeAircraftStore
 import com.flightalert.sources.VisibleAircraftFeedController
+import com.flightalert.sources.VisibleAircraftFeedEnvironment
+import com.flightalert.sources.VisibleAircraftFeedEnvironmentSource
+import com.flightalert.sources.VisibleAircraftFeedStatusPresenter
 import com.flightalert.sources.VisibleAircraftRequest
 import com.flightalert.traffic.AircraftFilterController
 import com.flightalert.traffic.AircraftFilterEngine
@@ -160,7 +167,10 @@ import com.flightalert.traffic.FilterStats
 import com.flightalert.traffic.FlightStatusFilter
 import com.flightalert.traffic.OwnshipOverlayState
 import com.flightalert.traffic.ReportAgeFilter
+import com.flightalert.traffic.TrafficCacheBuildContext
 import com.flightalert.traffic.TrafficCacheController
+import com.flightalert.traffic.TrafficCachePolicy
+import com.flightalert.traffic.TrafficSafetyContext
 import com.flightalert.traffic.TrafficOverlayFrame
 import com.flightalert.traffic.TrafficOverlayInteraction
 import com.flightalert.traffic.TrafficOverlayRenderer
@@ -440,7 +450,9 @@ class FlightMapView(
         dp = { value -> dp(value) },
         sp = { value -> sp(value) },
         with_alpha = { color, alpha -> with_alpha(color, alpha) },
-        report_status = { status -> map_status = status },
+        on_load_state_changed = { state ->
+            map_tile_status_text = MapTileStatusPresenter.text(state)
+        },
         request_redraw = { postInvalidateOnAnimation() }
     )
     private val flight_path_renderer = FlightPathRenderer(
@@ -581,16 +593,6 @@ class FlightMapView(
         run_in_background = { task -> network_io_executor.execute(task) },
         post_to_main = ::post_if_alive,
         request_redraw = { invalidate() },
-        current_viewport = {
-            latest_location?.let {
-                viewport_for(
-                    it,
-                    content_width(),
-                    content_height()
-                )
-            }
-        },
-        visible_bounds = { viewport -> bounds_for_viewport(viewport) },
         refresh_ms = AVIATION_LAYER_REFRESH_MS,
         bounds_padding_fraction = AVIATION_LAYER_BOUNDS_PADDING_FRACTION,
         run_preparation_in_background = { task -> aviation_prepare_executor.execute(task) },
@@ -599,33 +601,51 @@ class FlightMapView(
     )
     private val flight_path_requests = mutableSetOf<String>()
     private val aircraft_filter_controller = AircraftFilterController(prefs)
+    private val traffic_cache_policy = object : TrafficCachePolicy {
+        override fun passes_aircraft_filters(
+            aircraft: Aircraft,
+            context: TrafficCacheBuildContext,
+            distance_meters: Double,
+            alert: AlertAircraft?,
+        ): Boolean = AircraftFilterEngine.passes(
+            aircraft = aircraft,
+            filters = context.filters,
+            now_epoch_sec = context.now_epoch_sec,
+            distance_meters = distance_meters,
+            is_hazard_aircraft = alert?.is_hazard == true,
+        )
+
+        override fun distance_meters(aircraft: Aircraft): Double =
+            reported_distance_meters(aircraft)
+
+        override fun classify_alert_aircraft(
+            aircraft: Aircraft,
+            context: TrafficSafetyContext,
+            distance_meters: Double,
+        ): AlertAircraft? = alert_classification_for(
+            aircraft = aircraft,
+            alert_position = alert_position_for(
+                aircraft,
+                context.now_epoch_sec,
+                distance_meters,
+            ),
+            now_epoch_sec = context.now_epoch_sec,
+            extreme_priority_only = true,
+        )
+
+        override fun aircraft_icao_key(aircraft: Aircraft): String =
+            this@FlightMapView.aircraft_icao_key(aircraft)
+
+        override fun spatial_entry_for(
+            aircraft: Aircraft,
+            context: TrafficCacheBuildContext,
+        ): TrafficSpatialEntry = this@FlightMapView.spatial_entry_for(
+            aircraft,
+            context.now_epoch_sec,
+        )
+    }
     private val traffic_cache_controller = TrafficCacheController(
-        passes_aircraft_filters = { item, epoch, distance, alert ->
-            AircraftFilterEngine.passes(
-                aircraft = item,
-                filters = aircraft_filter_controller.current_state(),
-                now_epoch_sec = epoch,
-                distance_meters = distance,
-                is_hazard_aircraft = alert?.is_hazard == true
-            )
-        },
-        distance_meters = ::reported_distance_meters,
-        classify_alert_aircraft = { aircraft, now_epoch_sec, distance_meters ->
-            alert_classification_for(
-                aircraft = aircraft,
-                alert_position = alert_position_for(
-                    aircraft,
-                    now_epoch_sec,
-                    distance_meters
-                ),
-                now_epoch_sec = now_epoch_sec,
-                extreme_priority_only = true
-            )
-        },
-        aircraft_icao_key = ::aircraft_icao_key,
-        spatial_entry_for = ::spatial_entry_for,
-        alerts_enabled = { alerts_enabled },
-        now_epoch_seconds = ::aircraft_projection_epoch_seconds
+        policy = traffic_cache_policy,
     )
     private val visible_aircraft_feed_controller = VisibleAircraftFeedController(
         aircraft_traffic_feed = aircraft_traffic_feed,
@@ -633,13 +653,34 @@ class FlightMapView(
         executor = network_io_executor,
         post_to_main = ::post_if_alive,
         post_delayed = ::post_delayed_if_alive,
-        has_location = { latest_location != null },
-        has_usable_viewport = ::has_usable_viewport,
-        build_request = ::visible_aircraft_request,
-        has_ready_aircraft_feed = { aircraft_feed_coverage.isNotEmpty() },
-        should_defer_for_interaction = ::should_defer_aircraft_refresh_for_interaction,
-        delay_after_interaction = ::aircraft_refresh_delay_after_interaction,
-        set_aircraft_status = { status -> aircraft_status = status },
+        environment_source = object : VisibleAircraftFeedEnvironmentSource {
+            override fun snapshot(): VisibleAircraftFeedEnvironment {
+                if (latest_location == null) return VisibleAircraftFeedEnvironment.NO_LOCATION
+                if (!has_usable_viewport()) return VisibleAircraftFeedEnvironment.NO_VIEWPORT
+                val now_elapsed_ms = SystemClock.elapsedRealtime()
+                val interaction_deferred =
+                    should_defer_aircraft_refresh_for_interaction(now_elapsed_ms)
+                return VisibleAircraftFeedEnvironment.READY(
+                    now_elapsed_ms = now_elapsed_ms,
+                    feed_ready = feed_ready(),
+                    interaction_deferred = interaction_deferred,
+                    interaction_delay_ms = if (interaction_deferred) {
+                        aircraft_refresh_delay_after_interaction(now_elapsed_ms)
+                    } else {
+                        0L
+                    },
+                )
+            }
+
+            override fun feed_ready(): Boolean = aircraft_feed_coverage.isNotEmpty()
+
+            override fun build_request(): VisibleAircraftRequest = visible_aircraft_request()
+        },
+        on_state_changed = { state ->
+            VisibleAircraftFeedStatusPresenter.text(state)?.let { status ->
+                aircraft_status = status
+            }
+        },
         request_redraw = { postInvalidateOnAnimation() },
         apply_result = { result, token, signature, phase, request ->
             apply_aircraft_feed_result(
@@ -777,20 +818,55 @@ class FlightMapView(
         FlightAlertSettings.DEFAULT_PRIORITY_RANGE_CIRCLE_VISIBLE
     )
 
-    private var settings_open = false
-    private var display_settings_open = false
-    private var map_settings_open = false
-    private var alert_settings_open = false
-    private var map_labels_open = false
-    private var aviation_layers_open = false
-    private var priority_tracker_open = false
-    private var filters_open = false
+    private val overlay_navigator = FlightMapOverlayNavigator()
+
+    private val settings_page: FlightMapSettingsPage?
+        get() = overlay_navigator.settings_page
+
+    private var settings_open: Boolean
+        get() = overlay_navigator.settings_open
+        set(value) = overlay_navigator.set_settings_open(value)
+
+    private var display_settings_open: Boolean
+        get() = settings_page == FlightMapSettingsPage.DISPLAY
+        set(value) = set_settings_subpage(FlightMapSettingsPage.DISPLAY, value)
+
+    private var map_settings_open: Boolean
+        get() = settings_page == FlightMapSettingsPage.MAP
+        set(value) = set_settings_subpage(FlightMapSettingsPage.MAP, value)
+
+    private var alert_settings_open: Boolean
+        get() = settings_page == FlightMapSettingsPage.ALERTS
+        set(value) = set_settings_subpage(FlightMapSettingsPage.ALERTS, value)
+
+    private var map_labels_open: Boolean
+        get() = settings_page == FlightMapSettingsPage.MAP_LABELS
+        set(value) = set_settings_subpage(FlightMapSettingsPage.MAP_LABELS, value)
+
+    private var aviation_layers_open: Boolean
+        get() = settings_page == FlightMapSettingsPage.AVIATION_LAYERS
+        set(value) = set_settings_subpage(FlightMapSettingsPage.AVIATION_LAYERS, value)
+
+    private var priority_tracker_open: Boolean
+        get() = overlay_navigator.priority_tracker_open
+        set(value) {
+            overlay_navigator.priority_tracker_open = value
+        }
+
+    private var filters_open: Boolean
+        get() = overlay_navigator.filters_open
+        set(value) {
+            overlay_navigator.filters_open = value
+        }
     private var filter_search_focused = false
     private var reference_filters_panel_session = ReferenceFiltersPanelSession()
     private var filter_panel_scroll_start_offset_dp = 0f
     private var reference_filters_panel_plan_cache_key: ReferenceFiltersPanelPlanCacheKey? = null
     private var reference_filters_panel_plan_cache: ReferenceFiltersPanelPlan? = null
-    private var impact_methodology_open = false
+    private var impact_methodology_open: Boolean
+        get() = settings_page == FlightMapSettingsPage.IMPACT_METHODOLOGY
+        set(value) = set_settings_subpage(FlightMapSettingsPage.IMPACT_METHODOLOGY, value)
+
     private var priority_adjust_hold: PriorityAdjustHold? = null
     private var map_label_text_slider_dragging = false
 
@@ -830,29 +906,50 @@ class FlightMapView(
     private val details_session: AircraftDetailsSession = AircraftDetailsSession(
         coordinator = aircraft_details_coordinator,
         warm_requester = aircraft_details_warm_requester,
-        feed_mode = { aircraft_feed_mode },
-        selected_aircraft = { selected_path_controller.selected_aircraft_snapshot },
-        select_aircraft = ::select_aircraft,
-        has_selected_flight_path = ::has_selected_flight_path,
-        is_flight_path_loading = ::is_flight_path_loading,
-        request_flight_path = { icao24 -> request_flight_path(icao24) },
-        request_trace_origin_airport = { aircraft ->
-            origin_lookup_controller.request_trace_origin_airport_if_needed(
-                aircraft
-            )
+        host = object : AircraftDetailsSessionHost {
+            override fun feed_mode(): AircraftFeedMode = aircraft_feed_mode
+
+            override fun selected_aircraft(): Aircraft? =
+                selected_path_controller.selected_aircraft_snapshot
+
+            override fun has_selected_flight_path(): Boolean =
+                this@FlightMapView.has_selected_flight_path()
+
+            override fun select_aircraft(aircraft: Aircraft) {
+                this@FlightMapView.select_aircraft(aircraft)
+            }
+
+            override fun is_flight_path_loading(aircraft: Aircraft): Boolean {
+                return this@FlightMapView.is_flight_path_loading(aircraft)
+            }
+
+            override fun request_flight_path(icao24: String) {
+                this@FlightMapView.request_flight_path(icao24)
+            }
+
+            override fun request_trace_origin_airport(aircraft: Aircraft) {
+                origin_lookup_controller.request_trace_origin_airport_if_needed(aircraft)
+            }
+
+            override fun emit(effect: AircraftDetailsEffect) {
+                when (effect) {
+                    AircraftDetailsEffect.RESET_SCROLL -> {
+                        details_scroll_y = 0f
+                        details_max_scroll_y = 0f
+                    }
+                    AircraftDetailsEffect.RESET_SCROLL_OFFSET -> details_scroll_y = 0f
+                    AircraftDetailsEffect.REQUEST_REDRAW -> invalidate()
+                    AircraftDetailsEffect.REQUEST_ANIMATION_FRAME -> postInvalidateOnAnimation()
+                }
+            }
         },
-        reset_scroll = {
-            details_scroll_y = 0f
-            details_max_scroll_y = 0f
-        },
-        reset_scroll_offset = { details_scroll_y = 0f },
-        request_redraw = { invalidate() },
-        request_animation_frame = { postInvalidateOnAnimation() }
     )
     private var last_ticker_fetch_ms = 0L
     private var last_aircraft_data_epoch_sec: Double? = null
     private var aircraft_status = "Waiting for location"
+    private var map_tile_status_text = "Waiting for location"
     private var map_status = "Waiting for location"
+    private val prepared_frame = PreparedFlightMapFrame()
     private var following_location = true
     private var manual_center_lat: Double? = null
     private var manual_center_lon: Double? = null
@@ -1077,6 +1174,10 @@ class FlightMapView(
     }
 
     // Close the top-most map overlay first. If nothing is open, let Android handle Back normally.
+    private fun set_settings_subpage(page: FlightMapSettingsPage, open: Boolean) {
+        overlay_navigator.set_settings_subpage(page, open)
+    }
+
     fun handle_back_press(): Boolean {
         if (selected_aviation_key != null) {
             clear_aviation_selection()
@@ -1171,6 +1272,58 @@ class FlightMapView(
         request_deferred_aircraft_refresh()
     }
 
+    private fun prepare_flight_map_frame(w: Float, h: Float): PreparedFlightMapFrame {
+        val location = latest_location
+        // Preserve the established order: resolve the aviation selection before map preparation.
+        val aviation_snapshot = aviation_layer_controller.snapshot
+        val selected_aviation = resolve_selected_aviation_for_draw(aviation_snapshot)
+        val viewport = location?.let {
+            viewport_for(
+                location = it,
+                w = w,
+                h = h,
+                frame_layout_state = layout_state(),
+            )
+        }
+        val traffic_state = viewport?.let {
+            traffic_overlay_state(
+                viewport = it,
+                now_epoch_sec = aircraft_projection_epoch_seconds(),
+                frame_content_width = w,
+                frame_content_height = h,
+            )
+        }
+        // Match the previous draw order: traffic preparation occurs before the draw-time elapsed clock.
+        val elapsed_ms = SystemClock.elapsedRealtime()
+        val map_tile_state = if (viewport != null && traffic_state != null) {
+            map_tile_state(viewport, traffic_state, elapsed_ms)
+        } else {
+            null
+        }
+        prepared_frame.update(
+            elapsed_ms = elapsed_ms,
+            content_width = w,
+            content_height = h,
+            location = location,
+            viewport = viewport,
+            traffic_state = traffic_state,
+            map_tile_state = map_tile_state,
+            aviation_snapshot = aviation_snapshot,
+            aviation_visibility = viewport?.let { aviation_layer_visibility() },
+            selected_flight_path = if (viewport != null) {
+                selected_flight_path_render_state()
+            } else {
+                null
+            },
+            selected_aviation = selected_aviation,
+            details_page = details_session.page,
+            settings_page = settings_page,
+            priority_tracker_open = priority_tracker_open,
+            filters_open = filters_open,
+        )
+        return prepared_frame
+    }
+
     // Android calls this whenever the View is invalidated. Draw the whole cockpit in one ordered pass.
     override fun onDraw(canvas: Canvas) {
         if (destroyed) return
@@ -1179,74 +1332,72 @@ class FlightMapView(
         paint.color = theme_colors.system_bar
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
 
-        // Draw and hit-test inside system-bar-safe content so Android chrome never covers controls.
-        val w = content_width()
-        val h = content_height()
-        val location = latest_location
-        val aviation_snapshot = aviation_layer_controller.snapshot
-        val selected_aviation = resolve_selected_aviation_for_draw(aviation_snapshot)
-        val modal_open =
-            details_session.details_open || settings_open || priority_tracker_open || filters_open || selected_aviation != null
+        // Prepare the shared viewport, traffic, map, aviation, path, and overlay facts once.
+        val frame = prepare_flight_map_frame(content_width(), content_height())
+        val w = frame.content_width
+        val h = frame.content_height
         canvas.withTranslation(safe_inset_left, safe_inset_top) {
             clipRect(0f, 0f, w, h)
             paint.color = map_empty_color
             drawRect(0f, 0f, w, h, paint)
 
-            if (location == null) {
+            val location = frame.location
+            val viewport = frame.viewport
+            val traffic_state = frame.traffic_state
+            val map_tile_state = frame.map_tile_state
+            if (location == null || viewport == null || traffic_state == null || map_tile_state == null) {
                 draw_no_location_state(this, w, h)
             } else {
-                val viewport = viewport_for(location, w, h)
-                val traffic_state = traffic_overlay_state(viewport)
-                val traffic_draw_elapsed_ms = SystemClock.elapsedRealtime()
-                draw_map_tiles(this, viewport, traffic_state, traffic_draw_elapsed_ms)
-                request_aviation_layers_if_needed(viewport)
-                draw_aviation_layers(this, viewport, aviation_snapshot, selected_aviation)
+                draw_map_tiles(this, viewport, map_tile_state)
+                request_aviation_layers_if_needed(viewport, frame.aviation_visibility)
+                draw_aviation_layers(
+                    canvas = this,
+                    viewport = viewport,
+                    snapshot = frame.aviation_snapshot,
+                    visibility = frame.aviation_visibility,
+                    selection = frame.overlays.selected_aviation,
+                    now_elapsed_ms = frame.elapsed_ms,
+                )
                 draw_priority_range_circle(this, viewport, location)
-                draw_selected_flight_path(this, viewport)
-                draw_traffic_overlay(this, traffic_state, traffic_draw_elapsed_ms)
+                draw_selected_flight_path(this, viewport, frame.selected_flight_path)
+                draw_traffic_overlay(this, traffic_state, frame.elapsed_ms)
                 draw_ownship_overlay(this, viewport, location)
             }
 
-            if (!modal_open) {
+            if (!frame.overlays.modal_open) {
                 draw_top_status(this, w, h)
                 draw_recenter_button(this, w, h)
-                location?.let { draw_flight_path_buttons(this, viewport_for(it, w, h), w, h) }
+                viewport?.let { draw_flight_path_buttons(this, it, w, h) }
                 draw_settings_button(this, w, h)
                 draw_filters_button(this, w, h)
                 draw_traffic_panel(this, w, h)
             } else {
                 draw_modal_backdrop(this, w, h)
             }
-            selected_aviation?.let { selection ->
-                aviation_snapshot?.let { snapshot ->
+
+            frame.overlays.selected_aviation?.let { selection ->
+                frame.aviation_snapshot?.let { snapshot ->
                     draw_aviation_details_panel(this, w, h, selection, snapshot)
                 }
             }
-            if (details_session.details_open) {
-                // Draw only the open overlay branch so the visible panel matches the current state object.
+            if (frame.overlays.details_page.is_open) {
                 draw_aircraft_details_panel(this, w, h)
             }
-            if (settings_open) {
-                if (display_settings_open) {
-                    draw_display_settings_panel(this, w, h)
-                } else if (map_labels_open) {
-                    draw_map_labels_panel(this, w, h)
-                } else if (aviation_layers_open) {
-                    draw_aviation_layers_panel(this, w, h)
-                } else if (map_settings_open) {
-                    draw_map_settings_panel(this, w, h)
-                } else if (alert_settings_open) {
-                    draw_alert_settings_panel(this, w, h)
-                } else if (impact_methodology_open) {
+            when (frame.overlays.settings_page) {
+                FlightMapSettingsPage.DISPLAY -> draw_display_settings_panel(this, w, h)
+                FlightMapSettingsPage.MAP_LABELS -> draw_map_labels_panel(this, w, h)
+                FlightMapSettingsPage.AVIATION_LAYERS -> draw_aviation_layers_panel(this, w, h)
+                FlightMapSettingsPage.MAP -> draw_map_settings_panel(this, w, h)
+                FlightMapSettingsPage.ALERTS -> draw_alert_settings_panel(this, w, h)
+                FlightMapSettingsPage.IMPACT_METHODOLOGY ->
                     draw_impact_methodology_panel(this, w, h)
-                } else {
-                    draw_settings_panel(this, w, h)
-                }
+                FlightMapSettingsPage.ROOT -> draw_settings_panel(this, w, h)
+                null -> Unit
             }
-            if (priority_tracker_open) {
+            if (frame.overlays.priority_tracker_open) {
                 draw_priority_tracker_panel(this, w, h)
             }
-            if (filters_open) {
+            if (frame.overlays.filters_open) {
                 draw_filters_panel(this, w, h)
             }
         }
@@ -1804,13 +1955,22 @@ class FlightMapView(
     }
 
     // Make the camera: follow mode keeps the user under the focus point, manual mode keeps the dragged map centered.
-    private fun viewport_for(location: Location, w: Float, h: Float): Viewport {
+    private fun viewport_for(
+        location: Location,
+        w: Float,
+        h: Float,
+        frame_layout_state: FlightMapLayoutState = layout_state(),
+    ): Viewport {
         val center_lat =
             if (following_location) location.latitude else manual_center_lat ?: location.latitude
         val center_lon =
             if (following_location) location.longitude else manual_center_lon ?: location.longitude
         val center = MapProjection.lat_lon_to_world(center_lat, center_lon, zoom)
-        val focus = if (following_location) layout.default_map_focus(w, h, layout_state()) else ScreenPoint(w / 2f, h / 2f)
+        val focus = if (following_location) {
+            layout.default_map_focus(w, h, frame_layout_state)
+        } else {
+            ScreenPoint(w / 2f, h / 2f)
+        }
         return Viewport(
             zoom = zoom,
             center_x = center.x + w / 2.0 - focus.x,
@@ -1829,19 +1989,19 @@ class FlightMapView(
             ?: location.longitude
     }
 
-    // Ask the tile renderer to draw real map imagery and return the honest map status.
+    // Draw the prepared tile state. Load text is presented separately from renderer state changes.
     private fun draw_map_tiles(
         canvas: Canvas,
         viewport: Viewport,
-        traffic_state: TrafficOverlayState,
-        traffic_draw_elapsed_ms: Long,
+        state: MapTileRenderState,
     ) {
-        map_status = map_tile_renderer.draw_tiles(
+        map_tile_renderer.draw_tiles(
             canvas = canvas,
             viewport = viewport,
-            state = map_tile_state(viewport, traffic_state, traffic_draw_elapsed_ms),
+            state = state,
             style = map_tile_style()
         )
+        map_status = map_tile_status_text
     }
 
     private fun map_tile_state(
@@ -2000,9 +2160,10 @@ class FlightMapView(
         canvas: Canvas,
         viewport: Viewport,
         snapshot: AviationLayerSnapshot?,
-        selection: AviationSelection?
+        visibility: AviationLayerVisibility,
+        selection: AviationSelection?,
+        now_elapsed_ms: Long,
     ) {
-        val visibility = aviation_layer_visibility()
         if (!aviation_layer_controller.has_enabled_layers(visibility) && selection == null) return
         snapshot ?: return
         val visible_bounds = aviation_bounds_for_viewport(viewport).to_aviation_geo_bounds()
@@ -2014,7 +2175,7 @@ class FlightMapView(
             visibility = visibility,
             style = aviation_layer_style(),
             selection = selection,
-            interaction_active = aviation_layer_interacting(SystemClock.elapsedRealtime())
+            interaction_active = aviation_layer_interacting(now_elapsed_ms)
         )
     }
 
@@ -2064,8 +2225,12 @@ class FlightMapView(
     }
 
     // Draw a selected aircraft's real trace; the controller decides whether previous legs are visible.
-    private fun draw_selected_flight_path(canvas: Canvas, viewport: Viewport) {
-        val state = selected_flight_path_render_state() ?: return
+    private fun draw_selected_flight_path(
+        canvas: Canvas,
+        viewport: Viewport,
+        state: FlightPathRenderState?,
+    ) {
+        state ?: return
         flight_path_renderer.draw_selected_path(canvas, viewport, state, flight_path_render_style())
     }
 
@@ -2101,8 +2266,12 @@ class FlightMapView(
         return aviation_layer_controller.has_enabled_layers(aviation_layer_visibility())
     }
 
-    private fun request_aviation_layers_if_needed(viewport: Viewport, force: Boolean = false) {
-        aviation_layer_controller.request_if_needed(viewport, aviation_layer_visibility(), force)
+    private fun request_aviation_layers_if_needed(
+        viewport: Viewport,
+        visibility: AviationLayerVisibility = aviation_layer_visibility(),
+        force: Boolean = false,
+    ) {
+        aviation_layer_controller.request_if_needed(viewport, visibility, force)
     }
 
     // Build one real feed request for the current viewport, then let AircraftTrafficFeed merge enabled sources.
@@ -2544,7 +2713,7 @@ class FlightMapView(
             prepare_selected_path_endpoint(request.selected_path, is_cancelled)
         if (is_cancelled()) return null
 
-        val distance_meters: (Aircraft) -> Double = { item ->
+        val reported_distance_for: (Aircraft) -> Double = { item ->
             AircraftPositionProjector.reported_distance_meters(
                 aircraft = item,
                 own_lat = request.own_lat,
@@ -2589,7 +2758,7 @@ class FlightMapView(
                 metadata_fallback_by_key = metadata_fallback_by_key,
                 feed_request = checkNotNull(feed_request),
                 request = request,
-                distance_meters = distance_meters,
+                distance_meters = reported_distance_for,
                 is_cancelled = is_cancelled
             ) ?: return null
         } else {
@@ -2601,7 +2770,7 @@ class FlightMapView(
                 metadata_fallback_by_key = metadata_fallback_by_key,
                 feed_request = feed_request,
                 request = request,
-                distance_meters = distance_meters,
+                distance_meters = reported_distance_for,
                 is_cancelled = is_cancelled
             ) ?: return null
             }
@@ -2632,33 +2801,62 @@ class FlightMapView(
             metadata_by_key = next_metadata_by_key
         }
         if (is_cancelled()) return null
+        val cache_context = TrafficCacheBuildContext(
+            safety = TrafficSafetyContext(
+                now_epoch_sec = request.now_epoch_sec,
+                alerts_enabled = request.alerts_enabled,
+            ),
+            filters = request.filters,
+        )
         val cache_builder = TrafficCacheController(
-            passes_aircraft_filters = { item, epoch, distance, alert ->
-                AircraftFilterEngine.passes(
-                    aircraft = item,
-                    filters = request.filters,
-                    now_epoch_sec = epoch,
-                    distance_meters = distance,
-                    is_hazard_aircraft = alert?.is_hazard == true
+            policy = object : TrafficCachePolicy {
+                override fun passes_aircraft_filters(
+                    aircraft: Aircraft,
+                    context: TrafficCacheBuildContext,
+                    distance_meters: Double,
+                    alert: AlertAircraft?,
+                ): Boolean = AircraftFilterEngine.passes(
+                    aircraft = aircraft,
+                    filters = context.filters,
+                    now_epoch_sec = context.now_epoch_sec,
+                    distance_meters = distance_meters,
+                    is_hazard_aircraft = alert?.is_hazard == true,
+                )
+
+                override fun distance_meters(aircraft: Aircraft): Double =
+                    reported_distance_for(aircraft)
+
+                override fun classify_alert_aircraft(
+                    aircraft: Aircraft,
+                    context: TrafficSafetyContext,
+                    distance_meters: Double,
+                ): AlertAircraft? = prepared_alert_classification(
+                    aircraft,
+                    request,
+                    context.now_epoch_sec,
+                    distance_meters,
+                )
+
+                override fun aircraft_icao_key(aircraft: Aircraft): String =
+                    aircraft.icao_key
+
+                override fun spatial_entry_for(
+                    aircraft: Aircraft,
+                    context: TrafficCacheBuildContext,
+                ): TrafficSpatialEntry = prepared_spatial_entry(
+                    aircraft,
+                    request,
+                    context.now_epoch_sec,
+                    selected_path_endpoint,
                 )
             },
-            distance_meters = distance_meters,
-            classify_alert_aircraft = { item, epoch, distance ->
-                prepared_alert_classification(item, request, epoch, distance)
-            },
-            aircraft_icao_key = { item -> item.icao_key },
-            spatial_entry_for = { item, epoch ->
-                prepared_spatial_entry(item, request, epoch, selected_path_endpoint)
-            },
-            alerts_enabled = { request.alerts_enabled },
-            now_epoch_seconds = { request.now_epoch_sec }
         )
         val parsed_cache = cache_builder.build_cached_traffic_or_cancelled(
             all = parsed,
-            now_epoch_sec = request.now_epoch_sec,
+            context = cache_context,
             is_cancelled = is_cancelled,
             reusable_visual_cache =
-                request.reusable_visual_cache.takeUnless { retained_previous_added }
+                request.reusable_visual_cache.takeUnless { retained_previous_added },
         ) ?: return null
         val completed_cache = global_aircraft?.let {
             parsed_cache.copy(
@@ -3627,22 +3825,42 @@ class FlightMapView(
     }
 
     // Build the traffic render frame; the builder owns dense dots, selection fallbacks, and priority visibility.
-    private fun traffic_overlay_state(viewport: Viewport): TrafficOverlayState {
-        return traffic_overlay_state_builder.traffic_overlay_state(traffic_overlay_frame(viewport))
+    private fun traffic_overlay_state(
+        viewport: Viewport,
+        now_epoch_sec: Double = aircraft_projection_epoch_seconds(),
+        frame_content_width: Float = content_width(),
+        frame_content_height: Float = content_height(),
+    ): TrafficOverlayState {
+        return traffic_overlay_state_builder.traffic_overlay_state(
+            traffic_overlay_frame(
+                viewport = viewport,
+                now_epoch_sec = now_epoch_sec,
+                frame_content_width = frame_content_width,
+                frame_content_height = frame_content_height,
+            )
+        )
     }
 
-    private fun traffic_overlay_frame(viewport: Viewport): TrafficOverlayFrame {
+    private fun traffic_overlay_frame(
+        viewport: Viewport,
+        now_epoch_sec: Double = aircraft_projection_epoch_seconds(),
+        frame_content_width: Float = content_width(),
+        frame_content_height: Float = content_height(),
+    ): TrafficOverlayFrame {
         return TrafficOverlayFrame(
             viewport = viewport,
             cache = cached_traffic(),
-            now_epoch_sec = aircraft_projection_epoch_seconds(),
+            now_epoch_sec = now_epoch_sec,
             selection = traffic_overlay_selection(),
             filters_restrict_aircraft = filters_restrict_aircraft(),
             map_source = map_source,
             visual_theme_key = visual_theme.hashCode(),
-            content_width = content_width(),
-            content_height = content_height(),
-            label_avoid_rects = traffic_label_avoid_rects(),
+            content_width = frame_content_width,
+            content_height = frame_content_height,
+            label_avoid_rects = traffic_label_avoid_rects(
+                frame_content_width,
+                frame_content_height,
+            ),
             interaction = traffic_overlay_interaction()
         )
     }
@@ -3703,8 +3921,15 @@ class FlightMapView(
         )
     }
 
-    private fun traffic_label_avoid_rects(): List<RectF> {
-        return layout.traffic_label_avoid_rects(content_width(), content_height(), dp(8))
+    private fun traffic_label_avoid_rects(
+        frame_content_width: Float = content_width(),
+        frame_content_height: Float = content_height(),
+    ): List<RectF> {
+        return layout.traffic_label_avoid_rects(
+            frame_content_width,
+            frame_content_height,
+            dp(8),
+        )
     }
 
     private fun draw_no_location_state(canvas: Canvas, w: Float, h: Float) {
@@ -5251,7 +5476,13 @@ class FlightMapView(
     }
 
     private fun on_aviation_layers_changed() {
-        aviation_layer_controller.on_visibility_changed(aviation_layer_visibility())
+        val viewport = latest_location?.let { location ->
+            viewport_for(location, content_width(), content_height())
+        }
+        aviation_layer_controller.on_visibility_changed(
+            visibility = aviation_layer_visibility(),
+            viewport = viewport,
+        )
         invalidate()
     }
 
@@ -5581,7 +5812,10 @@ class FlightMapView(
     ): List<AlertAircraft> {
         return traffic_cache_controller.build_priority_notification_aircraft(
             all = aircraft_snapshot,
-            now_epoch_sec = now_epoch_sec
+            context = TrafficSafetyContext(
+                now_epoch_sec = now_epoch_sec,
+                alerts_enabled = alerts_enabled,
+            ),
         )
     }
 

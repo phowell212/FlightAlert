@@ -243,19 +243,45 @@ internal object TrafficDotGrouper {
     private const val FEET_PER_METER = 3.28084
 }
 
+internal data class TrafficSafetyContext(
+    val now_epoch_sec: Double,
+    val alerts_enabled: Boolean,
+)
+
+internal data class TrafficCacheBuildContext(
+    val safety: TrafficSafetyContext,
+    val filters: AircraftFilterState,
+) {
+    val now_epoch_sec: Double
+        get() = safety.now_epoch_sec
+}
+
+internal interface TrafficCachePolicy {
+    fun passes_aircraft_filters(
+        aircraft: Aircraft,
+        context: TrafficCacheBuildContext,
+        distance_meters: Double,
+        alert: AlertAircraft?,
+    ): Boolean
+
+    fun distance_meters(aircraft: Aircraft): Double
+
+    fun classify_alert_aircraft(
+        aircraft: Aircraft,
+        context: TrafficSafetyContext,
+        distance_meters: Double,
+    ): AlertAircraft?
+
+    fun aircraft_icao_key(aircraft: Aircraft): String
+
+    fun spatial_entry_for(
+        aircraft: Aircraft,
+        context: TrafficCacheBuildContext,
+    ): TrafficSpatialEntry
+}
+
 internal class TrafficCacheController(
-    private val passes_aircraft_filters: (
-        Aircraft,
-        Double,
-        Double,
-        AlertAircraft?
-    ) -> Boolean,
-    private val distance_meters: (Aircraft) -> Double,
-    private val classify_alert_aircraft: (Aircraft, Double, Double) -> AlertAircraft?,
-    private val aircraft_icao_key: (Aircraft) -> String,
-    private val spatial_entry_for: (Aircraft, Double) -> TrafficSpatialEntry,
-    private val alerts_enabled: () -> Boolean,
-    private val now_epoch_seconds: () -> Double
+    private val policy: TrafficCachePolicy,
 ) {
     private var traffic_cache_dirty = true
     private var published_traffic = CachedTraffic(
@@ -290,20 +316,20 @@ internal class TrafficCacheController(
 
     fun build_cached_traffic(
         all: List<Aircraft>,
-        now_epoch_sec: Double = now_epoch_seconds()
+        context: TrafficCacheBuildContext,
     ): CachedTraffic = checkNotNull(
         build_cached_traffic_or_cancelled(
             all = all,
-            now_epoch_sec = now_epoch_sec,
-            is_cancelled = { false }
+            context = context,
+            is_cancelled = { false },
         )
     )
 
     fun build_cached_traffic_or_cancelled(
         all: List<Aircraft>,
-        now_epoch_sec: Double,
+        context: TrafficCacheBuildContext,
         is_cancelled: () -> Boolean,
-        reusable_visual_cache: CachedTraffic? = null
+        reusable_visual_cache: CachedTraffic? = null,
     ): CachedTraffic? {
         val filtered = ArrayList<Aircraft>(all.size)
         var filtered_by_icao: HashMap<String, Aircraft>? =
@@ -315,21 +341,24 @@ internal class TrafficCacheController(
         var nearest: Aircraft? = null
         var nearest_distance = Double.POSITIVE_INFINITY
         var max_projected_speed_squared = 0.0
-        val prepare_alerts = alerts_enabled()
+        val prepare_alerts = context.safety.alerts_enabled
         all.forEachIndexed { index, item ->
             if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
-            val distance = distance_meters(item)
-            val alert =
-                if (prepare_alerts) classify_alert_aircraft(item, now_epoch_sec, distance) else null
+            val distance = policy.distance_meters(item)
+            val alert = if (prepare_alerts) {
+                policy.classify_alert_aircraft(item, context.safety, distance)
+            } else {
+                null
+            }
             if (alert?.is_hazard == true) {
                 priority_aircraft += item
                 priority_alerts += alert
             }
-            if (passes_aircraft_filters(item, now_epoch_sec, distance, alert)) {
+            if (policy.passes_aircraft_filters(item, context, distance, alert)) {
                 filtered += item
-                filtered_by_icao?.putIfAbsent(aircraft_icao_key(item), item)
+                filtered_by_icao?.putIfAbsent(policy.aircraft_icao_key(item), item)
                 entries?.let { destination ->
-                    val entry = spatial_entry_for(item, now_epoch_sec)
+                    val entry = policy.spatial_entry_for(item, context)
                     destination += entry
                     if (entry.projected_motion_remaining_sec > 0.0) {
                         val dx = entry.projected_velocity_x_zoom_zero
@@ -369,8 +398,8 @@ internal class TrafficCacheController(
             filtered_by_icao = rebuilt_by_icao
             filtered.forEachIndexed { index, item ->
                 if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
-                rebuilt_by_icao.putIfAbsent(aircraft_icao_key(item), item)
-                val entry = spatial_entry_for(item, now_epoch_sec)
+                rebuilt_by_icao.putIfAbsent(policy.aircraft_icao_key(item), item)
+                val entry = policy.spatial_entry_for(item, context)
                 entries += entry
                 if (entry.projected_motion_remaining_sec > 0.0) {
                     val dx = entry.projected_velocity_x_zoom_zero
@@ -402,20 +431,20 @@ internal class TrafficCacheController(
             extreme_priority_aircraft = priority_aircraft,
             priority_notification_aircraft = priority_alerts,
             max_projected_speed_zoom_zero = max_projected_speed,
-            projection_epoch_sec = now_epoch_sec
+            projection_epoch_sec = context.now_epoch_sec
         )
     }
 
     fun build_priority_notification_aircraft(
         all: List<Aircraft>,
-        now_epoch_sec: Double = now_epoch_seconds()
+        context: TrafficSafetyContext,
     ): List<AlertAircraft> {
-        if (!alerts_enabled()) return emptyList()
+        if (!context.alerts_enabled) return emptyList()
         val priority_alerts = ArrayList<AlertAircraft>()
         // Safety state is based on every real aircraft in the feed, not the current visual filter.
         for (aircraft in all) {
-            val distance = distance_meters(aircraft)
-            val alert = classify_alert_aircraft(aircraft, now_epoch_sec, distance) ?: continue
+            val distance = policy.distance_meters(aircraft)
+            val alert = policy.classify_alert_aircraft(aircraft, context, distance) ?: continue
             if (alert.is_hazard) priority_alerts += alert
         }
         priority_alerts.sortWith(

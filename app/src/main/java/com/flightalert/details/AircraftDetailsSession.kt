@@ -52,25 +52,89 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.pow
 
+enum class AircraftDetailsSection {
+    MAIN,
+    USAGE,
+    ENVIRONMENTAL_IMPACT,
+}
+
+sealed interface AircraftDetailsOverlay {
+    object NONE : AircraftDetailsOverlay
+    object PHOTO_GALLERY : AircraftDetailsOverlay
+    data class PHOTO_EVIDENCE(val return_to_gallery: Boolean) : AircraftDetailsOverlay
+}
+
+data class AircraftDetailsPage(
+    val is_open: Boolean,
+    val section: AircraftDetailsSection = AircraftDetailsSection.MAIN,
+    val overlay: AircraftDetailsOverlay = AircraftDetailsOverlay.NONE,
+) {
+    companion object {
+        val CLOSED = AircraftDetailsPage(is_open = false)
+        val MAIN = AircraftDetailsPage(is_open = true)
+    }
+}
+
+enum class AircraftDetailsEffect {
+    RESET_SCROLL,
+    RESET_SCROLL_OFFSET,
+    REQUEST_REDRAW,
+    REQUEST_ANIMATION_FRAME,
+}
+
+interface AircraftDetailsSessionHost {
+    fun feed_mode(): AircraftFeedMode
+    fun selected_aircraft(): Aircraft?
+    fun has_selected_flight_path(): Boolean
+    fun select_aircraft(aircraft: Aircraft)
+    fun is_flight_path_loading(aircraft: Aircraft): Boolean
+    fun request_flight_path(icao24: String)
+    fun request_trace_origin_airport(aircraft: Aircraft)
+    fun emit(effect: AircraftDetailsEffect)
+}
+
 class AircraftDetailsSession(
     private val coordinator: AircraftDetailsCoordinator,
     private val warm_requester: AircraftDetailsWarmRequester,
-    private val feed_mode: () -> AircraftFeedMode,
-    private val selected_aircraft: () -> Aircraft?,
-    private val select_aircraft: (Aircraft) -> Unit,
-    private val has_selected_flight_path: () -> Boolean,
-    private val is_flight_path_loading: (Aircraft) -> Boolean,
-    private val request_flight_path: (String) -> Unit,
-    private val request_trace_origin_airport: (Aircraft) -> Unit,
-    private val reset_scroll: () -> Unit,
-    private val reset_scroll_offset: () -> Unit,
-    private val request_redraw: () -> Unit,
-    private val request_animation_frame: () -> Unit
+    private val host: AircraftDetailsSessionHost,
 ) {
-    var details_open = false
-    var usage_open = false
-    var environmental_impact_open = false
-    var impact_methodology_open = false
+    var page: AircraftDetailsPage = AircraftDetailsPage.CLOSED
+        private set
+
+    var details_open: Boolean
+        get() = page.is_open
+        set(value) {
+            page = when {
+                value && !page.is_open -> AircraftDetailsPage.MAIN
+                !value -> AircraftDetailsPage.CLOSED
+                else -> page
+            }
+        }
+
+    var usage_open: Boolean
+        get() = page.is_open && page.section == AircraftDetailsSection.USAGE
+        set(value) {
+            if (!page.is_open && value) page = AircraftDetailsPage.MAIN
+            page = when {
+                value -> page.copy(section = AircraftDetailsSection.USAGE)
+                page.section == AircraftDetailsSection.USAGE ->
+                    page.copy(section = AircraftDetailsSection.MAIN)
+                else -> page
+            }
+        }
+
+    var environmental_impact_open: Boolean
+        get() = page.is_open && page.section == AircraftDetailsSection.ENVIRONMENTAL_IMPACT
+        set(value) {
+            if (!page.is_open && value) page = AircraftDetailsPage.MAIN
+            page = when {
+                value -> page.copy(section = AircraftDetailsSection.ENVIRONMENTAL_IMPACT)
+                page.section == AircraftDetailsSection.ENVIRONMENTAL_IMPACT ->
+                    page.copy(section = AircraftDetailsSection.MAIN)
+                else -> page
+            }
+        }
+
     var aircraft_details: AircraftDetails? = null
     var aircraft_details_status = "Select aircraft"
     var aircraft_details_loading = false
@@ -81,8 +145,41 @@ class AircraftDetailsSession(
     var aircraft_photo_evidence: PhotoEvidence? = null
     var active_photo_evidence: PhotoEvidence? = null
     var aircraft_photo_quality: PhotoQuality? = null
-    var photo_evidence_open = false
-    var photo_gallery_open = false
+    var photo_evidence_open: Boolean
+        get() = page.overlay is AircraftDetailsOverlay.PHOTO_EVIDENCE
+        set(value) {
+            page = when {
+                value -> page.copy(
+                    is_open = true,
+                    overlay = AircraftDetailsOverlay.PHOTO_EVIDENCE(
+                        return_to_gallery = page.overlay == AircraftDetailsOverlay.PHOTO_GALLERY
+                    )
+                )
+                page.overlay is AircraftDetailsOverlay.PHOTO_EVIDENCE -> {
+                    val evidence = page.overlay as AircraftDetailsOverlay.PHOTO_EVIDENCE
+                    page.copy(
+                        overlay = if (evidence.return_to_gallery) {
+                            AircraftDetailsOverlay.PHOTO_GALLERY
+                        } else {
+                            AircraftDetailsOverlay.NONE
+                        }
+                    )
+                }
+                else -> page
+            }
+        }
+
+    var photo_gallery_open: Boolean
+        get() = page.overlay == AircraftDetailsOverlay.PHOTO_GALLERY ||
+            (page.overlay as? AircraftDetailsOverlay.PHOTO_EVIDENCE)?.return_to_gallery == true
+        set(value) {
+            page = when {
+                value -> page.copy(is_open = true, overlay = AircraftDetailsOverlay.PHOTO_GALLERY)
+                page.overlay == AircraftDetailsOverlay.PHOTO_GALLERY ->
+                    page.copy(overlay = AircraftDetailsOverlay.NONE)
+                else -> page
+            }
+        }
     var aircraft_photo_gallery: List<AircraftPhotoGalleryItem> = emptyList()
     var aircraft_photo_gallery_status = "Photo gallery unavailable"
     var aircraft_photo_gallery_loading = false
@@ -96,14 +193,10 @@ class AircraftDetailsSession(
 
     // Details open by first anchoring selection, then letting real metadata/photo sources race safely by token.
     fun open_details(aircraft: Aircraft) {
-        select_aircraft(aircraft)
-        details_open = true
-        usage_open = false
-        environmental_impact_open = false
-        photo_evidence_open = false
-        photo_gallery_open = false
+        host.select_aircraft(aircraft)
+        page = AircraftDetailsPage.MAIN
         active_photo_evidence = null
-        reset_scroll()
+        host.emit(AircraftDetailsEffect.RESET_SCROLL)
         clear_photo_transition()
         aircraft_photo_gallery = emptyList()
         aircraft_photo_gallery_loading = false
@@ -138,57 +231,74 @@ class AircraftDetailsSession(
         panel: SecondaryPanel
     ) {
         if (selected_aircraft_id != aircraft.icao24) {
-            select_aircraft(aircraft)
-        } else if (!has_selected_flight_path() && !is_flight_path_loading(aircraft)) {
-            request_flight_path(aircraft.icao24)
+            host.select_aircraft(aircraft)
+        } else if (!host.has_selected_flight_path() && !host.is_flight_path_loading(aircraft)) {
+            host.request_flight_path(aircraft.icao24)
         }
-        usage_open = panel == SecondaryPanel.USAGE
-        environmental_impact_open = panel == SecondaryPanel.ENVIRONMENTAL_IMPACT
-        photo_evidence_open = false
-        photo_gallery_open = false
+        page = AircraftDetailsPage(
+            is_open = true,
+            section = when (panel) {
+                SecondaryPanel.USAGE -> AircraftDetailsSection.USAGE
+                SecondaryPanel.ENVIRONMENTAL_IMPACT ->
+                    AircraftDetailsSection.ENVIRONMENTAL_IMPACT
+            },
+            overlay = AircraftDetailsOverlay.NONE,
+        )
         active_photo_evidence = null
-        reset_scroll()
+        host.emit(AircraftDetailsEffect.RESET_SCROLL)
     }
 
     fun close_details_shell() {
-        details_open = false
+        page = AircraftDetailsPage.CLOSED
         aircraft_details_loading = false
-        photo_evidence_open = false
-        photo_gallery_open = false
         active_photo_evidence = null
-        usage_open = false
-        environmental_impact_open = false
     }
 
     fun open_photo_evidence(evidence: PhotoEvidence?) {
         active_photo_evidence = evidence
-        photo_evidence_open = true
-        reset_scroll_offset()
+        page = page.copy(
+            is_open = true,
+            overlay = AircraftDetailsOverlay.PHOTO_EVIDENCE(
+                return_to_gallery = page.overlay == AircraftDetailsOverlay.PHOTO_GALLERY
+            ),
+        )
+        host.emit(AircraftDetailsEffect.RESET_SCROLL_OFFSET)
     }
 
     fun close_photo_evidence() {
-        photo_evidence_open = false
+        val evidence = page.overlay as? AircraftDetailsOverlay.PHOTO_EVIDENCE
+        page = page.copy(
+            overlay = if (evidence?.return_to_gallery == true) {
+                AircraftDetailsOverlay.PHOTO_GALLERY
+            } else {
+                AircraftDetailsOverlay.NONE
+            }
+        )
         active_photo_evidence = null
     }
 
     fun close_photo_gallery() {
-        photo_gallery_open = false
+        if (page.overlay == AircraftDetailsOverlay.PHOTO_GALLERY) {
+            page = page.copy(overlay = AircraftDetailsOverlay.NONE)
+        }
     }
 
     fun open_photo_gallery(aircraft: Aircraft, details: AircraftDetails) {
         val request_token = details_request_token
-        photo_gallery_open = true
-        photo_evidence_open = false
+        page = page.copy(
+            is_open = true,
+            overlay = AircraftDetailsOverlay.PHOTO_GALLERY,
+        )
         active_photo_evidence = null
-        reset_scroll()
+        host.emit(AircraftDetailsEffect.RESET_SCROLL)
         aircraft_photo_gallery = emptyList()
         aircraft_photo_gallery_loading = true
-        aircraft_photo_gallery_status = when (feed_mode()) {
+        aircraft_photo_gallery_status = when (host.feed_mode()) {
             AircraftFeedMode.BINCRAFT -> "Loading exact photos from direct aircraft-photo sources"
             AircraftFeedMode.API -> "Loading exterior photos from API sources"
             AircraftFeedMode.HYBRID -> "Loading exact photos, then labeled representatives"
         }
-        request_redraw()
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
         coordinator.request_photo_gallery(
             aircraft = aircraft,
             details = details,
@@ -205,7 +315,7 @@ class AircraftDetailsSession(
             clear_photo_transition()
             return 1f
         }
-        request_animation_frame()
+        host.emit(AircraftDetailsEffect.REQUEST_ANIMATION_FRAME)
         return (elapsed.toFloat() / replacement_transition_ms).coerceIn(0f, 1f)
     }
 
@@ -216,7 +326,7 @@ class AircraftDetailsSession(
     fun is_current_details_request(requested_id: String, request_token: Long): Boolean {
         return details_open &&
                 details_request_token == request_token &&
-                selected_aircraft()?.icao24 == requested_id
+                host.selected_aircraft()?.icao24 == requested_id
     }
 
     fun apply_warm_cache_to_current_details(
@@ -226,7 +336,7 @@ class AircraftDetailsSession(
     ) {
         if (!details_open || current_key != key) return
         apply_warmed_details(entry, preserve_existing = true)
-        request_redraw()
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
     }
 
     private fun request_details(aircraft: Aircraft) {
@@ -257,8 +367,8 @@ class AircraftDetailsSession(
         if (aircraft_photo == null) {
             aircraft_photo_status = "Searching real photo sources"
         }
-        selected_aircraft()?.let { request_trace_origin_airport(it) }
-        request_redraw()
+        host.selected_aircraft()?.let { host.request_trace_origin_airport(it) }
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
     }
 
     private fun post_aircraft_details_unavailable(requested_id: String, request_token: Long) {
@@ -267,8 +377,8 @@ class AircraftDetailsSession(
         if (aircraft_details == null) {
             aircraft_details_status = "Metadata unavailable from configured sources"
         }
-        selected_aircraft()?.let { request_trace_origin_airport(it) }
-        request_redraw()
+        host.selected_aircraft()?.let { host.request_trace_origin_airport(it) }
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
     }
 
     private fun post_photo_gallery(
@@ -284,7 +394,7 @@ class AircraftDetailsSession(
         } else {
             "Tap a source-marked photo for proof and browser links"
         }
-        request_redraw()
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
     }
 
     private fun apply_seeded_details(aircraft: Aircraft): Boolean {
@@ -297,7 +407,7 @@ class AircraftDetailsSession(
         aircraft_details_status =
             AircraftDetailsCoordinator.details_status(details, still_loading = true)
         aircraft_photo_status = "Searching real photo sources"
-        request_redraw()
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
         return true
     }
 
@@ -346,7 +456,7 @@ class AircraftDetailsSession(
         val current_quality = aircraft_photo_quality
         if (!allow_replace && aircraft_photo != null) return
         if (allow_replace && current_quality != null && photo.quality.rank <= current_quality.rank) {
-            request_redraw()
+            host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
             return
         }
         apply_aircraft_photo(
@@ -354,7 +464,7 @@ class AircraftDetailsSession(
             animate_replace = allow_replace && aircraft_photo != null && photo.quality.rank > (current_quality?.rank
                 ?: 0)
         )
-        request_redraw()
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
     }
 
     private fun post_aircraft_photo_unavailable(requested_id: String, request_token: Long) {
@@ -364,7 +474,7 @@ class AircraftDetailsSession(
         aircraft_photo_evidence = null
         aircraft_photo_quality = null
         clear_photo_transition()
-        request_redraw()
+        host.emit(AircraftDetailsEffect.REQUEST_REDRAW)
     }
 
     private fun post_aircraft_photo_search_done(requested_id: String, request_token: Long) {
@@ -376,7 +486,7 @@ class AircraftDetailsSession(
         if (animate_replace && previous != null && previous != photo.bitmap) {
             aircraft_photo_previous_bitmap = previous
             aircraft_photo_transition_started_elapsed_ms = SystemClock.elapsedRealtime()
-            request_animation_frame()
+            host.emit(AircraftDetailsEffect.REQUEST_ANIMATION_FRAME)
         } else {
             clear_photo_transition()
         }

@@ -21,6 +21,7 @@ import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
 import com.flightalert.map.reference.dictionary.FilterState
 import com.flightalert.map.reference.labels.ReferenceScreenRect
 import java.io.File
+import java.util.Locale
 
 class MapTileRenderer(
     context: Context,
@@ -29,9 +30,11 @@ class MapTileRenderer(
     dp: (Float) -> Float,
     sp: (Float) -> Float,
     with_alpha: (Int, Int) -> Int,
-    report_status: (String) -> Unit,
+    private val on_load_state_changed: (MapTileLoadState) -> Unit,
     request_redraw: () -> Unit
 ) {
+    private var load_state: MapTileLoadState = MapTileLoadState.WAITING
+
     private val map_tile_disk_cache = ProcessMapTileDiskCaches.cache(
         context.cacheDir,
         MAP_TILE_DISK_CACHE_MAX_BYTES,
@@ -42,7 +45,13 @@ class MapTileRenderer(
         text_paint = text_paint,
         sp = sp,
         with_alpha = with_alpha,
-        report_status = report_status,
+        report_failure = { kind ->
+            publish_load_state(
+                MapTileLoadState.UNAVAILABLE(
+                    MapTileFailure(TileSource.STREET, kind)
+                )
+            )
+        },
         request_redraw = request_redraw,
         map_tile_disk_cache = map_tile_disk_cache,
     )
@@ -53,7 +62,13 @@ class MapTileRenderer(
         dp = dp,
         sp = sp,
         with_alpha = with_alpha,
-        report_status = report_status,
+        report_failure = { kind ->
+            publish_load_state(
+                MapTileLoadState.UNAVAILABLE(
+                    MapTileFailure(TileSource.SATELLITE, kind)
+                )
+            )
+        },
         request_redraw = request_redraw,
         shared_map_tile_disk_cache = map_tile_disk_cache,
     )
@@ -63,11 +78,46 @@ class MapTileRenderer(
         viewport: Viewport,
         state: MapTileRenderState,
         style: MapTileRenderStyle
-    ): String {
-        return when (state.map_source) {
+    ) {
+        val frame_result = when (state.map_source) {
             TileSource.STREET -> street_renderer.draw_tiles(canvas, viewport, state, style)
             TileSource.SATELLITE -> satellite_renderer.draw_tiles(canvas, viewport, state, style)
         }
+        publish_frame_load_state(
+            source = state.map_source,
+            labels_enabled = state.map_labels_enabled,
+            ready = frame_result.requested == 0 && frame_result.loaded > 0,
+        )
+    }
+
+    private fun publish_frame_load_state(
+        source: TileSource,
+        labels_enabled: Boolean,
+        ready: Boolean,
+    ) {
+        val unchanged = when (val current = load_state) {
+            is MapTileLoadState.LOADING -> {
+                !ready && current.source == source && current.labels_enabled == labels_enabled
+            }
+            is MapTileLoadState.READY -> {
+                ready && current.source == source && current.labels_enabled == labels_enabled
+            }
+            else -> false
+        }
+        if (unchanged) return
+        publish_load_state(
+            if (ready) {
+                MapTileLoadState.READY(source, labels_enabled)
+            } else {
+                MapTileLoadState.LOADING(source, labels_enabled)
+            }
+        )
+    }
+
+    private fun publish_load_state(next: MapTileLoadState) {
+        if (load_state == next) return
+        load_state = next
+        on_load_state_changed(next)
     }
 
     fun reference_class_catalog(): ReferenceClassCatalog? {
@@ -100,6 +150,66 @@ class MapTileRenderer(
     fun shutdown() {
         street_renderer.shutdown()
         satellite_renderer.shutdown()
+    }
+}
+
+enum class MapTileFailureKind {
+    PROVIDER_UNAVAILABLE,
+    NETWORK_UNAVAILABLE,
+}
+
+data class MapTileFailure(
+    val source: TileSource,
+    val kind: MapTileFailureKind,
+)
+
+sealed interface MapTileLoadState {
+    object WAITING : MapTileLoadState
+    data class LOADING(
+        val source: TileSource,
+        val labels_enabled: Boolean,
+    ) : MapTileLoadState
+
+    data class READY(
+        val source: TileSource,
+        val labels_enabled: Boolean,
+    ) : MapTileLoadState
+
+    data class UNAVAILABLE(val failure: MapTileFailure) : MapTileLoadState
+}
+
+object MapTileStatusPresenter {
+    fun text(state: MapTileLoadState): String = when (state) {
+        MapTileLoadState.WAITING -> "Waiting for location"
+        is MapTileLoadState.LOADING -> {
+            val label_note = if (state.source == TileSource.STREET && !state.labels_enabled) {
+                " no-label"
+            } else {
+                ""
+            }
+            "Loading ${state.source.display_name.lowercase(Locale.US)}$label_note tiles"
+        }
+        is MapTileLoadState.READY -> {
+            val label_note = if (state.source == TileSource.STREET && !state.labels_enabled) {
+                " no-label"
+            } else {
+                ""
+            }
+            "${state.source.display_name}$label_note loaded"
+        }
+        is MapTileLoadState.UNAVAILABLE -> when (state.failure.kind) {
+            MapTileFailureKind.PROVIDER_UNAVAILABLE -> "Map tiles unavailable"
+            MapTileFailureKind.NETWORK_UNAVAILABLE -> "Map network unavailable"
+        }
+    }
+}
+
+internal data class MapTileAvailability(
+    val loaded: Int,
+    val requested: Int,
+) {
+    companion object {
+        val EMPTY = MapTileAvailability(loaded = 0, requested = 0)
     }
 }
 

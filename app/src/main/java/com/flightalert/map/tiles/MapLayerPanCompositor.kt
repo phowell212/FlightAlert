@@ -16,11 +16,6 @@ import com.flightalert.map.Viewport
 import kotlin.math.abs
 import kotlin.math.ceil
 
-internal data class MapLayerPanCacheRecordResult(
-    val status: String,
-    val reusable: Boolean
-)
-
 internal class MapLayerPanCompositor(
     private val name: String,
     private val max_age_ms: Long
@@ -37,7 +32,6 @@ internal class MapLayerPanCompositor(
         val width: Int,
         val height: Int,
         val recorded_ms: Long,
-        val status: String,
         var invalidated: Boolean = false,
     )
 
@@ -55,14 +49,14 @@ internal class MapLayerPanCompositor(
         viewport: Viewport,
         key: Any,
         now_ms: Long
-    ): String? {
+    ): Boolean {
         if (!canvas.isHardwareAccelerated) {
             clear()
-            return null
+            return false
         }
         var discarded: Entry? = null
-        val status = synchronized(content_lock) {
-            val cached = entry ?: return@synchronized null
+        val drawn = synchronized(content_lock) {
+            val cached = entry ?: return@synchronized false
             if (cached.invalidated ||
                 cached.key != key ||
                 cached.viewport_width != viewport.width ||
@@ -73,13 +67,13 @@ internal class MapLayerPanCompositor(
             ) {
                 entry = null
                 discarded = cached
-                return@synchronized null
+                false
+            } else {
+                draw_entry(canvas, viewport, cached)
             }
-            if (!draw_entry(canvas, viewport, cached)) return@synchronized null
-            cached.status
         }
         discarded?.node?.discardDisplayList()
-        return status
+        return drawn
     }
 
     fun record_and_draw_current(
@@ -89,19 +83,19 @@ internal class MapLayerPanCompositor(
         key: Any,
         dependency_keys: Set<String>,
         padding: Float,
-        record: (Canvas, Viewport) -> MapLayerPanCacheRecordResult?
-    ): MapLayerPanCacheRecordResult? {
+        record: (Canvas, Viewport) -> Boolean
+    ): Boolean {
         if (!canvas.isHardwareAccelerated ||
             padding <= 0f ||
             record_viewport.width != draw_viewport.width ||
             record_viewport.height != draw_viewport.height ||
             abs(record_viewport.zoom - draw_viewport.zoom) > ZOOM_EPSILON
         ) {
-            return null
+            return false
         }
         val width = ceil(record_viewport.width + padding * 2f).toInt().coerceAtLeast(1)
         val height = ceil(record_viewport.height + padding * 2f).toInt().coerceAtLeast(1)
-        if (width > MAX_RENDER_NODE_DIMENSION || height > MAX_RENDER_NODE_DIMENSION) return null
+        if (width > MAX_RENDER_NODE_DIMENSION || height > MAX_RENDER_NODE_DIMENSION) return false
         val draw_x = (record_viewport.center_x - draw_viewport.center_x).toFloat() +
                 record_viewport.width / 2f - width / 2f
         val draw_y = (record_viewport.center_y - draw_viewport.center_y).toFloat() +
@@ -111,7 +105,7 @@ internal class MapLayerPanCompositor(
             draw_x + width < draw_viewport.width ||
             draw_y + height < draw_viewport.height
         ) {
-            return null
+            return false
         }
         val dependency_snapshot = dependency_keys.toSet()
         val recording = RecordingGuard(dependency_snapshot)
@@ -136,10 +130,10 @@ internal class MapLayerPanCompositor(
             node.discardDisplayList()
             throw failure
         }
-        if (result == null || !result.reusable) {
+        if (!result) {
             unregister_recording(recording)
             node.discardDisplayList()
-            return null
+            return false
         }
         val recorded = Entry(
             node = node,
@@ -153,7 +147,6 @@ internal class MapLayerPanCompositor(
             width = width,
             height = height,
             recorded_ms = SystemClock.elapsedRealtime(),
-            status = result.status
         )
         var previous: Entry? = null
         val installed = synchronized(content_lock) {
@@ -169,7 +162,7 @@ internal class MapLayerPanCompositor(
         }
         if (!installed) {
             node.discardDisplayList()
-            return null
+            return false
         }
         previous?.node?.discardDisplayList()
         val drawn = synchronized(content_lock) {
@@ -188,9 +181,9 @@ internal class MapLayerPanCompositor(
                 }
             }
             discarded?.node?.discardDisplayList()
-            return null
+            return false
         }
-        return result
+        return true
     }
 
     fun content_changed(content_key: String) {

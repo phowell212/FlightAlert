@@ -25,13 +25,57 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 
+internal sealed interface AviationLayerLoadState {
+    object OFF : AviationLayerLoadState
+    object WAITING : AviationLayerLoadState
+    object LOADING : AviationLayerLoadState
+    data class SUMMARY(
+        val loaded: Int,
+        val partial: Int,
+        val unavailable: Int,
+        val retained: Int,
+        val waiting: Boolean,
+        val airport_labels_deferred: Boolean,
+        val other_layers_enabled: Boolean,
+    ) : AviationLayerLoadState
+}
+
+internal object AviationLayerStatusPresenter {
+    fun text(state: AviationLayerLoadState): String = when (state) {
+        AviationLayerLoadState.OFF -> "Layers off"
+        AviationLayerLoadState.WAITING -> "Waiting for aviation layers"
+        AviationLayerLoadState.LOADING -> "Loading aviation layers"
+        is AviationLayerLoadState.SUMMARY -> {
+            val base = when {
+                state.waiting -> "Waiting for aviation layers"
+                state.retained > 0 -> buildString {
+                    append("Latest source incomplete; showing last aviation layers")
+                    if (state.unavailable > 0) append("; ${state.unavailable} unavailable")
+                }
+                state.loaded > 0 || state.partial > 0 || state.unavailable > 0 -> buildList {
+                    if (state.loaded > 0) {
+                        add("${state.loaded} aviation layer${if (state.loaded == 1) "" else "s"} loaded")
+                    }
+                    if (state.partial > 0) add("${state.partial} partial")
+                    if (state.unavailable > 0) add("${state.unavailable} unavailable")
+                }.joinToString("; ")
+                else -> "No aviation layer data in view"
+            }
+            if (!state.airport_labels_deferred) {
+                base
+            } else {
+                val airport_note = "Airport labels appear at zoom 8.4"
+                if (state.other_layers_enabled) "$base; $airport_note" else airport_note
+            }
+        }
+    }
+}
+
 internal class AviationLayerController(
     private val client: AviationLayerClient,
     private val run_in_background: (() -> Unit) -> Unit,
     private val post_to_main: (() -> Unit) -> Unit,
     private val request_redraw: () -> Unit,
-    private val current_viewport: () -> Viewport?,
-    private val visible_bounds: (Viewport) -> Bounds?,
     private val refresh_ms: Long,
     private val bounds_padding_fraction: Double,
     private val now_ms: () -> Long = { SystemClock.elapsedRealtime() },
@@ -54,7 +98,10 @@ internal class AviationLayerController(
     var fetch_in_flight: Boolean = false
         private set
 
-    var status_text: String = "Layers off"
+    var load_state: AviationLayerLoadState = AviationLayerLoadState.OFF
+        private set
+
+    var status_text: String = AviationLayerStatusPresenter.text(load_state)
         private set
 
     private val last_fetch_completed_ms = mutableMapOf<AviationLayerKind, Long>()
@@ -70,6 +117,12 @@ internal class AviationLayerController(
     )
     private var latest_requested_viewport: Viewport? = null
 
+    private fun publish_load_state(next: AviationLayerLoadState) {
+        if (load_state == next) return
+        load_state = next
+        status_text = AviationLayerStatusPresenter.text(next)
+    }
+
     fun request_if_needed(
         viewport: Viewport,
         visibility: AviationLayerVisibility,
@@ -79,7 +132,7 @@ internal class AviationLayerController(
         latest_requested_viewport = viewport
         if (!has_enabled_layers(visibility)) {
             cancel_active_fetch_if_not_requested(emptyList())
-            status_text = "Layers off"
+            publish_load_state(AviationLayerLoadState.OFF)
             return
         }
         val fetchable_kinds = fetchable_active_kinds(viewport, visibility)
@@ -100,14 +153,14 @@ internal class AviationLayerController(
         }
         if (requested_kinds.isEmpty() || fetch_in_flight) {
             if (requested_kinds.isEmpty()) {
-                status_text = summary_for_viewport(snapshot, visibility, viewport)
+                publish_load_state(summary_for_viewport(snapshot, visibility, viewport))
             } else {
-                status_text = "Loading aviation layers"
+                publish_load_state(AviationLayerLoadState.LOADING)
             }
             return
         }
 
-        status_text = "Loading aviation layers"
+        publish_load_state(AviationLayerLoadState.LOADING)
         start_fetch(
             query_envelopes = query_envelopes,
             requested_kind = requested_kinds.first()
@@ -145,12 +198,13 @@ internal class AviationLayerController(
                     active_fetch_token = null
                     fetch_in_flight = false
                     forced_refresh_required_kinds += requested_kinds
-                    status_text =
+                    publish_load_state(
                         if (has_enabled_layers(latest_visibility)) {
-                            "Loading aviation layers"
+                            AviationLayerLoadState.LOADING
                         } else {
-                            "Layers off"
+                            AviationLayerLoadState.OFF
                         }
+                    )
                     request_redraw()
                 }
             }
@@ -272,24 +326,33 @@ internal class AviationLayerController(
                 attempted_query_envelopes = query_envelopes
             )
         } ?: normalized_snapshot
-        status_text = latest_requested_viewport?.let { viewport ->
-            summary_for_viewport(snapshot, latest_visibility, viewport)
-        } ?: summary(snapshot, latest_visibility)
+        publish_load_state(
+            latest_requested_viewport?.let { viewport ->
+                summary_for_viewport(snapshot, latest_visibility, viewport)
+            } ?: summary(snapshot, latest_visibility)
+        )
         request_redraw()
     }
 
-    fun on_visibility_changed(visibility: AviationLayerVisibility) {
+    fun on_visibility_changed(
+        visibility: AviationLayerVisibility,
+        viewport: Viewport?,
+    ) {
         latest_visibility = visibility
+        latest_requested_viewport = viewport
         if (!has_enabled_layers(visibility)) {
             cancel_active_fetch_if_not_requested(emptyList())
-            status_text = "Layers off"
+            publish_load_state(AviationLayerLoadState.OFF)
             request_redraw()
             return
         }
         val active_kinds = active_kinds(visibility)
         cancel_active_fetch_if_not_requested(active_kinds)
-        status_text = summary(snapshot, visibility)
-        current_viewport()?.let { request_if_needed(it, visibility, force = false) }
+        publish_load_state(
+            viewport?.let { summary_for_viewport(snapshot, visibility, it) }
+                ?: summary(snapshot, visibility)
+        )
+        viewport?.let { request_if_needed(it, visibility, force = false) }
     }
 
     fun clear() {
@@ -307,7 +370,7 @@ internal class AviationLayerController(
             airport_labels_enabled = false
         )
         latest_requested_viewport = null
-        status_text = "Layers off"
+        publish_load_state(AviationLayerLoadState.OFF)
     }
 
     fun has_enabled_layers(visibility: AviationLayerVisibility): Boolean {
@@ -331,13 +394,15 @@ internal class AviationLayerController(
         val latest_enabled = has_enabled_layers(latest_visibility)
         if (cancelled) {
             forced_refresh_required_kinds += requested_kinds
-            status_text = if (latest_enabled) {
-                latest_requested_viewport?.let { viewport ->
-                    summary_for_viewport(this.snapshot, latest_visibility, viewport)
-                } ?: summary(this.snapshot, latest_visibility)
-            } else {
-                "Layers off"
-            }
+            publish_load_state(
+                if (latest_enabled) {
+                    latest_requested_viewport?.let { viewport ->
+                        summary_for_viewport(this.snapshot, latest_visibility, viewport)
+                    } ?: summary(this.snapshot, latest_visibility)
+                } else {
+                    AviationLayerLoadState.OFF
+                }
+            )
             request_redraw()
             request_missing_latest_layers_if_needed(latest_enabled)
             return
@@ -363,13 +428,15 @@ internal class AviationLayerController(
                     attempted_query_envelopes = query_envelopes
                 )
             } ?: failed_attempt
-            status_text = if (latest_enabled) {
-                latest_requested_viewport?.let { viewport ->
-                    summary_for_viewport(this.snapshot, latest_visibility, viewport)
-                } ?: summary(this.snapshot, latest_visibility)
-            } else {
-                "Layers off"
-            }
+            publish_load_state(
+                if (latest_enabled) {
+                    latest_requested_viewport?.let { viewport ->
+                        summary_for_viewport(this.snapshot, latest_visibility, viewport)
+                    } ?: summary(this.snapshot, latest_visibility)
+                } else {
+                    AviationLayerLoadState.OFF
+                }
+            )
             request_redraw()
             request_missing_latest_layers_if_needed(latest_enabled)
             return
@@ -393,13 +460,15 @@ internal class AviationLayerController(
         prepared_airspaces?.let { prepared ->
             this.snapshot?.let { displayed -> publish_airspaces?.invoke(displayed, prepared) }
         }
-        status_text = if (latest_enabled) {
-            latest_requested_viewport?.let { viewport ->
-                summary_for_viewport(this.snapshot, latest_visibility, viewport)
-            } ?: summary(this.snapshot, latest_visibility)
-        } else {
-            "Layers off"
-        }
+        publish_load_state(
+            if (latest_enabled) {
+                latest_requested_viewport?.let { viewport ->
+                    summary_for_viewport(this.snapshot, latest_visibility, viewport)
+                } ?: summary(this.snapshot, latest_visibility)
+            } else {
+                AviationLayerLoadState.OFF
+            }
+        )
         request_redraw()
         request_missing_latest_layers_if_needed(latest_enabled)
     }
@@ -433,16 +502,30 @@ internal class AviationLayerController(
         snapshot: AviationLayerSnapshot?,
         visibility: AviationLayerVisibility,
         viewport: Viewport
-    ): String {
+    ): AviationLayerLoadState {
         val base = summary(snapshot, visibility)
         if (!visibility.airport_labels_enabled ||
             viewport.zoom >= AVIATION_AIRPORT_LABEL_MIN_ZOOM
         ) return base
-        val airport_note = "Airport labels appear at zoom 8.4"
         val other_enabled = visibility.atc_boundaries_enabled ||
             visibility.restricted_airspaces_enabled ||
             visibility.oceanic_tracks_enabled
-        return if (other_enabled) "$base; $airport_note" else airport_note
+        return when (base) {
+            is AviationLayerLoadState.SUMMARY -> base.copy(
+                airport_labels_deferred = true,
+                other_layers_enabled = other_enabled,
+            )
+            AviationLayerLoadState.WAITING -> AviationLayerLoadState.SUMMARY(
+                loaded = 0,
+                partial = 0,
+                unavailable = 0,
+                retained = 0,
+                waiting = true,
+                airport_labels_deferred = true,
+                other_layers_enabled = other_enabled,
+            )
+            else -> base
+        }
     }
 
     private fun source_query_envelopes_for_viewport(
@@ -498,9 +581,9 @@ internal class AviationLayerController(
     private fun summary(
         snapshot: AviationLayerSnapshot?,
         visibility: AviationLayerVisibility
-    ): String {
-        if (!has_enabled_layers(visibility)) return "Layers off"
-        snapshot ?: return "Waiting for aviation layers"
+    ): AviationLayerLoadState {
+        if (!has_enabled_layers(visibility)) return AviationLayerLoadState.OFF
+        snapshot ?: return AviationLayerLoadState.WAITING
         val active = active_kinds(visibility)
         val retained = active.count { snapshot.statuses[it]?.showing_last_good == true }
         val loaded = active.count { snapshot.statuses[it]?.state == AviationLayerState.LOADED }
@@ -512,24 +595,15 @@ internal class AviationLayerController(
             snapshot.statuses[it]?.state == AviationLayerState.UNAVAILABLE &&
                 snapshot.statuses[it]?.showing_last_good != true
         }
-        return when {
-            retained > 0 -> buildString {
-                append("Latest source incomplete; showing last aviation layers")
-                if (unavailable > 0) append("; $unavailable unavailable")
-            }
-            loaded > 0 || partial > 0 || unavailable > 0 -> buildList {
-                if (loaded > 0) {
-                    add("$loaded aviation layer${if (loaded == 1) "" else "s"} loaded")
-                }
-                if (partial > 0) {
-                    add("$partial partial")
-                }
-                if (unavailable > 0) {
-                    add("$unavailable unavailable")
-                }
-            }.joinToString("; ")
-            else -> "No aviation layer data in view"
-        }
+        return AviationLayerLoadState.SUMMARY(
+            loaded = loaded,
+            partial = partial,
+            unavailable = unavailable,
+            retained = retained,
+            waiting = false,
+            airport_labels_deferred = false,
+            other_layers_enabled = active.any { it != AviationLayerKind.AIRPORTS },
+        )
     }
 
     private fun merge_layer_snapshot(

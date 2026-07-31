@@ -23,7 +23,7 @@ internal class SatelliteMapTileRenderer(
     private val dp: (Float) -> Float,
     private val sp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int,
-    private val report_status: (String) -> Unit,
+    private val report_failure: (MapTileFailureKind) -> Unit,
     private val request_redraw: () -> Unit,
     shared_map_tile_disk_cache: MapTileDiskCache? = null,
 ) {
@@ -37,7 +37,7 @@ internal class SatelliteMapTileRenderer(
         text_paint = text_paint,
         sp = sp,
         with_alpha = with_alpha,
-        report_status = report_status,
+        report_failure = report_failure,
         request_redraw = request_redraw,
         shared_map_tile_disk_cache = map_tile_disk_cache,
         overlay_drawer = ::draw_reference_layers,
@@ -58,7 +58,7 @@ internal class SatelliteMapTileRenderer(
         viewport: Viewport,
         state: MapTileRenderState,
         style: MapTileRenderStyle
-    ): String {
+    ): MapTileAvailability {
         return base_renderer.draw_tiles(
             canvas = canvas,
             viewport = viewport,

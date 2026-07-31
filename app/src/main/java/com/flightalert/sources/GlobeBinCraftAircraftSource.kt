@@ -34,6 +34,7 @@ import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.nextUp
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -639,14 +640,12 @@ internal data class GlobeQueryBounds(
             )
         }
 
-        val longitude_delta = Math.nextUp(
-            Math.toDegrees(
-                asin(
-                    (sin(angular_distance) / cos(maximum_source_latitude))
-                        .coerceIn(0.0, 1.0)
-                )
+        val longitude_delta = Math.toDegrees(
+            asin(
+                (sin(angular_distance) / cos(maximum_source_latitude))
+                    .coerceIn(0.0, 1.0)
             )
-        )
+        ).nextUp()
         val longitude_span =
             if (wraps_longitude) 360.0 - min_lon + max_lon else max_lon - min_lon
         if (longitude_span + 2.0 * longitude_delta >= 360.0) {

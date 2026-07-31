@@ -24,19 +24,52 @@ import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 
+sealed interface VisibleAircraftFeedEnvironment {
+    object NO_LOCATION : VisibleAircraftFeedEnvironment
+    object NO_VIEWPORT : VisibleAircraftFeedEnvironment
+
+    data class READY(
+        val now_elapsed_ms: Long,
+        val feed_ready: Boolean,
+        val interaction_deferred: Boolean,
+        val interaction_delay_ms: Long,
+    ) : VisibleAircraftFeedEnvironment
+}
+
+interface VisibleAircraftFeedEnvironmentSource {
+    /** Preserve the old gate order; the implementation captures time only after location and viewport exist. */
+    fun snapshot(): VisibleAircraftFeedEnvironment
+    fun feed_ready(): Boolean
+    fun build_request(): VisibleAircraftRequest
+}
+
+sealed interface VisibleAircraftFeedState {
+    object IDLE : VisibleAircraftFeedState
+    object WAITING_FOR_LOCATION : VisibleAircraftFeedState
+    object WAITING_FOR_VIEWPORT : VisibleAircraftFeedState
+    object DEFERRED_FOR_INTERACTION : VisibleAircraftFeedState
+    object FETCHING : VisibleAircraftFeedState
+    object WAITING_FOR_CAPACITY : VisibleAircraftFeedState
+    object UNAVAILABLE : VisibleAircraftFeedState
+}
+
+object VisibleAircraftFeedStatusPresenter {
+    fun text(state: VisibleAircraftFeedState): String? = when (state) {
+        VisibleAircraftFeedState.WAITING_FOR_CAPACITY ->
+            "Aircraft feed waiting for background capacity"
+        VisibleAircraftFeedState.UNAVAILABLE -> "Aircraft feed unavailable"
+        else -> null
+    }
+}
+
 class VisibleAircraftFeedController(
     private val aircraft_traffic_feed: AircraftTrafficFeed,
     private val globe_source: GlobeBinCraftAircraftSource?,
     private val executor: Executor,
     private val post_to_main: (() -> Unit) -> Unit,
     private val post_delayed: (() -> Unit, Long) -> Unit,
-    private val has_location: () -> Boolean,
-    private val has_usable_viewport: () -> Boolean,
-    private val build_request: () -> VisibleAircraftRequest,
-    private val has_ready_aircraft_feed: () -> Boolean,
-    private val should_defer_for_interaction: (Long) -> Boolean,
-    private val delay_after_interaction: (Long) -> Long,
-    private val set_aircraft_status: (String) -> Unit,
+    private val environment_source: VisibleAircraftFeedEnvironmentSource,
+    private val on_state_changed: (VisibleAircraftFeedState) -> Unit,
     private val request_redraw: () -> Unit,
     private val apply_result: (
         FeedResult,
@@ -66,32 +99,57 @@ class VisibleAircraftFeedController(
     private var pending_interaction_feed_mode: AircraftFeedMode? = null
     private var interaction_globe_snapshot_token: Long? = null
     private var interaction_globe_snapshot_signature: String? = null
+    private var state: VisibleAircraftFeedState = VisibleAircraftFeedState.IDLE
+
+    private fun publish_state(next: VisibleAircraftFeedState) {
+        if (state == next) return
+        state = next
+        on_state_changed(next)
+    }
 
     // One request may publish intermediate and final real feed results, but only the newest token can affect the map.
     fun request_if_needed(force: Boolean = false) {
-        if (!has_location()) return
-        if (!has_usable_viewport()) {
-            waiting_for_viewport = true
-            return
+        request_if_needed(force, environment_source.snapshot())
+    }
+
+    private fun request_if_needed(
+        force: Boolean,
+        environment_snapshot: VisibleAircraftFeedEnvironment,
+    ) {
+        val environment = when (val snapshot = environment_snapshot) {
+            VisibleAircraftFeedEnvironment.NO_LOCATION -> {
+                publish_state(VisibleAircraftFeedState.WAITING_FOR_LOCATION)
+                return
+            }
+            VisibleAircraftFeedEnvironment.NO_VIEWPORT -> {
+                waiting_for_viewport = true
+                publish_state(VisibleAircraftFeedState.WAITING_FOR_VIEWPORT)
+                return
+            }
+            is VisibleAircraftFeedEnvironment.READY -> snapshot
         }
-        val now = SystemClock.elapsedRealtime()
-        if (should_defer_for_interaction(now)) {
-            if (force) schedule_refresh(delay_after_interaction(now), force = true)
+        val now = environment.now_elapsed_ms
+        if (environment.interaction_deferred) {
+            publish_state(VisibleAircraftFeedState.DEFERRED_FOR_INTERACTION)
+            if (force) schedule_refresh(environment.interaction_delay_ms, force = true)
             return
         }
         if (fetch_in_flight) {
+            publish_state(VisibleAircraftFeedState.FETCHING)
             schedule_refresh(in_flight_retry_ms, force)
             return
         }
         val min_fetch_interval_ms = if (force) force_refresh_ms else refresh_ms
         if (now - last_fetch_elapsed_ms < min_fetch_interval_ms) {
+            publish_state(VisibleAircraftFeedState.IDLE)
             if (force) schedule_refresh(min_fetch_interval_ms - (now - last_fetch_elapsed_ms), true)
             return
         }
 
         fetch_in_flight = true
+        publish_state(VisibleAircraftFeedState.FETCHING)
         last_fetch_elapsed_ms = now
-        val request = build_request()
+        val request = environment_source.build_request()
         pending_interaction_feed_mode = null
         interaction_globe_snapshot_token = null
         interaction_globe_snapshot_signature = null
@@ -106,13 +164,13 @@ class VisibleAircraftFeedController(
             request.zoom,
             request.feed_mode
         )
-        val publish_intermediate_results = !has_ready_aircraft_feed()
+        val publish_intermediate_results = !environment.feed_ready
         execute_in_background(on_rejected = {
             if (active_fetch_token == token) {
                 active_fetch_token = null
                 fetch_in_flight = false
                 if (is_current_token(token)) {
-                    set_aircraft_status("Aircraft feed waiting for background capacity")
+                    publish_state(VisibleAircraftFeedState.WAITING_FOR_CAPACITY)
                 }
                 schedule_refresh(in_flight_retry_ms, force = true)
                 request_redraw()
@@ -152,7 +210,7 @@ class VisibleAircraftFeedController(
                 if (is_current_token(token)) {
                     post_to_main {
                         if (is_current_token(token)) {
-                            set_aircraft_status("Aircraft feed unavailable")
+                            publish_state(VisibleAircraftFeedState.UNAVAILABLE)
                         }
                     }
                 }
@@ -161,6 +219,9 @@ class VisibleAircraftFeedController(
                     if (active_fetch_token == token) {
                         active_fetch_token = null
                         fetch_in_flight = false
+                        if (state == VisibleAircraftFeedState.FETCHING) {
+                            publish_state(VisibleAircraftFeedState.IDLE)
+                        }
                         request_redraw()
                     }
                 }
@@ -169,7 +230,7 @@ class VisibleAircraftFeedController(
     }
 
     fun request_after_map_interaction() {
-        if (!has_ready_aircraft_feed()) {
+        if (!environment_source.feed_ready()) {
             request_if_needed(force = true)
         } else {
             schedule_refresh(map_interaction_refresh_delay_ms, force = true)
@@ -189,10 +250,11 @@ class VisibleAircraftFeedController(
     fun publish_globe_snapshot_update_if_useful(feed_mode: AircraftFeedMode) {
         val source = globe_source ?: return
         if (!feed_mode.uses_globe) return
-        if (!has_location() || !has_usable_viewport()) return
-        val now = SystemClock.elapsedRealtime()
-        val startup_publish = !has_ready_aircraft_feed()
-        if (!startup_publish && should_defer_for_interaction(now)) {
+        val environment = environment_source.snapshot() as? VisibleAircraftFeedEnvironment.READY
+            ?: return
+        val now = environment.now_elapsed_ms
+        val startup_publish = !environment.feed_ready
+        if (!startup_publish && environment.interaction_deferred) {
             request_interaction_globe_snapshot(feed_mode)
             return
         }
@@ -202,7 +264,7 @@ class VisibleAircraftFeedController(
         ) {
             return
         }
-        val request = build_request()
+        val request = environment_source.build_request()
         val signature = request_signature(request)
         val publish_while_fetching = fetch_in_flight
         val token = if (publish_while_fetching && fetch_token > 0L) fetch_token else ++fetch_token
@@ -255,9 +317,10 @@ class VisibleAircraftFeedController(
         val feed_mode = pending_interaction_feed_mode ?: return
         pending_interaction_feed_mode = null
         val source = globe_source ?: return
-        if (!feed_mode.uses_globe || !has_location() || !has_usable_viewport()) return
+        if (!feed_mode.uses_globe) return
+        environment_source.snapshot() as? VisibleAircraftFeedEnvironment.READY ?: return
 
-        val request = build_request()
+        val request = environment_source.build_request()
         val signature = request_signature(request)
         val token = interaction_globe_snapshot_token
             ?: ++fetch_token
@@ -321,9 +384,11 @@ class VisibleAircraftFeedController(
     }
 
     fun request_deferred_refresh() {
-        if (!waiting_for_viewport || !has_location() || !has_usable_viewport()) return
+        if (!waiting_for_viewport) return
+        val environment = environment_source.snapshot()
+        if (environment !is VisibleAircraftFeedEnvironment.READY) return
         waiting_for_viewport = false
-        request_if_needed(force = true)
+        request_if_needed(force = true, environment_snapshot = environment)
     }
 
     fun schedule_hybrid_supplement_refresh() {
