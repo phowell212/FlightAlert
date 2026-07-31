@@ -8,22 +8,28 @@
 
 package com.flightalert.sources
 
+import android.location.Location
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import com.flightalert.FlightAlertAppSettings
 import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
+import com.flightalert.map.MapProjection
+import com.github.luben.zstd.Zstd
 import com.github.luben.zstd.ZstdInputStream
 import java.io.ByteArrayInputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.BitSet
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import kotlin.io.DEFAULT_BUFFER_SIZE
 import kotlin.math.abs
+import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.ln
@@ -114,49 +120,72 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
     @Synchronized
     @Suppress("UNUSED_PARAMETER")
     fun latest_snapshot(
-        bounds: FeedBounds,
+        display_bounds: List<FeedBounds>,
+        safety_bounds: FeedBounds?,
         own_lat: Double,
         own_lon: Double,
-        exact_search: String?
+        search_query: String?,
+        selected_aircraft_key: String?
     ): FeedResult? {
         if (!source_enabled || destroyed) return null
         val viewport = pending_viewport ?: return null
         val snapshot = latest ?: return null
         if (snapshot.viewport_generation != viewport.generation) return null
-        if (SystemClock.elapsedRealtime() - snapshot.received_elapsed_ms > MAX_SNAPSHOT_AGE_MS) return null
+        if (SystemClock.elapsedRealtime() - snapshot.received_elapsed_ms > GLOBE_SNAPSHOT_VALIDITY_MS) return null
         if (snapshot.store.aircraft.isEmpty() && snapshot.partial_coverage) return null
-        val query_bounds = bounds.to_globe_query_bounds()
-        val normalized_search = normalize_globe_search_key(exact_search)
+        val query_bounds = display_bounds.map(FeedBounds::to_globe_query_bounds)
+        val safety_query_bounds = safety_bounds?.to_globe_query_bounds()
+        val normalized_search = normalize_globe_search_key(search_query)
+        val normalized_selected_key = normalize_globe_search_key(selected_aircraft_key)
         val cached_query = latest_query
         if (cached_query != null &&
             cached_query.content_revision == snapshot.content_revision &&
             cached_query.own_lat_bits == own_lat.toBits() &&
             cached_query.own_lon_bits == own_lon.toBits() &&
-            cached_query.bounds == query_bounds &&
-            cached_query.normalized_search == normalized_search
+            cached_query.display_bounds == query_bounds &&
+            cached_query.safety_bounds == safety_query_bounds &&
+            cached_query.normalized_search == normalized_search &&
+            cached_query.normalized_selected_key == normalized_selected_key
         ) {
             return cached_query.result
         }
-        val queried = snapshot.store.query(query_bounds, normalized_search)
-        val filtered = ArrayList<FeedAircraft>(queried.size)
-        queried.forEach { aircraft ->
-            filtered += aircraft.with_distance_from(own_lat, own_lon)
-        }
-        filtered.sortBy { it.distance_m }
+        val queried = snapshot.store.query(
+            display_bounds = query_bounds,
+            safety_bounds = safety_query_bounds,
+            normalized_search = normalized_search,
+            selected_aircraft_key = normalized_selected_key,
+            own_lat = own_lat,
+            own_lon = own_lon
+        )
         val result = FeedResult(
             status = FeedStatus.OK,
             source = FeedSource.AIRPLANES_LIVE_GLOBE,
-            aircraft = filtered,
+            aircraft = queried.aircraft,
             epoch_sec = snapshot.epoch_sec,
             query_count = 0,
-            partial_coverage = snapshot.partial_coverage
+            partial_coverage = snapshot.partial_coverage,
+            content_revision = snapshot.content_revision,
+            globe_aircraft = snapshot.store.aircraft,
+            globe_motion_candidates = queried.motion_candidates,
+            globe_default_summary = GlobeDefaultAircraftSummary(
+                total = snapshot.store.aircraft.size,
+                airborne_total = queried.airborne_total,
+                nearest_airborne = queried.nearest_airborne,
+                content_revision = snapshot.content_revision,
+                own_lat_bits = own_lat.toBits(),
+                own_lon_bits = own_lon.toBits(),
+                projection_valid_until_epoch_sec =
+                    snapshot.epoch_sec + GLOBE_SNAPSHOT_VALIDITY_SECONDS
+            )
         )
         latest_query = GlobeQuery(
             content_revision = snapshot.content_revision,
             own_lat_bits = own_lat.toBits(),
             own_lon_bits = own_lon.toBits(),
-            bounds = query_bounds,
+            display_bounds = query_bounds,
+            safety_bounds = safety_query_bounds,
             normalized_search = normalized_search,
+            normalized_selected_key = normalized_selected_key,
             result = result
         )
         return result
@@ -277,10 +306,6 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         )
     }
 
-    private fun FeedAircraft.with_distance_from(own_lat: Double, own_lon: Double): FeedAircraft {
-        return copy(distance_m = globe_distance_meters(own_lat, own_lon, lat, lon))
-    }
-
     private data class GlobeSnapshot(
         val store: GlobeAircraftStore,
         val epoch_sec: Double,
@@ -294,8 +319,10 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         val content_revision: Long,
         val own_lat_bits: Long,
         val own_lon_bits: Long,
-        val bounds: GlobeQueryBounds,
+        val display_bounds: List<GlobeQueryBounds>,
+        val safety_bounds: GlobeQueryBounds?,
         val normalized_search: String?,
+        val normalized_selected_key: String?,
         val result: FeedResult
     )
 
@@ -321,7 +348,6 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         private const val TAG = "FlightAlert"
         private const val EXTRACT_INTERVAL_MS = 1000L
         private const val STARTUP_RETRY_MS = 450L
-        private const val MAX_SNAPSHOT_AGE_MS = 9000L
         private const val GLOBE_INVENTORY_ZOOM = 0.0
         private const val GLOBE_INVENTORY_CENTER_LAT = 0.0
         private const val GLOBE_INVENTORY_CENTER_LON = 0.0
@@ -341,6 +367,9 @@ internal fun globe_distance_meters(lat1: Double, lon1: Double, lat2: Double, lon
 }
 
 internal const val GLOBE_EARTH_RADIUS_M = 6371000.0
+private const val GLOBE_SNAPSHOT_VALIDITY_MS = 9000L
+private const val GLOBE_SNAPSHOT_VALIDITY_SECONDS =
+    GLOBE_SNAPSHOT_VALIDITY_MS / 1000.0
 
 internal data class GlobeBinCraftSnapshot(
     val store: GlobeAircraftStore,
@@ -349,48 +378,225 @@ internal data class GlobeBinCraftSnapshot(
     val content_revision: Long = 0L
 )
 
-internal class GlobeAircraftStore private constructor(
+internal data class GlobeAircraftQueryResult(
     val aircraft: List<FeedAircraft>,
-    private val exact_key_index: Map<String, IntArray>,
-    private val spatial_index: GlobeAircraftSpatialIndex
+    val motion_candidates: List<FeedAircraft>,
+    val airborne_total: Int,
+    val nearest_airborne: FeedAircraft?
+)
+
+internal class GlobeAircraftStore(
+    val aircraft: List<FeedAircraft>,
+    private val display_projection_bands: ByteArray,
+    private val alert_projection_bands: ByteArray,
+    private val maximum_display_projection_band: Int,
+    private val maximum_alert_projection_band: Int
 ) {
-    fun query(bounds: GlobeQueryBounds, exact_key: String?): List<FeedAircraft> {
-        val selected = BitSet(aircraft.size)
-        spatial_index.select(bounds, aircraft, selected)
-        exact_key?.let { exact_key_index[it]?.forEach(selected::set) }
-        val result = ArrayList<FeedAircraft>(selected.cardinality())
-        var index = selected.nextSetBit(0)
-        while (index >= 0) {
-            result += aircraft[index]
-            index = selected.nextSetBit(index + 1)
+    fun query(
+        display_bounds: List<GlobeQueryBounds>,
+        safety_bounds: GlobeQueryBounds?,
+        normalized_search: String?,
+        selected_aircraft_key: String?,
+        own_lat: Double,
+        own_lon: Double
+    ): GlobeAircraftQueryResult {
+        val selected = ArrayList<FeedAircraft>()
+        val motion_candidates = ArrayList<FeedAircraft>()
+        val display_bounds_by_band =
+            Array(display_bounds.size) {
+                arrayOfNulls<GlobeQueryBounds>(maximum_display_projection_band + 1)
+            }
+        val alert_bounds_by_band =
+            safety_bounds?.let {
+                arrayOfNulls<GlobeQueryBounds>(maximum_alert_projection_band + 1)
+            }
+        val distance_result = FloatArray(1)
+        var airborne_total = 0
+        var nearest_airborne: FeedAircraft? = null
+        var nearest_distance_meters = Double.POSITIVE_INFINITY
+        aircraft.forEachIndexed { index, item ->
+            if (item.on_ground == false) {
+                airborne_total++
+                val latitude_distance_floor =
+                    abs(item.lat - own_lat) * MINIMUM_METERS_PER_LATITUDE_DEGREE
+                if (latitude_distance_floor < nearest_distance_meters) {
+                    Location.distanceBetween(
+                        own_lat,
+                        own_lon,
+                        item.lat,
+                        item.lon,
+                        distance_result
+                    )
+                    val distance_meters = distance_result[0].toDouble()
+                    if (distance_meters < nearest_distance_meters) {
+                        nearest_airborne = item
+                        nearest_distance_meters = distance_meters
+                    }
+                }
+            }
+
+            var raw_authoritative = false
+            var bounds_index = 0
+            while (bounds_index < display_bounds.size) {
+                if (display_bounds[bounds_index].contains(item.lat, item.lon)) {
+                    raw_authoritative = true
+                    break
+                }
+                bounds_index++
+            }
+            if (!raw_authoritative && safety_bounds?.contains(item.lat, item.lon) == true) {
+                raw_authoritative = true
+            }
+            if (!raw_authoritative && selected_aircraft_key != null &&
+                item.matches_normalized_exact_key(selected_aircraft_key)
+            ) {
+                raw_authoritative = true
+            }
+            if (raw_authoritative ||
+                normalized_search != null && item.matches_normalized_search(normalized_search)
+            ) {
+                selected += item.copy(
+                    distance_m = globe_distance_meters(own_lat, own_lon, item.lat, item.lon)
+                )
+            }
+            if (!raw_authoritative) {
+                val display_band = display_projection_bands[index].toInt() and 0xff
+                var may_project_into_display = false
+                if (display_band != 0) {
+                    bounds_index = 0
+                    while (bounds_index < display_bounds.size) {
+                        if (bounds_for_projection_band(
+                                display_bounds[bounds_index],
+                                display_bounds_by_band[bounds_index],
+                                display_band
+                            ).contains(item.lat, item.lon)
+                        ) {
+                            may_project_into_display = true
+                            break
+                        }
+                        bounds_index++
+                    }
+                }
+                val alert_band = alert_projection_bands[index].toInt() and 0xff
+                val may_project_into_safety =
+                    safety_bounds != null &&
+                            alert_bounds_by_band != null &&
+                            alert_band != 0 &&
+                            bounds_for_projection_band(
+                                safety_bounds,
+                                alert_bounds_by_band,
+                                alert_band
+                            ).contains(item.lat, item.lon)
+                if (may_project_into_display || may_project_into_safety) {
+                    motion_candidates += item
+                }
+            }
         }
-        return result
+        selected.sortWith(distance_order)
+        return GlobeAircraftQueryResult(
+            aircraft = selected,
+            motion_candidates = motion_candidates,
+            airborne_total = airborne_total,
+            nearest_airborne = nearest_airborne
+        )
     }
 
     companion object {
-        fun from(parsed: List<FeedAircraft>): GlobeAircraftStore {
-            val aircraft = parsed.toList()
-            val mutable_exact_index = HashMap<String, MutableList<Int>>()
-            aircraft.forEachIndexed { index, item ->
-                val icao_key = normalize_globe_search_key(item.icao24)
-                val callsign_key = normalize_globe_search_key(item.callsign)
-                val registration_key = normalize_globe_search_key(item.registration)
-                mutable_exact_index.add_key(icao_key, index)
-                if (callsign_key != icao_key) mutable_exact_index.add_key(callsign_key, index)
-                if (registration_key != icao_key && registration_key != callsign_key) {
-                    mutable_exact_index.add_key(registration_key, index)
-                }
-            }
-            return GlobeAircraftStore(
-                aircraft = aircraft,
-                exact_key_index = mutable_exact_index.mapValues { it.value.toIntArray() },
-                spatial_index = GlobeAircraftSpatialIndex.from(aircraft)
+        private val distance_order = Comparator<FeedAircraft> { left, right ->
+            left.distance_m.compareTo(right.distance_m)
+        }
+
+        internal fun display_projection_band(
+            item: FeedAircraft,
+            projection_valid_until: Double
+        ): Int {
+            return projection_band(
+                display_projection_reach_meters(item, projection_valid_until)
             )
         }
 
-        private fun MutableMap<String, MutableList<Int>>.add_key(key: String?, index: Int) {
-            if (key != null) getOrPut(key) { ArrayList(1) } += index
+        internal fun alert_projection_band(
+            item: FeedAircraft,
+            projection_valid_until: Double
+        ): Int {
+            return projection_band(
+                alert_projection_reach_meters(item, projection_valid_until)
+            )
         }
+
+        private fun display_projection_reach_meters(
+            item: FeedAircraft,
+            projection_valid_until: Double
+        ): Double {
+            if (item.on_ground == true || !projection_valid_until.isFinite()) return 0.0
+            val speed = item.velocity_ms?.takeIf {
+                it.isFinite() &&
+                        it > MIN_DISPLAY_PROJECTION_SPEED_MS &&
+                        it <= MAX_DISPLAY_PROJECTION_SPEED_MS
+            } ?: return 0.0
+            if (item.track_deg?.isFinite() != true) return 0.0
+            val position_time =
+                item.position_time_sec?.takeIf { it.isFinite() } ?: return 0.0
+            val raw_elapsed = projection_valid_until - position_time
+            if (!raw_elapsed.isFinite()) return 0.0
+            return speed * raw_elapsed.coerceAtLeast(0.0)
+        }
+
+        private fun alert_projection_reach_meters(
+            item: FeedAircraft,
+            projection_valid_until: Double
+        ): Double {
+            if (!projection_valid_until.isFinite()) return 0.0
+            val speed = item.velocity_ms?.takeIf {
+                it.isFinite() &&
+                        it in FlightAlertAppSettings.AlertProjection.MIN_PROJECTABLE_SPEED_MS..
+                        FlightAlertAppSettings.AlertProjection.MAX_PROJECTABLE_SPEED_MS
+            } ?: return 0.0
+            if (item.track_deg?.isFinite() != true) return 0.0
+            val report_time = item.position_time_sec ?: item.last_contact_sec ?: return 0.0
+            val raw_age = projection_valid_until - report_time
+            val age = when {
+                raw_age.isNaN() -> 0.0
+                raw_age <= 0.0 -> 0.0
+                raw_age >= FlightAlertAppSettings.AlertProjection.MAX_SECONDS ->
+                    FlightAlertAppSettings.AlertProjection.MAX_SECONDS
+                else -> raw_age
+            }
+            if (age <= FlightAlertAppSettings.AlertProjection.MIN_SECONDS) return 0.0
+            return speed * age
+        }
+
+        private fun projection_band(distance_meters: Double): Int {
+            if (!(distance_meters > 0.0)) return 0
+            if (!distance_meters.isFinite()) return FULL_GLOBE_PROJECTION_BAND
+            val rounded_exponent =
+                (Math.getExponent(Math.nextDown(distance_meters)) + 1).coerceAtLeast(0)
+            return if (rounded_exponent >= FULL_GLOBE_PROJECTION_BAND - 1) {
+                FULL_GLOBE_PROJECTION_BAND
+            } else {
+                rounded_exponent + 1
+            }
+        }
+
+        private fun bounds_for_projection_band(
+            bounds: GlobeQueryBounds,
+            cached_bounds: Array<GlobeQueryBounds?>,
+            band: Int
+        ): GlobeQueryBounds {
+            return cached_bounds[band]
+                ?: bounds.expanded_by_distance_meters(
+                    if (band == FULL_GLOBE_PROJECTION_BAND) {
+                        Double.POSITIVE_INFINITY
+                    } else {
+                        Math.scalb(1.0, band - 1)
+                    }
+                ).also { cached_bounds[band] = it }
+        }
+
+        private const val FULL_GLOBE_PROJECTION_BAND = 0xff
+        private const val MINIMUM_METERS_PER_LATITUDE_DEGREE = 110_000.0
+        private const val MIN_DISPLAY_PROJECTION_SPEED_MS = 0.5
+        private const val MAX_DISPLAY_PROJECTION_SPEED_MS = 1_200.0
     }
 }
 
@@ -405,79 +611,62 @@ internal data class GlobeQueryBounds(
         if (lat !in min_lat..max_lat) return false
         return if (wraps_longitude) lon >= min_lon || lon <= max_lon else lon in min_lon..max_lon
     }
-}
 
-internal class GlobeAircraftSpatialIndex private constructor(
-    private val cells: Array<IntArray?>
-) {
-    fun select(bounds: GlobeQueryBounds, aircraft: List<FeedAircraft>, selected: BitSet) {
-        val min_row = latitude_cell(bounds.min_lat)
-        val max_row = latitude_cell(bounds.max_lat)
-        if (bounds.wraps_longitude) {
-            select(min_row, max_row, longitude_cell(bounds.min_lon), LONGITUDE_CELLS - 1, bounds, aircraft, selected)
-            select(min_row, max_row, 0, longitude_cell(bounds.max_lon), bounds, aircraft, selected)
-        } else {
-            select(
-                min_row,
-                max_row,
-                longitude_cell(bounds.min_lon),
-                longitude_cell(bounds.max_lon),
-                bounds,
-                aircraft,
-                selected
-            )
+    fun expanded_by_distance_meters(distance_meters: Double): GlobeQueryBounds {
+        if (distance_meters <= 0.0) return this
+        if (!distance_meters.isFinite()) {
+            return GlobeQueryBounds(-90.0, -180.0, 90.0, 180.0, false)
         }
-    }
-
-    private fun select(
-        min_row: Int,
-        max_row: Int,
-        min_column: Int,
-        max_column: Int,
-        bounds: GlobeQueryBounds,
-        aircraft: List<FeedAircraft>,
-        selected: BitSet
-    ) {
-        for (row in min_row..max_row) {
-            for (column in min_column..max_column) {
-                cells[row * LONGITUDE_CELLS + column]?.forEach { index ->
-                    val item = aircraft[index]
-                    if (bounds.contains(item.lat, item.lon)) selected.set(index)
-                }
-            }
-        }
-    }
-
-    companion object {
-        private const val CELL_DEGREES = 2.0
-        private const val LATITUDE_CELLS = 90
-        private const val LONGITUDE_CELLS = 180
-        private const val CELL_COUNT = LATITUDE_CELLS * LONGITUDE_CELLS
-
-        fun from(aircraft: List<FeedAircraft>): GlobeAircraftSpatialIndex {
-            val mutable_cells = arrayOfNulls<MutableList<Int>>(CELL_COUNT)
-            aircraft.forEachIndexed { index, item ->
-                val cell = latitude_cell(item.lat) * LONGITUDE_CELLS + longitude_cell(item.lon)
-                mutable_cells[cell] =
-                    (mutable_cells[cell] ?: ArrayList<Int>().also { mutable_cells[cell] = it })
-                        .also { it += index }
-            }
-            return GlobeAircraftSpatialIndex(
-                Array(CELL_COUNT) { index -> mutable_cells[index]?.toIntArray() }
+        val angular_distance =
+            Math.nextUp(distance_meters / GLOBE_EARTH_RADIUS_M)
+        val latitude_delta = Math.toDegrees(angular_distance)
+        val expanded_min_lat = (min_lat - latitude_delta).coerceAtLeast(-90.0)
+        val expanded_max_lat = (max_lat + latitude_delta).coerceAtMost(90.0)
+        val full_longitude =
+            !wraps_longitude && min_lon <= -180.0 && max_lon >= 180.0
+        val maximum_source_latitude =
+            Math.toRadians(max(abs(min_lat), abs(max_lat)))
+        if (full_longitude ||
+            angular_distance >= Math.PI ||
+            maximum_source_latitude + angular_distance >= Math.PI / 2.0
+        ) {
+            return GlobeQueryBounds(
+                expanded_min_lat,
+                -180.0,
+                expanded_max_lat,
+                180.0,
+                false
             )
         }
 
-        private fun latitude_cell(lat: Double): Int {
-            return ((lat.coerceIn(-90.0, 90.0) + 90.0) / CELL_DEGREES)
-                .toInt()
-                .coerceIn(0, LATITUDE_CELLS - 1)
+        val longitude_delta = Math.nextUp(
+            Math.toDegrees(
+                asin(
+                    (sin(angular_distance) / cos(maximum_source_latitude))
+                        .coerceIn(0.0, 1.0)
+                )
+            )
+        )
+        val longitude_span =
+            if (wraps_longitude) 360.0 - min_lon + max_lon else max_lon - min_lon
+        if (longitude_span + 2.0 * longitude_delta >= 360.0) {
+            return GlobeQueryBounds(
+                expanded_min_lat,
+                -180.0,
+                expanded_max_lat,
+                180.0,
+                false
+            )
         }
-
-        private fun longitude_cell(lon: Double): Int {
-            return ((lon.coerceIn(-180.0, 180.0) + 180.0) / CELL_DEGREES)
-                .toInt()
-                .coerceIn(0, LONGITUDE_CELLS - 1)
-        }
+        val expanded_min_lon = MapProjection.normalize_longitude(min_lon - longitude_delta)
+        val expanded_max_lon = MapProjection.normalize_longitude(max_lon + longitude_delta)
+        return GlobeQueryBounds(
+            min_lat = expanded_min_lat,
+            min_lon = expanded_min_lon,
+            max_lat = expanded_max_lat,
+            max_lon = expanded_max_lon,
+            wraps_longitude = expanded_min_lon > expanded_max_lon
+        )
     }
 }
 
@@ -502,9 +691,25 @@ private fun normalize_globe_search_key(value: String?): String? {
         ?.takeIf { it.isNotBlank() }
 }
 
+private fun FeedAircraft.matches_normalized_search(search: String): Boolean {
+    return normalize_globe_search_key(callsign)?.contains(search) == true ||
+            normalize_globe_search_key(registration)?.contains(search) == true ||
+            normalize_globe_search_key(icao24)?.contains(search) == true ||
+            normalize_globe_search_key(type_code)?.contains(search) == true
+}
+
+private fun FeedAircraft.matches_normalized_exact_key(search: String): Boolean {
+    return normalize_globe_search_key(icao24) == search ||
+            normalize_globe_search_key(callsign) == search ||
+            normalize_globe_search_key(registration) == search
+}
+
 internal class GlobeBinCraftClient(private val user_agent: String) {
     private var content_revision = 0L
     private var cached_compressed: ByteArray? = null
+    private var cached_compressed_size = 0
+    private var incoming_compressed = ByteArray(DEFAULT_BUFFER_SIZE)
+    private var decoded = ByteArray(DEFAULT_BUFFER_SIZE)
     private var cached_snapshot: GlobeBinCraftSnapshot? = null
 
     fun fetch(bounds: FeedBounds): GlobeBinCraftSnapshot? {
@@ -538,18 +743,36 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 connection.errorStream?.close()
                 return null
             }
-            val compressed = connection.inputStream.use { it.readBytes() }
-            val previous_snapshot = cached_snapshot
-            if (previous_snapshot != null &&
-                cached_compressed?.contentEquals(compressed) == true
-            ) {
-                return previous_snapshot
+            val compressed_size = connection.inputStream.use { input ->
+                read_compressed(
+                    input = input,
+                    expected_size = connection.contentLength.coerceIn(
+                        DEFAULT_BUFFER_SIZE,
+                        MAX_INITIAL_RESPONSE_CAPACITY
+                    )
+                )
             }
-            val decoded = ZstdInputStream(ByteArrayInputStream(compressed)).use { it.readBytes() }
-            parse(decoded)?.let {
+            val previous_snapshot = cached_snapshot
+            val previous_compressed = cached_compressed
+            if (previous_snapshot != null && previous_compressed != null &&
+                cached_compressed_size == compressed_size
+            ) {
+                var index = 0
+                while (index < compressed_size &&
+                    previous_compressed[index] == incoming_compressed[index]
+                ) {
+                    index++
+                }
+                if (index == compressed_size) return previous_snapshot
+            }
+            val decoded_size = decompress(compressed_size)
+            parse(decoded, decoded_size)?.let {
                 content_revision += 1L
                 it.copy(content_revision = content_revision).also { versioned ->
-                    cached_compressed = compressed
+                    cached_compressed = incoming_compressed
+                    cached_compressed_size = compressed_size
+                    incoming_compressed = previous_compressed
+                        ?: ByteArray(max(DEFAULT_BUFFER_SIZE, compressed_size))
                     cached_snapshot = versioned
                 }
             }
@@ -560,12 +783,89 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         }
     }
 
-    private fun parse(bytes: ByteArray): GlobeBinCraftSnapshot? {
-        if (bytes.size < HEADER_BYTES) return null
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    private fun read_compressed(input: InputStream, expected_size: Int): Int {
+        incoming_compressed = ensure_capacity(incoming_compressed, expected_size)
+        var size = 0
+        while (true) {
+            if (size == incoming_compressed.size) {
+                incoming_compressed = ensure_capacity(incoming_compressed, size + 1)
+            }
+            val read = input.read(
+                incoming_compressed,
+                size,
+                incoming_compressed.size - size
+            )
+            when {
+                read < 0 -> return size
+                read > 0 -> size += read
+                else -> {
+                    val next = input.read()
+                    if (next < 0) return size
+                    if (size == incoming_compressed.size) {
+                        incoming_compressed = ensure_capacity(incoming_compressed, size + 1)
+                    }
+                    incoming_compressed[size++] = next.toByte()
+                }
+            }
+        }
+    }
+
+    private fun decompress(compressed_size: Int): Int {
+        val expected_size = Zstd.getFrameContentSize(
+            incoming_compressed,
+            0,
+            compressed_size
+        )
+        if (expected_size in 1L..Int.MAX_VALUE.toLong()) {
+            decoded = ensure_capacity(decoded, expected_size.toInt())
+            val decoded_size = Zstd.decompressByteArray(
+                decoded,
+                0,
+                decoded.size,
+                incoming_compressed,
+                0,
+                compressed_size
+            )
+            if (!Zstd.isError(decoded_size) && decoded_size in 0L..Int.MAX_VALUE.toLong()) {
+                return decoded_size.toInt()
+            }
+        }
+        ZstdInputStream(
+            ByteArrayInputStream(incoming_compressed, 0, compressed_size)
+        ).use { stream ->
+            var size = 0
+            while (true) {
+                if (size == decoded.size) {
+                    decoded = ensure_capacity(decoded, size + 1)
+                }
+                val read = stream.read(decoded, size, decoded.size - size)
+                when {
+                    read < 0 -> return size
+                    read > 0 -> size += read
+                    else -> {
+                        val next = stream.read()
+                        if (next < 0) return size
+                        if (size == decoded.size) {
+                            decoded = ensure_capacity(decoded, size + 1)
+                        }
+                        decoded[size++] = next.toByte()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun ensure_capacity(buffer: ByteArray, required_size: Int): ByteArray {
+        if (buffer.size >= required_size) return buffer
+        return buffer.copyOf(max(required_size, buffer.size * 2))
+    }
+
+    private fun parse(bytes: ByteArray, byte_count: Int): GlobeBinCraftSnapshot? {
+        if (byte_count < HEADER_BYTES) return null
+        val buffer = ByteBuffer.wrap(bytes, 0, byte_count).order(ByteOrder.LITTLE_ENDIAN)
         val now_sec = u32(buffer, 0) / 1000.0 + u32(buffer, 4) * 4294967.296
         val stride = int(buffer, 8)
-        if (stride !in MIN_STRIDE_BYTES..MAX_STRIDE_BYTES || bytes.size < stride) return null
+        if (stride !in MIN_STRIDE_BYTES..MAX_STRIDE_BYTES || byte_count < stride) return null
         val global_with_position = int(buffer, 12)
         val messages = u32(buffer, 28)
         val bin_craft_version = int(buffer, 40)
@@ -573,20 +873,46 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val flags = int(buffer, 48)
         val use_message_rate = flags and 1 != 0
         val parsed = ArrayList<FeedAircraft>(global_with_position.coerceIn(512, 32768))
+        val record_count = ((byte_count - stride) / stride).coerceAtLeast(0)
+        val display_projection_bands = ByteArray(record_count)
+        val alert_projection_bands = ByteArray(record_count)
+        val projection_valid_until = now_sec + GLOBE_SNAPSHOT_VALIDITY_SECONDS
+        var maximum_display_projection_band = 0
+        var maximum_alert_projection_band = 0
         var offset = stride
-        while (offset + stride <= bytes.size) {
-            parse_aircraft(
+        while (offset + stride <= byte_count) {
+            val item = parse_aircraft(
                 buffer,
                 offset,
                 stride,
                 bin_craft_version,
                 use_message_rate,
                 now_sec
-            )?.let(parsed::add)
+            )
+            if (item != null) {
+                val index = parsed.size
+                parsed += item
+                val display_band =
+                    GlobeAircraftStore.display_projection_band(item, projection_valid_until)
+                val alert_band =
+                    GlobeAircraftStore.alert_projection_band(item, projection_valid_until)
+                display_projection_bands[index] = display_band.toByte()
+                alert_projection_bands[index] = alert_band.toByte()
+                maximum_display_projection_band =
+                    max(maximum_display_projection_band, display_band)
+                maximum_alert_projection_band =
+                    max(maximum_alert_projection_band, alert_band)
+            }
             offset += stride
         }
         return GlobeBinCraftSnapshot(
-            store = GlobeAircraftStore.from(parsed),
+            store = GlobeAircraftStore(
+                aircraft = parsed,
+                display_projection_bands = display_projection_bands,
+                alert_projection_bands = alert_projection_bands,
+                maximum_display_projection_band = maximum_display_projection_band,
+                maximum_alert_projection_band = maximum_alert_projection_band
+            ),
             epoch_sec = now_sec,
             partial_coverage = parsed.isEmpty() && (global_with_position > 0 || messages > 0 || message_rate > 0.0)
         )
@@ -628,8 +954,8 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val valid_75 = u8(buffer, offset + 75)
         val valid_76 = u8(buffer, offset + 76)
         val valid_77 = u8(buffer, offset + 77)
-        val category =
-            u8(buffer, offset + 64).takeIf { it != 0 }?.toString(16)?.uppercase(Locale.US)
+        val category_value = u8(buffer, offset + 64)
+        val category = if (category_value != 0) hex_labels[category_value] else null
         val type_code = ascii(buffer, offset + 88, 4)
         val registration = ascii(buffer, offset + 92, 12)
         val flight = ascii(buffer, offset + 78, 8)
@@ -730,29 +1056,34 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                     offset + 69
                 ) and 15
             ) else null,
-            nic_baro = if (valid_75 and 16 != 0) (u8(
+            nic_baro = if (valid_75 and 16 != 0) decimal_labels[u8(
                 buffer,
                 offset + 73
-            ) and 1).toString() else null,
+            ) and 1] else null,
             rc_m = if (u8(buffer, offset + 71) and 15 != 0) u16(
                 buffer,
                 offset + 60
             ).toDouble() else null,
             rssi = rssi,
             message_rate = if (use_message_rate) u16(buffer, offset + 62) / 10.0 else null,
-            receiver_count_label = receiver_count?.toString(),
+            receiver_count_label =
+                if (receiver_count != null) decimal_labels[receiver_count] else null,
             category_label = category
-        ).takeIf { it.has_values }
+        )
         return FeedAircraft(
             icao24 = hex,
             callsign = callsign,
             registration = registration,
             type_code = type_code,
-            metadata = AircraftMetadataSeed(
-                source_name = FeedSource.AIRPLANES_LIVE_GLOBE.display_name,
-                registration = registration,
-                type_code = type_code
-            ).takeIf { it.has_details },
+            metadata = if (registration != null || type_code != null) {
+                AircraftMetadataSeed(
+                    source_name = FeedSource.AIRPLANES_LIVE_GLOBE.display_name,
+                    registration = registration,
+                    type_code = type_code
+                )
+            } else {
+                null
+            },
             db_flags = db_flags,
             lat = lat,
             lon = lon,
@@ -802,26 +1133,19 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
             3, 10, 11 -> (u8(buffer, offset + 70) and 240) ushr 4
             else -> return null
         }
-        return "v$version"
+        return adsb_version_labels[version]
     }
 
     private fun sil_type_label(value: Int): String {
         return when (value) {
             1 -> "per_sample"
             2 -> "per_hour"
-            else -> value.toString()
+            else -> decimal_labels[value]
         }
     }
 
     private fun nav_modes(bits: Int): List<String> {
-        val result = ArrayList<String>(6)
-        if (bits and 1 != 0) result += "autopilot"
-        if (bits and 2 != 0) result += "vnav"
-        if (bits and 4 != 0) result += "alt_hold"
-        if (bits and 8 != 0) result += "approach"
-        if (bits and 16 != 0) result += "lnav"
-        if (bits and 32 != 0) result += "tcas"
-        return result
+        return nav_mode_labels[bits and 63]
     }
 
     private fun squawk(buffer: ByteBuffer, offset: Int): String {
@@ -838,15 +1162,19 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
     }
 
     private fun ascii(buffer: ByteBuffer, offset: Int, max_length: Int): String? {
-        val builder = StringBuilder(max_length)
-        var index = 0
-        while (index < max_length && offset + index < buffer.limit()) {
-            val byte = u8(buffer, offset + index)
-            if (byte == 0) break
-            builder.append(byte.toChar())
-            index++
-        }
-        return builder.toString().trim().takeIf { it.isNotBlank() }
+        var end = offset
+        val limit = minOf(offset + max_length, buffer.limit())
+        while (end < limit && u8(buffer, end) != 0) end++
+        var start = offset
+        while (start < end && u8(buffer, start).toChar().isWhitespace()) start++
+        while (end > start && u8(buffer, end - 1).toChar().isWhitespace()) end--
+        if (start == end) return null
+        return String(
+            buffer.array(),
+            buffer.arrayOffset() + start,
+            end - start,
+            Charsets.ISO_8859_1
+        )
     }
 
     private fun category_from_globe(category: String?, type_code: String?): Int? {
@@ -882,5 +1210,20 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         const val MAX_STRIDE_BYTES = 160
         const val FEET_PER_METER = 3.28084
         const val KNOTS_TO_METERS_PER_SECOND = 0.514444
+        const val MAX_INITIAL_RESPONSE_CAPACITY = 8 * 1024 * 1024
+
+        val decimal_labels = Array(256) { it.toString() }
+        val hex_labels = Array(256) { it.toString(16).uppercase(Locale.US) }
+        val adsb_version_labels = Array(16) { "v$it" }
+        val nav_mode_labels = Array<List<String>>(64) { bits ->
+            buildList(6) {
+                if (bits and 1 != 0) add("autopilot")
+                if (bits and 2 != 0) add("vnav")
+                if (bits and 4 != 0) add("alt_hold")
+                if (bits and 8 != 0) add("approach")
+                if (bits and 16 != 0) add("lnav")
+                if (bits and 32 != 0) add("tcas")
+            }
+        }
     }
 }

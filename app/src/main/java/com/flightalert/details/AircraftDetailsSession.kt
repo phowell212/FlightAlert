@@ -1272,21 +1272,12 @@ class AircraftDetailsWarmCache(
         request_tokens.remove(key)
     }
 
-    fun fresh_entry(key: String, now_elapsed_ms: Long): AircraftDetailsWarmCacheEntry? {
-        val entry = entries[key] ?: return null
-        if (now_elapsed_ms - entry.updated_elapsed_ms <= max_age_ms) return entry
-        entries.remove(key)
-        return null
-    }
+    fun display_entry(key: String): AircraftDetailsWarmCacheEntry? = entries[key]
 
     fun needs_refresh(key: String, now_elapsed_ms: Long): Boolean {
         if (key.isBlank() || request_tokens.containsKey(key)) return false
         val cached = entries[key] ?: return true
-        if (now_elapsed_ms - cached.updated_elapsed_ms > max_age_ms) {
-            entries.remove(key)
-            return true
-        }
-        return false
+        return now_elapsed_ms - cached.updated_elapsed_ms > max_age_ms
     }
 
     fun cache_details(
@@ -1299,7 +1290,7 @@ class AircraftDetailsWarmCache(
         val previous = entries[key]
         val entry =
             (previous ?: AircraftDetailsWarmCacheEntry(updated_elapsed_ms = now_elapsed_ms)).copy(
-                details = details,
+                details = if (still_loading) previous?.details ?: details else details,
                 details_loading = still_loading,
                 details_status = AircraftDetailsCoordinator.details_status(details, still_loading),
                 photo_status = previous?.photo_status ?: "Searching real photo sources",
@@ -1388,7 +1379,7 @@ class AircraftDetailsWarmRequester(
         get() = warm_cache.in_flight_count
 
     fun fresh_details_for(aircraft: Aircraft): AircraftDetailsWarmCacheEntry? {
-        return warm_cache.fresh_entry(cache_key(aircraft), SystemClock.elapsedRealtime())
+        return warm_cache.display_entry(cache_key(aircraft))
     }
 
     fun should_prefetch(aircraft: Aircraft, now_elapsed_ms: Long): Boolean {
@@ -1412,10 +1403,7 @@ class AircraftDetailsWarmRequester(
                 is_current_warmed_request(key, aircraft, requested_id, token)
             },
             is_photo_available = {
-                warm_cache.fresh_entry(
-                    key,
-                    SystemClock.elapsedRealtime()
-                )?.photo != null
+                warm_cache.display_entry(key)?.photo != null
             },
             on_details = { requested_id, token, details, still_loading ->
                 if (is_current_warmed_request(key, aircraft, requested_id, token)) {

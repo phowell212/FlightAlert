@@ -20,6 +20,7 @@ import com.flightalert.aircraft.AircraftMetadataSeed
 import com.flightalert.aircraft.AircraftTelemetry
 import com.flightalert.aircraft.aircraft_identity_key
 import com.flightalert.ui.AircraftFeedMode
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 
@@ -41,6 +42,7 @@ data class FeedBounds(
 
 data class VisibleAircraftRequest(
     val feed_bounds: FeedBounds,
+    val globe_display_bounds: List<FeedBounds>,
     val safety_api_bounds: FeedBounds?,
     val own_lat: Double,
     val own_lon: Double,
@@ -48,7 +50,8 @@ data class VisibleAircraftRequest(
     val center_lon: Double,
     val zoom: Double,
     val feed_mode: AircraftFeedMode,
-    val exact_search: String?
+    val search_query: String?,
+    val selected_aircraft_key: String?
 )
 
 data class FeedResult(
@@ -58,7 +61,21 @@ data class FeedResult(
     val epoch_sec: Double? = null,
     val http_code: Int? = null,
     val query_count: Int = 1,
-    val partial_coverage: Boolean = false
+    val partial_coverage: Boolean = false,
+    val content_revision: Long? = null,
+    val globe_aircraft: List<FeedAircraft>? = null,
+    val globe_motion_candidates: List<FeedAircraft>? = null,
+    val globe_default_summary: GlobeDefaultAircraftSummary? = null
+)
+
+data class GlobeDefaultAircraftSummary(
+    val total: Int,
+    val airborne_total: Int,
+    val nearest_airborne: FeedAircraft?,
+    val content_revision: Long,
+    val own_lat_bits: Long,
+    val own_lon_bits: Long,
+    val projection_valid_until_epoch_sec: Double
 )
 
 data class FeedAircraft(
@@ -83,6 +100,30 @@ data class FeedAircraft(
 ) {
     fun feed_key(): String =
         aircraft_identity_key(icao24, registration, callsign, lat, lon)
+}
+
+internal fun adsb_emitter_category(raw_category: String?): Int? {
+    return when (raw_category?.trim()?.uppercase(Locale.US)) {
+        "A1" -> 2
+        "A2" -> 3
+        "A3" -> 4
+        "A4" -> 5
+        "A5" -> 6
+        "A6" -> 7
+        "A7" -> 8
+        "B1" -> 9
+        "B2" -> 10
+        "B3" -> 11
+        "B4" -> 12
+        "B6" -> 14
+        "B7" -> 15
+        "C1" -> 16
+        "C2" -> 17
+        "C3" -> 18
+        "C4" -> 19
+        "C5" -> 20
+        else -> null
+    }
 }
 
 enum class FeedStatus {

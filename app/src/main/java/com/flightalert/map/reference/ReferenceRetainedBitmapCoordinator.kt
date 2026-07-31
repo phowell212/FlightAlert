@@ -68,6 +68,9 @@ internal class ReferenceRetainedBitmapCoordinator<Key, Value>(
     fun hasCurrentRequest(): Boolean = current != null
 
     @Synchronized
+    fun currentKey(): Key? = current?.key
+
+    @Synchronized
     fun cancel() {
         current = null
         completed?.let { discardValue(it.value) }

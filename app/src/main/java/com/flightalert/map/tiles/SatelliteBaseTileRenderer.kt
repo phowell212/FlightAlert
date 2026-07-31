@@ -65,7 +65,6 @@ internal class SatelliteBaseTileRenderer(
     private val with_alpha: (Int, Int) -> Int,
     private val report_status: (String) -> Unit,
     private val request_redraw: () -> Unit,
-    private val map_content_revision: AtomicLong = AtomicLong(),
     shared_map_tile_disk_cache: MapTileDiskCache? = null,
     private val overlay_drawer: SatelliteBaseOverlayDrawer = SatelliteBaseOverlayDrawer { _, _, _, _, _ ->
         TileLayerDrawStats(
@@ -135,7 +134,6 @@ internal class SatelliteBaseTileRenderer(
     private var last_pan_cache_zoom_change_ms = 0L
     private var last_pan_cache_record_attempt_ms = 0L
     private var last_pan_cache_record_attempt_key: SatellitePanCacheKey? = null
-    private var last_pan_cache_record_attempt_revision = Long.MIN_VALUE
 
     fun draw_tiles(
         canvas: Canvas,
@@ -146,12 +144,10 @@ internal class SatelliteBaseTileRenderer(
         val now_ms = SystemClock.elapsedRealtime()
         observe_pan_cache_draw_zoom(viewport.zoom, now_ms)
         val pan_cache_key = satellite_pan_cache_key(state, style)
-        val content_revision = map_content_revision.get()
         pan_compositor.draw_cached(
             canvas = canvas,
             viewport = viewport,
             key = pan_cache_key,
-            content_revision = content_revision,
             now_ms = now_ms
         )?.let { status ->
             val label_stats = overlay_drawer.draw(
@@ -165,9 +161,9 @@ internal class SatelliteBaseTileRenderer(
             return status
         }
 
-        if (should_record_pan_cache(
+        if (!state.interaction_active &&
+            should_record_pan_cache(
                 key = pan_cache_key,
-                content_revision = content_revision,
                 now_ms = now_ms,
             )
         ) {
@@ -175,36 +171,42 @@ internal class SatelliteBaseTileRenderer(
                 width = ceil(viewport.width + MAP_PAN_CACHE_PADDING_PX * 2f),
                 height = ceil(viewport.height + MAP_PAN_CACHE_PADDING_PX * 2f),
             )
-            if (satellite_pan_cache_recording_ready(cache_viewport, state, now_ms)) {
+            val recording_plan =
+                satellite_pan_cache_recording_plan(cache_viewport, state, now_ms)
+            if (recording_plan != null) {
                 pan_compositor.record_and_draw_current(
                     canvas = canvas,
                     record_viewport = viewport,
                     draw_viewport = viewport,
                     key = pan_cache_key,
-                    content_revision = content_revision,
+                    dependency_keys = recording_plan.dependency_keys,
                     padding = MAP_PAN_CACHE_PADDING_PX
                 ) { recording_canvas, padded_viewport ->
                     val recording_now_ms = SystemClock.elapsedRealtime()
-                    val recorded_result = draw_tiles_direct(
-                        canvas = recording_canvas,
-                        viewport = padded_viewport,
-                        state = state,
-                        style = style,
-                        allow_speculative_requests = false,
-                        draw_reference_layers = false,
-                        include_retained_interim = false,
-                        draw_lower_lod_pixels = satellite_pan_cache_lower_lod_pixels_needed(
+                    if (satellite_pan_cache_recording_plan(
                             padded_viewport,
                             state,
                             recording_now_ms
-                        ),
-                        now_ms = recording_now_ms
-                    )
-                    MapLayerPanCacheRecordResult(
-                        status = recorded_result.status,
-                        reusable = recorded_result.reusable_for_pan_cache &&
-                            map_content_revision.get() == content_revision
-                    )
+                        ) != recording_plan
+                    ) {
+                        null
+                    } else {
+                        val recorded_result = draw_tiles_direct(
+                            canvas = recording_canvas,
+                            viewport = padded_viewport,
+                            state = state,
+                            style = style,
+                            allow_speculative_requests = false,
+                            draw_reference_layers = false,
+                            include_retained_interim = false,
+                            draw_lower_lod_pixels = recording_plan.draw_lower_lod_pixels,
+                            now_ms = recording_now_ms
+                        )
+                        MapLayerPanCacheRecordResult(
+                            status = recorded_result.status,
+                            reusable = recorded_result.reusable_for_pan_cache
+                        )
+                    }
                 }?.let { recorded ->
                     val label_stats = overlay_drawer.draw(
                         canvas = canvas,
@@ -246,6 +248,9 @@ internal class SatelliteBaseTileRenderer(
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
 
         val lod = satellite_lod_state(viewport)
+        val lower_lod_pixels_needed =
+            draw_lower_lod_pixels &&
+                satellite_lower_lod_pixels_needed(viewport, state, now_ms)
 
         val request_frame = begin_tile_request_generation()
         val request_generation = request_frame.generation
@@ -253,18 +258,20 @@ internal class SatelliteBaseTileRenderer(
             !request_frame.requests_were_idle
 
         val interim_draw_needed = include_retained_interim &&
-                (lod.blend_active ||
-                        !satellite_tile_grid_fully_available(
-                            viewport = viewport,
-                            state = state,
-                            tile_zoom = lod.lower_tile_zoom
-                        ))
+                !satellite_tile_grid_fully_available(
+                    viewport = viewport,
+                    state = state,
+                    tile_zoom = lod.lower_tile_zoom,
+                    require_opaque = true,
+                    require_settled_at_ms = now_ms
+                )
         if (interim_draw_needed) {
             draw_interim_tiles(
                 canvas = canvas,
                 viewport = viewport,
                 state = state,
-                now_ms = now_ms
+                now_ms = now_ms,
+                lower_tile_zoom = lod.lower_tile_zoom,
             )
         }
         loaded_interim_tile_buffer.clear()
@@ -277,7 +284,7 @@ internal class SatelliteBaseTileRenderer(
             style = style,
             tile_zoom = lod.lower_tile_zoom,
             now_ms = now_ms,
-            layer_alpha = if (draw_lower_lod_pixels) 1f else 0f,
+            layer_alpha = if (lower_lod_pixels_needed) 1f else 0f,
             draw_unavailable_if_missing = true,
             allow_parent_fallback = true,
             loaded_interim_tiles = loaded_interim_tile_buffer,
@@ -407,48 +414,62 @@ internal class SatelliteBaseTileRenderer(
 
     private fun should_record_pan_cache(
         key: SatellitePanCacheKey,
-        content_revision: Long,
         now_ms: Long
     ): Boolean {
         if (now_ms - last_pan_cache_zoom_change_ms < MAP_PAN_CACHE_ZOOM_STABILITY_MS) {
             return false
         }
         if (last_pan_cache_record_attempt_key == key &&
-            last_pan_cache_record_attempt_revision == content_revision &&
             now_ms - last_pan_cache_record_attempt_ms < MAP_PAN_CACHE_RECORD_RETRY_MS
         ) {
             return false
         }
         last_pan_cache_record_attempt_key = key
-        last_pan_cache_record_attempt_revision = content_revision
         last_pan_cache_record_attempt_ms = now_ms
         return true
     }
 
-    private fun satellite_pan_cache_recording_ready(
+    private fun satellite_pan_cache_recording_plan(
         viewport: Viewport,
         state: MapTileRenderState,
         now_ms: Long,
-    ): Boolean {
+    ): SatellitePanCachePlan? {
         val lod = satellite_lod_state(viewport)
+        val lower_dependency_keys = LinkedHashSet<String>()
         if (!satellite_tile_grid_fully_available(
                 viewport = viewport,
                 state = state,
                 tile_zoom = lod.lower_tile_zoom,
                 require_settled_at_ms = now_ms,
+                dependency_keys = lower_dependency_keys,
             )
-        ) return false
-        return !lod.has_upper_lod ||
-            lod.upper_lod_alpha <= MIN_LAYER_ALPHA ||
-            satellite_tile_grid_fully_available(
+        ) return null
+        val upper_dependency_keys = LinkedHashSet<String>()
+        if (lod.has_upper_lod &&
+            lod.upper_lod_alpha > MIN_LAYER_ALPHA &&
+            !satellite_tile_grid_fully_available(
                 viewport = viewport,
                 state = state,
                 tile_zoom = lod.upper_tile_zoom,
                 require_settled_at_ms = now_ms,
+                dependency_keys = upper_dependency_keys,
             )
+        ) return null
+        val draw_lower_lod_pixels =
+            satellite_lower_lod_pixels_needed(viewport, state, now_ms)
+        val dependency_keys = LinkedHashSet<String>(
+            upper_dependency_keys.size +
+                if (draw_lower_lod_pixels) lower_dependency_keys.size else 0
+        )
+        if (draw_lower_lod_pixels) dependency_keys += lower_dependency_keys
+        dependency_keys += upper_dependency_keys
+        return SatellitePanCachePlan(
+            dependency_keys = dependency_keys,
+            draw_lower_lod_pixels = draw_lower_lod_pixels,
+        )
     }
 
-    private fun satellite_pan_cache_lower_lod_pixels_needed(
+    private fun satellite_lower_lod_pixels_needed(
         viewport: Viewport,
         state: MapTileRenderState,
         now_ms: Long
@@ -484,7 +505,6 @@ internal class SatelliteBaseTileRenderer(
 
     fun clear() {
         pan_compositor.clear()
-        map_content_revision.incrementAndGet()
         synchronized(tile_cache) {
             tile_cache.clear()
             tile_loaded_elapsed_ms.clear()
@@ -685,7 +705,8 @@ internal class SatelliteBaseTileRenderer(
         state: MapTileRenderState,
         tile_zoom: Int,
         require_opaque: Boolean = false,
-        require_settled_at_ms: Long? = null
+        require_settled_at_ms: Long? = null,
+        dependency_keys: MutableSet<String>? = null,
     ): Boolean {
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
@@ -708,6 +729,7 @@ internal class SatelliteBaseTileRenderer(
                 if (require_settled_at_ms != null &&
                     satellite_tile_load_alpha(key, require_settled_at_ms) < 0.999f
                 ) return false
+                dependency_keys?.add(key)
             }
         }
         return true
@@ -752,7 +774,8 @@ internal class SatelliteBaseTileRenderer(
         canvas: Canvas,
         viewport: Viewport,
         state: MapTileRenderState,
-        now_ms: Long
+        now_ms: Long,
+        lower_tile_zoom: Int,
     ): Boolean {
         prune_interim_tiles(now_ms)
         val visible_tiles = visible_interim_tile_buffer
@@ -765,13 +788,27 @@ internal class SatelliteBaseTileRenderer(
         if (visible_tiles.isEmpty()) return false
         visible_tiles.sortBy { it.z }
         for (tile in visible_tiles) {
-            draw_interim_tile(canvas, tile, viewport)
+            draw_interim_tile(
+                canvas = canvas,
+                tile = tile,
+                viewport = viewport,
+                cache_key = state.cache_key,
+                lower_tile_zoom = lower_tile_zoom,
+                now_ms = now_ms,
+            )
             tile.last_used_ms = now_ms
         }
         return true
     }
 
-    private fun draw_interim_tile(canvas: Canvas, tile: InterimRasterTile, viewport: Viewport) {
+    private fun draw_interim_tile(
+        canvas: Canvas,
+        tile: InterimRasterTile,
+        viewport: Viewport,
+        cache_key: String,
+        lower_tile_zoom: Int,
+        now_ms: Long,
+    ) {
         val scale = 2.0.pow(viewport.zoom - tile.z)
         val tile_size_on_screen = (TILE_SIZE * scale).toFloat()
         val tile_world_width_at_zoom = TILE_SIZE * 2.0.pow(viewport.zoom)
@@ -791,8 +828,53 @@ internal class SatelliteBaseTileRenderer(
                 screen_y + tile_size_on_screen
             )
             if (!rect_intersects_viewport(interim_tile_destination, viewport)) continue
+            if (!retained_interim_needed_for_destination(
+                    viewport = viewport,
+                    cache_key = cache_key,
+                    lower_tile_zoom = lower_tile_zoom,
+                    now_ms = now_ms,
+                    destination = interim_tile_destination,
+                )
+            ) continue
             draw_tile_bitmap(canvas, tile.bitmap, null, interim_tile_destination, 1f)
         }
+    }
+
+    private fun retained_interim_needed_for_destination(
+        viewport: Viewport,
+        cache_key: String,
+        lower_tile_zoom: Int,
+        now_ms: Long,
+        destination: RectF,
+    ): Boolean {
+        val visible_left = destination.left.coerceAtLeast(0f)
+        val visible_top = destination.top.coerceAtLeast(0f)
+        val visible_right = destination.right.coerceAtMost(viewport.width)
+        val visible_bottom = destination.bottom.coerceAtMost(viewport.height)
+        if (visible_left >= visible_right || visible_top >= visible_bottom) return false
+
+        val lower_tile_size =
+            TILE_SIZE * 2.0.pow(viewport.zoom - lower_tile_zoom)
+        val left_world = viewport.center_x - viewport.width / 2.0
+        val top_world = viewport.center_y - viewport.height / 2.0
+        val first_tile_x = floor((left_world + visible_left) / lower_tile_size).toInt()
+        val last_tile_x = ceil((left_world + visible_right) / lower_tile_size).toInt() - 1
+        val first_tile_y = floor((top_world + visible_top) / lower_tile_size).toInt()
+        val last_tile_y = ceil((top_world + visible_bottom) / lower_tile_size).toInt() - 1
+        val max_tile = 1 shl lower_tile_zoom
+
+        for (ty in first_tile_y..last_tile_y) {
+            if (ty !in 0 until max_tile) return true
+            for (tx_raw in first_tile_x..last_tile_x) {
+                val tx = ((tx_raw % max_tile) + max_tile) % max_tile
+                val key = "$cache_key/$lower_tile_zoom/$tx/$ty"
+                val exact = memory_tile_bitmap(key) ?: interim_tiles[key]?.bitmap ?: return true
+                if (exact.hasAlpha() ||
+                    satellite_tile_load_alpha(key, now_ms) < 0.999f
+                ) return true
+            }
+        }
+        return false
     }
 
     private fun interim_tile_intersects_viewport(
@@ -1216,12 +1298,9 @@ internal class SatelliteBaseTileRenderer(
         submit_tile_request(
             SatelliteTileRequestTask(
                 key = key,
-                order = SatelliteBaseTileRequestOrder(
-                    generation = request_generation,
-                    kind = request_kind,
-                    parentDepth = parent_depth,
-                    sequence = satellite_tile_task_sequence.incrementAndGet()
-                ),
+                generation = request_generation,
+                priority = SatelliteBaseTilePolicy.priority(request_kind, parent_depth),
+                sequence = satellite_tile_task_sequence.incrementAndGet(),
                 action = tileTask@{
                     var connection: HttpURLConnection? = null
                     var redrew_when_loaded = false
@@ -1406,9 +1485,9 @@ internal class SatelliteBaseTileRenderer(
 
     private fun put_tile_in_memory(key: String, bitmap: Bitmap) {
         val previous = tile_cache[key]
+        if (previous !== bitmap) pan_compositor.content_changed(key)
         tile_cache[key] = bitmap
         val is_new = previous == null
-        if (previous !== bitmap) map_content_revision.incrementAndGet()
         if (is_new) tile_loaded_elapsed_ms[key] = SystemClock.elapsedRealtime()
         while (tile_cache.size > MAX_MEMORY_TILES) {
             val first_key = tile_cache.keys.firstOrNull() ?: break
@@ -1470,7 +1549,9 @@ internal class SatelliteBaseTileRenderer(
 
     private inner class SatelliteTileRequestTask(
         private val key: String,
-        private val order: SatelliteBaseTileRequestOrder,
+        private val generation: Long,
+        private val priority: Int,
+        private val sequence: Long,
         private val action: () -> Unit
     ) : Runnable, Comparable<Runnable> {
         override fun run() = action()
@@ -1479,7 +1560,14 @@ internal class SatelliteBaseTileRenderer(
 
         override fun compareTo(other: Runnable): Int {
             val task = other as? SatelliteTileRequestTask ?: return -1
-            return SatelliteBaseTileScheduler.compare(order, task.order)
+            return SatelliteBaseTileScheduler.compare(
+                generation,
+                priority,
+                sequence,
+                task.generation,
+                task.priority,
+                task.sequence
+            )
         }
     }
 
@@ -1496,6 +1584,11 @@ internal class SatelliteBaseTileRenderer(
     private data class SatellitePanCacheKey(
         val cache_key: String,
         val map_empty: Int
+    )
+
+    private data class SatellitePanCachePlan(
+        val dependency_keys: Set<String>,
+        val draw_lower_lod_pixels: Boolean,
     )
 
     private companion object {

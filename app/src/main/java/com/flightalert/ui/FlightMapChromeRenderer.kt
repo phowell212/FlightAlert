@@ -41,8 +41,8 @@ import kotlin.math.sin
 
 class FlightMapChromeBridge(
     override val layout: FlightMapLayout,
-    private val dp_value: (Float) -> Float,
-    private val sp_value: (Float) -> Float,
+    private val dp_value: FloatScale,
+    private val sp_value: FloatScale,
     private val fit_text: (String, Float) -> String,
     private val control_radius_value: () -> Float,
     private val panel_surface: (Canvas, RectF, Int, Int) -> Unit,
@@ -50,16 +50,17 @@ class FlightMapChromeBridge(
     private val control_surface: (Canvas, RectF, Int, Int, Boolean) -> Unit,
     private val wrapped_text: (Canvas, String, Float, Float, Float, Int) -> Float,
     private val aircraft_label: (Aircraft) -> String,
-    private val animation_frame: () -> Unit
+    private val animation_frame: () -> Unit,
+    private val retire_bitmap: (Bitmap) -> Unit,
 ) : FlightMapChromeHost,
     FlightMapPanelChrome,
     AircraftDetailsPanelChrome,
     TrafficPanelChrome,
     TrafficOverlayChrome {
 
-    override fun dp(value: Float): Float = dp_value(value)
+    override fun dp(value: Float): Float = dp_value.scale(value)
 
-    override fun sp(value: Float): Float = sp_value(value)
+    override fun sp(value: Float): Float = sp_value.scale(value)
 
     override fun ellipsize(value: String, max_width: Float): String = fit_text(value, max_width)
 
@@ -98,6 +99,10 @@ class FlightMapChromeBridge(
 
     override fun request_animation_frame() {
         animation_frame()
+    }
+
+    override fun retire_bitmap_after_frame_commit(bitmap: Bitmap) {
+        retire_bitmap(bitmap)
     }
 }
 

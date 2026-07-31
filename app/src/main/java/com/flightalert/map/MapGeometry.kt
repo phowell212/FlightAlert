@@ -317,8 +317,10 @@ data class Bounds(
 data class ScaleLabel(val pixels: Float, val label: String)
 
 object MapProjection {
+    private val distance_result = ThreadLocal.withInitial { FloatArray(1) }
+
     fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val result = FloatArray(1)
+        val result = distance_result.get()!!
         Location.distanceBetween(lat1, lon1, lat2, lon2, result)
         return result[0].toDouble()
     }

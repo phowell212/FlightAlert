@@ -142,6 +142,20 @@ internal class ReferenceRetainedRenderer(
         package_generation_snapshot: Long,
     ) {
         if (!labels_enabled || retained_label_executor.isShutdown) return
+        retained_label_coordinator.currentKey()?.let { current_key ->
+            if (retained_label_request_matches(
+                    key = current_key,
+                    role = role,
+                    viewport = viewport,
+                    frame_viewport = frame_viewport,
+                    tile_zoom = tile_zoom,
+                    tiles = tiles,
+                    label_avoid_rects = label_avoid_rects,
+                    options = options,
+                    package_generation = package_generation_snapshot,
+                )
+            ) return
+        }
         val avoid_rects = label_avoid_rects.toList()
         val tile_keys = retained_label_tile_keys(tiles)
         val static_key = RetainedStaticLabelPlanKey(
@@ -161,6 +175,7 @@ internal class ReferenceRetainedRenderer(
             tiles = tile_keys,
             options = options,
             packageGeneration = package_generation_snapshot,
+            labelAvoidRects = avoid_rects,
         )
         requested_retained_static_label_key = static_key
         if (retained_label_plan_is_available(key)) {
@@ -173,7 +188,7 @@ internal class ReferenceRetainedRenderer(
                 it.options == options &&
                     it.package_generation == package_generation_snapshot
             }
-            ?.resolved_labels
+            ?.labels
             ?: emptyList()
         enqueue_retained_label_request(
             RetainedLabelPlanRequest(
@@ -393,11 +408,44 @@ internal class ReferenceRetainedRenderer(
         )
     }
 
+    private fun retained_label_request_matches(
+        key: RetainedLabelPlanKey,
+        role: RetainedFrameRole,
+        viewport: Viewport,
+        frame_viewport: Viewport,
+        tile_zoom: Int,
+        tiles: List<DictionaryTileDrawRef>,
+        label_avoid_rects: List<ReferenceScreenRect>,
+        options: RetainedReferenceOptions,
+        package_generation: Long,
+    ): Boolean {
+        if (key.role != role ||
+            key.viewport != viewport ||
+            key.frameViewport != frame_viewport ||
+            key.tileZoom != tile_zoom ||
+            key.options != options ||
+            key.packageGeneration != package_generation ||
+            key.labelAvoidRects != label_avoid_rects ||
+            key.tiles.size != tiles.size
+        ) return false
+        return tiles.indices.all { index ->
+            val tile = tiles[index]
+            val existing = key.tiles[index]
+            existing.z == tile.tile.coordinate.z &&
+                existing.x == tile.tile.coordinate.x &&
+                existing.y == tile.tile.coordinate.y &&
+                existing.drawX == tile.draw_x &&
+                existing.coreVisible == tile.core_visible &&
+                existing.identity == System.identityHashCode(tile.tile)
+        }
+    }
+
     fun finish_completed_retained_label_frame(
         viewport: Viewport,
         target_tile_zoom: Int,
         fallback_tile_zoom: Int?,
         options: RetainedReferenceOptions,
+        label_avoid_rects: List<ReferenceScreenRect>,
         interaction_active: Boolean,
     ) {
         val prepared = retained_label_coordinator.take() ?: return
@@ -407,6 +455,7 @@ internal class ReferenceRetainedRenderer(
         val environment_matches =
             frame.options == options &&
                 frame.package_generation == current_generation &&
+                key.labelAvoidRects == label_avoid_rects &&
                 frame.is_drawable()
         val visible_at_current_viewport = if (environment_matches) {
             retained_frame_destination(frame, viewport, retained_destination)
@@ -652,9 +701,6 @@ internal class ReferenceRetainedRenderer(
             options = options,
             package_generation = package_generation_snapshot,
             label_plan_key = label_plan_key,
-            static_label_plan = resolved_static_label_plan,
-            preferred_occurrences = preferred_occurrences,
-            preferred_candidate_keys = preferred_candidate_keys,
             boundaries_drawn = content.boundaries,
             labels = content.labels,
             label_coverage = label_coverage,
@@ -893,11 +939,15 @@ internal class ReferenceRetainedRenderer(
             bottom = vertical_padding + viewport.height,
         )
         val shifted_avoid_rects = ArrayList<ReferenceScreenRect>(label_avoid_rects.size + 1)
-        shifted_avoid_rects += shift_label_avoid_rects(
-            label_avoid_rects,
-            horizontal_padding,
-            vertical_padding,
-        )
+        for (rect in label_avoid_rects) {
+            val shifted = translate_screen_rect(rect, horizontal_padding, vertical_padding)
+            val contained_by_core =
+                shifted.left >= core_rect.left &&
+                    shifted.top >= core_rect.top &&
+                    shifted.right <= core_rect.right &&
+                    shifted.bottom <= core_rect.bottom
+            if (!contained_by_core) shifted_avoid_rects += shifted
+        }
         shifted_avoid_rects += core_rect
         val core_area = viewport.width.toDouble() * viewport.height
         val frame_area = frame_viewport.width.toDouble() * frame_viewport.height
@@ -925,22 +975,6 @@ internal class ReferenceRetainedRenderer(
         )
         if (!padding_plan_complete) return null
         return workspace.acceptedLabels.toList()
-    }
-
-    private fun shift_label_avoid_rects(
-        rects: List<ReferenceScreenRect>,
-        dx: Double,
-        dy: Double,
-    ): List<ReferenceScreenRect> {
-        if (rects.isEmpty()) return emptyList()
-        return rects.map { rect ->
-            ReferenceScreenRect(
-                left = rect.left + dx,
-                top = rect.top + dy,
-                right = rect.right + dx,
-                bottom = rect.bottom + dy,
-            )
-        }
     }
 
     private fun translate_label_candidate(
@@ -978,55 +1012,6 @@ internal class ReferenceRetainedRenderer(
         )
     }
 
-    private fun resolve_retained_frame_labels(
-        frame: RetainedReferenceFrame,
-        destination: ReferenceRetainedDestination,
-        label_avoid_rects: List<ReferenceScreenRect>,
-    ) {
-        val plan = frame.static_label_plan
-        if (plan == null) {
-            frame.resolved_labels = emptyList()
-            return
-        }
-        val frame_avoid_rects = label_avoid_rects_in_frame_viewport(
-            frame = frame,
-            destination = destination,
-            label_avoid_rects = label_avoid_rects,
-        )
-        frame.resolved_labels = if (frame_avoid_rects == null) {
-            emptyList()
-        } else {
-            resolve_retained_static_label_plan(
-                workspace = label_renderer.ui_workspace,
-                plan = plan,
-                label_avoid_rects = frame_avoid_rects,
-                preferred_occurrences = frame.preferred_occurrences,
-                preferred_candidate_keys = frame.preferred_candidate_keys,
-                keep_planning = ALWAYS_KEEP_LABEL_PLAN,
-            ) ?: emptyList()
-        }
-    }
-
-    private fun label_avoid_rects_in_frame_viewport(
-        frame: RetainedReferenceFrame,
-        destination: ReferenceRetainedDestination,
-        label_avoid_rects: List<ReferenceScreenRect>,
-    ): List<ReferenceScreenRect>? {
-        if (label_avoid_rects.isEmpty()) return emptyList()
-        val zoom_scale = (destination.right - destination.left) / frame.width
-        if (!zoom_scale.isFinite() || zoom_scale <= 0.0) return null
-        val horizontal_padding = (frame.width - frame.visible_width) / 2.0
-        val vertical_padding = (frame.height - frame.visible_height) / 2.0
-        return label_avoid_rects.map { rect ->
-            ReferenceScreenRect(
-                left = (rect.left - destination.left) / zoom_scale - horizontal_padding,
-                top = (rect.top - destination.top) / zoom_scale - vertical_padding,
-                right = (rect.right - destination.left) / zoom_scale - horizontal_padding,
-                bottom = (rect.bottom - destination.top) / zoom_scale - vertical_padding,
-            )
-        }
-    }
-
     fun draw_retained_frame_if_available(
         canvas: Canvas,
         viewport: Viewport,
@@ -1034,7 +1019,6 @@ internal class ReferenceRetainedRenderer(
         target_tile_zoom: Int,
         fallback_tile_zoom: Int?,
         now_ms: Long,
-        label_avoid_rects: List<ReferenceScreenRect>,
     ): RetainedReferenceFrame? {
         val frame = retained_frame_for_viewport(
             canvas,
@@ -1055,7 +1039,6 @@ internal class ReferenceRetainedRenderer(
             frame = frame,
             now_ms = now_ms,
             destination = retained_destination,
-            label_avoid_rects = label_avoid_rects,
         )
         return frame
     }
@@ -1373,13 +1356,11 @@ internal class ReferenceRetainedRenderer(
         viewport: Viewport,
         frame: RetainedReferenceFrame,
         now_ms: Long,
-        label_avoid_rects: List<ReferenceScreenRect>,
         destination: ReferenceRetainedDestination? = null,
     ) {
         val current_destination = destination ?: retained_destination.also {
             retained_frame_destination(frame, viewport, it)
         }
-        resolve_retained_frame_labels(frame, current_destination, label_avoid_rects)
         var established = displayed_retained_frame
         var carried_fade_elapsed_ms = 0L
         val interrupted_fade = retained_fade
@@ -1434,6 +1415,8 @@ internal class ReferenceRetainedRenderer(
             retained_fade = retained_reference_fade(
                 previous = established,
                 current = frame,
+                previous_destination = fading_destination,
+                current_destination = current_destination,
                 start_ms = now_ms - carried_fade_elapsed_ms,
             )
         }
@@ -1461,22 +1444,6 @@ internal class ReferenceRetainedRenderer(
         val leaving_label_alpha = reference_retained_leaving_label_alpha(raw_progress)
         val entering_label_alpha = reference_retained_entering_label_alpha(raw_progress)
         retained_frame_destination(fade.previous, viewport, fading_destination)
-        resolve_retained_frame_labels(fade.previous, fading_destination, label_avoid_rects)
-        val label_transition = reference_retained_label_transition(
-            previous = fade.previous.resolved_labels,
-            current = frame.resolved_labels,
-            identity = DictionaryLabelCandidate::occurrenceId,
-            samePlacement = { old, next ->
-                reference_retained_label_anchor_is_stable(
-                    previousAnchor = old.anchor,
-                    previousDestination = fading_destination,
-                    previousFrameWidth = fade.previous.width,
-                    currentAnchor = next.anchor,
-                    currentDestination = current_destination,
-                    currentFrameWidth = frame.width,
-                )
-            },
-        )
         draw_retained_frame(
             canvas = canvas,
             viewport = viewport,
@@ -1499,7 +1466,7 @@ internal class ReferenceRetainedRenderer(
             frame = fade.previous,
             destination = fading_destination,
             alpha = leaving_label_alpha,
-            labels = label_transition.leaving,
+            labels = fade.labels.leaving,
         )
         draw_retained_labels(
             canvas = canvas,
@@ -1507,7 +1474,7 @@ internal class ReferenceRetainedRenderer(
             frame = frame,
             destination = current_destination,
             alpha = entering_label_alpha,
-            fully_visible = label_transition.continuing_current,
+            fully_visible = fade.labels.continuing_current,
         )
         request_redraw()
     }
@@ -1554,7 +1521,7 @@ internal class ReferenceRetainedRenderer(
         frame: RetainedReferenceFrame,
         destination: ReferenceRetainedDestination,
         alpha: Int = 255,
-        labels: List<DictionaryLabelCandidate> = frame.resolved_labels,
+        labels: List<DictionaryLabelCandidate> = frame.labels,
         fully_visible: BooleanArray? = null,
     ) {
         val zoom_scale = (destination.right - destination.left) / frame.width
@@ -1784,7 +1751,10 @@ internal class ReferenceRetainedRenderer(
                 next = options,
                 current_package_generation = current_generation,
             )
-        ) return
+        ) {
+            if (active.label_plan_key != frame.label_plan_key) replace_retained_frame(frame)
+            return
+        }
         if (active.matches_environment(viewport, options, current_generation) &&
             retained_target_frame_can_settle(
                 frame = active,
@@ -1809,11 +1779,28 @@ internal class ReferenceRetainedRenderer(
     private fun retained_reference_fade(
         previous: RetainedReferenceFrame,
         current: RetainedReferenceFrame,
+        previous_destination: ReferenceRetainedDestination,
+        current_destination: ReferenceRetainedDestination,
         start_ms: Long,
     ): RetainedReferenceFade {
         return RetainedReferenceFade(
             previous = previous,
             current = current,
+            labels = reference_retained_label_transition(
+                previous = previous.labels,
+                current = current.labels,
+                identity = DictionaryLabelCandidate::occurrenceId,
+                samePlacement = { old, next ->
+                    reference_retained_label_anchor_is_stable(
+                        previousAnchor = old.anchor,
+                        previousDestination = previous_destination,
+                        previousFrameWidth = previous.width,
+                        currentAnchor = next.anchor,
+                        currentDestination = current_destination,
+                        currentFrameWidth = current.width,
+                    )
+                },
+            ),
             start_ms = start_ms,
         )
     }
@@ -1954,6 +1941,7 @@ internal data class RetainedLabelPlanKey(
     val tiles: List<RetainedLabelTileKey>,
     val options: RetainedReferenceOptions,
     val packageGeneration: Long,
+    val labelAvoidRects: List<ReferenceScreenRect>,
 )
 
 internal data class RetainedLabelPlanRequest(
@@ -2035,18 +2023,18 @@ internal data class RetainedReferenceFrame(
     val options: RetainedReferenceOptions,
     val package_generation: Long,
     val label_plan_key: RetainedLabelPlanKey?,
-    val static_label_plan: PreparedRetainedStaticLabelPlan?,
-    val preferred_occurrences: Set<ReferenceLabelOccurrenceId>,
-    val preferred_candidate_keys: Set<ReferenceLabelCandidateKey>,
     val boundaries_drawn: Int,
     val labels: List<DictionaryLabelCandidate>,
     val label_coverage: ReferenceRetainedLabelCoverage,
 ) {
-    var resolved_labels: List<DictionaryLabelCandidate> = labels
-    val labels_drawn: Int get() = resolved_labels.size
+    val labels_drawn: Int get() = labels.size
 
     fun matches_options(next: RetainedReferenceOptions): Boolean {
         return options == next
+    }
+
+    fun matches_label_avoidance(next: List<ReferenceScreenRect>): Boolean {
+        return !options.labels_enabled || label_plan_key?.labelAvoidRects == next
     }
 
     fun matches_environment(
@@ -2104,5 +2092,6 @@ internal data class RetainedReferenceFrame(
 internal data class RetainedReferenceFade(
     val previous: RetainedReferenceFrame,
     val current: RetainedReferenceFrame,
+    val labels: ReferenceRetainedLabelTransition<DictionaryLabelCandidate>,
     val start_ms: Long
 )

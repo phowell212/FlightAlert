@@ -64,41 +64,40 @@ data class AircraftTelemetry(
     val category_label: String? = null
 ) {
     val has_values: Boolean
-        get() = listOf(
-            source_type,
-            squawk,
-            baro_altitude_m,
-            geom_altitude_m,
-            ground_speed_ms,
-            true_speed_ms,
-            indicated_speed_ms,
-            mach,
-            baro_rate_ms,
-            geom_rate_ms,
-            selected_altitude_m,
-            selected_heading_deg,
-            wind_speed_ms,
-            wind_direction_deg,
-            tat_c,
-            oat_c,
-            qnh_hpa,
-            true_heading_deg,
-            magnetic_heading_deg,
-            magnetic_declination_deg,
-            track_rate_deg_per_sec,
-            roll_deg,
-            adsb_version,
-            nac_p,
-            nac_v,
-            sil,
-            sil_type,
-            nic_baro,
-            rc_m,
-            rssi,
-            message_rate,
-            receiver_count_label,
-            category_label
-        ).any { it != null } || nav_modes.isNotEmpty()
+        get() = source_type != null ||
+                squawk != null ||
+                baro_altitude_m != null ||
+                geom_altitude_m != null ||
+                ground_speed_ms != null ||
+                true_speed_ms != null ||
+                indicated_speed_ms != null ||
+                mach != null ||
+                baro_rate_ms != null ||
+                geom_rate_ms != null ||
+                selected_altitude_m != null ||
+                selected_heading_deg != null ||
+                wind_speed_ms != null ||
+                wind_direction_deg != null ||
+                tat_c != null ||
+                oat_c != null ||
+                qnh_hpa != null ||
+                true_heading_deg != null ||
+                magnetic_heading_deg != null ||
+                magnetic_declination_deg != null ||
+                track_rate_deg_per_sec != null ||
+                roll_deg != null ||
+                adsb_version != null ||
+                nac_p != null ||
+                nac_v != null ||
+                sil != null ||
+                sil_type != null ||
+                nic_baro != null ||
+                rc_m != null ||
+                rssi != null ||
+                message_rate != null ||
+                receiver_count_label != null ||
+                category_label != null ||
+                nav_modes.isNotEmpty()
 
     fun with_fallback(fallback: AircraftTelemetry?): AircraftTelemetry {
         fallback ?: return this
@@ -153,16 +152,13 @@ data class AircraftMetadataSeed(
     val operator_code: String? = null
 ) {
     val has_details: Boolean
-        get() = listOf(
-            registration,
-            manufacturer,
-            type,
-            type_code,
-            owner,
-            manufactured_year,
-            operator_code
-        )
-            .any { !it.isNullOrBlank() }
+        get() = !registration.isNullOrBlank() ||
+                !manufacturer.isNullOrBlank() ||
+                !type.isNullOrBlank() ||
+                !type_code.isNullOrBlank() ||
+                !owner.isNullOrBlank() ||
+                !manufactured_year.isNullOrBlank() ||
+                !operator_code.isNullOrBlank()
 }
 
 data class Aircraft(

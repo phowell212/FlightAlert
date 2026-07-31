@@ -9,20 +9,20 @@
 package com.flightalert.traffic
 
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withRotation
 import androidx.core.graphics.withTranslation
-import com.flightalert.AIRCRAFT_APPEAR_DURATION_MS
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftMarkerMorph
 import com.flightalert.aircraft.AircraftSymbol
@@ -35,7 +35,6 @@ import com.flightalert.map.Viewport
 import com.flightalert.map.is_inside_viewport
 import com.flightalert.ThemeColors
 import com.flightalert.ThemeTreatment
-import com.flightalert.VisualTheme
 import com.flightalert.ui.ensure_point_capacity
 import com.flightalert.ui.mix_color
 import com.flightalert.ui.recycle_bitmap_pair
@@ -43,12 +42,15 @@ import com.flightalert.ui.smooth_step
 import com.flightalert.ui.with_alpha
 import java.util.LinkedHashMap
 import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 interface TrafficOverlayChrome {
@@ -57,6 +59,7 @@ interface TrafficOverlayChrome {
     fun ellipsize(value: String, max_width: Float): String
     fun aircraft_label_detail(aircraft: Aircraft): String
     fun request_animation_frame()
+    fun retire_bitmap_after_frame_commit(bitmap: Bitmap)
 }
 
 class TrafficOverlayRenderer(
@@ -67,20 +70,33 @@ class TrafficOverlayRenderer(
     private val chrome: TrafficOverlayChrome
 ) {
     private val symbol_draw_matrix = Matrix()
+    private val rotorcraft_shadow_path = Path()
+    private val rotorcraft_body_path = Path()
+    private val rotorcraft_main_blade_lines = FloatArray(8)
+    private val rotorcraft_tail_blade_lines = FloatArray(8)
+    private var rotorcraft_geometry_shape_bits = Int.MIN_VALUE
+    private var rotorcraft_geometry: RotorcraftFrameGeometry? = null
     private var dot_outline_points = FloatArray(0)
     private var dot_outline_count = 0
     private val dot_fill_points = Array(DOT_BATCH_GROUP_COUNT) { FloatArray(0) }
     private val dot_fill_counts = IntArray(DOT_BATCH_GROUP_COUNT)
-    private var animated_outline_points = FloatArray(0)
-    private val animated_fill_points = Array(DOT_BATCH_GROUP_COUNT) { FloatArray(0) }
     private val symbol_mask_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         isFilterBitmap = true
         isDither = true
     }
-    private val symbol_overlay_bitmap_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val symbol_batch_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
         isFilterBitmap = true
         isDither = true
     }
+    private var symbol_batch_vertices = FloatArray(0)
+    private var symbol_batch_texture_coordinates = FloatArray(0)
+    private var symbol_batch_colors = IntArray(0)
+    private var symbol_batch_indices = ShortArray(0)
+    private var symbol_batch_vertex_count = 0
+    private var symbol_batch_index_count = 0
+    private var symbol_batch_atlas: AircraftSymbolBatchAtlas? = null
+    private var previous_rotorcraft_shape_bits = Int.MIN_VALUE
     private val dot_overlay_bitmap_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         isFilterBitmap = false
         isDither = true
@@ -93,31 +109,10 @@ class TrafficOverlayRenderer(
                 return remove
             }
         }
-    private val aircraft_symbol_values = AircraftSymbol.entries
     private val frame_symbol_masks = arrayOfNulls<AircraftSymbolMask>(AircraftSymbol.entries.size)
-    private var symbol_overlay_bitmap: Bitmap? = null
-    private var symbol_overlay_key: AircraftSymbolOverlayCacheKey? = null
-    private var symbol_overlay_width = 0
-    private var symbol_overlay_height = 0
-    private var symbol_overlay_center_x = Double.NaN
-    private var symbol_overlay_center_y = Double.NaN
-    private var symbol_overlay_occupied_tiles: List<AircraftSymbolOverlayTile> = emptyList()
-    private var symbol_overlay_cached_aircraft_keys: Set<String> = emptySet()
-    private var symbol_overlay_has_motion_exclusions = false
-    private val symbol_overlay_src_rect = Rect()
-    private val symbol_overlay_dst_rect = RectF()
-    private var symbol_overlay_recorded_padding_px = 0f
-    private var symbol_overlay_rejected_target: AircraftSymbolOverlayTarget? = null
-    private val symbol_overlay_async_lock = Any()
-    private val symbol_overlay_main_handler = Handler(Looper.getMainLooper())
-    @Volatile
-    private var symbol_overlay_async_generation = 0
+    private val overlay_main_handler = Handler(Looper.getMainLooper())
     @Volatile
     private var overlay_async_closed = false
-    private var symbol_overlay_async_active_request: AircraftSymbolOverlayRecordingRequest? = null
-    private var symbol_overlay_async_pending_request: AircraftSymbolOverlayRecordingRequest? = null
-    private var symbol_overlay_async_worker_running = false
-    private var symbol_overlay_async_result: AircraftSymbolOverlayAsyncResult? = null
     private var dot_overlay_bitmap: Bitmap? = null
     private var dot_overlay_key: DotOverlayCacheKey? = null
     private var dot_overlay_width = 0
@@ -126,6 +121,10 @@ class TrafficOverlayRenderer(
     private var dot_overlay_center_x = Double.NaN
     private var dot_overlay_center_y = Double.NaN
     private val dot_overlay_async_lock = Any()
+    private val dot_overlay_async_executor =
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "FlightAlertDotOverlayRecord").apply { isDaemon = true }
+        }
     @Volatile
     private var dot_overlay_async_generation = 0
     private var dot_overlay_async_active_request: DotOverlayRecordingRequest? = null
@@ -157,7 +156,7 @@ class TrafficOverlayRenderer(
                     draw_selected_overlay = false,
                     interaction_active = state.interaction_active
                 )
-                draw_aircraft_symbols_with_pan_cache(
+                draw_aircraft_symbols(
                     canvas = canvas,
                     aircraft = state.aircraft,
                     selected_aircraft_id = state.selected_aircraft_id,
@@ -170,7 +169,6 @@ class TrafficOverlayRenderer(
                     translation_x = state.aircraft_translation_x,
                     translation_y = state.aircraft_translation_y,
                     now_elapsed_ms = now_elapsed_ms,
-                    aircraft_generation = state.symbol_state_generation,
                 )
             } else {
                 draw_prepared_aircraft_dot_batch(
@@ -224,12 +222,25 @@ class TrafficOverlayRenderer(
         translation_y: Float,
         now_elapsed_ms: Long,
         draw_labels: Boolean = true,
-        exclude_centers_in: RectF? = null,
-        exclude_aircraft_keys: Set<String>? = null
     ): Int {
         val normalized_selected_id = normalized_selected_aircraft_id(selected_aircraft_id)
         val label_count = label_aircraft_count(marker_blend, viewport.zoom)
-        val frame_style = aircraft_icon_frame_style(marker_blend, viewport.zoom, style)
+        val frame_style =
+            aircraft_icon_frame_style(marker_blend, viewport.zoom, style, now_elapsed_ms)
+        val rotorcraft_shape_bits = frame_style.shape_progress.toRawBits()
+        val batch_rotorcraft =
+            transform_scale == 1f && rotorcraft_shape_bits == previous_rotorcraft_shape_bits
+        previous_rotorcraft_shape_bits = rotorcraft_shape_bits
+        val batch_atlas =
+            if (aircraft.isNotEmpty() &&
+                canvas.isHardwareAccelerated &&
+                !(draw_internal_dot && frame_style.blend >= AIRCRAFT_FAST_DOT_BLEND)
+            ) {
+                aircraft_symbol_batch_atlas(frame_style, batch_rotorcraft)
+            } else {
+                null
+            }
+        reset_aircraft_symbol_batch()
         var drawn_count = 0
         val scale = transform_scale.coerceAtLeast(0.001f)
         val now_ms = now_elapsed_ms
@@ -247,19 +258,6 @@ class TrafficOverlayRenderer(
                 (item.screen_point.x + item.screen_velocity_x_px_per_sec * elapsed_sec) * scale + translation_x
             val y =
                 (item.screen_point.y + item.screen_velocity_y_px_per_sec * elapsed_sec) * scale + translation_y
-            if (exclude_centers_in != null &&
-                exclude_aircraft_keys?.contains(item.appearance_key) == true &&
-                cached_aircraft_visual_bounds_inside(
-                    item = item,
-                    x = x,
-                    y = y,
-                    viewport_zoom = viewport.zoom,
-                    coverage = exclude_centers_in,
-                    now_elapsed_ms = now_ms,
-                )
-            ) {
-                continue
-            }
             if (!is_on_screen(
                     x,
                     y,
@@ -269,379 +267,33 @@ class TrafficOverlayRenderer(
             ) {
                 continue
             }
+            val appearance = current_aircraft_appearance_progress_at(item, now_ms)
             draw_aircraft_icon(
                 canvas = canvas,
                 x = x,
                 y = y,
                 item = item,
                 selected = selected,
+                appearance = appearance,
                 frame_style = frame_style,
                 draw_internal_dot = draw_internal_dot,
-                now_ms = now_ms
+                now_ms = now_ms,
+                batch_atlas = batch_atlas,
             )
             if (draw_any_labels && drawn_count < label_count) {
+                flush_aircraft_symbol_batch(canvas, batch_atlas)
                 draw_aircraft_label(canvas, x, y, item, label_avoid_state, style)
             }
             drawn_count++
         }
+        flush_aircraft_symbol_batch(canvas, batch_atlas)
         return drawn_count
     }
 
-    private fun cached_aircraft_visual_bounds_inside(
-        item: TrafficAircraftOverlayState,
-        x: Float,
-        y: Float,
-        viewport_zoom: Double,
-        coverage: RectF,
-        now_elapsed_ms: Long,
-    ): Boolean {
-        val radius = traffic_aircraft_painted_radius_px(
-            item = item,
-            viewport_zoom = viewport_zoom,
-            selected = false,
-            dp = chrome::dp,
-            appearance_progress = current_aircraft_appearance_progress_at(item, now_elapsed_ms),
-        )
-        return x - radius >= coverage.left &&
-            y - radius >= coverage.top &&
-            x + radius <= coverage.right &&
-            y + radius <= coverage.bottom
-    }
-
-    private fun draw_aircraft_symbols_with_pan_cache(
-        canvas: Canvas,
-        aircraft: List<TrafficAircraftOverlayState>,
-        selected_aircraft_id: String?,
-        viewport: Viewport,
-        style: TrafficOverlayStyle,
-        marker_blend: Float,
-        label_avoid_state: TrafficOverlayState,
-        draw_internal_dot: Boolean,
-        transform_scale: Float,
-        translation_x: Float,
-        translation_y: Float,
-        now_elapsed_ms: Long,
-        aircraft_generation: Long,
-    ) {
-        val cached_coverage =
-            if (!draw_internal_dot && label_aircraft_count(marker_blend, viewport.zoom) == 0) {
-                draw_symbol_overlay_pan_cache(
-                    canvas = canvas,
-                    aircraft = aircraft,
-                    selected_aircraft_id = selected_aircraft_id,
-                    viewport = viewport,
-                    style = style,
-                    marker_blend = marker_blend,
-                    label_avoid_state = label_avoid_state,
-                    transform_scale = transform_scale,
-                    translation_x = translation_x,
-                    translation_y = translation_y,
-                    now_elapsed_ms = now_elapsed_ms,
-                    aircraft_generation = aircraft_generation,
-                )
-            } else {
-                null
-            }
-        if (cached_coverage == null) {
-            draw_aircraft_symbols(
-                canvas = canvas,
-                aircraft = aircraft,
-                selected_aircraft_id = selected_aircraft_id,
-                viewport = viewport,
-                style = style,
-                marker_blend = marker_blend,
-                label_avoid_state = label_avoid_state,
-                draw_internal_dot = draw_internal_dot,
-                transform_scale = transform_scale,
-                translation_x = translation_x,
-                translation_y = translation_y,
-                now_elapsed_ms = now_elapsed_ms,
-            )
-        } else {
-            if (!symbol_overlay_has_motion_exclusions &&
-                cached_symbol_overlay_covers_direct_fallback(cached_coverage, viewport)
-            ) {
-                return
-            }
-            draw_aircraft_symbols(
-                canvas = canvas,
-                aircraft = aircraft,
-                selected_aircraft_id = selected_aircraft_id,
-                viewport = viewport,
-                style = style,
-                marker_blend = marker_blend,
-                label_avoid_state = label_avoid_state,
-                draw_internal_dot = false,
-                transform_scale = transform_scale,
-                translation_x = translation_x,
-                translation_y = translation_y,
-                now_elapsed_ms = now_elapsed_ms,
-                draw_labels = false,
-                exclude_centers_in = cached_coverage,
-                exclude_aircraft_keys = symbol_overlay_cached_aircraft_keys
-            )
-        }
-    }
-
-    private fun cached_symbol_overlay_covers_direct_fallback(
-        cached_coverage: RectF,
-        viewport: Viewport
-    ): Boolean {
-        val edge_padding = chrome.dp(SYMBOL_OVERLAY_DIRECT_FALLBACK_PADDING_DP)
-        return cached_coverage.left <= -edge_padding &&
-                cached_coverage.top <= -edge_padding &&
-                cached_coverage.right >= viewport.width + edge_padding &&
-                cached_coverage.bottom >= viewport.height + edge_padding
-    }
-
-    private fun reject_sparse_symbol_overlay_recording_if_needed(current_aircraft_count: Int): Boolean {
-        val rejected_key = symbol_overlay_key
-        if (rejected_key == null ||
-            current_aircraft_count < SYMBOL_OVERLAY_SPARSE_RECORDING_MIN_CURRENT_AIRCRAFT
-        ) {
-            return false
-        }
-        val cached_count = symbol_overlay_cached_aircraft_keys.size
-        if (cached_count * SYMBOL_OVERLAY_SPARSE_RECORDING_MAX_CURRENT_RATIO >= current_aircraft_count) {
-            return false
-        }
-        symbol_overlay_rejected_target = AircraftSymbolOverlayTarget(
-            key = rejected_key,
-            width_px = symbol_overlay_width,
-            height_px = symbol_overlay_height,
-            padding = symbol_overlay_recorded_padding_px,
-            center_x = symbol_overlay_center_x,
-            center_y = symbol_overlay_center_y,
-        )
-        symbol_overlay_bitmap?.let { bitmap ->
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
-        symbol_overlay_bitmap = null
-        symbol_overlay_key = null
-        symbol_overlay_width = 0
-        symbol_overlay_height = 0
-        symbol_overlay_center_x = Double.NaN
-        symbol_overlay_center_y = Double.NaN
-        symbol_overlay_occupied_tiles = emptyList()
-        symbol_overlay_cached_aircraft_keys = emptySet()
-        symbol_overlay_has_motion_exclusions = false
-        symbol_overlay_recorded_padding_px = 0f
-        return true
-    }
-
-    private fun symbol_overlay_cache_padding_px(viewport: Viewport): Float {
-        val padding_dp = if (viewport.zoom < SYMBOL_OVERLAY_WIDE_COVERAGE_MAX_ZOOM) {
-            SYMBOL_OVERLAY_WIDE_COVERAGE_PADDING_DP
-        } else {
-            SYMBOL_OVERLAY_CACHE_PADDING_DP
-        }
-        return chrome.dp(padding_dp)
-    }
-
-    private fun draw_symbol_overlay_pan_cache(
-        canvas: Canvas,
-        aircraft: List<TrafficAircraftOverlayState>,
-        selected_aircraft_id: String?,
-        viewport: Viewport,
-        style: TrafficOverlayStyle,
-        marker_blend: Float,
-        label_avoid_state: TrafficOverlayState,
-        transform_scale: Float,
-        translation_x: Float,
-        translation_y: Float,
-        now_elapsed_ms: Long,
-        aircraft_generation: Long,
-    ): RectF? {
-        // The retained symbol bitmap is used only after the aircraft appearance bucket says full symbols are ready.
-        val interaction_active = label_avoid_state.interaction_active
-        val scale = transform_scale.coerceAtLeast(0.001f)
-        if (!scale.isFinite() || !translation_x.isFinite() || !translation_y.isFinite()) {
-            return null
-        }
-        reject_sparse_symbol_overlay_recording_if_needed(aircraft.size)
-        if (abs(scale - 1f) > SYMBOL_OVERLAY_PAN_SCALE_EPSILON) {
-            return null
-        }
-        if (!interaction_active && symbol_overlay_key == null && symbol_overlay_recording_pending()) {
-            return null
-        }
-        val padding = symbol_overlay_cache_padding_px(viewport)
-        val width_px = ceil(viewport.width + padding * 2f).toInt().coerceAtLeast(1)
-        val height_px = ceil(viewport.height + padding * 2f).toInt().coerceAtLeast(1)
-        val source_center_x = label_avoid_state.symbol_source_center_x.takeIf { it.isFinite() }
-            ?: (viewport.center_x + translation_x / scale)
-        val source_center_y = label_avoid_state.symbol_source_center_y.takeIf { it.isFinite() }
-            ?: (viewport.center_y + translation_y / scale)
-        if (now_elapsed_ms < label_avoid_state.symbol_appearance_ready_elapsed_ms) {
-            return null
-        }
-        val selected_aircraft_key = normalized_selected_aircraft_id(selected_aircraft_id)
-        val key = AircraftSymbolOverlayCacheKey(
-            marker_bucket = aircraft_symbol_progress_bucket(
-                AircraftMarkerMorph.shape_progress(
-                    marker_blend
-                )
-            ),
-            icon_scale_bucket = (AircraftMarkerMorph.aircraft_icon_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
-            dot_scale_bucket = (AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom) * SYMBOL_OVERLAY_SCALE_BUCKET).round_to_int(),
-            aircraft_generation = aircraft_generation,
-            aircraft_population_revision = label_avoid_state.symbol_population_revision,
-            appearance_revision = label_avoid_state.symbol_appearance_revision,
-            marker_blend_bits = marker_blend.toBits(),
-            viewport_zoom_bits = viewport.zoom.toBits(),
-            selected_aircraft_key = selected_aircraft_key,
-            theme_key = style.visual_theme.hashCode()
-        )
-        symbol_overlay_rejected_target?.let { rejected_target ->
-            if (rejected_target.matches_target(
-                    key = key,
-                    width_px = width_px,
-                    height_px = height_px,
-                    padding = padding,
-                    center_x = source_center_x,
-                    center_y = source_center_y,
-                )
-            ) {
-                return null
-            }
-            symbol_overlay_rejected_target = null
-        }
-        install_completed_symbol_overlay_recording(
-            expected_key = key,
-            width_px = width_px,
-            height_px = height_px,
-            padding = padding,
-            center_x = source_center_x,
-            center_y = source_center_y,
-        )
-        val dimensions_match = symbol_overlay_width == width_px &&
-            symbol_overlay_height == height_px
-        val recorded_padding = symbol_overlay_recorded_padding_px
-        val active_dimensions_compatible = dimensions_match ||
-            (interaction_active &&
-                recorded_padding >= padding &&
-                symbol_overlay_width >= width_px &&
-                symbol_overlay_height >= height_px &&
-                abs((symbol_overlay_width - width_px).toFloat() - (recorded_padding - padding) * 2f) <= 2f &&
-                abs((symbol_overlay_height - height_px).toFloat() - (recorded_padding - padding) * 2f) <= 2f)
-        val cache_translation_x = if (interaction_active) {
-            translation_x
-        } else {
-            (symbol_overlay_center_x - viewport.center_x).toFloat()
-        }
-        val cache_translation_y = if (interaction_active) {
-            translation_y
-        } else {
-            (symbol_overlay_center_y - viewport.center_y).toFloat()
-        }
-        val draw_padding =
-            if (active_dimensions_compatible && !dimensions_match && interaction_active) {
-                recorded_padding
-            } else {
-                padding
-            }
-        val cache_left = cache_translation_x - draw_padding * scale
-        val cache_top = cache_translation_y - draw_padding * scale
-        val cache_right = cache_left + symbol_overlay_width * scale
-        val cache_bottom = cache_top + symbol_overlay_height * scale
-        val cache_intersects_viewport = active_dimensions_compatible &&
-            cache_right >= 0f &&
-            cache_bottom >= 0f &&
-            cache_left <= viewport.width &&
-            cache_top <= viewport.height
-        if (interaction_active && symbol_overlay_key != null && !cache_intersects_viewport) {
-            return null
-        }
-        val center_matches =
-            symbol_overlay_center_x == source_center_x &&
-                symbol_overlay_center_y == source_center_y
-        val population_key_matches = symbol_overlay_population_matches(key)
-        val key_matches = symbol_overlay_key == key &&
-            dimensions_match &&
-            center_matches &&
-            population_key_matches
-        val visual_key_matches = symbol_overlay_key?.visual_key_matches(key) == true &&
-            if (interaction_active) active_dimensions_compatible else dimensions_match
-        val active_key_matches = interaction_active &&
-            cache_intersects_viewport &&
-            population_key_matches &&
-            active_dimensions_compatible &&
-            center_matches &&
-            visual_key_matches
-        if (!key_matches && interaction_active && !active_key_matches) {
-            return null
-        }
-        if (!key_matches && !interaction_active && aircraft.isNotEmpty()) {
-            request_symbol_overlay_cache_recording(
-                aircraft = aircraft,
-                selected_aircraft_id = selected_aircraft_id,
-                viewport = viewport,
-                style = style,
-                marker_blend = marker_blend,
-                padding = padding,
-                width_px = width_px,
-                height_px = height_px,
-                center_x = source_center_x,
-                center_y = source_center_y,
-                key = key,
-            )
-        }
-        val can_draw_cached_overlay = if (interaction_active) {
-            key_matches || active_key_matches
-        } else {
-            false
-        }
-        if (!can_draw_cached_overlay) {
-            return null
-        }
-        val overlay_bitmap = symbol_overlay_bitmap
-        if (overlay_bitmap == null || overlay_bitmap.isRecycled) {
-            return null
-        }
-        val save_count = canvas.save()
-        try {
-            canvas.translate(
-                cache_translation_x - draw_padding * scale,
-                cache_translation_y - draw_padding * scale
-            )
-            canvas.scale(scale, scale)
-            draw_cached_symbol_overlay_bitmap(canvas, overlay_bitmap)
-        } finally {
-            canvas.restoreToCount(save_count)
-        }
-        val cached_left = cache_translation_x - draw_padding * scale
-        val cached_top = cache_translation_y - draw_padding * scale
-        return RectF(
-            cached_left,
-            cached_top,
-            cached_left + symbol_overlay_width * scale,
-            cached_top + symbol_overlay_height * scale
-        )
-    }
-
     fun shutdown() {
-        val pending_symbol_result = synchronized(symbol_overlay_async_lock) {
-            if (overlay_async_closed) return
-            overlay_async_closed = true
-            symbol_overlay_async_generation += 1
-            symbol_overlay_async_pending_request = null
-            symbol_overlay_async_result.also {
-                symbol_overlay_async_result = null
-            }
-        }
-        symbol_overlay_main_handler.removeCallbacksAndMessages(null)
-        pending_symbol_result?.bitmap?.let { bitmap ->
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
-        symbol_overlay_bitmap?.let { bitmap ->
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
-        symbol_overlay_bitmap = null
-        symbol_overlay_key = null
-        symbol_overlay_occupied_tiles = emptyList()
-        symbol_overlay_cached_aircraft_keys = emptySet()
-        symbol_overlay_has_motion_exclusions = false
-        symbol_overlay_rejected_target = null
+        if (overlay_async_closed) return
+        overlay_async_closed = true
+        overlay_main_handler.removeCallbacksAndMessages(null)
 
         val pending_dot_result = synchronized(dot_overlay_async_lock) {
             dot_overlay_async_generation += 1
@@ -650,6 +302,7 @@ class TrafficOverlayRenderer(
                 dot_overlay_async_result = null
             }
         }
+        dot_overlay_async_executor.shutdownNow()
         val installed_dot_bitmap = dot_overlay_bitmap
         installed_dot_bitmap?.let { bitmap ->
             if (!bitmap.isRecycled) bitmap.recycle()
@@ -663,213 +316,9 @@ class TrafficOverlayRenderer(
         symbol_mask_cache.values.forEach(AircraftSymbolMask::recycle)
         symbol_mask_cache.clear()
         frame_symbol_masks.fill(null)
-    }
-
-    private fun symbol_overlay_population_matches(
-        current_key: AircraftSymbolOverlayCacheKey
-    ): Boolean {
-        val cached_key = symbol_overlay_key ?: return false
-        if (cached_key.aircraft_generation != current_key.aircraft_generation) return false
-        if (cached_key.aircraft_population_revision != current_key.aircraft_population_revision) return false
-        if (cached_key.selected_aircraft_key != current_key.selected_aircraft_key) return false
-        return true
-    }
-
-    private fun draw_cached_symbol_overlay_bitmap(canvas: Canvas, overlay_bitmap: Bitmap) {
-        val tiles = symbol_overlay_occupied_tiles
-        if (tiles.isEmpty()) {
-            canvas.drawBitmap(overlay_bitmap, 0f, 0f, symbol_overlay_bitmap_paint)
-            return
-        }
-        for (tile in tiles) {
-            symbol_overlay_src_rect.set(tile.left, tile.top, tile.right, tile.bottom)
-            symbol_overlay_dst_rect.set(
-                tile.left.toFloat(),
-                tile.top.toFloat(),
-                tile.right.toFloat(),
-                tile.bottom.toFloat()
-            )
-            canvas.drawBitmap(
-                overlay_bitmap,
-                symbol_overlay_src_rect,
-                symbol_overlay_dst_rect,
-                symbol_overlay_bitmap_paint
-            )
-        }
-    }
-
-    private fun install_completed_symbol_overlay_recording(
-        expected_key: AircraftSymbolOverlayCacheKey,
-        width_px: Int,
-        height_px: Int,
-        padding: Float,
-        center_x: Double,
-        center_y: Double,
-    ) {
-        val result = synchronized(symbol_overlay_async_lock) {
-            val pending = symbol_overlay_async_result
-            if (pending?.matches_target(
-                    key = expected_key,
-                    width_px = width_px,
-                    height_px = height_px,
-                    padding = padding,
-                    center_x = center_x,
-                    center_y = center_y,
-                ) == true
-            ) {
-                symbol_overlay_async_result = null
-                pending
-            } else {
-                null
-            }
-        } ?: return
-        install_symbol_overlay_recording_result(result)
-    }
-
-    private fun install_symbol_overlay_recording_result(result: AircraftSymbolOverlayAsyncResult) {
-        val current = symbol_overlay_bitmap
-        if (current != null && current !== result.bitmap && !current.isRecycled) {
-            current.recycle()
-        }
-        symbol_overlay_bitmap = result.bitmap
-        symbol_overlay_key = result.key
-        symbol_overlay_width = result.width_px
-        symbol_overlay_height = result.height_px
-        symbol_overlay_center_x = result.center_x
-        symbol_overlay_center_y = result.center_y
-        symbol_overlay_occupied_tiles = result.occupied_tiles
-        symbol_overlay_cached_aircraft_keys = result.cached_aircraft_keys
-        symbol_overlay_has_motion_exclusions = result.has_motion_exclusions
-        symbol_overlay_recorded_padding_px = result.padding_px
-    }
-
-    private fun symbol_overlay_recording_pending(): Boolean {
-        return synchronized(symbol_overlay_async_lock) {
-            symbol_overlay_async_active_request != null ||
-                symbol_overlay_async_pending_request != null
-        }
-    }
-
-    private fun request_symbol_overlay_cache_recording(
-        aircraft: List<TrafficAircraftOverlayState>,
-        selected_aircraft_id: String?,
-        viewport: Viewport,
-        style: TrafficOverlayStyle,
-        marker_blend: Float,
-        padding: Float,
-        width_px: Int,
-        height_px: Int,
-        center_x: Double,
-        center_y: Double,
-        key: AircraftSymbolOverlayCacheKey
-    ) {
-        if (overlay_async_closed) return
-        var start_worker = false
-        var stale_result: AircraftSymbolOverlayAsyncResult? = null
-        synchronized(symbol_overlay_async_lock) {
-            if (overlay_async_closed) return
-            val generation = symbol_overlay_async_generation
-            if (symbol_overlay_async_active_request?.let {
-                    it.recording_generation == generation &&
-                        it.matches_target(key, width_px, height_px, padding, center_x, center_y)
-                } == true ||
-                symbol_overlay_async_pending_request?.let {
-                    it.recording_generation == generation &&
-                        it.matches_target(key, width_px, height_px, padding, center_x, center_y)
-                } == true ||
-                symbol_overlay_async_result?.matches_target(
-                    key,
-                    width_px,
-                    height_px,
-                    padding,
-                    center_x,
-                    center_y,
-                ) == true
-            ) {
-                return
-            }
-            stale_result = symbol_overlay_async_result
-            symbol_overlay_async_result = null
-            symbol_overlay_async_generation += 1
-            symbol_overlay_async_pending_request = AircraftSymbolOverlayRecordingRequest(
-                aircraft = ArrayList(aircraft),
-                selected_aircraft_key = normalized_selected_aircraft_id(selected_aircraft_id),
-                viewport = viewport.copy(width = width_px.toFloat(), height = height_px.toFloat()),
-                visual_theme = style.visual_theme,
-                marker_blend = marker_blend,
-                padding = padding,
-                width_px = width_px,
-                height_px = height_px,
-                center_x = center_x,
-                center_y = center_y,
-                key = key,
-                dp_scale = chrome.dp(1f),
-                recording_generation = symbol_overlay_async_generation,
-            )
-            if (!symbol_overlay_async_worker_running) {
-                symbol_overlay_async_worker_running = true
-                start_worker = true
-            }
-        }
-        stale_result?.bitmap?.let { bitmap ->
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
-        if (!start_worker) return
-        Thread {
-            while (true) {
-                val request = synchronized(symbol_overlay_async_lock) {
-                    val pending = symbol_overlay_async_pending_request
-                    if (pending == null || overlay_async_closed) {
-                        symbol_overlay_async_worker_running = false
-                        null
-                    } else {
-                        symbol_overlay_async_pending_request = null
-                        symbol_overlay_async_active_request = pending
-                        pending
-                    }
-                } ?: break
-                var allocated_bitmap: Bitmap? = null
-                val result = try {
-                    AircraftSymbolOverlayRecorder.record(
-                        request = request,
-                        is_cancelled = {
-                            overlay_async_closed ||
-                                symbol_overlay_async_generation != request.recording_generation
-                        },
-                        on_bitmap_allocated = { allocated_bitmap = it },
-                    )
-                } catch (_: RuntimeException) {
-                    null
-                } catch (_: OutOfMemoryError) {
-                    null
-                }
-                var accepted = false
-                synchronized(symbol_overlay_async_lock) {
-                    symbol_overlay_async_active_request = null
-                    if (result != null &&
-                        !overlay_async_closed &&
-                        symbol_overlay_async_generation == request.recording_generation
-                    ) {
-                        symbol_overlay_async_result = result
-                        accepted = true
-                    }
-                }
-                if (accepted) {
-                    symbol_overlay_main_handler.post {
-                        if (!overlay_async_closed) chrome.request_animation_frame()
-                    }
-                } else {
-                    val stale_bitmap = result?.bitmap ?: allocated_bitmap
-                    if (stale_bitmap != null && !stale_bitmap.isRecycled) {
-                        stale_bitmap.recycle()
-                    }
-                }
-            }
-        }.apply {
-            name = "FlightAlertSymbolOverlayRecord"
-            isDaemon = true
-            start()
-        }
+        symbol_batch_paint.shader = null
+        symbol_batch_atlas = null
+        reset_aircraft_symbol_batch()
     }
 
     private fun draw_prepared_aircraft_dot_batch(
@@ -901,34 +350,6 @@ class TrafficOverlayRenderer(
             return
         }
         val old_cap = paint.strokeCap
-        val motion_elapsed_sec = if (batch.animate_motion && batch.built_elapsed_ms > 0L) {
-            ((SystemClock.elapsedRealtime() - batch.built_elapsed_ms) / 1000f).coerceIn(
-                0f,
-                MAX_BATCH_MOTION_SECONDS
-            )
-        } else {
-            0f
-        }
-        val outline_draw_points = animated_batch_points(
-            points = batch.outline_points,
-            velocities = batch.outline_velocities,
-            motion_limits = batch.outline_motion_limits,
-            count = batch.outline_count,
-            elapsed_sec = motion_elapsed_sec,
-            scratch = animated_outline_points
-        ).also { animated_outline_points = it }
-        for (group in 0 until TrafficDotBatchOverlayState.GROUP_COUNT) {
-            val count = batch.fill_counts[group]
-            if (count == 0) continue
-            animated_fill_points[group] = animated_batch_points(
-                points = batch.fill_points[group],
-                velocities = batch.fill_velocities?.get(group),
-                motion_limits = batch.fill_motion_limits?.get(group),
-                count = count,
-                elapsed_sec = motion_elapsed_sec,
-                scratch = animated_fill_points[group]
-            )
-        }
         draw_dot_batch_points(
             canvas = canvas,
             batch = batch,
@@ -937,8 +358,8 @@ class TrafficOverlayRenderer(
             dot_alpha = dot_alpha,
             batch_radius_px = batch_radius_px,
             outline_extra_px = outline_extra_px,
-            outline_draw_points = outline_draw_points,
-            fill_draw_points = animated_fill_points,
+            outline_draw_points = batch.outline_points,
+            fill_draw_points = batch.fill_points,
             old_cap = old_cap
         )
         if (!draw_selected_overlay) return
@@ -1091,7 +512,6 @@ class TrafficOverlayRenderer(
     ): Boolean {
         return batch.visible_count >= DOT_OVERLAY_CACHE_MIN_DOTS &&
                 viewport.zoom <= DOT_OVERLAY_CACHE_MAX_ZOOM &&
-                !batch.animate_motion &&
                 batch.repeat_x_spacing > 0f &&
                 dot_alpha >= DOT_OVERLAY_CACHE_MIN_ALPHA &&
                 batch.transform_scale.isFinite() &&
@@ -1153,25 +573,6 @@ class TrafficOverlayRenderer(
             dot_overlay_async_result = null
             dot_overlay_async_generation += 1
             val cache_batch = batch.copy(
-                outline_points = batch.outline_points.copyOf(batch.outline_count),
-                outline_velocities =
-                    batch.outline_velocities?.copyOf(batch.outline_count),
-                outline_motion_limits =
-                    batch.outline_motion_limits?.copyOf(batch.outline_count),
-                fill_points = Array(TrafficDotBatchOverlayState.GROUP_COUNT) { group ->
-                    batch.fill_points[group].copyOf(batch.fill_counts[group])
-                },
-                fill_counts = batch.fill_counts.copyOf(),
-                fill_velocities = batch.fill_velocities?.let { velocities ->
-                    Array(TrafficDotBatchOverlayState.GROUP_COUNT) { group ->
-                        velocities[group].copyOf(batch.fill_counts[group])
-                    }
-                },
-                fill_motion_limits = batch.fill_motion_limits?.let { motion_limits ->
-                    Array(TrafficDotBatchOverlayState.GROUP_COUNT) { group ->
-                        motion_limits[group].copyOf(batch.fill_counts[group])
-                    }
-                },
                 selected_aircraft = null,
                 translation_x = batch.translation_x + padding,
                 translation_y = batch.translation_y + padding,
@@ -1212,60 +613,62 @@ class TrafficOverlayRenderer(
             if (!bitmap.isRecycled) bitmap.recycle()
         }
         if (!start_worker) return
-        Thread {
-            while (true) {
-                val request = synchronized(dot_overlay_async_lock) {
-                    val pending = dot_overlay_async_pending_request
-                    if (pending == null || overlay_async_closed) {
-                        dot_overlay_async_worker_running = false
+        try {
+            dot_overlay_async_executor.execute {
+                while (true) {
+                    val request = synchronized(dot_overlay_async_lock) {
+                        val pending = dot_overlay_async_pending_request
+                        if (pending == null || overlay_async_closed) {
+                            dot_overlay_async_worker_running = false
+                            null
+                        } else {
+                            dot_overlay_async_pending_request = null
+                            dot_overlay_async_active_request = pending
+                            pending
+                        }
+                    } ?: break
+                    var allocated_bitmap: Bitmap? = null
+                    val result = try {
+                        DotOverlayRecorder.record(
+                            request = request,
+                            is_cancelled = {
+                                overlay_async_closed ||
+                                    dot_overlay_async_generation != request.recording_generation
+                            },
+                            on_bitmap_allocated = { allocated_bitmap = it },
+                        )
+                    } catch (_: RuntimeException) {
                         null
+                    } catch (_: OutOfMemoryError) {
+                        null
+                    }
+                    var accepted = false
+                    synchronized(dot_overlay_async_lock) {
+                        dot_overlay_async_active_request = null
+                        if (result != null &&
+                            !overlay_async_closed &&
+                            dot_overlay_async_generation == request.recording_generation
+                        ) {
+                            dot_overlay_async_result = result
+                            accepted = true
+                        }
+                    }
+                    if (accepted) {
+                        overlay_main_handler.post {
+                            if (!overlay_async_closed) chrome.request_animation_frame()
+                        }
                     } else {
-                        dot_overlay_async_pending_request = null
-                        dot_overlay_async_active_request = pending
-                        pending
-                    }
-                } ?: break
-                var allocated_bitmap: Bitmap? = null
-                val result = try {
-                    DotOverlayRecorder.record(
-                        request = request,
-                        is_cancelled = {
-                            overlay_async_closed ||
-                                dot_overlay_async_generation != request.recording_generation
-                        },
-                        on_bitmap_allocated = { allocated_bitmap = it },
-                    )
-                } catch (_: RuntimeException) {
-                    null
-                } catch (_: OutOfMemoryError) {
-                    null
-                }
-                var accepted = false
-                synchronized(dot_overlay_async_lock) {
-                    dot_overlay_async_active_request = null
-                    if (result != null &&
-                        !overlay_async_closed &&
-                        dot_overlay_async_generation == request.recording_generation
-                    ) {
-                        dot_overlay_async_result = result
-                        accepted = true
-                    }
-                }
-                if (accepted) {
-                    symbol_overlay_main_handler.post {
-                        if (!overlay_async_closed) chrome.request_animation_frame()
-                    }
-                } else {
-                    val stale_bitmap = result?.bitmap ?: allocated_bitmap
-                    if (stale_bitmap != null && !stale_bitmap.isRecycled) {
-                        stale_bitmap.recycle()
+                        val stale_bitmap = result?.bitmap ?: allocated_bitmap
+                        if (stale_bitmap != null && !stale_bitmap.isRecycled) {
+                            stale_bitmap.recycle()
+                        }
                     }
                 }
             }
-        }.apply {
-            name = "FlightAlertDotOverlayRecord"
-            isDaemon = true
-            start()
+        } catch (_: RuntimeException) {
+            synchronized(dot_overlay_async_lock) {
+                dot_overlay_async_worker_running = false
+            }
         }
     }
 
@@ -1366,31 +769,6 @@ class TrafficOverlayRenderer(
             .coerceAtMost(MAX_WORLD_REPEAT)
         if (min_repeat > max_repeat) return 0..0
         return min_repeat..max_repeat
-    }
-
-    private fun animated_batch_points(
-        points: FloatArray,
-        velocities: FloatArray?,
-        motion_limits: FloatArray?,
-        count: Int,
-        elapsed_sec: Float,
-        scratch: FloatArray
-    ): FloatArray {
-        if (elapsed_sec <= 0f || velocities == null || velocities.size < count) return points
-        val animated_points = ensure_point_capacity(scratch, count)
-        var index = 0
-        while (index < count) {
-            val point_elapsed_sec = if (motion_limits != null && motion_limits.size > index) {
-                min(elapsed_sec, motion_limits[index].coerceAtLeast(0f))
-            } else {
-                elapsed_sec
-            }
-            animated_points[index] = points[index] + velocities[index] * point_elapsed_sec
-            animated_points[index + 1] =
-                points[index + 1] + velocities[index + 1] * point_elapsed_sec
-            index += 2
-        }
-        return animated_points
     }
 
     private fun draw_aircraft_dot_batch(
@@ -1542,11 +920,13 @@ class TrafficOverlayRenderer(
         y: Float,
         item: TrafficAircraftOverlayState,
         selected: Boolean,
+        appearance: Float,
         frame_style: AircraftIconFrameStyle,
         draw_internal_dot: Boolean,
-        now_ms: Long
+        now_ms: Long,
+        batch_atlas: AircraftSymbolBatchAtlas?,
     ) {
-        val appear = current_aircraft_appearance_progress_at(item, now_ms)
+        val appear = appearance
         val enter_scale = 0.18f + 0.82f * appear
         val alpha = (appear * 255).toInt().coerceIn(0, 255)
         val symbol_alpha = (appear * frame_style.symbol_visibility * 255).toInt().coerceIn(0, 255)
@@ -1571,6 +951,56 @@ class TrafficOverlayRenderer(
         }
         if (alpha > 4 && symbol_alpha > 4) {
             val shadow_alpha = (74 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 74)
+            val fill_color = with_alpha(item.color, symbol_alpha)
+            val stroke_color = with_alpha(
+                colors.scrim,
+                (235 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 235)
+            )
+            val batch_vertices =
+                if (symbol == AircraftSymbol.ROTORCRAFT) {
+                    ROTORCRAFT_SYMBOL_BATCH_VERTICES
+                } else {
+                    SYMBOL_BATCH_VERTICES_PER_AIRCRAFT
+                }
+            if (batch_atlas != null &&
+                !selected &&
+                item.aircraft.track_deg?.isFinite() != false &&
+                (symbol != AircraftSymbol.ROTORCRAFT ||
+                    (batch_atlas.rotorcraft_geometry != null &&
+                        x.isFinite() && y.isFinite() && icon_scale.isFinite()))
+            ) {
+                if (symbol_batch_vertex_count > MAX_SYMBOL_BATCH_VERTICES - batch_vertices) {
+                    flush_aircraft_symbol_batch(canvas, batch_atlas)
+                }
+                if (symbol == AircraftSymbol.ROTORCRAFT) {
+                    append_rotorcraft_symbol_to_batch(
+                        atlas = batch_atlas,
+                        x = x,
+                        y = y,
+                        track_deg = item.aircraft.track_deg,
+                        icon_scale = icon_scale,
+                        frame_style = frame_style,
+                        shadow_alpha = shadow_alpha,
+                        fill = fill_color,
+                        stroke = stroke_color,
+                    )
+                } else {
+                    append_aircraft_symbol_to_batch(
+                        atlas = batch_atlas,
+                        x = x,
+                        y = y,
+                        symbol = symbol,
+                        track_deg = item.aircraft.track_deg,
+                        icon_scale = icon_scale,
+                        frame_style = frame_style,
+                        shadow = with_alpha(colors.scrim, shadow_alpha),
+                        fill = fill_color,
+                        stroke = stroke_color,
+                    )
+                }
+                return
+            }
+            flush_aircraft_symbol_batch(canvas, batch_atlas)
             paint.style = Paint.Style.FILL
             paint.color = with_alpha(colors.scrim, shadow_alpha)
             if (symbol == AircraftSymbol.ROTORCRAFT) {
@@ -1604,11 +1034,6 @@ class TrafficOverlayRenderer(
                 )
             }
 
-            val fill_color = with_alpha(item.color, symbol_alpha)
-            val stroke_color = with_alpha(
-                colors.scrim,
-                (235 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 235)
-            )
             if (symbol == AircraftSymbol.ROTORCRAFT) {
                 draw_rotorcraft_icon(
                     canvas = canvas,
@@ -1617,7 +1042,6 @@ class TrafficOverlayRenderer(
                     track_deg = item.aircraft.track_deg,
                     icon_scale = icon_scale,
                     frame_style = frame_style,
-                    now_ms = now_ms,
                     fill = fill_color,
                     stroke = stroke_color
                 )
@@ -1630,7 +1054,7 @@ class TrafficOverlayRenderer(
                     track_deg = item.aircraft.track_deg,
                     icon_scale = icon_scale,
                     mask_resolution_scale = frame_style.mask_resolution_scale,
-                    mask = frame_style.mask_for(symbol),
+                    mask = aircraft_symbol_mask_for_frame(frame_style, symbol),
                     fill = fill_color,
                     stroke = stroke_color
                 )
@@ -1643,7 +1067,8 @@ class TrafficOverlayRenderer(
     private fun aircraft_icon_frame_style(
         marker_blend: Float,
         viewport_zoom: Double,
-        style: TrafficOverlayStyle
+        style: TrafficOverlayStyle,
+        now_elapsed_ms: Long,
     ): AircraftIconFrameStyle {
         val blend = marker_blend.coerceIn(0f, 1f)
         val shape_progress = AircraftMarkerMorph.shape_progress(blend)
@@ -1653,27 +1078,605 @@ class TrafficOverlayRenderer(
         val mask_resolution_scale = aircraft_symbol_mask_resolution_scale(base_icon_scale)
         val mask_size_px = aircraft_symbol_mask_size_px(mask_resolution_scale)
         java.util.Arrays.fill(frame_symbol_masks, null)
-        for (symbol in aircraft_symbol_values) {
-            frame_symbol_masks[symbol.ordinal] = aircraft_symbol_mask(
-                symbol = symbol,
-                progress_bucket = progress_bucket,
-                size_px = mask_size_px,
-                mask_resolution_scale = mask_resolution_scale
-            )
-        }
         return AircraftIconFrameStyle(
             style = style,
             colors = style.visual_theme.colors,
             blend = blend,
+            shape_progress = shape_progress,
+            rotorcraft_blade_phase_deg =
+                ((now_elapsed_ms % ROTORCRAFT_BLADE_CYCLE_MS).toFloat() /
+                    ROTORCRAFT_BLADE_CYCLE_MS) * 360f,
             viewport_zoom = viewport_zoom,
             symbol_visibility = symbol_visibility,
             base_icon_scale = base_icon_scale,
+            mask_progress_bucket = progress_bucket,
+            mask_size_px = mask_size_px,
             mask_resolution_scale = mask_resolution_scale,
             shadow_offset_x_px = chrome.dp(TrafficSpritePaintGeometry.shadow_offset_x_dp(shape_progress)),
             shadow_offset_y_px = chrome.dp(TrafficSpritePaintGeometry.shadow_offset_y_dp(shape_progress)),
             shadow_radius_px = chrome.dp(TrafficSpritePaintGeometry.shadow_radius_dp(shape_progress)),
             masks = frame_symbol_masks
         )
+    }
+
+    private fun aircraft_symbol_mask_for_frame(
+        frame_style: AircraftIconFrameStyle,
+        symbol: AircraftSymbol,
+    ): AircraftSymbolMask {
+        return frame_style.masks[symbol.ordinal] ?: aircraft_symbol_mask(
+            symbol = symbol,
+            progress_bucket = frame_style.mask_progress_bucket,
+            size_px = frame_style.mask_size_px,
+            mask_resolution_scale = frame_style.mask_resolution_scale,
+        ).also { mask -> frame_style.masks[symbol.ordinal] = mask }
+    }
+
+    private fun aircraft_symbol_batch_atlas(
+        frame_style: AircraftIconFrameStyle,
+        batch_rotorcraft: Boolean,
+    ): AircraftSymbolBatchAtlas {
+        val rotorcraft_shape_bits =
+            if (batch_rotorcraft) frame_style.shape_progress.toRawBits() else Int.MIN_VALUE
+        symbol_batch_atlas?.let { atlas ->
+            if (atlas.key.progress_bucket == frame_style.mask_progress_bucket &&
+                atlas.key.size_px == frame_style.mask_size_px &&
+                atlas.key.rotorcraft_shape_bits == rotorcraft_shape_bits
+            ) {
+                return atlas
+            }
+        }
+        val key = AircraftSymbolBatchAtlasKey(
+            progress_bucket = frame_style.mask_progress_bucket,
+            size_px = frame_style.mask_size_px,
+            rotorcraft_shape_bits = rotorcraft_shape_bits,
+        )
+
+        val stride = key.size_px + SYMBOL_BATCH_ATLAS_GUTTER_PX * 2
+        val shadow_cell_index = (AircraftSymbol.entries.size - 1) * 2
+        val rotorcraft_cell_index =
+            if (batch_rotorcraft) shadow_cell_index + 1 else -1
+        val cell_count =
+            shadow_cell_index + 1 +
+                if (batch_rotorcraft) ROTORCRAFT_SYMBOL_BATCH_QUADS else 0
+        val rows = (cell_count + SYMBOL_BATCH_ATLAS_COLUMNS - 1) / SYMBOL_BATCH_ATLAS_COLUMNS
+        val bitmap = createBitmap(
+            stride * SYMBOL_BATCH_ATLAS_COLUMNS,
+            stride * rows,
+            Bitmap.Config.ALPHA_8,
+        )
+        val atlas_canvas = Canvas(bitmap)
+        for (symbol in AircraftSymbol.entries) {
+            if (symbol == AircraftSymbol.ROTORCRAFT) continue
+            val symbol_index = batchable_aircraft_symbol_index(symbol)
+            val mask = aircraft_symbol_mask_for_frame(frame_style, symbol)
+            draw_mask_into_symbol_batch_atlas(
+                canvas = atlas_canvas,
+                bitmap = mask.fill,
+                cell_index = symbol_index * 2,
+                stride = stride,
+            )
+            draw_mask_into_symbol_batch_atlas(
+                canvas = atlas_canvas,
+                bitmap = mask.stroke,
+                cell_index = symbol_index * 2 + 1,
+                stride = stride,
+            )
+        }
+        val shadow_left = symbol_batch_atlas_cell_left(shadow_cell_index, stride)
+        val shadow_top = symbol_batch_atlas_cell_top(shadow_cell_index, stride)
+        val shadow_source_radius = (key.size_px / 2f - SYMBOL_BATCH_SHADOW_EDGE_PX).coerceAtLeast(1f)
+        val shadow_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.WHITE
+        }
+        atlas_canvas.drawCircle(
+            shadow_left + key.size_px / 2f,
+            shadow_top + key.size_px / 2f,
+            shadow_source_radius,
+            shadow_paint,
+        )
+        val rotorcraft_geometry =
+            if (batch_rotorcraft) {
+                rotorcraft_frame_geometry(frame_style.shape_progress).also { geometry ->
+                    draw_rotorcraft_masks_into_symbol_batch_atlas(
+                        canvas = atlas_canvas,
+                        first_cell_index = rotorcraft_cell_index,
+                        stride = stride,
+                        size_px = key.size_px,
+                        mask_resolution_scale = frame_style.mask_resolution_scale,
+                        geometry = geometry,
+                    )
+                }
+            } else {
+                null
+            }
+
+        val atlas = AircraftSymbolBatchAtlas(
+            key = key,
+            bitmap = bitmap,
+            shader = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP),
+            stride = stride,
+            shadow_cell_index = shadow_cell_index,
+            shadow_source_radius = shadow_source_radius,
+            rotorcraft_cell_index = rotorcraft_cell_index,
+            rotorcraft_geometry = rotorcraft_geometry,
+        )
+        val previous = symbol_batch_atlas
+        symbol_batch_atlas = atlas
+        previous?.let { chrome.retire_bitmap_after_frame_commit(it.bitmap) }
+        return atlas
+    }
+
+    private fun draw_mask_into_symbol_batch_atlas(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        cell_index: Int,
+        stride: Int,
+    ) {
+        canvas.drawBitmap(
+            bitmap,
+            symbol_batch_atlas_cell_left(cell_index, stride),
+            symbol_batch_atlas_cell_top(cell_index, stride),
+            null,
+        )
+    }
+
+    private fun draw_rotorcraft_masks_into_symbol_batch_atlas(
+        canvas: Canvas,
+        first_cell_index: Int,
+        stride: Int,
+        size_px: Int,
+        mask_resolution_scale: Float,
+        geometry: RotorcraftFrameGeometry,
+    ) {
+        val fill_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.WHITE
+        }
+        val stroke_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeJoin = Paint.Join.ROUND
+            strokeWidth = chrome.dp(1.2f)
+            color = Color.WHITE
+        }
+        val blade_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            color = Color.WHITE
+        }
+        draw_rotorcraft_mask_cell(
+            canvas,
+            first_cell_index,
+            stride,
+            size_px,
+            mask_resolution_scale,
+        ) {
+            drawPath(rotorcraft_shadow_path, fill_paint)
+        }
+        draw_rotorcraft_mask_cell(
+            canvas,
+            first_cell_index + 1,
+            stride,
+            size_px,
+            mask_resolution_scale,
+        ) {
+            drawPath(rotorcraft_body_path, fill_paint)
+        }
+        draw_rotorcraft_mask_cell(
+            canvas,
+            first_cell_index + 2,
+            stride,
+            size_px,
+            mask_resolution_scale,
+        ) {
+            drawPath(rotorcraft_body_path, stroke_paint)
+        }
+        blade_paint.strokeWidth = geometry.main_blade_stroke_width
+        draw_rotorcraft_mask_cell(
+            canvas,
+            first_cell_index + 3,
+            stride,
+            size_px,
+            mask_resolution_scale,
+            geometry.mast_y,
+        ) {
+            drawLines(rotorcraft_main_blade_lines, blade_paint)
+        }
+        blade_paint.strokeWidth = geometry.tail_blade_stroke_width
+        draw_rotorcraft_mask_cell(
+            canvas,
+            first_cell_index + 4,
+            stride,
+            size_px,
+            mask_resolution_scale,
+            geometry.tail_rotor_y,
+        ) {
+            drawLines(rotorcraft_tail_blade_lines, blade_paint)
+        }
+        draw_rotorcraft_mask_cell(
+            canvas,
+            first_cell_index + 5,
+            stride,
+            size_px,
+            mask_resolution_scale,
+        ) {
+            drawCircle(0f, 0f, geometry.hub_radius, fill_paint)
+        }
+        draw_rotorcraft_mask_cell(
+            canvas,
+            first_cell_index + 6,
+            stride,
+            size_px,
+            mask_resolution_scale,
+        ) {
+            drawCircle(0f, 0f, geometry.hub_radius, stroke_paint)
+        }
+    }
+
+    private inline fun draw_rotorcraft_mask_cell(
+        canvas: Canvas,
+        cell_index: Int,
+        stride: Int,
+        size_px: Int,
+        mask_resolution_scale: Float,
+        pivot_y: Float = 0f,
+        draw: Canvas.() -> Unit,
+    ) {
+        canvas.withTranslation(
+            symbol_batch_atlas_cell_left(cell_index, stride) + size_px / 2f,
+            symbol_batch_atlas_cell_top(cell_index, stride) + size_px / 2f,
+        ) {
+            scale(mask_resolution_scale, mask_resolution_scale)
+            translate(0f, -pivot_y)
+            draw()
+        }
+    }
+
+    private fun append_aircraft_symbol_to_batch(
+        atlas: AircraftSymbolBatchAtlas,
+        x: Float,
+        y: Float,
+        symbol: AircraftSymbol,
+        track_deg: Double?,
+        icon_scale: Float,
+        frame_style: AircraftIconFrameStyle,
+        shadow: Int,
+        fill: Int,
+        stroke: Int,
+    ) {
+        ensure_aircraft_symbol_batch_capacity(SYMBOL_BATCH_QUADS_PER_AIRCRAFT)
+        val shadow_scale =
+            frame_style.shadow_radius_px * icon_scale / atlas.shadow_source_radius
+        append_aircraft_symbol_batch_quad(
+            atlas = atlas,
+            cell_index = atlas.shadow_cell_index,
+            center_x = x + frame_style.shadow_offset_x_px * icon_scale,
+            center_y = y + frame_style.shadow_offset_y_px * icon_scale,
+            half_size = atlas.key.size_px * shadow_scale / 2f,
+            rotation_cos = 1f,
+            rotation_sin = 0f,
+            color = shadow,
+        )
+
+        val draw_scale = icon_scale / frame_style.mask_resolution_scale.coerceAtLeast(0.001f)
+        val angle_rad =
+            if (track_deg != null && symbol != AircraftSymbol.SURFACE) {
+                Math.toRadians(track_deg)
+            } else {
+                0.0
+            }
+        val rotation_cos = cos(angle_rad).toFloat()
+        val rotation_sin = sin(angle_rad).toFloat()
+        val half_size = atlas.key.size_px * draw_scale / 2f
+        val symbol_cell = batchable_aircraft_symbol_index(symbol) * 2
+        append_aircraft_symbol_batch_quad(
+            atlas = atlas,
+            cell_index = symbol_cell,
+            center_x = x,
+            center_y = y,
+            half_size = half_size,
+            rotation_cos = rotation_cos,
+            rotation_sin = rotation_sin,
+            color = fill,
+        )
+        append_aircraft_symbol_batch_quad(
+            atlas = atlas,
+            cell_index = symbol_cell + 1,
+            center_x = x,
+            center_y = y,
+            half_size = half_size,
+            rotation_cos = rotation_cos,
+            rotation_sin = rotation_sin,
+            color = stroke,
+        )
+    }
+
+    private fun append_rotorcraft_symbol_to_batch(
+        atlas: AircraftSymbolBatchAtlas,
+        x: Float,
+        y: Float,
+        track_deg: Double?,
+        icon_scale: Float,
+        frame_style: AircraftIconFrameStyle,
+        shadow_alpha: Int,
+        fill: Int,
+        stroke: Int,
+    ) {
+        ensure_aircraft_symbol_batch_capacity(ROTORCRAFT_SYMBOL_BATCH_QUADS)
+        val geometry = requireNotNull(atlas.rotorcraft_geometry)
+        val draw_scale = icon_scale / frame_style.mask_resolution_scale.coerceAtLeast(0.001f)
+        val half_size = atlas.key.size_px * draw_scale / 2f
+        val track_radians = Math.toRadians(track_deg ?: 0.0)
+        val track_cos = cos(track_radians).toFloat()
+        val track_sin = sin(track_radians).toFloat()
+        val first_cell = atlas.rotorcraft_cell_index
+
+        if (shadow_alpha > 4) {
+            append_aircraft_symbol_batch_quad(
+                atlas = atlas,
+                cell_index = first_cell,
+                center_x = x + frame_style.shadow_offset_x_px * icon_scale * 0.42f,
+                center_y = y + frame_style.shadow_offset_y_px * icon_scale * 0.42f,
+                half_size = half_size,
+                rotation_cos = track_cos,
+                rotation_sin = track_sin,
+                color = with_alpha(
+                    frame_style.colors.scrim,
+                    (shadow_alpha * 0.8f).round_to_int().coerceIn(0, 64),
+                ),
+            )
+        }
+        append_aircraft_symbol_batch_quad(
+            atlas,
+            first_cell + 1,
+            x,
+            y,
+            half_size,
+            track_cos,
+            track_sin,
+            fill,
+        )
+        append_aircraft_symbol_batch_quad(
+            atlas,
+            first_cell + 2,
+            x,
+            y,
+            half_size,
+            track_cos,
+            track_sin,
+            stroke,
+        )
+
+        val blade_alpha =
+            (Color.alpha(stroke) * geometry.blade_visibility * 0.72f)
+                .round_to_int()
+                .coerceIn(0, 255)
+        if (blade_alpha > 4 && (geometry.rotor > 0f || geometry.tail_rotor > 0f)) {
+            val blade_color = with_alpha(stroke, blade_alpha)
+            val mast_offset = geometry.mast_y * icon_scale
+            val mast_x = x - mast_offset * track_sin
+            val mast_y = y + mast_offset * track_cos
+            val main_radians =
+                track_radians + Math.toRadians(frame_style.rotorcraft_blade_phase_deg.toDouble())
+            append_aircraft_symbol_batch_quad(
+                atlas,
+                first_cell + 3,
+                mast_x,
+                mast_y,
+                half_size,
+                cos(main_radians).toFloat(),
+                sin(main_radians).toFloat(),
+                blade_color,
+            )
+            if (geometry.tail_rotor > 0f) {
+                val tail_offset = geometry.tail_rotor_y * icon_scale
+                val tail_phase = (frame_style.rotorcraft_blade_phase_deg * 5f + 24f) % 360f
+                val tail_radians = track_radians + Math.toRadians(tail_phase.toDouble())
+                append_aircraft_symbol_batch_quad(
+                    atlas,
+                    first_cell + 4,
+                    x - tail_offset * track_sin,
+                    y + tail_offset * track_cos,
+                    half_size,
+                    cos(tail_radians).toFloat(),
+                    sin(tail_radians).toFloat(),
+                    blade_color,
+                )
+            }
+            request_rotorcraft_animation_frame_once()
+        }
+        val mast_offset = geometry.mast_y * icon_scale
+        val mast_x = x - mast_offset * track_sin
+        val mast_y = y + mast_offset * track_cos
+        append_aircraft_symbol_batch_quad(
+            atlas,
+            first_cell + 5,
+            mast_x,
+            mast_y,
+            half_size,
+            1f,
+            0f,
+            fill,
+        )
+        append_aircraft_symbol_batch_quad(
+            atlas,
+            first_cell + 6,
+            mast_x,
+            mast_y,
+            half_size,
+            1f,
+            0f,
+            stroke,
+        )
+    }
+
+    private fun append_aircraft_symbol_batch_quad(
+        atlas: AircraftSymbolBatchAtlas,
+        cell_index: Int,
+        center_x: Float,
+        center_y: Float,
+        half_size: Float,
+        rotation_cos: Float,
+        rotation_sin: Float,
+        color: Int,
+    ) {
+        val left = symbol_batch_atlas_cell_left(cell_index, atlas.stride)
+        val top = symbol_batch_atlas_cell_top(cell_index, atlas.stride)
+        val right = left + atlas.key.size_px
+        val bottom = top + atlas.key.size_px
+        val local_left = -half_size
+        val local_top = -half_size
+        val local_right = half_size
+        val local_bottom = half_size
+        val vertex_offset = symbol_batch_vertex_count * 2
+
+        write_rotated_symbol_batch_vertex(
+            vertex_offset,
+            center_x,
+            center_y,
+            local_left,
+            local_top,
+            rotation_cos,
+            rotation_sin,
+            left,
+            top,
+        )
+        write_rotated_symbol_batch_vertex(
+            vertex_offset + 2,
+            center_x,
+            center_y,
+            local_right,
+            local_top,
+            rotation_cos,
+            rotation_sin,
+            right,
+            top,
+        )
+        write_rotated_symbol_batch_vertex(
+            vertex_offset + 4,
+            center_x,
+            center_y,
+            local_right,
+            local_bottom,
+            rotation_cos,
+            rotation_sin,
+            right,
+            bottom,
+        )
+        write_rotated_symbol_batch_vertex(
+            vertex_offset + 6,
+            center_x,
+            center_y,
+            local_left,
+            local_bottom,
+            rotation_cos,
+            rotation_sin,
+            left,
+            bottom,
+        )
+        java.util.Arrays.fill(
+            symbol_batch_colors,
+            symbol_batch_vertex_count,
+            symbol_batch_vertex_count + SYMBOL_BATCH_VERTICES_PER_QUAD,
+            color,
+        )
+        val base_vertex = symbol_batch_vertex_count
+        symbol_batch_indices[symbol_batch_index_count++] = base_vertex.toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base_vertex + 1).toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base_vertex + 2).toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = base_vertex.toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base_vertex + 2).toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base_vertex + 3).toShort()
+        symbol_batch_vertex_count += SYMBOL_BATCH_VERTICES_PER_QUAD
+    }
+
+    private fun write_rotated_symbol_batch_vertex(
+        offset: Int,
+        center_x: Float,
+        center_y: Float,
+        local_x: Float,
+        local_y: Float,
+        rotation_cos: Float,
+        rotation_sin: Float,
+        texture_x: Float,
+        texture_y: Float,
+    ) {
+        symbol_batch_vertices[offset] =
+            center_x + local_x * rotation_cos - local_y * rotation_sin
+        symbol_batch_vertices[offset + 1] =
+            center_y + local_x * rotation_sin + local_y * rotation_cos
+        symbol_batch_texture_coordinates[offset] = texture_x
+        symbol_batch_texture_coordinates[offset + 1] = texture_y
+    }
+
+    private fun ensure_aircraft_symbol_batch_capacity(additional_quads: Int) {
+        val required_vertices =
+            symbol_batch_vertex_count + additional_quads * SYMBOL_BATCH_VERTICES_PER_QUAD
+        val required_floats = required_vertices * 2
+        val required_indices =
+            symbol_batch_index_count + additional_quads * SYMBOL_BATCH_INDICES_PER_QUAD
+        if (symbol_batch_vertices.size < required_floats) {
+            val next_size = max(required_floats, max(256, symbol_batch_vertices.size * 2))
+            symbol_batch_vertices = symbol_batch_vertices.copyOf(next_size)
+            symbol_batch_texture_coordinates =
+                symbol_batch_texture_coordinates.copyOf(next_size)
+        }
+        if (symbol_batch_colors.size < required_vertices) {
+            symbol_batch_colors =
+                symbol_batch_colors.copyOf(max(required_vertices, max(128, symbol_batch_colors.size * 2)))
+        }
+        if (symbol_batch_indices.size < required_indices) {
+            symbol_batch_indices =
+                symbol_batch_indices.copyOf(max(required_indices, max(192, symbol_batch_indices.size * 2)))
+        }
+    }
+
+    private fun flush_aircraft_symbol_batch(
+        canvas: Canvas,
+        atlas: AircraftSymbolBatchAtlas?,
+    ) {
+        if (symbol_batch_vertex_count == 0 || atlas == null) return
+        symbol_batch_paint.shader = atlas.shader
+        try {
+            canvas.drawVertices(
+                Canvas.VertexMode.TRIANGLES,
+                symbol_batch_vertex_count * 2,
+                symbol_batch_vertices,
+                0,
+                symbol_batch_texture_coordinates,
+                0,
+                symbol_batch_colors,
+                0,
+                symbol_batch_indices,
+                0,
+                symbol_batch_index_count,
+                symbol_batch_paint,
+            )
+        } finally {
+            symbol_batch_paint.shader = null
+            reset_aircraft_symbol_batch()
+        }
+    }
+
+    private fun reset_aircraft_symbol_batch() {
+        symbol_batch_vertex_count = 0
+        symbol_batch_index_count = 0
+    }
+
+    private fun batchable_aircraft_symbol_index(symbol: AircraftSymbol): Int {
+        val ordinal = symbol.ordinal
+        val rotorcraft_ordinal = AircraftSymbol.ROTORCRAFT.ordinal
+        return ordinal - if (ordinal > rotorcraft_ordinal) 1 else 0
+    }
+
+    private fun symbol_batch_atlas_cell_left(cell_index: Int, stride: Int): Float {
+        return (cell_index % SYMBOL_BATCH_ATLAS_COLUMNS) * stride +
+            SYMBOL_BATCH_ATLAS_GUTTER_PX.toFloat()
+    }
+
+    private fun symbol_batch_atlas_cell_top(cell_index: Int, stride: Int): Float {
+        return (cell_index / SYMBOL_BATCH_ATLAS_COLUMNS) * stride +
+            SYMBOL_BATCH_ATLAS_GUTTER_PX.toFloat()
     }
 
     private fun draw_aircraft_selection_ring(
@@ -1755,9 +1758,7 @@ class TrafficOverlayRenderer(
         alpha: Int
     ) {
         if (alpha <= 4) return
-        val shape_progress = AircraftMarkerMorph.shape_progress(frame_style.blend)
-        val body = smooth_step(0f, 0.62f, shape_progress)
-        val tail = smooth_step(0.34f, 1f, shape_progress)
+        rotorcraft_frame_geometry(frame_style.shape_progress)
         val previous_paint_style = paint.style
         canvas.withTranslation(
             x + frame_style.shadow_offset_x_px * icon_scale * 0.42f,
@@ -1765,38 +1766,10 @@ class TrafficOverlayRenderer(
         ) {
             if (track_deg != null) rotate(track_deg.toFloat())
             scale(icon_scale, icon_scale)
-
-            val nose_y = -chrome.dp(4.5f + 9.5f * body)
-            val shoulder_y = -chrome.dp(3.4f + 5.3f * body)
-            val cabin_mid_y = chrome.dp(1.2f + 4.4f * body)
-            val cabin_back_y = chrome.dp(4.2f + 5f * body)
-            val cabin_half_width = chrome.dp(3.4f + 4.4f * body)
-            val cabin_back_half_width = chrome.dp(2.1f + 2.1f * body)
-            val boom_half_width = chrome.dp(0.85f + 0.75f * tail)
-            val boom_end_y = chrome.dp(6f + 18f * tail)
-            val tail_fin_half_width = chrome.dp(2.1f + 3.1f * tail)
-            val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
-            path.reset()
-            path.moveTo(0f, nose_y)
-            path.cubicTo(
-                cabin_half_width,
-                shoulder_y,
-                cabin_half_width,
-                cabin_mid_y,
-                cabin_back_half_width,
-                cabin_back_y
-            )
-            path.lineTo(boom_half_width, boom_end_y)
-            path.lineTo(tail_fin_half_width, tail_fin_y)
-            path.lineTo(-tail_fin_half_width, tail_fin_y)
-            path.lineTo(-boom_half_width, boom_end_y)
-            path.lineTo(-cabin_back_half_width, cabin_back_y)
-            path.cubicTo(-cabin_half_width, cabin_mid_y, -cabin_half_width, shoulder_y, 0f, nose_y)
-            path.close()
             paint.style = Paint.Style.FILL
             paint.color =
                 with_alpha(frame_style.colors.scrim, (alpha * 0.8f).round_to_int().coerceIn(0, 64))
-            drawPath(path, paint)
+            drawPath(rotorcraft_shadow_path, paint)
         }
         paint.style = previous_paint_style
     }
@@ -1808,15 +1781,10 @@ class TrafficOverlayRenderer(
         track_deg: Double?,
         icon_scale: Float,
         frame_style: AircraftIconFrameStyle,
-        now_ms: Long,
         fill: Int,
         stroke: Int
     ) {
-        val shape_progress = AircraftMarkerMorph.shape_progress(frame_style.blend)
-        val body = smooth_step(0f, 0.62f, shape_progress)
-        val tail = smooth_step(0.34f, 1f, shape_progress)
-        val rotor = smooth_step(0.32f, 1f, shape_progress)
-        val tail_rotor = smooth_step(0.58f, 1f, shape_progress)
+        val geometry = rotorcraft_frame_geometry(frame_style.shape_progress)
         val previous_stroke_cap = stroke_paint.strokeCap
         val previous_stroke_join = stroke_paint.strokeJoin
         val previous_paint_style = paint.style
@@ -1825,74 +1793,37 @@ class TrafficOverlayRenderer(
             if (track_deg != null) rotate(track_deg.toFloat())
             scale(icon_scale, icon_scale)
 
-            path.reset()
-            val nose_y = -chrome.dp(5f + 10f * body)
-            val shoulder_y = -chrome.dp(3.8f + 5.8f * body)
-            val cabin_mid_y = chrome.dp(1.4f + 4.8f * body)
-            val cabin_back_y = chrome.dp(4.4f + 5.2f * body)
-            val cabin_half_width = chrome.dp(2.9f + 4f * body)
-            val cabin_back_half_width = chrome.dp(1.8f + 1.9f * body)
-            val boom_half_width = chrome.dp(0.55f + 0.65f * tail)
-            val boom_end_y = chrome.dp(6f + 18f * tail)
-            val tail_fin_half_width = chrome.dp(1.8f + 2.9f * tail)
-            val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
-            path.moveTo(0f, nose_y)
-            path.cubicTo(
-                cabin_half_width,
-                shoulder_y,
-                cabin_half_width,
-                cabin_mid_y,
-                cabin_back_half_width,
-                cabin_back_y
-            )
-            path.lineTo(boom_half_width, boom_end_y)
-            path.lineTo(tail_fin_half_width, tail_fin_y)
-            path.lineTo(-tail_fin_half_width, tail_fin_y)
-            path.lineTo(-boom_half_width, boom_end_y)
-            path.lineTo(-cabin_back_half_width, cabin_back_y)
-            path.cubicTo(-cabin_half_width, cabin_mid_y, -cabin_half_width, shoulder_y, 0f, nose_y)
-            path.close()
-
             paint.style = Paint.Style.FILL
             paint.color = fill
-            drawPath(path, paint)
+            drawPath(rotorcraft_body_path, paint)
             stroke_paint.style = Paint.Style.STROKE
             stroke_paint.strokeJoin = Paint.Join.ROUND
             stroke_paint.color = stroke
             stroke_paint.strokeWidth = chrome.dp(1.2f)
-            drawPath(path, stroke_paint)
+            drawPath(rotorcraft_body_path, stroke_paint)
 
-            val blade_visibility = smooth_step(0.32f, 0.82f, shape_progress)
             val blade_alpha =
-                (Color.alpha(stroke) * blade_visibility * 0.72f).round_to_int().coerceIn(0, 255)
-            if (blade_alpha > 4 && (rotor > 0f || tail_rotor > 0f)) {
-                val phase =
-                    ((now_ms % ROTORCRAFT_BLADE_CYCLE_MS).toFloat() / ROTORCRAFT_BLADE_CYCLE_MS) * 360f
+                (Color.alpha(stroke) * geometry.blade_visibility * 0.72f)
+                    .round_to_int()
+                    .coerceIn(0, 255)
+            if (blade_alpha > 4 && (geometry.rotor > 0f || geometry.tail_rotor > 0f)) {
+                val phase = frame_style.rotorcraft_blade_phase_deg
                 stroke_paint.strokeCap = Paint.Cap.ROUND
                 stroke_paint.color = with_alpha(stroke, blade_alpha)
-                stroke_paint.strokeWidth = chrome.dp(1.55f + 0.3f * rotor)
-                val mast_y = -chrome.dp(1.8f * body)
-                val main_half_length = chrome.dp(5f + 22f * rotor)
-                val main_gap = chrome.dp(2.8f + 1.6f * body)
+                stroke_paint.strokeWidth = geometry.main_blade_stroke_width
                 draw_rotorcraft_blade_pair(
                     this,
-                    0f,
-                    mast_y,
-                    main_half_length,
-                    main_gap,
+                    rotorcraft_main_blade_lines,
+                    geometry.mast_y,
                     phase,
                     stroke_paint
                 )
-                if (tail_rotor > 0f) {
-                    val tail_rotor_y = chrome.dp(7.8f + 19.2f * tail)
-                    val tail_blade = chrome.dp(2.3f + 4.2f * tail_rotor)
-                    stroke_paint.strokeWidth = chrome.dp(1.25f)
+                if (geometry.tail_rotor > 0f) {
+                    stroke_paint.strokeWidth = geometry.tail_blade_stroke_width
                     draw_rotorcraft_blade_pair(
                         this,
-                        0f,
-                        tail_rotor_y,
-                        tail_blade,
-                        chrome.dp(0.8f),
+                        rotorcraft_tail_blade_lines,
+                        geometry.tail_rotor_y,
                         (phase * 5f + 24f) % 360f,
                         stroke_paint
                     )
@@ -1900,13 +1831,11 @@ class TrafficOverlayRenderer(
                 request_rotorcraft_animation_frame_once()
             }
 
-            val mast_y = -chrome.dp(1.8f * body)
-            val hub_radius = chrome.dp(1.2f + 1.3f * body)
             paint.color = fill
-            drawCircle(0f, mast_y, hub_radius, paint)
+            drawCircle(0f, geometry.mast_y, geometry.hub_radius, paint)
             stroke_paint.color = stroke
             stroke_paint.strokeWidth = chrome.dp(1.2f)
-            drawCircle(0f, mast_y, hub_radius, stroke_paint)
+            drawCircle(0f, geometry.mast_y, geometry.hub_radius, stroke_paint)
         }
         paint.style = previous_paint_style
         stroke_paint.style = previous_stroke_style
@@ -1916,17 +1845,140 @@ class TrafficOverlayRenderer(
 
     private fun draw_rotorcraft_blade_pair(
         canvas: Canvas,
-        center_x: Float,
+        lines: FloatArray,
         center_y: Float,
-        half_length: Float,
-        center_gap: Float,
         angle_deg: Float,
         blade_paint: Paint
     ) {
-        canvas.withRotation(angle_deg, center_x, center_y) {
-            drawLine(center_x - half_length, center_y, center_x - center_gap, center_y, blade_paint)
-            drawLine(center_x + center_gap, center_y, center_x + half_length, center_y, blade_paint)
+        canvas.withRotation(angle_deg, 0f, center_y) {
+            drawLines(lines, blade_paint)
         }
+    }
+
+    private fun rotorcraft_frame_geometry(shape_progress: Float): RotorcraftFrameGeometry {
+        val shape_bits = shape_progress.toRawBits()
+        rotorcraft_geometry?.let { cached ->
+            if (rotorcraft_geometry_shape_bits == shape_bits) return cached
+        }
+
+        val body = smooth_step(0f, 0.62f, shape_progress)
+        val tail = smooth_step(0.34f, 1f, shape_progress)
+        val rotor = smooth_step(0.32f, 1f, shape_progress)
+        val tail_rotor = smooth_step(0.58f, 1f, shape_progress)
+        val mast_y = -chrome.dp(1.8f * body)
+        val main_half_length = chrome.dp(5f + 22f * rotor)
+        val main_gap = chrome.dp(2.8f + 1.6f * body)
+        val tail_rotor_y = chrome.dp(7.8f + 19.2f * tail)
+        val tail_half_length = chrome.dp(2.3f + 4.2f * tail_rotor)
+        val tail_gap = chrome.dp(0.8f)
+
+        rotorcraft_main_blade_lines[0] = -main_half_length
+        rotorcraft_main_blade_lines[1] = mast_y
+        rotorcraft_main_blade_lines[2] = -main_gap
+        rotorcraft_main_blade_lines[3] = mast_y
+        rotorcraft_main_blade_lines[4] = main_gap
+        rotorcraft_main_blade_lines[5] = mast_y
+        rotorcraft_main_blade_lines[6] = main_half_length
+        rotorcraft_main_blade_lines[7] = mast_y
+        rotorcraft_tail_blade_lines[0] = -tail_half_length
+        rotorcraft_tail_blade_lines[1] = tail_rotor_y
+        rotorcraft_tail_blade_lines[2] = -tail_gap
+        rotorcraft_tail_blade_lines[3] = tail_rotor_y
+        rotorcraft_tail_blade_lines[4] = tail_gap
+        rotorcraft_tail_blade_lines[5] = tail_rotor_y
+        rotorcraft_tail_blade_lines[6] = tail_half_length
+        rotorcraft_tail_blade_lines[7] = tail_rotor_y
+
+        prepare_rotorcraft_shadow_path(body, tail)
+        prepare_rotorcraft_body_path(body, tail)
+
+        return RotorcraftFrameGeometry(
+            rotor = rotor,
+            tail_rotor = tail_rotor,
+            blade_visibility = smooth_step(0.32f, 0.82f, shape_progress),
+            mast_y = mast_y,
+            main_blade_stroke_width = chrome.dp(1.55f + 0.3f * rotor),
+            tail_rotor_y = tail_rotor_y,
+            tail_blade_stroke_width = chrome.dp(1.25f),
+            hub_radius = chrome.dp(1.2f + 1.3f * body),
+        ).also { geometry ->
+            rotorcraft_geometry_shape_bits = shape_bits
+            rotorcraft_geometry = geometry
+        }
+    }
+
+    private fun prepare_rotorcraft_shadow_path(body: Float, tail: Float) {
+        val nose_y = -chrome.dp(4.5f + 9.5f * body)
+        val shoulder_y = -chrome.dp(3.4f + 5.3f * body)
+        val cabin_mid_y = chrome.dp(1.2f + 4.4f * body)
+        val cabin_back_y = chrome.dp(4.2f + 5f * body)
+        val cabin_half_width = chrome.dp(3.4f + 4.4f * body)
+        val cabin_back_half_width = chrome.dp(2.1f + 2.1f * body)
+        val boom_half_width = chrome.dp(0.85f + 0.75f * tail)
+        val boom_end_y = chrome.dp(6f + 18f * tail)
+        val tail_fin_half_width = chrome.dp(2.1f + 3.1f * tail)
+        val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
+        rotorcraft_shadow_path.reset()
+        rotorcraft_shadow_path.moveTo(0f, nose_y)
+        rotorcraft_shadow_path.cubicTo(
+            cabin_half_width,
+            shoulder_y,
+            cabin_half_width,
+            cabin_mid_y,
+            cabin_back_half_width,
+            cabin_back_y
+        )
+        rotorcraft_shadow_path.lineTo(boom_half_width, boom_end_y)
+        rotorcraft_shadow_path.lineTo(tail_fin_half_width, tail_fin_y)
+        rotorcraft_shadow_path.lineTo(-tail_fin_half_width, tail_fin_y)
+        rotorcraft_shadow_path.lineTo(-boom_half_width, boom_end_y)
+        rotorcraft_shadow_path.lineTo(-cabin_back_half_width, cabin_back_y)
+        rotorcraft_shadow_path.cubicTo(
+            -cabin_half_width,
+            cabin_mid_y,
+            -cabin_half_width,
+            shoulder_y,
+            0f,
+            nose_y
+        )
+        rotorcraft_shadow_path.close()
+    }
+
+    private fun prepare_rotorcraft_body_path(body: Float, tail: Float) {
+        val nose_y = -chrome.dp(5f + 10f * body)
+        val shoulder_y = -chrome.dp(3.8f + 5.8f * body)
+        val cabin_mid_y = chrome.dp(1.4f + 4.8f * body)
+        val cabin_back_y = chrome.dp(4.4f + 5.2f * body)
+        val cabin_half_width = chrome.dp(2.9f + 4f * body)
+        val cabin_back_half_width = chrome.dp(1.8f + 1.9f * body)
+        val boom_half_width = chrome.dp(0.55f + 0.65f * tail)
+        val boom_end_y = chrome.dp(6f + 18f * tail)
+        val tail_fin_half_width = chrome.dp(1.8f + 2.9f * tail)
+        val tail_fin_y = chrome.dp(7.4f + 19.6f * tail)
+        rotorcraft_body_path.reset()
+        rotorcraft_body_path.moveTo(0f, nose_y)
+        rotorcraft_body_path.cubicTo(
+            cabin_half_width,
+            shoulder_y,
+            cabin_half_width,
+            cabin_mid_y,
+            cabin_back_half_width,
+            cabin_back_y
+        )
+        rotorcraft_body_path.lineTo(boom_half_width, boom_end_y)
+        rotorcraft_body_path.lineTo(tail_fin_half_width, tail_fin_y)
+        rotorcraft_body_path.lineTo(-tail_fin_half_width, tail_fin_y)
+        rotorcraft_body_path.lineTo(-boom_half_width, boom_end_y)
+        rotorcraft_body_path.lineTo(-cabin_back_half_width, cabin_back_y)
+        rotorcraft_body_path.cubicTo(
+            -cabin_half_width,
+            cabin_mid_y,
+            -cabin_half_width,
+            shoulder_y,
+            0f,
+            nose_y
+        )
+        rotorcraft_body_path.close()
     }
 
     private fun request_rotorcraft_animation_frame_once() {
@@ -2001,8 +2053,6 @@ class TrafficOverlayRenderer(
                 mask_dp
             )
         }
-        fill.prepareToDraw()
-        stroke.prepareToDraw()
         val mask = AircraftSymbolMask(fill, stroke)
         symbol_mask_cache[key] = mask
         return mask
@@ -2578,141 +2628,52 @@ class TrafficOverlayRenderer(
         }
     }
 
+    private data class AircraftSymbolBatchAtlasKey(
+        val progress_bucket: Int,
+        val size_px: Int,
+        val rotorcraft_shape_bits: Int,
+    )
+
+    private data class AircraftSymbolBatchAtlas(
+        val key: AircraftSymbolBatchAtlasKey,
+        val bitmap: Bitmap,
+        val shader: BitmapShader,
+        val stride: Int,
+        val shadow_cell_index: Int,
+        val shadow_source_radius: Float,
+        val rotorcraft_cell_index: Int,
+        val rotorcraft_geometry: RotorcraftFrameGeometry?,
+    )
+
+    private data class RotorcraftFrameGeometry(
+        val rotor: Float,
+        val tail_rotor: Float,
+        val blade_visibility: Float,
+        val mast_y: Float,
+        val main_blade_stroke_width: Float,
+        val tail_rotor_y: Float,
+        val tail_blade_stroke_width: Float,
+        val hub_radius: Float,
+    )
+
     @Suppress("ArrayInDataClass")
     private data class AircraftIconFrameStyle(
         val style: TrafficOverlayStyle,
         val colors: ThemeColors,
         val blend: Float,
+        val shape_progress: Float,
+        val rotorcraft_blade_phase_deg: Float,
         val viewport_zoom: Double,
         val symbol_visibility: Float,
         val base_icon_scale: Float,
+        val mask_progress_bucket: Int,
+        val mask_size_px: Int,
         val mask_resolution_scale: Float,
         val shadow_offset_x_px: Float,
         val shadow_offset_y_px: Float,
         val shadow_radius_px: Float,
         val masks: Array<AircraftSymbolMask?>
-    ) {
-        fun mask_for(symbol: AircraftSymbol): AircraftSymbolMask {
-            return masks[symbol.ordinal] ?: error("Missing aircraft symbol mask for $symbol")
-        }
-    }
-
-    private data class AircraftSymbolOverlayAsyncResult(
-        val bitmap: Bitmap,
-        val recording_generation: Int,
-        val key: AircraftSymbolOverlayCacheKey,
-        val width_px: Int,
-        val height_px: Int,
-        val center_x: Double,
-        val center_y: Double,
-        val occupied_tiles: List<AircraftSymbolOverlayTile>,
-        val cached_aircraft_keys: Set<String>,
-        val has_motion_exclusions: Boolean,
-        val padding_px: Float
-    ) {
-        fun matches_target(
-            key: AircraftSymbolOverlayCacheKey,
-            width_px: Int,
-            height_px: Int,
-            padding: Float,
-            center_x: Double,
-            center_y: Double,
-        ): Boolean {
-            return this.key == key &&
-                this.width_px == width_px &&
-                this.height_px == height_px &&
-                padding_px.toBits() == padding.toBits() &&
-                this.center_x.toBits() == center_x.toBits() &&
-                this.center_y.toBits() == center_y.toBits()
-        }
-    }
-
-    private data class AircraftSymbolOverlayRecordingRequest(
-        val aircraft: List<TrafficAircraftOverlayState>,
-        val selected_aircraft_key: String?,
-        val viewport: Viewport,
-        val visual_theme: VisualTheme,
-        val marker_blend: Float,
-        val padding: Float,
-        val width_px: Int,
-        val height_px: Int,
-        val center_x: Double,
-        val center_y: Double,
-        val key: AircraftSymbolOverlayCacheKey,
-        val dp_scale: Float,
-        val recording_generation: Int,
-    ) {
-        fun matches_target(
-            key: AircraftSymbolOverlayCacheKey,
-            width_px: Int,
-            height_px: Int,
-            padding: Float,
-            center_x: Double,
-            center_y: Double,
-        ): Boolean {
-            return this.key == key &&
-                this.width_px == width_px &&
-                this.height_px == height_px &&
-                this.padding.toBits() == padding.toBits() &&
-                this.center_x.toBits() == center_x.toBits() &&
-                this.center_y.toBits() == center_y.toBits()
-        }
-    }
-
-    private data class AircraftSymbolOverlayTile(
-        val left: Int,
-        val top: Int,
-        val right: Int,
-        val bottom: Int
     )
-
-    private data class AircraftSymbolOverlayCacheKey(
-        val marker_bucket: Int,
-        val icon_scale_bucket: Int,
-        val dot_scale_bucket: Int,
-        val aircraft_generation: Long,
-        val aircraft_population_revision: Long,
-        val appearance_revision: Long,
-        val marker_blend_bits: Int,
-        val viewport_zoom_bits: Long,
-        val selected_aircraft_key: String?,
-        val theme_key: Int
-    ) {
-        fun visual_key_matches(other: AircraftSymbolOverlayCacheKey): Boolean {
-            return marker_bucket == other.marker_bucket &&
-                    icon_scale_bucket == other.icon_scale_bucket &&
-                    dot_scale_bucket == other.dot_scale_bucket &&
-                    appearance_revision == other.appearance_revision &&
-                    marker_blend_bits == other.marker_blend_bits &&
-                    viewport_zoom_bits == other.viewport_zoom_bits &&
-                    theme_key == other.theme_key
-        }
-    }
-
-    private data class AircraftSymbolOverlayTarget(
-        val key: AircraftSymbolOverlayCacheKey,
-        val width_px: Int,
-        val height_px: Int,
-        val padding: Float,
-        val center_x: Double,
-        val center_y: Double,
-    ) {
-        fun matches_target(
-            key: AircraftSymbolOverlayCacheKey,
-            width_px: Int,
-            height_px: Int,
-            padding: Float,
-            center_x: Double,
-            center_y: Double,
-        ): Boolean {
-            return this.key == key &&
-                this.width_px == width_px &&
-                this.height_px == height_px &&
-                this.padding.toBits() == padding.toBits() &&
-                this.center_x.toBits() == center_x.toBits() &&
-                this.center_y.toBits() == center_y.toBits()
-        }
-    }
 
     @Suppress("ArrayInDataClass")
     private data class DotOverlayRecordingRequest(
@@ -2880,497 +2841,30 @@ class TrafficOverlayRenderer(
         }
     }
 
-    private object AircraftSymbolOverlayRecorder {
-        fun record(
-            request: AircraftSymbolOverlayRecordingRequest,
-            is_cancelled: () -> Boolean,
-            on_bitmap_allocated: (Bitmap) -> Unit,
-        ): AircraftSymbolOverlayAsyncResult? {
-            if (is_cancelled()) return null
-            val bitmap = createBitmap(
-                request.width_px,
-                request.height_px,
-                Bitmap.Config.ARGB_8888,
-            )
-            on_bitmap_allocated(bitmap)
-            val canvas = Canvas(bitmap)
-            val masks = HashMap<RecorderMaskKey, RecorderMask>()
-            val sprites = HashMap<RecorderSpriteKey, RecorderSprite>()
-            val tile_size = SYMBOL_OVERLAY_TILE_SIZE_PX
-            val tile_cols =
-                ceil(request.width_px / tile_size.toFloat()).toInt().coerceAtLeast(1)
-            val tile_rows =
-                ceil(request.height_px / tile_size.toFloat()).toInt().coerceAtLeast(1)
-            val occupied_tiles = BooleanArray(tile_cols * tile_rows)
-            val cached_aircraft_keys = HashSet<String>()
-            var has_motion_exclusions = false
-            val now_ms = SystemClock.elapsedRealtime()
-            try {
-                val colors = request.visual_theme.colors
-                val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-                val stroke_paint = Paint(Paint.ANTI_ALIAS_FLAG)
-                val mask_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    isFilterBitmap = true
-                    isDither = true
-                }
-                val dp: (Float) -> Float = { value -> value * request.dp_scale }
-                for (item in request.aircraft) {
-                    if (is_cancelled()) return null
-                    val selected = item.appearance_key == request.selected_aircraft_key
-                    val appearance_progress = current_aircraft_appearance_progress(item, now_ms)
-                    val elapsed_sec = traffic_motion_elapsed_seconds(item, now_ms)
-                    val moves = item.motion_limit_sec > 0f &&
-                        elapsed_sec < item.motion_limit_sec &&
-                        (item.screen_velocity_x_px_per_sec != 0f ||
-                            item.screen_velocity_y_px_per_sec != 0f)
-                    if (selected ||
-                        item.symbol == AircraftSymbol.ROTORCRAFT ||
-                        appearance_progress < 1f ||
-                        moves
-                    ) {
-                        has_motion_exclusions = true
-                        continue
-                    }
-                    val x =
-                        item.screen_point.x +
-                            item.screen_velocity_x_px_per_sec * elapsed_sec +
-                            request.padding
-                    val y =
-                        item.screen_point.y +
-                            item.screen_velocity_y_px_per_sec * elapsed_sec +
-                            request.padding
-                    val cull_padding =
-                        aircraft_cull_padding(item, request.viewport.zoom, selected, dp)
-                    if (!is_on_screen(x, y, request.viewport, cull_padding)) {
-                        continue
-                    }
-                    val painted_radius = traffic_aircraft_painted_radius_px(
-                        item = item,
-                        viewport_zoom = request.viewport.zoom,
-                        selected = false,
-                        dp = dp,
-                        appearance_progress = appearance_progress,
-                    )
-                    if (x - painted_radius < 0f ||
-                        y - painted_radius < 0f ||
-                        x + painted_radius > request.width_px ||
-                        y + painted_radius > request.height_px
-                    ) {
-                        has_motion_exclusions = true
-                        continue
-                    }
-                    draw_aircraft_icon(
-                        canvas = canvas,
-                        x = x,
-                        y = y,
-                        item = item,
-                        selected = selected,
-                        marker_blend = request.marker_blend,
-                        viewport_zoom = request.viewport.zoom,
-                        colors = colors,
-                        paint = paint,
-                        stroke_paint = stroke_paint,
-                        mask_paint = mask_paint,
-                        masks = masks,
-                        sprites = sprites,
-                        dp = dp,
-                        now_ms = now_ms
-                    )
-                    mark_occupied_tiles(
-                        occupied_tiles = occupied_tiles,
-                        tile_cols = tile_cols,
-                        tile_rows = tile_rows,
-                        center_x = x,
-                        center_y = y,
-                        radius = cull_padding,
-                        tile_size = tile_size
-                    )
-                    cached_aircraft_keys += item.appearance_key
-                }
-            } finally {
-                sprites.values.forEach { it.recycle() }
-                masks.values.forEach { it.recycle() }
-            }
-            return AircraftSymbolOverlayAsyncResult(
-                bitmap = bitmap,
-                recording_generation = request.recording_generation,
-                key = request.key,
-                width_px = request.width_px,
-                height_px = request.height_px,
-                center_x = request.center_x,
-                center_y = request.center_y,
-                occupied_tiles = build_occupied_tile_rects(
-                    occupied_tiles,
-                    tile_cols,
-                    tile_rows,
-                    request.width_px,
-                    request.height_px,
-                    tile_size
-                ),
-                cached_aircraft_keys = cached_aircraft_keys,
-                has_motion_exclusions = has_motion_exclusions,
-                padding_px = request.padding
-            )
-        }
-
-        private fun mark_occupied_tiles(
-            occupied_tiles: BooleanArray,
-            tile_cols: Int,
-            tile_rows: Int,
-            center_x: Float,
-            center_y: Float,
-            radius: Float,
-            tile_size: Int
-        ) {
-            val left = floor((center_x - radius) / tile_size).toInt().coerceIn(0, tile_cols - 1)
-            val top = floor((center_y - radius) / tile_size).toInt().coerceIn(0, tile_rows - 1)
-            val right = floor((center_x + radius) / tile_size).toInt().coerceIn(0, tile_cols - 1)
-            val bottom = floor((center_y + radius) / tile_size).toInt().coerceIn(0, tile_rows - 1)
-            for (row in top..bottom) {
-                val row_offset = row * tile_cols
-                for (col in left..right) {
-                    occupied_tiles[row_offset + col] = true
-                }
-            }
-        }
-
-        private fun build_occupied_tile_rects(
-            occupied_tiles: BooleanArray,
-            tile_cols: Int,
-            tile_rows: Int,
-            width_px: Int,
-            height_px: Int,
-            tile_size: Int
-        ): List<AircraftSymbolOverlayTile> {
-            val rects = ArrayList<AircraftSymbolOverlayTile>()
-            for (row in 0 until tile_rows) {
-                var col = 0
-                while (col < tile_cols) {
-                    val row_offset = row * tile_cols
-                    while (col < tile_cols && !occupied_tiles[row_offset + col]) col++
-                    val start_col = col
-                    while (col < tile_cols && occupied_tiles[row_offset + col]) col++
-                    if (start_col < col) {
-                        rects += AircraftSymbolOverlayTile(
-                            left = start_col * tile_size,
-                            top = row * tile_size,
-                            right = min(col * tile_size, width_px),
-                            bottom = min((row + 1) * tile_size, height_px)
-                        )
-                    }
-                }
-            }
-            return rects
-        }
-
-        private fun draw_aircraft_icon(
-            canvas: Canvas,
-            x: Float,
-            y: Float,
-            item: TrafficAircraftOverlayState,
-            selected: Boolean,
-            marker_blend: Float,
-            viewport_zoom: Double,
-            colors: ThemeColors,
-            paint: Paint,
-            stroke_paint: Paint,
-            mask_paint: Paint,
-            masks: MutableMap<RecorderMaskKey, RecorderMask>,
-            sprites: MutableMap<RecorderSpriteKey, RecorderSprite>,
-            dp: (Float) -> Float,
-            now_ms: Long
-        ) {
-            val blend = marker_blend.coerceIn(0f, 1f)
-            val appear = current_aircraft_appearance_progress(item, now_ms)
-            val shape_progress = AircraftMarkerMorph.shape_progress(blend)
-            val symbol_visibility = AircraftMarkerMorph.symbol_visibility(blend)
-            val enter_scale = 0.18f + 0.82f * appear
-            val alpha = (appear * 255).toInt().coerceIn(0, 255)
-            val symbol_alpha = (appear * symbol_visibility * 255).toInt().coerceIn(0, 255)
-            val base_icon_scale = AircraftMarkerMorph.blended_icon_scale(viewport_zoom, blend)
-            val icon_scale = base_icon_scale * item.symbol_scale * enter_scale
-            if (alpha <= 4 || symbol_alpha <= 4) return
-            paint.style = Paint.Style.FILL
-            paint.color =
-                with_alpha(colors.scrim, (74 * appear * symbol_visibility).toInt().coerceIn(0, 74))
-            canvas.drawCircle(
-                x + dp(TrafficSpritePaintGeometry.shadow_offset_x_dp(shape_progress)) * icon_scale,
-                y + dp(TrafficSpritePaintGeometry.shadow_offset_y_dp(shape_progress)) * icon_scale,
-                dp(TrafficSpritePaintGeometry.shadow_radius_dp(shape_progress)) * icon_scale,
-                paint
-            )
-            if (selected) {
-                stroke_paint.style = Paint.Style.STROKE
-                stroke_paint.color = Color.argb(
-                    (235 * appear * symbol_visibility).toInt().coerceIn(0, 235),
-                    Color.red(colors.accent_green),
-                    Color.green(colors.accent_green),
-                    Color.blue(colors.accent_green)
-                )
-                stroke_paint.strokeWidth = dp(TrafficSpritePaintGeometry.SELECTION_RING_STROKE_WIDTH_DP)
-                canvas.drawCircle(
-                    x,
-                    y,
-                    dp(TrafficSpritePaintGeometry.selection_ring_radius_dp(shape_progress)) * icon_scale,
-                    stroke_paint,
-                )
-            }
-            draw_cached_aircraft_symbol(
-                canvas = canvas,
-                x = x,
-                y = y,
-                symbol = item.symbol,
-                track_deg = item.aircraft.track_deg,
-                icon_scale = icon_scale,
-                mask_resolution_scale = aircraft_symbol_mask_resolution_scale(base_icon_scale),
-                shape_progress = shape_progress,
-                fill = with_alpha(item.color, symbol_alpha),
-                stroke = with_alpha(
-                    colors.scrim,
-                    (235 * appear * symbol_visibility).toInt().coerceIn(0, 235)
-                ),
-                mask_paint = mask_paint,
-                masks = masks,
-                sprites = sprites,
-                dp = dp
-            )
-        }
-
-        private fun draw_cached_aircraft_symbol(
-            canvas: Canvas,
-            x: Float,
-            y: Float,
-            symbol: AircraftSymbol,
-            track_deg: Double?,
-            icon_scale: Float,
-            mask_resolution_scale: Float,
-            shape_progress: Float,
-            fill: Int,
-            stroke: Int,
-            mask_paint: Paint,
-            masks: MutableMap<RecorderMaskKey, RecorderMask>,
-            sprites: MutableMap<RecorderSpriteKey, RecorderSprite>,
-            dp: (Float) -> Float
-        ) {
-            val sprite = aircraft_symbol_sprite(
-                symbol,
-                shape_progress,
-                mask_resolution_scale,
-                fill,
-                stroke,
-                mask_paint,
-                masks,
-                sprites,
-                dp
-            )
-            canvas.withTranslation(x, y) {
-                val draw_scale = icon_scale / mask_resolution_scale.coerceAtLeast(0.001f)
-                scale(draw_scale, draw_scale)
-                if (track_deg != null && symbol != AircraftSymbol.SURFACE) rotate(track_deg.toFloat())
-                drawBitmap(
-                    sprite.bitmap,
-                    -sprite.bitmap.width / 2f,
-                    -sprite.bitmap.height / 2f,
-                    null
-                )
-            }
-        }
-
-        private fun aircraft_symbol_sprite(
-            symbol: AircraftSymbol,
-            shape_progress: Float,
-            mask_resolution_scale: Float,
-            fill: Int,
-            stroke: Int,
-            mask_paint: Paint,
-            masks: MutableMap<RecorderMaskKey, RecorderMask>,
-            sprites: MutableMap<RecorderSpriteKey, RecorderSprite>,
-            dp: (Float) -> Float
-        ): RecorderSprite {
-            val progress_bucket = aircraft_symbol_progress_bucket(shape_progress)
-            val size_px = dp(SYMBOL_MASK_SIZE_DP * mask_resolution_scale.coerceAtLeast(0.001f))
-                .roundToInt()
-                .coerceAtLeast(1)
-            val key = RecorderSpriteKey(symbol, progress_bucket, size_px, fill, stroke)
-            sprites[key]?.let { return it }
-            val mask = aircraft_symbol_mask(
-                symbol,
-                progress_bucket,
-                size_px,
-                mask_resolution_scale,
-                masks,
-                dp
-            )
-            val bitmap = createBitmap(size_px, size_px, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            mask_paint.color = fill
-            canvas.drawBitmap(mask.fill, 0f, 0f, mask_paint)
-            mask_paint.color = stroke
-            canvas.drawBitmap(mask.stroke, 0f, 0f, mask_paint)
-            mask_paint.alpha = 255
-            return RecorderSprite(bitmap).also { sprites[key] = it }
-        }
-
-        private fun aircraft_symbol_mask(
-            symbol: AircraftSymbol,
-            shape_progress: Float,
-            masks: MutableMap<RecorderMaskKey, RecorderMask>,
-            dp: (Float) -> Float
-        ): RecorderMask {
-            val progress_bucket = aircraft_symbol_progress_bucket(shape_progress)
-            val size_px = dp(SYMBOL_MASK_SIZE_DP).roundToInt().coerceAtLeast(1)
-            return aircraft_symbol_mask(symbol, progress_bucket, size_px, 1f, masks, dp)
-        }
-
-        private fun aircraft_symbol_mask(
-            symbol: AircraftSymbol,
-            progress_bucket: Int,
-            size_px: Int,
-            mask_resolution_scale: Float,
-            masks: MutableMap<RecorderMaskKey, RecorderMask>,
-            dp: (Float) -> Float
-        ): RecorderMask {
-            val key = RecorderMaskKey(symbol, progress_bucket, size_px)
-            masks[key]?.let { return it }
-            val progress = progress_bucket / SYMBOL_MASK_PROGRESS_STEPS.toFloat()
-            val fill = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
-            val stroke = createBitmap(size_px, size_px, Bitmap.Config.ALPHA_8)
-            val center = size_px / 2f
-            val mask_dp_scale = mask_resolution_scale.coerceAtLeast(0.001f)
-            val mask_dp: (Float) -> Float = { value -> dp(value) * mask_dp_scale }
-            val fill_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.FILL
-                color = Color.WHITE
-            }
-            val transparent_fill_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.FILL
-                color = Color.TRANSPARENT
-            }
-            val stroke_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeWidth = mask_dp(1.2f)
-                color = Color.WHITE
-            }
-            val transparent_stroke_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeWidth = mask_dp(1.2f)
-                color = Color.TRANSPARENT
-            }
-            Canvas(fill).withTranslation(center, center) {
-                AircraftSymbolRenderer.draw(
-                    this,
-                    symbol,
-                    progress,
-                    fill_paint,
-                    transparent_stroke_paint,
-                    mask_dp
-                )
-            }
-            Canvas(stroke).withTranslation(center, center) {
-                AircraftSymbolRenderer.draw(
-                    this,
-                    symbol,
-                    progress,
-                    transparent_fill_paint,
-                    stroke_paint,
-                    mask_dp
-                )
-            }
-            return RecorderMask(fill, stroke).also { masks[key] = it }
-        }
-
-        private fun aircraft_symbol_progress_bucket(shape_progress: Float): Int {
-            return (shape_progress.coerceIn(0f, 1f) * SYMBOL_MASK_PROGRESS_STEPS)
-                .roundToInt()
-                .coerceIn(0, SYMBOL_MASK_PROGRESS_STEPS)
-        }
-
-        private fun current_aircraft_appearance_progress(
-            item: TrafficAircraftOverlayState,
-            now_ms: Long
-        ): Float {
-            if (item.appearance_first_seen_ms <= 0L) return item.appearance_progress.coerceIn(
-                0f,
-                1f
-            )
-            val elapsed = now_ms - item.appearance_first_seen_ms - item.appearance_delay_ms
-            return smooth_step(0f, AIRCRAFT_APPEAR_DURATION_MS.toFloat(), elapsed.toFloat())
-        }
-
-        private fun aircraft_cull_padding(
-            item: TrafficAircraftOverlayState,
-            zoom: Double,
-            selected: Boolean,
-            dp: (Float) -> Float
-        ): Float {
-            val geometry = TrafficSpritePaintGeometry.symbol(item.symbol)
-            val shape_radius_dp = geometry.maximum_radius_dp * geometry.icon_scale_multiplier
-            val selected_ring_dp = if (selected) 17f else 0f
-            val max_icon_scale = max(
-                AircraftMarkerMorph.aircraft_dot_scale(zoom),
-                AircraftMarkerMorph.aircraft_icon_scale(zoom)
-            )
-            return dp((shape_radius_dp + selected_ring_dp) * item.symbol_scale * max_icon_scale + AIRCRAFT_CULL_EXTRA_DP)
-        }
-
-        private fun is_on_screen(x: Float, y: Float, viewport: Viewport, padding: Float): Boolean {
-            return is_inside_viewport(x, y, viewport, padding)
-        }
-
-        private data class RecorderMaskKey(
-            val symbol: AircraftSymbol,
-            val progress_bucket: Int,
-            val size_px: Int
-        )
-
-        private data class RecorderSpriteKey(
-            val symbol: AircraftSymbol,
-            val progress_bucket: Int,
-            val size_px: Int,
-            val fill: Int,
-            val stroke: Int
-        )
-
-        private data class RecorderMask(
-            val fill: Bitmap,
-            val stroke: Bitmap
-        ) {
-            fun recycle() {
-                recycle_bitmap_pair(fill, stroke)
-            }
-        }
-
-        private data class RecorderSprite(
-            val bitmap: Bitmap
-        ) {
-            fun recycle() {
-                bitmap.recycle()
-            }
-        }
-    }
-
     private companion object {
         const val LABEL_AIRCRAFT_COUNT = 4
         const val AIRCRAFT_CULL_EXTRA_DP = 24f
         const val AIRCRAFT_FAST_DOT_BLEND = 0.995f
         const val AIRCRAFT_BATCH_DOT_BLEND = 0.995f
         const val ROTORCRAFT_BLADE_CYCLE_MS = 288L
-        const val MAX_BATCH_MOTION_SECONDS = 10f * 60f
         const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
         const val SYMBOL_MASK_SIZE_DP = 72f
         const val SYMBOL_MASK_PROGRESS_STEPS = 96
         const val SYMBOL_MASK_CACHE_MAX_ENTRIES = 640
+        const val SYMBOL_BATCH_ATLAS_COLUMNS = 4
+        const val SYMBOL_BATCH_ATLAS_GUTTER_PX = 2
+        const val SYMBOL_BATCH_SHADOW_EDGE_PX = 2f
+        const val SYMBOL_BATCH_QUADS_PER_AIRCRAFT = 3
+        const val SYMBOL_BATCH_VERTICES_PER_QUAD = 4
+        const val SYMBOL_BATCH_INDICES_PER_QUAD = 6
+        const val SYMBOL_BATCH_VERTICES_PER_AIRCRAFT =
+            SYMBOL_BATCH_QUADS_PER_AIRCRAFT * SYMBOL_BATCH_VERTICES_PER_QUAD
+        const val ROTORCRAFT_SYMBOL_BATCH_QUADS = 7
+        const val ROTORCRAFT_SYMBOL_BATCH_VERTICES =
+            ROTORCRAFT_SYMBOL_BATCH_QUADS * SYMBOL_BATCH_VERTICES_PER_QUAD
+        const val MAX_SYMBOL_BATCH_VERTICES = 32_760
         const val DIRECT_ICON_DETAIL_SAMPLE_PERIOD = 16
         const val SYMBOL_MASK_DETAIL_SAMPLE_PERIOD = 5
-        const val SYMBOL_OVERLAY_CACHE_PADDING_DP = 220f
-        const val SYMBOL_OVERLAY_TILE_SIZE_PX = 256
-        const val SYMBOL_OVERLAY_WIDE_COVERAGE_MAX_ZOOM = 6.0
-        const val SYMBOL_OVERLAY_WIDE_COVERAGE_PADDING_DP = 420f
-        const val SYMBOL_OVERLAY_DIRECT_FALLBACK_PADDING_DP = 96f
-        const val SYMBOL_OVERLAY_SPARSE_RECORDING_MIN_CURRENT_AIRCRAFT = 256
-        const val SYMBOL_OVERLAY_SPARSE_RECORDING_MAX_CURRENT_RATIO = 8
-        const val SYMBOL_OVERLAY_SCALE_BUCKET = 1000f
-        const val SYMBOL_OVERLAY_PAN_SCALE_EPSILON = 0.0025f
         const val DOT_OVERLAY_CACHE_MIN_DOTS = 3200
         const val DOT_OVERLAY_CACHE_MAX_ZOOM = 6.2
         const val DOT_OVERLAY_CACHE_MIN_ALPHA = 0.999f

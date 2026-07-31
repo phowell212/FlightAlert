@@ -253,7 +253,14 @@ internal class TrafficSelectionHitTester(
             radius_squared = radius_squared
         )
         return cache.spatial_index
-            .query(viewport, radius_squared.sqrt() + query_padding_px)
+            .query(
+                viewport,
+                cache.motion_query_padding_px(
+                    viewport,
+                    radius_squared.sqrt() + query_padding_px,
+                    now_epoch_sec,
+                ),
+            )
             .asSequence()
             .filter { entry ->
                 !path_focus || aircraft_icao_key(entry.aircraft) == selected_key

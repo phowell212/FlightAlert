@@ -146,6 +146,7 @@ import com.flightalert.sources.FeedPublicationPhase
 import com.flightalert.sources.FeedSource
 import com.flightalert.sources.FeedStatus
 import com.flightalert.sources.GlobeBinCraftAircraftSource
+import com.flightalert.sources.MappedGlobeAircraftStore
 import com.flightalert.sources.VisibleAircraftFeedController
 import com.flightalert.sources.VisibleAircraftRequest
 import com.flightalert.traffic.AircraftFilterController
@@ -171,6 +172,7 @@ import com.flightalert.traffic.TrafficScreenProjector
 import com.flightalert.traffic.TrafficSelectionHitTester
 import com.flightalert.traffic.TrafficSpatialEntry
 import com.flightalert.traffic.TrafficSpriteFootprints
+import com.flightalert.ui.AircraftFeedMode
 import com.flightalert.ui.AviationLayersPanelState
 import com.flightalert.ui.FilterPanelAction
 import com.flightalert.ui.FiltersPanelState
@@ -182,6 +184,7 @@ import com.flightalert.ui.FlightMapLayout
 import com.flightalert.ui.FlightMapLayoutState
 import com.flightalert.ui.FlightMapPanelRenderer
 import com.flightalert.ui.FlightMapPanelStyle
+import com.flightalert.ui.FloatScale
 import com.flightalert.ui.ImpactMethodologyPanelState
 import com.flightalert.ui.MapLabelsPanelState
 import com.flightalert.ui.MapSurfaceAction
@@ -269,11 +272,11 @@ class FlightMapView(
     private val icon_path = Path()
     private val prefs: SharedPreferences = FlightAlertSettings.prefs(context)
 
-    private val layout = FlightMapLayout { value -> dp(value) }
+    private val layout = FlightMapLayout(FloatScale { value -> dp(value) })
     private val chrome_bridge = FlightMapChromeBridge(
         layout = layout,
-        dp_value = { value -> dp(value) },
-        sp_value = { value -> sp(value) },
+        dp_value = FloatScale { value -> dp(value) },
+        sp_value = FloatScale { value -> sp(value) },
         fit_text = { value, max_width -> ellipsize(value, max_width) },
         control_radius_value = { control_radius() },
         panel_surface = { canvas, rect, fill, alpha ->
@@ -299,7 +302,11 @@ class FlightMapView(
             draw_wrapped_text(canvas, value, x, y, width, max_lines)
         },
         aircraft_label = { aircraft -> telemetry_formatter.aircraft_label_detail(aircraft) },
-        animation_frame = { postInvalidateOnAnimation() }
+        animation_frame = { postInvalidateOnAnimation() },
+        retire_bitmap = { bitmap ->
+            viewTreeObserver.registerFrameCommitCallback { bitmap.recycle() }
+            postInvalidateOnAnimation()
+        },
     )
     private val chrome_renderer = FlightMapChromeRenderer(
         paint = paint,
@@ -446,7 +453,8 @@ class FlightMapView(
         now_epoch_seconds = { aircraft_projection_epoch_seconds() },
         max_projection_seconds = MAX_ESTIMATION_SECONDS,
         path_trace_newer_than_feed_seconds = PATH_TRACE_NEWER_THAN_FEED_SECONDS,
-        max_trail_report_age_seconds = MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS
+        max_trail_report_age_seconds = MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS,
+        on_display_endpoint_changed = { mark_traffic_cache_dirty() }
     )
     private val selected_path_viewport_controller =
         SelectedFlightPathViewportController(selected_path_controller)
@@ -512,6 +520,11 @@ class FlightMapView(
     )
     @Volatile
     private var aircraft: List<Aircraft> = emptyList()
+    private var aircraft_feed_coverage: List<FeedBounds> = emptyList()
+    private var aircraft_interaction_feed_coverage: List<FeedBounds> = emptyList()
+    private var aircraft_feed_coverage_content_revision: Long? = null
+    private var requested_aircraft_feed_coverage: FeedBounds? = null
+    private var requested_aircraft_feed_coverage_elapsed_ms = 0L
     private var aircraft_by_icao: Map<String, Aircraft> = emptyMap()
     private var aircraft_metadata_by_key: Map<String, Aircraft> = emptyMap()
     private var aircraft_appearances: Map<String, AircraftAppearance> = emptyMap()
@@ -520,6 +533,7 @@ class FlightMapView(
     private var newest_aircraft_content: AircraftPrepareContent =
         AircraftPrepareContent.Committed(
             source_result = null,
+            feed_request = null,
             aircraft = emptyList(),
             aircraft_by_icao = emptyMap(),
             metadata_by_key = emptyMap(),
@@ -596,9 +610,14 @@ class FlightMapView(
             )
         },
         distance_meters = ::reported_distance_meters,
-        classify_alert_aircraft = { aircraft, now_epoch_sec ->
+        classify_alert_aircraft = { aircraft, now_epoch_sec, distance_meters ->
             alert_classification_for(
                 aircraft = aircraft,
+                alert_position = alert_position_for(
+                    aircraft,
+                    now_epoch_sec,
+                    distance_meters
+                ),
                 now_epoch_sec = now_epoch_sec,
                 extreme_priority_only = true
             )
@@ -617,24 +636,27 @@ class FlightMapView(
         has_location = { latest_location != null },
         has_usable_viewport = ::has_usable_viewport,
         build_request = ::visible_aircraft_request,
-        current_total_aircraft = { traffic_cache_controller.total },
+        has_ready_aircraft_feed = { aircraft_feed_coverage.isNotEmpty() },
+        should_defer_for_interaction = ::should_defer_aircraft_refresh_for_interaction,
+        delay_after_interaction = ::aircraft_refresh_delay_after_interaction,
         set_aircraft_status = { status -> aircraft_status = status },
         request_redraw = { postInvalidateOnAnimation() },
-        apply_result = { result, token, signature, phase ->
+        apply_result = { result, token, signature, phase, request ->
             apply_aircraft_feed_result(
                 result,
                 token,
                 signature,
-                phase
+                phase,
+                request
             )
         },
         refresh_ms = AIRCRAFT_REFRESH_MS,
         force_refresh_ms = AIRCRAFT_FORCE_REFRESH_MS,
         in_flight_retry_ms = AIRCRAFT_IN_FLIGHT_RETRY_MS,
+        map_interaction_refresh_delay_ms = MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS,
         hybrid_supplement_retry_ms = HYBRID_BINCRAFT_SUPPLEMENT_RETRY_MS,
         globe_snapshot_refresh_ms = BINCRAFT_SNAPSHOT_REFRESH_MS,
-        api_grace_ms = BINCRAFT_API_GRACE_MS,
-        ready_aircraft_min = BINCRAFT_FEED_READY_AIRCRAFT_MIN
+        api_grace_ms = BINCRAFT_API_GRACE_MS
     )
     private val traffic_screen_projector = TrafficScreenProjector(
         dp = { value -> dp(value) },
@@ -1025,6 +1047,11 @@ class FlightMapView(
         } else {
             latest_location = null
             aircraft = emptyList()
+            aircraft_feed_coverage = emptyList()
+            aircraft_interaction_feed_coverage = emptyList()
+            aircraft_feed_coverage_content_revision = null
+            requested_aircraft_feed_coverage = null
+            requested_aircraft_feed_coverage_elapsed_ms = 0L
             aircraft_by_icao = emptyMap()
             aircraft_metadata_by_key = emptyMap()
             aircraft_appearances = emptyMap()
@@ -1034,6 +1061,7 @@ class FlightMapView(
                 aircraft_prepare_pending = null
                 newest_aircraft_content = AircraftPrepareContent.Committed(
                     source_result = null,
+                    feed_request = null,
                     aircraft = emptyList(),
                     aircraft_by_icao = emptyMap(),
                     metadata_by_key = emptyMap(),
@@ -1116,7 +1144,7 @@ class FlightMapView(
     override fun onLocationChanged(location: Location) {
         latest_location = location
         device_heading_provider.update_location(location)
-        mark_traffic_cache_dirty()
+        enqueue_current_aircraft_cache_rebuild(reuse_published_visuals = true)
         map_status = "Loading map"
         apply_initial_mavic_range_zoom_if_needed()
         request_visible_aircraft_if_needed(force = true)
@@ -1254,6 +1282,7 @@ class FlightMapView(
                 map_touch_active = !map_blocked && !control_hit
                 if (map_touch_active) {
                     mark_map_interaction()
+                    request_interaction_aircraft_coverage()
                     postInvalidateOnAnimation()
                 }
                 down_x = x
@@ -2085,16 +2114,76 @@ class FlightMapView(
         visible_aircraft_feed_controller.request_after_map_interaction()
     }
 
+    private fun should_defer_aircraft_refresh_for_interaction(now: Long): Boolean {
+        if (!aircraft_feed_mode.uses_globe || aircraft_feed_coverage.isEmpty()) return false
+        return pinch_in_progress ||
+                drag_started ||
+                now - last_map_interaction_ms < MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS
+    }
+
+    private fun aircraft_refresh_delay_after_interaction(now: Long): Long {
+        if (pinch_in_progress || drag_started) {
+            return MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS
+        }
+        val elapsed = now - last_map_interaction_ms
+        return (MAP_INTERACTION_AIRCRAFT_REFRESH_DELAY_MS - elapsed).coerceAtLeast(
+            AIRCRAFT_IN_FLIGHT_RETRY_MS
+        )
+    }
+
     private fun publish_globe_snapshot_update_if_useful() {
         visible_aircraft_feed_controller.publish_globe_snapshot_update_if_useful(aircraft_feed_mode)
     }
 
+    private fun request_interaction_aircraft_coverage() {
+        if (!aircraft_feed_mode.uses_globe ||
+            (!pinch_in_progress && !drag_started && !map_touch_active) ||
+            aircraft_feed_coverage.isEmpty()
+        ) {
+            return
+        }
+        val viewport = current_interaction_viewport() ?: return
+        val trigger_bounds = globe_feed_bounds_for_viewport(
+            viewport,
+            aircraft_interaction_trigger_padding_px(viewport)
+        )
+        if (aircraft_feed_coverage.any { it.contains(trigger_bounds) }) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - requested_aircraft_feed_coverage_elapsed_ms <
+            AIRCRAFT_INTERACTION_COVERAGE_RETRY_MS &&
+            requested_aircraft_feed_coverage?.contains(trigger_bounds) == true
+        ) {
+            return
+        }
+        val requested_bounds = globe_feed_bounds_for_viewport(
+            viewport,
+            aircraft_interaction_query_padding_px(viewport)
+        )
+        requested_aircraft_feed_coverage = requested_bounds
+        requested_aircraft_feed_coverage_elapsed_ms = now
+        aircraft_interaction_feed_coverage =
+            extended_aircraft_interaction_feed_coverage(requested_bounds)
+        visible_aircraft_feed_controller.request_interaction_globe_snapshot(aircraft_feed_mode)
+    }
+
     private fun visible_aircraft_request(): VisibleAircraftRequest {
         val location = latest_location ?: error("visible aircraft request requires a location")
-        val bounds = aircraft_bounds_for_current_viewport(location)
-        val feed_bounds = bounds.to_feed_bounds()
+        val interaction = pinch_in_progress || drag_started || map_touch_active
+        val feed_bounds = aircraft_feed_bounds_for_current_viewport(
+            location,
+            interaction = interaction
+        )
+        val globe_display_bounds =
+            if (aircraft_feed_mode.uses_globe && interaction) {
+                extended_aircraft_interaction_feed_coverage(feed_bounds).also {
+                    aircraft_interaction_feed_coverage = it
+                }
+            } else {
+                listOf(feed_bounds)
+            }
         return VisibleAircraftRequest(
             feed_bounds = feed_bounds,
+            globe_display_bounds = globe_display_bounds,
             safety_api_bounds = safety_api_bounds_for(location),
             own_lat = location.latitude,
             own_lon = location.longitude,
@@ -2102,7 +2191,8 @@ class FlightMapView(
             center_lon = viewport_center_lon(location),
             zoom = zoom,
             feed_mode = aircraft_feed_mode,
-            exact_search = aircraft_filter_controller.search_query.takeIf { it.isNotBlank() }
+            search_query = aircraft_filter_controller.search_query.takeIf { it.isNotBlank() },
+            selected_aircraft_key = selected_path_controller.selected_aircraft_key
         )
     }
 
@@ -2111,7 +2201,8 @@ class FlightMapView(
         result: FeedResult,
         fetch_token: Long,
         fetch_signature: String,
-        publication_phase: FeedPublicationPhase
+        publication_phase: FeedPublicationPhase,
+        feed_request: VisibleAircraftRequest
     ): Boolean {
         if (result.status == FeedStatus.OK) {
             post_if_alive {
@@ -2119,7 +2210,8 @@ class FlightMapView(
                     result,
                     fetch_token,
                     fetch_signature,
-                    publication_phase
+                    publication_phase,
+                    feed_request
                 )
             }
             return true
@@ -2135,9 +2227,19 @@ class FlightMapView(
         result: FeedResult,
         fetch_token: Long,
         fetch_signature: String,
-        publication_phase: FeedPublicationPhase
+        publication_phase: FeedPublicationPhase,
+        feed_request: VisibleAircraftRequest
     ) {
         if (!is_current_aircraft_fetch(fetch_token, fetch_signature)) return
+        val current_required_bounds = current_required_aircraft_feed_bounds()
+        val same_generation =
+            result.content_revision != null &&
+                result.content_revision == aircraft_feed_coverage_content_revision
+        val retain_previous = same_generation &&
+            (should_defer_aircraft_refresh_for_interaction(SystemClock.elapsedRealtime()) ||
+                current_required_bounds?.let { feed_request.feed_bounds.contains(it) } == false)
+        val retained_feed_coverages =
+            if (retain_previous) aircraft_feed_coverage else emptyList()
         val start_worker = synchronized(aircraft_prepare_lock) {
             if (accepted_aircraft_phase_token == fetch_token &&
                 publication_phase.precedence < accepted_aircraft_phase.precedence
@@ -2146,7 +2248,11 @@ class FlightMapView(
             }
             accepted_aircraft_phase_token = fetch_token
             accepted_aircraft_phase = publication_phase
-            if (should_keep_current_aircraft_for_partial_result(result, result.aircraft.size)) {
+            if (should_keep_current_aircraft_for_partial_result(
+                    result,
+                    result.globe_aircraft?.size ?: result.aircraft.size
+                )
+            ) {
                 return@synchronized false
             }
             val content = when (val newest = newest_aircraft_content) {
@@ -2159,10 +2265,16 @@ class FlightMapView(
                             fetch_token = fetch_token,
                             fetch_signature = fetch_signature,
                             publication_phase = publication_phase,
+                            feed_request = feed_request,
+                            retain_previous_aircraft = retain_previous,
+                            retained_feed_coverages = retained_feed_coverages,
+                            previous_aircraft = aircraft,
                             previous_metadata_by_key = aircraft_metadata_by_key,
                             previous_appearances = aircraft_appearances,
                             previous_appearance_animation_until_ms =
-                                aircraft_appearance_animation_until_ms
+                                aircraft_appearance_animation_until_ms,
+                            reuses_previous_aircraft_generation =
+                                same_globe_content_revision(newest.source_result, result)
                         )
                     }
                 is AircraftPrepareContent.Feed ->
@@ -2170,7 +2282,11 @@ class FlightMapView(
                         newest.copy(
                             fetch_token = fetch_token,
                             fetch_signature = fetch_signature,
-                            publication_phase = publication_phase
+                            publication_phase = publication_phase,
+                            feed_request = feed_request,
+                            retain_previous_aircraft = retain_previous,
+                            retained_feed_coverages = retained_feed_coverages,
+                            previous_aircraft = aircraft
                         )
                     } else {
                         AircraftPrepareContent.Feed(
@@ -2178,10 +2294,15 @@ class FlightMapView(
                             fetch_token = fetch_token,
                             fetch_signature = fetch_signature,
                             publication_phase = publication_phase,
+                            feed_request = feed_request,
+                            retain_previous_aircraft = retain_previous,
+                            retained_feed_coverages = retained_feed_coverages,
+                            previous_aircraft = aircraft,
                             previous_metadata_by_key = aircraft_metadata_by_key,
                             previous_appearances = aircraft_appearances,
                             previous_appearance_animation_until_ms =
-                                aircraft_appearance_animation_until_ms
+                                aircraft_appearance_animation_until_ms,
+                            reuses_previous_aircraft_generation = false
                         )
                     }
             }
@@ -2191,11 +2312,18 @@ class FlightMapView(
                 publish_result = result,
                 fetch_token = fetch_token,
                 fetch_signature = fetch_signature,
-                publication_phase = publication_phase
+                publication_phase = publication_phase,
+                reusable_visual_cache =
+                    (content as? AircraftPrepareContent.Feed)
+                        ?.takeIf { it.reuses_previous_aircraft_generation }
+                        ?.let { reusable_published_traffic_visuals() }
             )
         } ?: return
         if (start_worker == false &&
-            should_keep_current_aircraft_for_partial_result(result, result.aircraft.size)
+            should_keep_current_aircraft_for_partial_result(
+                result,
+                result.globe_aircraft?.size ?: result.aircraft.size
+            )
         ) {
             aircraft_status =
                 "Live aircraft updating via ${result.source.display_name}${aircraft_traffic_feed.coverage_label(result)}"
@@ -2206,7 +2334,11 @@ class FlightMapView(
         if (start_worker) start_aircraft_prepare_worker()
     }
 
-    private fun enqueue_current_aircraft_cache_rebuild() {
+    private fun enqueue_current_aircraft_cache_rebuild(
+        reuse_published_visuals: Boolean = false
+    ) {
+        val reusable_visual_cache =
+            if (reuse_published_visuals) reusable_published_traffic_visuals() else null
         val start_worker = synchronized(aircraft_prepare_lock) {
             val content = newest_aircraft_content
             val pending_feed = content as? AircraftPrepareContent.Feed
@@ -2215,10 +2347,26 @@ class FlightMapView(
                 publish_result = pending_feed?.result,
                 fetch_token = pending_feed?.fetch_token,
                 fetch_signature = pending_feed?.fetch_signature,
-                publication_phase = pending_feed?.publication_phase
+                publication_phase = pending_feed?.publication_phase,
+                reusable_visual_cache = reusable_visual_cache
             )
         }
         if (start_worker) start_aircraft_prepare_worker()
+    }
+
+    private fun reusable_published_traffic_visuals(): CachedTraffic? {
+        if (traffic_cache_controller.is_dirty() || selected_path_prepare_state() != null) return null
+        return cached_traffic()
+    }
+
+    private fun same_globe_content_revision(
+        previous: FeedResult?,
+        current: FeedResult
+    ): Boolean {
+        val revision = current.content_revision ?: return false
+        return current.source == FeedSource.AIRPLANES_LIVE_GLOBE &&
+                previous?.source == current.source &&
+                previous.content_revision == revision
     }
 
     private fun replace_pending_aircraft_prepare_locked(
@@ -2226,7 +2374,8 @@ class FlightMapView(
         publish_result: FeedResult?,
         fetch_token: Long?,
         fetch_signature: String?,
-        publication_phase: FeedPublicationPhase?
+        publication_phase: FeedPublicationPhase?,
+        reusable_visual_cache: CachedTraffic? = null
     ): Boolean {
         val location = latest_location
         val generation = aircraft_prepare_generation + 1L
@@ -2244,6 +2393,7 @@ class FlightMapView(
             own_lon = location?.longitude,
             own_altitude_feet =
                 location?.takeIf { it.hasAltitude() }?.altitude?.times(3.28084),
+            required_safety_bounds = location?.let(::safety_api_bounds_for),
             alerts_enabled = alerts_enabled,
             alert_distance_feet = alert_distance_feet,
             alert_altitude_feet = alert_altitude_feet,
@@ -2251,7 +2401,8 @@ class FlightMapView(
             priority_range_feet = priority_range_feet,
             theme = visual_theme,
             theme_key = visual_theme.hashCode(),
-            selected_path = selected_path_prepare_state()
+            selected_path = selected_path_prepare_state(),
+            reusable_visual_cache = reusable_visual_cache
         )
         return if (!aircraft_prepare_worker_running) {
             aircraft_prepare_worker_running = true
@@ -2308,47 +2459,84 @@ class FlightMapView(
                     aircraft_prepare_generation != request.generation
         }
         if (is_cancelled()) return null
-        val parsed: List<Aircraft>
-        val by_icao: Map<String, Aircraft>
-        val metadata_by_key: Map<String, Aircraft>
+        val base_aircraft: List<Aircraft>
+        val authoritative_aircraft: List<Aircraft>
+        val existing_aircraft_by_icao: Map<String, Aircraft>?
+        val existing_metadata_by_key: Map<String, Aircraft>?
+        val metadata_fallback_by_key: Map<String, Aircraft>
+        val source_result: FeedResult?
+        val feed_request: VisibleAircraftRequest?
         val previous_appearances: Map<String, AircraftAppearance>
         val previous_appearance_animation_until_ms: Long
+        val retained_previous_added: Boolean
         when (val content = request.content) {
             is AircraftPrepareContent.Feed -> {
-                val mapped = aircraft_traffic_feed.map_aircraft_or_cancelled(
-                    content.result,
-                    is_cancelled
-                ) ?: return null
-                parsed = preserve_existing_aircraft_metadata(
-                    result = content.result,
-                    parsed = mapped,
-                    previous_by_key = content.previous_metadata_by_key,
-                    is_cancelled = is_cancelled
-                ) ?: return null
-                val next_by_icao = HashMap<String, Aircraft>(parsed.size)
-                val next_metadata_by_key = HashMap<String, Aircraft>(parsed.size)
-                parsed.forEachIndexed { index, item ->
-                    if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 &&
-                        is_cancelled()
+                val fresh =
+                    if (content.reuses_previous_aircraft_generation &&
+                        feed_matches_previous_aircraft_order(
+                            content.result,
+                            content.previous_aircraft,
+                            is_cancelled
+                        )
                     ) {
-                        return null
+                        content.previous_aircraft
+                    } else {
+                        map_aircraft_with_metadata_fallback(
+                            result = content.result,
+                            previous_by_key = content.previous_metadata_by_key,
+                            is_cancelled = is_cancelled
+                        ) ?: return null
                     }
-                    next_by_icao.putIfAbsent(item.icao_key, item)
-                    next_metadata_by_key[item.appearance_key()] = item
+                var added_retained_aircraft = false
+                base_aircraft = if (content.retain_previous_aircraft) {
+                    // Fresh order stays authoritative; only records outside its bounds retain the gesture corridor.
+                    val merged = LinkedHashMap<String, Aircraft>(
+                        content.previous_aircraft.size + fresh.size
+                    )
+                    fresh.forEach { item ->
+                        merged[item.appearance_key()] = item
+                    }
+                    val authoritative_exact_key =
+                        normalize_aircraft_exact_key(content.feed_request.selected_aircraft_key)
+                    content.previous_aircraft.forEach { item ->
+                        if (!content.feed_request.contains_authoritative(item.lat, item.lon) &&
+                            content.retained_feed_coverages.any {
+                                it.contains(item.lat, item.lon)
+                            } &&
+                            !item.matches_exact_key(authoritative_exact_key)
+                        ) {
+                            if (merged.putIfAbsent(item.appearance_key(), item) == null) {
+                                added_retained_aircraft = true
+                            }
+                        }
+                    }
+                    merged.values.toList()
+                } else {
+                    fresh
                 }
-                by_icao = next_by_icao
-                metadata_by_key = next_metadata_by_key
+                authoritative_aircraft = fresh
+                existing_aircraft_by_icao = null
+                existing_metadata_by_key = null
+                metadata_fallback_by_key = content.previous_metadata_by_key
+                source_result = content.result
+                feed_request = content.feed_request
                 previous_appearances = content.previous_appearances
                 previous_appearance_animation_until_ms =
                     content.previous_appearance_animation_until_ms
+                retained_previous_added = added_retained_aircraft
             }
             is AircraftPrepareContent.Committed -> {
-                parsed = content.aircraft
-                by_icao = content.aircraft_by_icao
-                metadata_by_key = content.metadata_by_key
+                base_aircraft = content.aircraft
+                authoritative_aircraft = content.aircraft
+                existing_aircraft_by_icao = content.aircraft_by_icao
+                existing_metadata_by_key = content.metadata_by_key
+                metadata_fallback_by_key = content.metadata_by_key
+                source_result = content.source_result
+                feed_request = content.feed_request
                 previous_appearances = content.appearances
                 previous_appearance_animation_until_ms =
                     content.appearance_animation_until_ms
+                retained_previous_added = false
             }
         }
         if (is_cancelled()) return null
@@ -2363,6 +2551,87 @@ class FlightMapView(
                 own_lon = request.own_lon
             )
         }
+        val default_globe_result = source_result?.takeIf { result ->
+            val summary = result.globe_default_summary
+            val own_lat = request.own_lat
+            val own_lon = request.own_lon
+            result.source == FeedSource.AIRPLANES_LIVE_GLOBE &&
+                    feed_request?.feed_mode == AircraftFeedMode.BINCRAFT &&
+                    AircraftFilterEngine.is_normal_airborne_mode(request.filters) &&
+                    feed_request.search_query.isNullOrBlank() &&
+                    result.globe_aircraft != null &&
+                    result.globe_motion_candidates != null &&
+                    summary != null &&
+                    summary.content_revision == result.content_revision &&
+                    own_lat != null &&
+                    own_lon != null &&
+                    summary.own_lat_bits == own_lat.toBits() &&
+                    summary.own_lon_bits == own_lon.toBits() &&
+                    request.now_epoch_sec.isFinite() &&
+                    summary.projection_valid_until_epoch_sec.isFinite() &&
+                    request.now_epoch_sec <= summary.projection_valid_until_epoch_sec &&
+                    (request.required_safety_bounds == null ||
+                            feed_request.safety_api_bounds
+                                ?.contains(request.required_safety_bounds) == true) &&
+                    (feed_request.safety_api_bounds == null ||
+                            abs(own_lat) <= MAX_EXACT_SAFETY_BOUNDS_LATITUDE)
+        }
+        val mapped_globe_aircraft = source_result
+            ?.takeIf { default_globe_result == null && it.globe_aircraft != null }
+            ?.let {
+                aircraft_traffic_feed.map_globe_aircraft_or_cancelled(it, is_cancelled)
+                    ?: return null
+            }
+        val global_aircraft = if (default_globe_result != null) {
+            prepare_default_global_aircraft(
+                result = default_globe_result,
+                base_aircraft = base_aircraft,
+                metadata_fallback_by_key = metadata_fallback_by_key,
+                feed_request = checkNotNull(feed_request),
+                request = request,
+                distance_meters = distance_meters,
+                is_cancelled = is_cancelled
+            ) ?: return null
+        } else {
+            mapped_globe_aircraft?.let {
+                prepare_global_aircraft(
+                globe = it,
+                base_aircraft = base_aircraft,
+                authoritative_aircraft = authoritative_aircraft,
+                metadata_fallback_by_key = metadata_fallback_by_key,
+                feed_request = feed_request,
+                request = request,
+                distance_meters = distance_meters,
+                is_cancelled = is_cancelled
+            ) ?: return null
+            }
+        }
+        val parsed = global_aircraft?.aircraft ?: base_aircraft
+        val reuse_existing_indexes =
+            parsed === base_aircraft &&
+                existing_aircraft_by_icao != null &&
+                existing_metadata_by_key != null
+        val by_icao: Map<String, Aircraft>
+        val metadata_by_key: Map<String, Aircraft>
+        if (reuse_existing_indexes) {
+            by_icao = checkNotNull(existing_aircraft_by_icao)
+            metadata_by_key = checkNotNull(existing_metadata_by_key)
+        } else {
+            val next_by_icao = HashMap<String, Aircraft>(parsed.size)
+            val next_metadata_by_key = HashMap<String, Aircraft>(parsed.size)
+            parsed.forEachIndexed { index, item ->
+                if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 &&
+                    is_cancelled()
+                ) {
+                    return null
+                }
+                next_by_icao.putIfAbsent(item.icao_key, item)
+                next_metadata_by_key[item.appearance_key()] = item
+            }
+            by_icao = next_by_icao
+            metadata_by_key = next_metadata_by_key
+        }
+        if (is_cancelled()) return null
         val cache_builder = TrafficCacheController(
             passes_aircraft_filters = { item, epoch, distance, alert ->
                 AircraftFilterEngine.passes(
@@ -2374,8 +2643,8 @@ class FlightMapView(
                 )
             },
             distance_meters = distance_meters,
-            classify_alert_aircraft = { item, epoch ->
-                prepared_alert_classification(item, request, epoch)
+            classify_alert_aircraft = { item, epoch, distance ->
+                prepared_alert_classification(item, request, epoch, distance)
             },
             aircraft_icao_key = { item -> item.icao_key },
             spatial_entry_for = { item, epoch ->
@@ -2387,8 +2656,17 @@ class FlightMapView(
         val parsed_cache = cache_builder.build_cached_traffic_or_cancelled(
             all = parsed,
             now_epoch_sec = request.now_epoch_sec,
-            is_cancelled = is_cancelled
+            is_cancelled = is_cancelled,
+            reusable_visual_cache =
+                request.reusable_visual_cache.takeUnless { retained_previous_added }
         ) ?: return null
+        val completed_cache = global_aircraft?.let {
+            parsed_cache.copy(
+                nearest_aircraft = it.nearest_aircraft,
+                total = it.total,
+                matched_total = it.matched_total
+            )
+        } ?: parsed_cache
         if (is_cancelled()) return null
         val (appearances, appearance_animation_until_ms) =
             if (request.publish_result != null) {
@@ -2409,9 +2687,9 @@ class FlightMapView(
             metadata_by_key = metadata_by_key,
             appearances = appearances,
             appearance_animation_until_ms = appearance_animation_until_ms,
-            cached_traffic = parsed_cache,
+            cached_traffic = completed_cache,
             priority_payload = AircraftAlertService.prepare_priority_snapshot(
-                parsed_cache.priority_notification_aircraft
+                completed_cache.priority_notification_aircraft
             ),
             coverage = request.publish_result
                 ?.let(aircraft_traffic_feed::coverage_label)
@@ -2473,11 +2751,49 @@ class FlightMapView(
         if (!is_current_prepared_aircraft_frame(prepared)) return
         val request = prepared.request
         val result = request.publish_result
+        val feed_content = request.content as? AircraftPrepareContent.Feed
+        val next_feed_coverage = feed_content?.let(::aircraft_feed_coverage_after)
+        val current_required_bounds = current_required_aircraft_feed_bounds()
+        val interaction_active = pinch_in_progress || drag_started || map_touch_active
+        val misses_active_corridor =
+            interaction_active &&
+                next_feed_coverage != null &&
+                aircraft_interaction_feed_coverage.any { active_bounds ->
+                    next_feed_coverage.none { it.contains(active_bounds) }
+                }
+        if ((next_feed_coverage != null &&
+                current_required_bounds != null &&
+                next_feed_coverage.none { it.contains(current_required_bounds) }) ||
+            misses_active_corridor
+        ) {
+            if (interaction_active) {
+                request_interaction_aircraft_coverage()
+            } else {
+                request_visible_aircraft_after_map_interaction()
+            }
+            return
+        }
         aircraft = prepared.aircraft
         aircraft_by_icao = prepared.aircraft_by_icao
         aircraft_metadata_by_key = prepared.metadata_by_key
         aircraft_appearances = prepared.appearances
         aircraft_appearance_animation_until_ms = prepared.appearance_animation_until_ms
+        feed_content?.let { content ->
+            aircraft_feed_coverage = requireNotNull(next_feed_coverage)
+            aircraft_feed_coverage_content_revision = content.result.content_revision
+            if (!interaction_active &&
+                content.feed_request.globe_display_bounds.size == 1 &&
+                content.feed_request.globe_display_bounds[0] == content.feed_request.feed_bounds
+            ) {
+                aircraft_interaction_feed_coverage = emptyList()
+            }
+            if (!content.retain_previous_aircraft ||
+                requested_aircraft_feed_coverage == content.feed_request.feed_bounds
+            ) {
+                requested_aircraft_feed_coverage = null
+                requested_aircraft_feed_coverage_elapsed_ms = 0L
+            }
+        }
         selected_path_controller.selected_aircraft_key?.let { selected_key ->
             prepared.aircraft_by_icao[selected_key]
                 ?.let(selected_path_controller::update_selected_aircraft)
@@ -2503,6 +2819,8 @@ class FlightMapView(
                 newest_aircraft_content = AircraftPrepareContent.Committed(
                     source_result = result
                         ?: (request.content as? AircraftPrepareContent.Committed)?.source_result,
+                    feed_request = feed_content?.feed_request
+                        ?: (request.content as? AircraftPrepareContent.Committed)?.feed_request,
                     aircraft = prepared.aircraft,
                     aircraft_by_icao = prepared.aircraft_by_icao,
                     metadata_by_key = prepared.metadata_by_key,
@@ -2513,6 +2831,17 @@ class FlightMapView(
             }
         }
         postInvalidateOnAnimation()
+        request_interaction_aircraft_coverage()
+    }
+
+    private fun aircraft_feed_coverage_after(
+        content: AircraftPrepareContent.Feed
+    ): List<FeedBounds> {
+        return if (content.result.globe_aircraft != null) {
+            content.feed_request.globe_display_bounds
+        } else {
+            listOf(content.feed_request.feed_bounds)
+        }
     }
 
     private fun should_keep_current_aircraft_for_partial_result(
@@ -2544,32 +2873,246 @@ class FlightMapView(
         }
     }
 
-    private fun preserve_existing_aircraft_metadata(
+    private fun feed_matches_previous_aircraft_order(
         result: FeedResult,
-        parsed: List<Aircraft>,
+        previous: List<Aircraft>,
+        is_cancelled: () -> Boolean
+    ): Boolean {
+        if (result.aircraft.size != previous.size) return false
+        result.aircraft.forEachIndexed { index, fresh ->
+            if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 && is_cancelled()) {
+                return false
+            }
+            val existing = previous[index]
+            if (fresh.feed_key() != existing.appearance_key() ||
+                fresh.lat.toBits() != existing.lat.toBits() ||
+                fresh.lon.toBits() != existing.lon.toBits() ||
+                fresh.position_time_sec?.toBits() != existing.position_time_sec?.toBits() ||
+                fresh.last_contact_sec?.toBits() != existing.last_contact_sec?.toBits()
+            ) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun map_aircraft_with_metadata_fallback(
+        result: FeedResult,
         previous_by_key: Map<String, Aircraft>,
         is_cancelled: () -> Boolean
     ): List<Aircraft>? {
-        if (result.source != FeedSource.AIRPLANES_LIVE_GLOBE) return parsed
-        if (previous_by_key.isEmpty()) return parsed
-        var changed = false
-        val merged = ArrayList<Aircraft>(parsed.size)
-        parsed.forEachIndexed { index, fresh_aircraft ->
+        val preserve_metadata =
+            result.source == FeedSource.AIRPLANES_LIVE_GLOBE && previous_by_key.isNotEmpty()
+        val mapped = ArrayList<Aircraft>(result.aircraft.size)
+        result.aircraft.forEachIndexed { index, raw_aircraft ->
             if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 &&
                 is_cancelled()
             ) {
                 return null
             }
-            val existing = previous_by_key[fresh_aircraft.appearance_key()]
-            if (existing == null) {
-                merged += fresh_aircraft
-                return@forEachIndexed
-            }
-            val merged_aircraft = fresh_aircraft.with_metadata_fallback(existing)
-            changed = changed || merged_aircraft !== fresh_aircraft
-            merged += merged_aircraft
+            val fallback =
+                if (preserve_metadata) previous_by_key[raw_aircraft.feed_key()] else null
+            mapped += aircraft_traffic_feed.map_aircraft(raw_aircraft, fallback)
         }
-        return if (changed) merged else parsed
+        return mapped
+    }
+
+    private fun prepare_default_global_aircraft(
+        result: FeedResult,
+        base_aircraft: List<Aircraft>,
+        metadata_fallback_by_key: Map<String, Aircraft>,
+        feed_request: VisibleAircraftRequest,
+        request: AircraftPrepareRequest,
+        distance_meters: (Aircraft) -> Double,
+        is_cancelled: () -> Boolean
+    ): PreparedGlobalAircraft? {
+        val motion_candidates = checkNotNull(result.globe_motion_candidates)
+        val summary = checkNotNull(result.globe_default_summary)
+        val candidates = LinkedHashMap<String, Aircraft>(base_aircraft.size + 16)
+        base_aircraft.forEach { candidates[it.appearance_key()] = it }
+        var changed_candidates = false
+
+        motion_candidates.forEachIndexed { index, raw ->
+            if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 &&
+                is_cancelled()
+            ) {
+                return null
+            }
+            val key = raw.feed_key()
+            if (candidates.containsKey(key)) return@forEachIndexed
+            val item = aircraft_traffic_feed.map_aircraft(raw, metadata_fallback_by_key[key])
+            val distance = distance_meters(item)
+            val alert_position =
+                if (request.alerts_enabled || request.priority_tracking_enabled) {
+                    prepared_alert_position(item, request, request.now_epoch_sec, distance)
+                } else {
+                    null
+                }
+            val alert =
+                if (request.alerts_enabled) {
+                    prepared_alert_classification(
+                        item,
+                        request,
+                        request.now_epoch_sec,
+                        checkNotNull(alert_position)
+                    )
+                } else {
+                    null
+                }
+            if (should_admit_global_motion_candidate(
+                    item = item,
+                    feed_request = feed_request,
+                    request = request,
+                    alert_position = alert_position,
+                    alert = alert
+                )
+            ) {
+                candidates[key] = item
+                changed_candidates = true
+            }
+        }
+        if (is_cancelled()) return null
+
+        val nearest_aircraft = summary.nearest_airborne?.let { raw ->
+            val key = raw.feed_key()
+            candidates[key]
+                ?: aircraft_traffic_feed.map_aircraft(raw, metadata_fallback_by_key[key])
+        }
+        return PreparedGlobalAircraft(
+            aircraft = if (changed_candidates) ArrayList(candidates.values) else base_aircraft,
+            total = summary.total,
+            matched_total = summary.airborne_total,
+            nearest_aircraft = nearest_aircraft
+        )
+    }
+
+    private fun prepare_global_aircraft(
+        globe: MappedGlobeAircraftStore,
+        base_aircraft: List<Aircraft>,
+        authoritative_aircraft: List<Aircraft>,
+        metadata_fallback_by_key: Map<String, Aircraft>,
+        feed_request: VisibleAircraftRequest?,
+        request: AircraftPrepareRequest,
+        distance_meters: (Aircraft) -> Double,
+        is_cancelled: () -> Boolean
+    ): PreparedGlobalAircraft? {
+        val candidates = LinkedHashMap<String, Aircraft>(base_aircraft.size + 16)
+        base_aircraft.forEach { candidates[it.appearance_key()] = it }
+        val authoritative_by_key = LinkedHashMap<String, Aircraft>(authoritative_aircraft.size)
+        authoritative_aircraft.forEach { authoritative_by_key[it.appearance_key()] = it }
+        var changed_candidates = false
+        var total = 0
+        var matched_total = 0
+        var nearest_aircraft: Aircraft? = null
+        var nearest_distance = Double.POSITIVE_INFINITY
+
+        fun scan(item: Aircraft) {
+            total++
+            val distance = distance_meters(item)
+            val alert_position =
+                if (request.alerts_enabled || request.priority_tracking_enabled) {
+                    prepared_alert_position(item, request, request.now_epoch_sec, distance)
+                } else {
+                    null
+                }
+            val alert =
+                if (request.alerts_enabled) {
+                    prepared_alert_classification(
+                        item,
+                        request,
+                        request.now_epoch_sec,
+                        checkNotNull(alert_position)
+                    )
+                } else {
+                    null
+                }
+            if (AircraftFilterEngine.passes(
+                    aircraft = item,
+                    filters = request.filters,
+                    now_epoch_sec = request.now_epoch_sec,
+                    distance_meters = distance,
+                    is_hazard_aircraft = alert?.is_hazard == true
+                )
+            ) {
+                matched_total++
+                if (distance.isFinite() && distance < nearest_distance) {
+                    nearest_aircraft = item
+                    nearest_distance = distance
+                }
+            }
+
+            val key = item.appearance_key()
+            if (candidates.containsKey(key)) return
+            if (should_admit_global_motion_candidate(
+                    item = item,
+                    feed_request = feed_request,
+                    request = request,
+                    alert_position = alert_position,
+                    alert = alert
+                )
+            ) {
+                candidates[key] = item
+                changed_candidates = true
+            }
+        }
+
+        globe.aircraft.forEachIndexed { index, globe_aircraft ->
+            if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 && is_cancelled()) {
+                return null
+            }
+            val key = globe_aircraft.appearance_key()
+            val authoritative = authoritative_by_key.remove(key)
+            val prepared = authoritative
+                ?: metadata_fallback_by_key[key]?.let { globe_aircraft.with_metadata_fallback(it) }
+                ?: globe_aircraft
+            if (authoritative == null && candidates[key] !== prepared && candidates.containsKey(key)) {
+                candidates[key] = prepared
+                changed_candidates = true
+            }
+            scan(prepared)
+        }
+        authoritative_by_key.values.forEachIndexed { index, item ->
+            if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 && is_cancelled()) {
+                return null
+            }
+            scan(item)
+        }
+        if (is_cancelled()) return null
+        val prepared_candidates =
+            if (changed_candidates) ArrayList(candidates.values) else base_aircraft
+        return PreparedGlobalAircraft(
+            aircraft = prepared_candidates,
+            total = total,
+            matched_total = matched_total,
+            nearest_aircraft = nearest_aircraft
+        )
+    }
+
+    private fun should_admit_global_motion_candidate(
+        item: Aircraft,
+        feed_request: VisibleAircraftRequest?,
+        request: AircraftPrepareRequest,
+        alert_position: ProjectedAlertPosition?,
+        alert: AlertAircraft?
+    ): Boolean {
+        val projected_display_inside = feed_request?.let {
+            val projected = AircraftPositionProjector.projected_display_position(
+                aircraft = item,
+                now_epoch_sec = request.now_epoch_sec,
+                max_projection_seconds = MAX_ESTIMATION_SECONDS
+            ).point
+            it.globe_display_bounds.any { bounds ->
+                bounds.contains(projected.lat, projected.lon)
+            }
+        } == true
+        val projected_priority_inside =
+            request.priority_tracking_enabled &&
+                    alert_position?.distance_meters?.let {
+                        it <= feet_to_meters(request.priority_range_feet.toDouble())
+                    } == true
+        return projected_display_inside ||
+                alert?.is_hazard == true ||
+                projected_priority_inside
     }
 
     private fun Aircraft.with_metadata_fallback(fallback: Aircraft): Aircraft {
@@ -2690,31 +3233,53 @@ class FlightMapView(
     private fun prepared_alert_classification(
         aircraft: Aircraft,
         request: AircraftPrepareRequest,
-        now_epoch_sec: Double
+        now_epoch_sec: Double,
+        reported_distance_meters: Double
     ): AlertAircraft? {
-        val alert_position =
-            if (request.own_lat == null || request.own_lon == null) {
-                ProjectedAlertPosition(
-                    aircraft.distance_m,
-                    aircraft.altitude_m,
-                    estimated = false
-                )
-            } else {
-                AlertPositionProjector.projected_alert_position(
-                    own_lat = request.own_lat,
-                    own_lon = request.own_lon,
-                    aircraft_lat = aircraft.lat,
-                    aircraft_lon = aircraft.lon,
-                    reported_distance_meters = aircraft.distance_m,
-                    altitude_meters = aircraft.altitude_m,
-                    velocity_ms = aircraft.velocity_ms,
-                    track_deg = aircraft.track_deg,
-                    vertical_rate_ms = aircraft.vertical_rate_ms,
-                    position_time_sec = aircraft.position_time_sec,
-                    last_contact_sec = aircraft.last_contact_sec,
-                    now_epoch_sec = now_epoch_sec
-                )
-            }
+        return prepared_alert_classification(
+            aircraft,
+            request,
+            now_epoch_sec,
+            prepared_alert_position(aircraft, request, now_epoch_sec, reported_distance_meters)
+        )
+    }
+
+    private fun prepared_alert_position(
+        aircraft: Aircraft,
+        request: AircraftPrepareRequest,
+        now_epoch_sec: Double,
+        reported_distance_meters: Double
+    ): ProjectedAlertPosition {
+        return if (request.own_lat == null || request.own_lon == null) {
+            ProjectedAlertPosition(
+                reported_distance_meters,
+                aircraft.altitude_m,
+                estimated = false
+            )
+        } else {
+            AlertPositionProjector.projected_alert_position(
+                own_lat = request.own_lat,
+                own_lon = request.own_lon,
+                aircraft_lat = aircraft.lat,
+                aircraft_lon = aircraft.lon,
+                reported_distance_meters = reported_distance_meters,
+                altitude_meters = aircraft.altitude_m,
+                velocity_ms = aircraft.velocity_ms,
+                track_deg = aircraft.track_deg,
+                vertical_rate_ms = aircraft.vertical_rate_ms,
+                position_time_sec = aircraft.position_time_sec,
+                last_contact_sec = aircraft.last_contact_sec,
+                now_epoch_sec = now_epoch_sec
+            )
+        }
+    }
+
+    private fun prepared_alert_classification(
+        aircraft: Aircraft,
+        request: AircraftPrepareRequest,
+        now_epoch_sec: Double,
+        alert_position: ProjectedAlertPosition
+    ): AlertAircraft? {
         return AlertAircraftClassifier.classify(
             icao24 = aircraft.icao24,
             callsign = aircraft.callsign,
@@ -2798,6 +3363,28 @@ class FlightMapView(
         }
     }
 
+    private fun aircraft_feed_bounds_for_current_viewport(
+        location: Location,
+        interaction: Boolean
+    ): FeedBounds {
+        if (!aircraft_feed_mode.uses_globe) {
+            return aircraft_bounds_for_current_viewport(location).to_feed_bounds()
+        }
+        if (!has_usable_viewport()) {
+            return aircraft_feed_bounds_around_location(
+                location,
+                aircraft_bounds_radius_meters()
+            )
+        }
+        val viewport = viewport_for(location, content_width(), content_height())
+        val padding = if (interaction) {
+            aircraft_interaction_query_padding_px(viewport)
+        } else {
+            aircraft_prepared_query_padding_px(viewport)
+        }
+        return globe_feed_bounds_for_viewport(viewport, padding)
+    }
+
     private fun aircraft_bounds_for_current_viewport(location: Location): Bounds {
         if (!has_usable_viewport()) return aircraft_bounds_around_location(location).with_priority_bounds(
             location
@@ -2805,6 +3392,26 @@ class FlightMapView(
         val viewport = viewport_for(location, content_width(), content_height())
         val bounds = bounds_for_viewport(viewport, aircraft_bounds_padding_px(viewport))
         return (bounds ?: aircraft_bounds_around_location(location)).with_priority_bounds(location)
+    }
+
+    private fun globe_feed_bounds_for_viewport(
+        viewport: Viewport,
+        padding: Double
+    ): FeedBounds {
+        val left = viewport.center_x - viewport.width / 2.0 - padding
+        val right = viewport.center_x + viewport.width / 2.0 + padding
+        val top = viewport.center_y - viewport.height / 2.0 - padding
+        val bottom = viewport.center_y + viewport.height / 2.0 + padding
+        val top_left = MapProjection.world_to_lat_lon(left, top, viewport.zoom)
+        val bottom_right = MapProjection.world_to_lat_lon(right, bottom, viewport.zoom)
+        val world_width = TILE_SIZE * 2.0.pow(viewport.zoom)
+        val spans_world = right - left >= world_width
+        return FeedBounds(
+            min_lat = min(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
+            min_lon = if (spans_world) -180.0 else top_left.lon.coerceIn(-180.0, 180.0),
+            max_lat = max(top_left.lat, bottom_right.lat).coerceIn(-90.0, 90.0),
+            max_lon = if (spans_world) 180.0 else bottom_right.lon.coerceIn(-180.0, 180.0)
+        )
     }
 
     private fun bounds_for_viewport(
@@ -2863,7 +3470,34 @@ class FlightMapView(
         return max(AIRCRAFT_BOUNDS_PADDING_PX, screen_span * screen_fraction)
     }
 
+    private fun aircraft_interaction_query_padding_px(viewport: Viewport): Double {
+        val screen_span = max(viewport.width, viewport.height).toDouble()
+        val screen_fraction = when {
+            viewport.zoom < 6.0 -> 1.5
+            viewport.zoom < 8.0 -> 1.75
+            viewport.zoom < 10.0 -> 2.0
+            else -> 2.5
+        }
+        return max(aircraft_bounds_padding_px(viewport), screen_span * screen_fraction)
+    }
+
+    private fun aircraft_prepared_query_padding_px(viewport: Viewport): Double {
+        val screen_span = max(viewport.width, viewport.height).toDouble()
+        return max(aircraft_bounds_padding_px(viewport), screen_span * 1.25)
+    }
+
+    private fun aircraft_interaction_trigger_padding_px(viewport: Viewport): Double {
+        return max(
+            aircraft_prepared_query_padding_px(viewport),
+            aircraft_interaction_query_padding_px(viewport) * 0.5
+        )
+    }
+
     private fun aircraft_bounds_around_location(location: Location): Bounds {
+        return aircraft_bounds_around_location(location, aircraft_bounds_radius_meters())
+    }
+
+    private fun aircraft_bounds_radius_meters(): Double {
         val radius_km = when (zoom) {
             in 0.0..8.999 -> 90.0
             in 9.0..9.999 -> 65.0
@@ -2872,7 +3506,7 @@ class FlightMapView(
             in 12.0..12.999 -> 16.0
             else -> 10.0
         }
-        return aircraft_bounds_around_location(location, radius_km * 1000.0)
+        return radius_km * 1000.0
     }
 
     private fun aircraft_bounds_around_location(location: Location, radius_meters: Double): Bounds =
@@ -2880,10 +3514,38 @@ class FlightMapView(
 
     private fun safety_api_bounds_for(location: Location): FeedBounds? {
         if (!alerts_enabled && !priority_tracking_enabled) return null
-        return aircraft_bounds_around_location(
+        return aircraft_feed_bounds_around_location(
             location,
             feet_to_meters(safety_api_radius_feet())
-        ).to_feed_bounds()
+        )
+    }
+
+    private fun aircraft_feed_bounds_around_location(
+        location: Location,
+        radius_meters: Double
+    ): FeedBounds {
+        val radius_km = radius_meters / 1000.0
+        val lat_delta = radius_km / 111.0
+        val lon_delta =
+            radius_km / (111.0 * max(0.25, cos(Math.toRadians(location.latitude))))
+        if (lon_delta >= 180.0) {
+            return FeedBounds(
+                min_lat = (location.latitude - lat_delta).coerceIn(-90.0, 90.0),
+                min_lon = -180.0,
+                max_lat = (location.latitude + lat_delta).coerceIn(-90.0, 90.0),
+                max_lon = 180.0
+            )
+        }
+        return FeedBounds(
+            min_lat = (location.latitude - lat_delta).coerceIn(-90.0, 90.0),
+            min_lon = normalize_feed_longitude(location.longitude - lon_delta),
+            max_lat = (location.latitude + lat_delta).coerceIn(-90.0, 90.0),
+            max_lon = normalize_feed_longitude(location.longitude + lon_delta)
+        )
+    }
+
+    private fun normalize_feed_longitude(value: Double): Double {
+        return ((value + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
     }
 
     private fun safety_api_radius_feet(): Double {
@@ -3089,7 +3751,7 @@ class FlightMapView(
 
     private fun top_traffic_status(): Pair<String, Int> {
         val cache = cached_traffic()
-        val nearest = cache.aircraft.firstOrNull()
+        val nearest = cache.nearest_aircraft
         val total = cache.total
         return when {
             cache.hazard_present -> "TRAFFIC ALERT" to danger_color
@@ -4402,6 +5064,8 @@ class FlightMapView(
     }
 
     private fun should_show_path_button(viewport: Viewport): Boolean {
+        if (!has_selected_flight_path()) return false
+        if (!selected_path_controller.path_visible) return true
         val usable = layout.largest_unblocked_map_rect(viewport.width, viewport.height, layout_state()).inset_by(dp(14))
         return selected_path_viewport_controller.should_show_path_button(viewport, usable)
     }
@@ -4431,6 +5095,7 @@ class FlightMapView(
         manual_center_lat = center.lat
         manual_center_lon = center.lon
         following_location = false
+        request_interaction_aircraft_coverage()
     }
 
     private fun is_overlay_or_control_hit(x: Float, y: Float): Boolean {
@@ -4829,7 +5494,7 @@ class FlightMapView(
         val cache = cached_traffic()
         return aircraft_filter_controller.stats_from_counts(
             total = cache.total,
-            matched = cache.aircraft.size
+            matched = cache.matched_total
         )
     }
 
@@ -5058,7 +5723,8 @@ class FlightMapView(
 
     private fun alert_position_for(
         aircraft: Aircraft,
-        now_epoch_sec: Double = aircraft_projection_epoch_seconds()
+        now_epoch_sec: Double = aircraft_projection_epoch_seconds(),
+        reported_distance_meters: Double = reported_distance_meters(aircraft)
     ): ProjectedAlertPosition {
         val location = latest_location
             ?: return ProjectedAlertPosition(
@@ -5071,7 +5737,7 @@ class FlightMapView(
             own_lon = location.longitude,
             aircraft_lat = aircraft.lat,
             aircraft_lon = aircraft.lon,
-            reported_distance_meters = aircraft.distance_m,
+            reported_distance_meters = reported_distance_meters,
             altitude_meters = aircraft.altitude_m,
             velocity_ms = aircraft.velocity_ms,
             track_deg = aircraft.track_deg,
@@ -5140,6 +5806,79 @@ class FlightMapView(
             max_lat = max_lat,
             max_lon = max_lon
         )
+    }
+
+    private fun current_required_aircraft_feed_bounds(): FeedBounds? {
+        val location = latest_location ?: return null
+        return aircraft_feed_bounds_for_current_viewport(location, interaction = false)
+    }
+
+    private fun FeedBounds.contains(other: FeedBounds): Boolean {
+        if (min_lat > other.min_lat || max_lat < other.max_lat) return false
+        val covers_world = min_lon <= -180.0 && max_lon >= 180.0
+        val other_covers_world = other.min_lon <= -180.0 && other.max_lon >= 180.0
+        if (covers_world || other_covers_world) return covers_world
+        val wraps = min_lon > max_lon
+        val other_wraps = other.min_lon > other.max_lon
+        return when {
+            !wraps && !other_wraps -> min_lon <= other.min_lon && max_lon >= other.max_lon
+            !wraps -> false
+            other_wraps -> min_lon <= other.min_lon && max_lon >= other.max_lon
+            else -> other.min_lon >= min_lon || other.max_lon <= max_lon
+        }
+    }
+
+    private fun append_compact_aircraft_feed_coverage(
+        coverage: MutableList<FeedBounds>,
+        bounds: FeedBounds
+    ) {
+        if (coverage.any { it.contains(bounds) }) return
+        coverage.removeAll { bounds.contains(it) }
+        coverage += bounds
+    }
+
+    private fun extended_aircraft_interaction_feed_coverage(
+        bounds: FeedBounds
+    ): List<FeedBounds> {
+        val coverage = ArrayList<FeedBounds>(
+            aircraft_feed_coverage.size + aircraft_interaction_feed_coverage.size + 1
+        )
+        aircraft_feed_coverage.forEach {
+            append_compact_aircraft_feed_coverage(coverage, it)
+        }
+        aircraft_interaction_feed_coverage.forEach {
+            append_compact_aircraft_feed_coverage(coverage, it)
+        }
+        append_compact_aircraft_feed_coverage(coverage, bounds)
+        return coverage
+    }
+
+    private fun FeedBounds.contains(lat: Double, lon: Double): Boolean {
+        if (lat !in min_lat..max_lat) return false
+        return if (min_lon <= max_lon) {
+            lon in min_lon..max_lon
+        } else {
+            lon >= min_lon || lon <= max_lon
+        }
+    }
+
+    private fun VisibleAircraftRequest.contains_authoritative(lat: Double, lon: Double): Boolean {
+        return globe_display_bounds.any { it.contains(lat, lon) } ||
+            safety_api_bounds?.contains(lat, lon) == true
+    }
+
+    private fun Aircraft.matches_exact_key(key: String?): Boolean {
+        key ?: return false
+        return normalize_aircraft_exact_key(icao24) == key ||
+            normalize_aircraft_exact_key(callsign) == key ||
+            normalize_aircraft_exact_key(registration) == key
+    }
+
+    private fun normalize_aircraft_exact_key(value: String?): String? {
+        return value
+            ?.uppercase(Locale.US)
+            ?.filter { it.isLetterOrDigit() || it == '-' }
+            ?.takeIf { it.isNotBlank() }
     }
 
     private fun Bounds.to_aviation_geo_bounds(): AviationGeoBounds {
@@ -5259,13 +5998,19 @@ class FlightMapView(
             val fetch_token: Long,
             val fetch_signature: String,
             val publication_phase: FeedPublicationPhase,
+            val feed_request: VisibleAircraftRequest,
+            val retain_previous_aircraft: Boolean,
+            val retained_feed_coverages: List<FeedBounds>,
+            val previous_aircraft: List<Aircraft>,
             val previous_metadata_by_key: Map<String, Aircraft>,
             val previous_appearances: Map<String, AircraftAppearance>,
-            val previous_appearance_animation_until_ms: Long
+            val previous_appearance_animation_until_ms: Long,
+            val reuses_previous_aircraft_generation: Boolean
         ) : AircraftPrepareContent
 
         data class Committed(
             val source_result: FeedResult?,
+            val feed_request: VisibleAircraftRequest?,
             val aircraft: List<Aircraft>,
             val aircraft_by_icao: Map<String, Aircraft>,
             val metadata_by_key: Map<String, Aircraft>,
@@ -5286,6 +6031,7 @@ class FlightMapView(
         val own_lat: Double?,
         val own_lon: Double?,
         val own_altitude_feet: Double?,
+        val required_safety_bounds: FeedBounds?,
         val alerts_enabled: Boolean,
         val alert_distance_feet: Float,
         val alert_altitude_feet: Float,
@@ -5293,7 +6039,8 @@ class FlightMapView(
         val priority_range_feet: Float,
         val theme: VisualTheme,
         val theme_key: Int,
-        val selected_path: SelectedPathPrepareState?
+        val selected_path: SelectedPathPrepareState?,
+        val reusable_visual_cache: CachedTraffic?
     )
 
     private data class PreparedAircraftFrame(
@@ -5306,6 +6053,13 @@ class FlightMapView(
         val cached_traffic: CachedTraffic,
         val priority_payload: PrioritySnapshotPayload,
         val coverage: String
+    )
+
+    private data class PreparedGlobalAircraft(
+        val aircraft: List<Aircraft>,
+        val total: Int,
+        val matched_total: Int,
+        val nearest_aircraft: Aircraft?
     )
 
     private data class SelectedPathPrepareState(
@@ -5327,6 +6081,8 @@ class FlightMapView(
         const val MAP_INTERACTION_SETTLE_REDRAW_PADDING_MS = 16L
         const val MAP_LABEL_SETTLED_FADE_MS = 140L
         const val AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK = 127
+        const val AIRCRAFT_INTERACTION_COVERAGE_RETRY_MS = 1000L
+        const val MAX_EXACT_SAFETY_BOUNDS_LATITUDE = 75.0
     }
 
 }

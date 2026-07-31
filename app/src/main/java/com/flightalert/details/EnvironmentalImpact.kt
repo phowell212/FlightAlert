@@ -60,7 +60,12 @@ object AircraftImpactEstimator {
         val text = search_text(facts)
         if (code.isBlank() && text.isBlank()) return null
         if (facts.category == 14 || text.contains("UAV") || text.contains("DRONE")) return null
-        if (facts.category == 9 || code.startsWith("GL") || text.contains("GLIDER")) return null
+        if (facts.category == 9 ||
+            facts.category == 10 ||
+            code == "GLID" ||
+            code == "GLIM" ||
+            text.contains("GLIDER")
+        ) return null
         if (facts.on_ground == true && facts.category != null && facts.category in listOf(
                 16,
                 17,

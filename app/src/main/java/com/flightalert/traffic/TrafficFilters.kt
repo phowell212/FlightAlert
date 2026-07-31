@@ -353,15 +353,16 @@ object AircraftFilterEngine {
     }
 
     private fun matches_type(aircraft: Aircraft, filter: AircraftTypeFilter): Boolean {
+        if (filter == AircraftTypeFilter.ALL) return true
+        if (filter == AircraftTypeFilter.MILITARY) return aircraft.is_military
         val symbol = AircraftSymbolClassifier.symbol_for(aircraft)
         return when (filter) {
-            AircraftTypeFilter.ALL -> true
             AircraftTypeFilter.AIRPLANES -> symbol == AircraftSymbol.AIRLINER || symbol == AircraftSymbol.GENERAL_AVIATION
             AircraftTypeFilter.ROTORCRAFT -> symbol == AircraftSymbol.ROTORCRAFT
             AircraftTypeFilter.GLIDER -> symbol == AircraftSymbol.GLIDER
             AircraftTypeFilter.UAV -> symbol == AircraftSymbol.UAV
             AircraftTypeFilter.SURFACE -> symbol == AircraftSymbol.SURFACE
-            AircraftTypeFilter.MILITARY -> aircraft.is_military
+            AircraftTypeFilter.ALL, AircraftTypeFilter.MILITARY -> error("Handled above")
         }
     }
 

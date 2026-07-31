@@ -36,8 +36,12 @@ enum class MapSurfaceAction {
     OPEN_TRAFFIC_DETAILS
 }
 
+fun interface FloatScale {
+    fun scale(value: Float): Float
+}
+
 // Owns map and panel geometry so FlightMapView can ask where things go without doing rectangle math inline.
-class FlightMapLayout(private val scale_dp: (Float) -> Float) {
+class FlightMapLayout(private val scale_dp: FloatScale) {
     // Keep the top status clear of the traffic card on wide screens and full-width on narrow screens.
     fun top_status_bounds(w: Float, h: Float): RectF {
         val left = dp(12)
@@ -670,29 +674,43 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
         }
         val sorted_x = xs.distinct().sorted()
         val sorted_y = ys.distinct().sorted()
-        var best = RectF(0f, 0f, w, h)
+        var best_left = 0f
+        var best_top = 0f
+        var best_right = w
+        var best_bottom = h
         var best_area = -1f
         for (left_index in sorted_x.indices) {
             for (right_index in left_index + 1 until sorted_x.size) {
                 for (top_index in sorted_y.indices) {
                     for (bottom_index in top_index + 1 until sorted_y.size) {
-                        val candidate = RectF(
-                            sorted_x[left_index],
-                            sorted_y[top_index],
-                            sorted_x[right_index],
-                            sorted_y[bottom_index]
-                        )
-                        val area = candidate.width() * candidate.height()
+                        val left = sorted_x[left_index]
+                        val top = sorted_y[top_index]
+                        val right = sorted_x[right_index]
+                        val bottom = sorted_y[bottom_index]
+                        val area = (right - left) * (bottom - top)
                         if (area <= best_area) continue
-                        if (obstacles.none { RectF.intersects(candidate, it) }) {
-                            best = candidate
+                        var blocked = false
+                        for (obstacle_index in obstacles.indices) {
+                            val obstacle = obstacles[obstacle_index]
+                            if (left < obstacle.right && obstacle.left < right &&
+                                top < obstacle.bottom && obstacle.top < bottom
+                            ) {
+                                blocked = true
+                                break
+                            }
+                        }
+                        if (!blocked) {
+                            best_left = left
+                            best_top = top
+                            best_right = right
+                            best_bottom = bottom
                             best_area = area
                         }
                     }
                 }
             }
         }
-        return best
+        return RectF(best_left, best_top, best_right, best_bottom)
     }
 
     // Obstacles are the UI rectangles that map focus, labels, and path fitting should avoid.
@@ -715,7 +733,7 @@ class FlightMapLayout(private val scale_dp: (Float) -> Float) {
 
     private fun dp(value: Int): Float = dp(value.toFloat())
 
-    private fun dp(value: Float): Float = scale_dp(value)
+    private fun dp(value: Float): Float = scale_dp.scale(value)
 
     private fun RectF.padded_copy(padding: Float): RectF {
         return RectF(left - padding, top - padding, right + padding, bottom + padding)

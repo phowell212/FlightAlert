@@ -8,7 +8,7 @@
 
 package com.flightalert.traffic
 
-import android.os.SystemClock
+import com.flightalert.MAX_ESTIMATION_SECONDS
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftSymbol
 import com.flightalert.aircraft.AircraftSymbolClassifier
@@ -23,16 +23,34 @@ internal data class CachedTraffic(
     val aircraft: List<Aircraft>,
     val aircraft_by_icao: Map<String, Aircraft>,
     val nearest_aircraft: Aircraft?,
-    val entries: List<TrafficSpatialEntry>,
     val spatial_index: TrafficSpatialIndex,
     val world_dot_batch: TrafficWorldDotBatch,
     val total: Int,
+    val matched_total: Int,
     val hazard_present: Boolean,
     val extreme_priority_aircraft: List<Aircraft>,
     val priority_notification_aircraft: List<AlertAircraft>,
-    val extreme_priority_keys: Set<String>,
-    val max_projected_speed_zoom_zero: Double
-)
+    val max_projected_speed_zoom_zero: Double,
+    val projection_epoch_sec: Double
+) {
+    fun motion_query_padding_px(
+        viewport: Viewport,
+        base_padding_px: Float,
+        now_epoch_sec: Double
+    ): Float {
+        val base = base_padding_px.coerceAtLeast(0f)
+        val elapsed_sec =
+            (now_epoch_sec - projection_epoch_sec).coerceIn(0.0, MAX_ESTIMATION_SECONDS)
+        val motion_px =
+            max_projected_speed_zoom_zero * 2.0.pow(viewport.zoom) * elapsed_sec
+        if (!(motion_px > 0.0)) return base
+        return if (!motion_px.isFinite() || motion_px >= Float.MAX_VALUE - base) {
+            Float.MAX_VALUE
+        } else {
+            base + motion_px.toFloat()
+        }
+    }
+}
 
 internal data class TrafficSpatialEntry(
     val aircraft: Aircraft,
@@ -54,28 +72,18 @@ internal data class TrafficSpatialEntry(
 internal data class TrafficWorldDotBatch(
     val outline_points: FloatArray,
     val outline_count: Int,
-    val outline_velocities: FloatArray,
-    val outline_motion_limits: FloatArray,
     val fill_points: Array<FloatArray>,
     val fill_counts: IntArray,
-    val fill_velocities: Array<FloatArray>,
-    val fill_motion_limits: Array<FloatArray>,
-    val visible_count: Int,
-    val built_elapsed_ms: Long
+    val visible_count: Int
 ) {
     companion object {
         fun empty(): TrafficWorldDotBatch {
             return TrafficWorldDotBatch(
                 outline_points = FloatArray(0),
                 outline_count = 0,
-                outline_velocities = FloatArray(0),
-                outline_motion_limits = FloatArray(0),
                 fill_points = Array(TrafficDotBatchOverlayState.GROUP_COUNT) { FloatArray(0) },
                 fill_counts = IntArray(TrafficDotBatchOverlayState.GROUP_COUNT),
-                fill_velocities = Array(TrafficDotBatchOverlayState.GROUP_COUNT) { FloatArray(0) },
-                fill_motion_limits = Array(TrafficDotBatchOverlayState.GROUP_COUNT) { FloatArray(0) },
-                visible_count = 0,
-                built_elapsed_ms = 0L
+                visible_count = 0
             )
         }
     }
@@ -108,6 +116,15 @@ internal class TrafficSpatialIndex(
 
     // Pan frames use this grid to ask only the cells near the viewport instead of scanning all aircraft.
     fun query(viewport: Viewport, padding_px: Float): List<TrafficSpatialEntry> {
+        return query_into(viewport, padding_px, ArrayList())
+    }
+
+    fun query_into(
+        viewport: Viewport,
+        padding_px: Float,
+        result: MutableList<TrafficSpatialEntry>
+    ): MutableList<TrafficSpatialEntry> {
+        result.clear()
         val scale = 2.0.pow(viewport.zoom)
         val min_y = ((viewport.center_y - viewport.height / 2.0 - padding_px) / scale).coerceIn(
             0.0,
@@ -119,7 +136,6 @@ internal class TrafficSpatialIndex(
         )
         val raw_min_x = (viewport.center_x - viewport.width / 2.0 - padding_px) / scale
         val raw_max_x = (viewport.center_x + viewport.width / 2.0 + padding_px) / scale
-        val result = ArrayList<TrafficSpatialEntry>()
         if (raw_max_x - raw_min_x >= WORLD_SIZE) {
             collect_range(0.0, WORLD_SIZE, min_y, max_y, result)
         } else {
@@ -235,27 +251,26 @@ internal class TrafficCacheController(
         AlertAircraft?
     ) -> Boolean,
     private val distance_meters: (Aircraft) -> Double,
-    private val classify_alert_aircraft: (Aircraft, Double) -> AlertAircraft?,
+    private val classify_alert_aircraft: (Aircraft, Double, Double) -> AlertAircraft?,
     private val aircraft_icao_key: (Aircraft) -> String,
     private val spatial_entry_for: (Aircraft, Double) -> TrafficSpatialEntry,
     private val alerts_enabled: () -> Boolean,
-    private val now_epoch_seconds: () -> Double,
-    private val now_elapsed_ms: () -> Long = { SystemClock.elapsedRealtime() }
+    private val now_epoch_seconds: () -> Double
 ) {
     private var traffic_cache_dirty = true
     private var published_traffic = CachedTraffic(
         aircraft = emptyList(),
         aircraft_by_icao = emptyMap(),
         nearest_aircraft = null,
-        entries = emptyList(),
         spatial_index = TrafficSpatialIndex(emptyList()),
         world_dot_batch = TrafficWorldDotBatch.empty(),
         total = 0,
+        matched_total = 0,
         hazard_present = false,
         extreme_priority_aircraft = emptyList(),
         priority_notification_aircraft = emptyList(),
-        extreme_priority_keys = emptySet(),
-        max_projected_speed_zoom_zero = 0.0
+        max_projected_speed_zoom_zero = 0.0,
+        projection_epoch_sec = 0.0
     )
 
     val total: Int
@@ -287,11 +302,14 @@ internal class TrafficCacheController(
     fun build_cached_traffic_or_cancelled(
         all: List<Aircraft>,
         now_epoch_sec: Double,
-        is_cancelled: () -> Boolean
+        is_cancelled: () -> Boolean,
+        reusable_visual_cache: CachedTraffic? = null
     ): CachedTraffic? {
         val filtered = ArrayList<Aircraft>(all.size)
-        val filtered_by_icao = HashMap<String, Aircraft>(all.size)
-        val entries = ArrayList<TrafficSpatialEntry>(all.size)
+        var filtered_by_icao: HashMap<String, Aircraft>? =
+            if (reusable_visual_cache == null) HashMap(all.size) else null
+        var entries: ArrayList<TrafficSpatialEntry>? =
+            if (reusable_visual_cache == null) ArrayList(all.size) else null
         val priority_aircraft = ArrayList<Aircraft>()
         val priority_alerts = ArrayList<AlertAircraft>()
         var nearest: Aircraft? = null
@@ -301,14 +319,57 @@ internal class TrafficCacheController(
         all.forEachIndexed { index, item ->
             if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
             val distance = distance_meters(item)
-            val alert = if (prepare_alerts) classify_alert_aircraft(item, now_epoch_sec) else null
+            val alert =
+                if (prepare_alerts) classify_alert_aircraft(item, now_epoch_sec, distance) else null
             if (alert?.is_hazard == true) {
                 priority_aircraft += item
                 priority_alerts += alert
             }
             if (passes_aircraft_filters(item, now_epoch_sec, distance, alert)) {
                 filtered += item
-                filtered_by_icao.putIfAbsent(aircraft_icao_key(item), item)
+                filtered_by_icao?.putIfAbsent(aircraft_icao_key(item), item)
+                entries?.let { destination ->
+                    val entry = spatial_entry_for(item, now_epoch_sec)
+                    destination += entry
+                    if (entry.projected_motion_remaining_sec > 0.0) {
+                        val dx = entry.projected_velocity_x_zoom_zero
+                        val dy = entry.projected_velocity_y_zoom_zero
+                        val speed_squared = dx * dx + dy * dy
+                        if (speed_squared > max_projected_speed_squared) {
+                            max_projected_speed_squared = speed_squared
+                        }
+                    }
+                }
+                if (distance.isFinite() && distance < nearest_distance) {
+                    nearest = item
+                    nearest_distance = distance
+                }
+            }
+        }
+        if (is_cancelled()) return null
+        priority_alerts.sortWith(
+            compareBy<AlertAircraft> { it.altitude_feet }.thenBy { it.distance_feet }
+        )
+        if (is_cancelled()) return null
+        val reusable = reusable_visual_cache?.takeIf { candidate ->
+            same_instance_order(candidate.aircraft, filtered) &&
+                    same_instance_order(candidate.extreme_priority_aircraft, priority_aircraft)
+        }
+        if (reusable != null) {
+            return reusable.copy(
+                nearest_aircraft = nearest ?: reusable.aircraft.firstOrNull(),
+                matched_total = filtered.size,
+                hazard_present = priority_aircraft.isNotEmpty(),
+                priority_notification_aircraft = priority_alerts
+            )
+        }
+        if (entries == null) {
+            entries = ArrayList(filtered.size)
+            val rebuilt_by_icao = HashMap<String, Aircraft>(filtered.size)
+            filtered_by_icao = rebuilt_by_icao
+            filtered.forEachIndexed { index, item ->
+                if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
+                rebuilt_by_icao.putIfAbsent(aircraft_icao_key(item), item)
                 val entry = spatial_entry_for(item, now_epoch_sec)
                 entries += entry
                 if (entry.projected_motion_remaining_sec > 0.0) {
@@ -319,38 +380,29 @@ internal class TrafficCacheController(
                         max_projected_speed_squared = speed_squared
                     }
                 }
-                if (distance.isFinite() && distance < nearest_distance) {
-                    nearest = item
-                    nearest_distance = distance
-                }
             }
         }
+        val completed_entries = entries
+        val completed_aircraft_by_icao = checkNotNull(filtered_by_icao)
+        val world_dot_batch = build_world_dot_batch(completed_entries, is_cancelled) ?: return null
         if (is_cancelled()) return null
-        val world_dot_batch = build_world_dot_batch(entries, is_cancelled) ?: return null
-        if (is_cancelled()) return null
-        val spatial_index = TrafficSpatialIndex(entries, is_cancelled)
+        val spatial_index = TrafficSpatialIndex(completed_entries, is_cancelled)
         if (!spatial_index.complete || is_cancelled()) return null
         val max_projected_speed =
             if (max_projected_speed_squared > 0.0) sqrt(max_projected_speed_squared) else 0.0
-        priority_alerts.sortWith(
-            compareBy<AlertAircraft> { it.altitude_feet }.thenBy { it.distance_feet }
-        )
-        if (is_cancelled()) return null
-        val priority_keys =
-            priority_aircraft.mapTo(HashSet(priority_aircraft.size)) { aircraft_icao_key(it) }
         return CachedTraffic(
             aircraft = filtered,
-            aircraft_by_icao = filtered_by_icao,
+            aircraft_by_icao = completed_aircraft_by_icao,
             nearest_aircraft = nearest ?: filtered.firstOrNull(),
-            entries = entries,
             spatial_index = spatial_index,
             world_dot_batch = world_dot_batch,
             total = all.size,
+            matched_total = filtered.size,
             hazard_present = priority_aircraft.isNotEmpty(),
             extreme_priority_aircraft = priority_aircraft,
             priority_notification_aircraft = priority_alerts,
-            extreme_priority_keys = priority_keys,
-            max_projected_speed_zoom_zero = max_projected_speed
+            max_projected_speed_zoom_zero = max_projected_speed,
+            projection_epoch_sec = now_epoch_sec
         )
     }
 
@@ -362,7 +414,8 @@ internal class TrafficCacheController(
         val priority_alerts = ArrayList<AlertAircraft>()
         // Safety state is based on every real aircraft in the feed, not the current visual filter.
         for (aircraft in all) {
-            val alert = classify_alert_aircraft(aircraft, now_epoch_sec) ?: continue
+            val distance = distance_meters(aircraft)
+            val alert = classify_alert_aircraft(aircraft, now_epoch_sec, distance) ?: continue
             if (alert.is_hazard) priority_alerts += alert
         }
         priority_alerts.sortWith(
@@ -380,14 +433,20 @@ internal class TrafficCacheController(
         return published_traffic
     }
 
+    private fun same_instance_order(first: List<Aircraft>, second: List<Aircraft>): Boolean {
+        if (first.size != second.size) return false
+        for (index in first.indices) {
+            if (first[index] !== second[index]) return false
+        }
+        return true
+    }
+
     private fun build_world_dot_batch(
         entries: List<TrafficSpatialEntry>,
         is_cancelled: () -> Boolean
     ): TrafficWorldDotBatch? {
         if (entries.isEmpty()) return TrafficWorldDotBatch.empty()
         var outline_points = FloatArray(max(128, entries.size * 2))
-        var outline_velocities = FloatArray(max(128, entries.size * 2))
-        var outline_motion_limits = FloatArray(max(128, entries.size * 2))
         var outline_count = 0
         val fill_points = Array(TrafficDotBatchOverlayState.GROUP_COUNT) {
             FloatArray(
@@ -398,62 +457,24 @@ internal class TrafficCacheController(
             )
         }
         val fill_counts = IntArray(TrafficDotBatchOverlayState.GROUP_COUNT)
-        val fill_velocities = Array(TrafficDotBatchOverlayState.GROUP_COUNT) {
-            FloatArray(
-                max(
-                    128,
-                    entries.size / 2
-                )
-            )
-        }
-        val fill_motion_limits = Array(TrafficDotBatchOverlayState.GROUP_COUNT) {
-            FloatArray(
-                max(
-                    128,
-                    entries.size / 2
-                )
-            )
-        }
         for ((index, entry) in entries.withIndex()) {
             if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
             val x = entry.world_x_zoom_zero.toFloat()
             val y = entry.world_y_zoom_zero.toFloat()
-            val motion_limit_sec = entry.projected_motion_remaining_sec.toFloat().coerceAtLeast(0f)
             outline_points = ensure_point_capacity(outline_points, outline_count + 2)
-            outline_velocities = ensure_point_capacity(outline_velocities, outline_count + 2)
-            outline_motion_limits = ensure_point_capacity(outline_motion_limits, outline_count + 2)
             outline_points[outline_count++] = x
             outline_points[outline_count++] = y
-            outline_velocities[outline_count - 2] = entry.projected_velocity_x_zoom_zero.toFloat()
-            outline_velocities[outline_count - 1] = entry.projected_velocity_y_zoom_zero.toFloat()
-            outline_motion_limits[outline_count - 2] = motion_limit_sec
-            outline_motion_limits[outline_count - 1] = motion_limit_sec
             val group = entry.dot_group
             fill_points[group] = ensure_point_capacity(fill_points[group], fill_counts[group] + 2)
-            fill_velocities[group] =
-                ensure_point_capacity(fill_velocities[group], fill_counts[group] + 2)
-            fill_motion_limits[group] =
-                ensure_point_capacity(fill_motion_limits[group], fill_counts[group] + 2)
             fill_points[group][fill_counts[group]++] = x
             fill_points[group][fill_counts[group]++] = y
-            fill_velocities[group][fill_counts[group] - 2] =
-                entry.projected_velocity_x_zoom_zero.toFloat()
-            fill_velocities[group][fill_counts[group] - 1] =
-                entry.projected_velocity_y_zoom_zero.toFloat()
-            fill_motion_limits[group][fill_counts[group] - 2] = motion_limit_sec
-            fill_motion_limits[group][fill_counts[group] - 1] = motion_limit_sec
         }
         return TrafficWorldDotBatch(
             outline_points = outline_points,
             outline_count = outline_count,
-            outline_velocities = outline_velocities,
-            outline_motion_limits = outline_motion_limits,
             fill_points = fill_points,
             fill_counts = fill_counts,
-            fill_velocities = fill_velocities,
-            fill_motion_limits = fill_motion_limits,
-            visible_count = outline_count / 2,
-            built_elapsed_ms = now_elapsed_ms()
+            visible_count = outline_count / 2
         )
     }
 

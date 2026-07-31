@@ -14,7 +14,6 @@ import android.graphics.Paint
 import com.flightalert.map.*
 import com.flightalert.map.reference.ReferenceDictionaryOverlayRenderer
 import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
-import java.util.concurrent.atomic.AtomicLong
 
 // Satellite imagery stays independent of local dictionary labels and borders.
 internal class SatelliteMapTileRenderer(
@@ -32,7 +31,6 @@ internal class SatelliteMapTileRenderer(
         context.cacheDir,
         com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES,
     )
-    private val map_content_revision = AtomicLong()
     private val base_renderer = SatelliteBaseTileRenderer(
         context = context,
         paint = paint,
@@ -41,7 +39,6 @@ internal class SatelliteMapTileRenderer(
         with_alpha = with_alpha,
         report_status = report_status,
         request_redraw = request_redraw,
-        map_content_revision = map_content_revision,
         shared_map_tile_disk_cache = map_tile_disk_cache,
         overlay_drawer = ::draw_reference_layers,
     )

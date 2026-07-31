@@ -50,6 +50,27 @@ class AircraftFeedClient(private val user_agent: String) {
         own_lat: Double,
         own_lon: Double
     ): FeedResult {
+        if (bounds.min_lon <= bounds.max_lon) {
+            return fetch_non_wrapping_viewport_aircraft(bounds, own_lat, own_lon)
+        }
+        val west = fetch_non_wrapping_viewport_aircraft(
+            bounds.copy(max_lon = 180.0),
+            own_lat,
+            own_lon
+        )
+        val east = fetch_non_wrapping_viewport_aircraft(
+            bounds.copy(min_lon = -180.0),
+            own_lat,
+            own_lon
+        )
+        return merge_wrapped_viewport_results(west, east)
+    }
+
+    private fun fetch_non_wrapping_viewport_aircraft(
+        bounds: FeedBounds,
+        own_lat: Double,
+        own_lon: Double
+    ): FeedResult {
         val now = System.currentTimeMillis()
         val airplanes_result = if (now >= airplanes_live_retry_after_ms) {
             fetch_airplanes_live(bounds, own_lat, own_lon)
@@ -69,6 +90,36 @@ class AircraftFeedClient(private val user_agent: String) {
         if (open_sky_result?.status == FeedStatus.OK) return open_sky_result
 
         return open_sky_result ?: airplanes_result
+    }
+
+    private fun merge_wrapped_viewport_results(
+        west: FeedResult,
+        east: FeedResult
+    ): FeedResult {
+        if (west.status != FeedStatus.OK && east.status != FeedStatus.OK) {
+            return if (east.status == FeedStatus.RATE_LIMITED) east else west
+        }
+        if (west.status != FeedStatus.OK || east.status != FeedStatus.OK) {
+            val available = if (west.status == FeedStatus.OK) west else east
+            return available.copy(
+                query_count = west.query_count + east.query_count,
+                partial_coverage = true
+            )
+        }
+        val merged = linkedMapOf<String, FeedAircraft>()
+        west.aircraft.forEach { item -> merged[item.feed_key()] = item }
+        east.aircraft.forEach { item ->
+            val key = item.feed_key()
+            merged[key] = newer_aircraft(merged[key], item)
+        }
+        return FeedResult(
+            status = FeedStatus.OK,
+            source = merged_source(west.source, east.source),
+            aircraft = merged.values.sortedBy { it.distance_m },
+            epoch_sec = max_epoch(west.epoch_sec, east.epoch_sec),
+            query_count = west.query_count + east.query_count,
+            partial_coverage = west.partial_coverage || east.partial_coverage
+        )
     }
 
     private fun merge_viewport_and_search(viewport: FeedResult, search: FeedResult?): FeedResult {
@@ -477,10 +528,7 @@ class AircraftFeedClient(private val user_agent: String) {
                     ?.let { feed_knots_to_meters_per_second(it) },
                 track_deg = item.feed_json_finite_double_or_null("track"),
                 vertical_rate_ms = vertical_rate_ms,
-                category = category_from_airplanes_live(
-                    item.optString("category"),
-                    item.optString("t")
-                ),
+                category = adsb_emitter_category(item.optString("category")),
                 position_time_sec = last_position_time,
                 last_contact_sec = last_contact_time,
                 distance_m = feed_distance_meters(own_lat, own_lon, lat, lon),
@@ -571,21 +619,6 @@ class AircraftFeedClient(private val user_agent: String) {
                 lon
             )
         } / METERS_PER_NAUTICAL_MILE
-    }
-
-    private fun category_from_airplanes_live(category: String, type_code: String): Int? {
-        val normalized = category.trim().uppercase(Locale.US)
-        if (normalized.startsWith("A7") || normalized.startsWith("B7")) return 8
-        if (normalized.startsWith("B1")) return 9
-        if (normalized.startsWith("B6")) return 14
-        if (normalized.startsWith("C") || normalized.startsWith("D")) return 15
-        val type = type_code.trim().uppercase(Locale.US)
-        return when {
-            type.startsWith("H") || type.startsWith("R") -> 8
-            type.startsWith("GL") -> 9
-            type.startsWith("UAV") || type.startsWith("DRON") -> 14
-            else -> null
-        }
     }
 
     private fun normalize_epoch_seconds(value: Double): Double {

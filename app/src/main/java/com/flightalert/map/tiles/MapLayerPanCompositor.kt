@@ -28,7 +28,7 @@ internal class MapLayerPanCompositor(
     private data class Entry(
         val node: RenderNode,
         val key: Any,
-        val content_revision: Long,
+        val dependency_keys: Set<String>,
         val zoom: Double,
         val center_x: Double,
         val center_y: Double,
@@ -37,35 +37,49 @@ internal class MapLayerPanCompositor(
         val width: Int,
         val height: Int,
         val recorded_ms: Long,
-        val status: String
+        val status: String,
+        var invalidated: Boolean = false,
     )
 
+    private data class RecordingGuard(
+        val dependency_keys: Set<String>,
+        var invalidated: Boolean = false,
+    )
+
+    private val content_lock = Any()
     private var entry: Entry? = null
+    private var recording_guard: RecordingGuard? = null
 
     fun draw_cached(
         canvas: Canvas,
         viewport: Viewport,
         key: Any,
-        content_revision: Long,
         now_ms: Long
     ): String? {
         if (!canvas.isHardwareAccelerated) {
-            entry = null
+            clear()
             return null
         }
-        val cached = entry ?: return null
-        if (cached.key != key ||
-            cached.content_revision != content_revision ||
-            cached.viewport_width != viewport.width ||
-            cached.viewport_height != viewport.height ||
-            abs(cached.zoom - viewport.zoom) > ZOOM_EPSILON ||
-            now_ms - cached.recorded_ms > max_age_ms
-        ) {
-            entry = null
-            return null
+        var discarded: Entry? = null
+        val status = synchronized(content_lock) {
+            val cached = entry ?: return@synchronized null
+            if (cached.invalidated ||
+                cached.key != key ||
+                cached.viewport_width != viewport.width ||
+                cached.viewport_height != viewport.height ||
+                abs(cached.zoom - viewport.zoom) > ZOOM_EPSILON ||
+                now_ms - cached.recorded_ms > max_age_ms ||
+                !cached.node.hasDisplayList()
+            ) {
+                entry = null
+                discarded = cached
+                return@synchronized null
+            }
+            if (!draw_entry(canvas, viewport, cached)) return@synchronized null
+            cached.status
         }
-        if (!draw_entry(canvas, viewport, cached)) return null
-        return cached.status
+        discarded?.node?.discardDisplayList()
+        return status
     }
 
     fun record_and_draw_current(
@@ -73,7 +87,7 @@ internal class MapLayerPanCompositor(
         record_viewport: Viewport,
         draw_viewport: Viewport,
         key: Any,
-        content_revision: Long,
+        dependency_keys: Set<String>,
         padding: Float,
         record: (Canvas, Viewport) -> MapLayerPanCacheRecordResult?
     ): MapLayerPanCacheRecordResult? {
@@ -99,22 +113,38 @@ internal class MapLayerPanCompositor(
         ) {
             return null
         }
+        val dependency_snapshot = dependency_keys.toSet()
+        val recording = RecordingGuard(dependency_snapshot)
+        synchronized(content_lock) {
+            recording_guard = recording
+        }
         val node = RenderNode(name)
         node.setPosition(0, 0, width, height)
         val cache_viewport = record_viewport.copy(
             width = width.toFloat(),
             height = height.toFloat()
         )
-        val recording_canvas = node.beginRecording(width, height)
         val result = try {
-            record(recording_canvas, cache_viewport)
-        } finally {
-            node.endRecording()
-        } ?: return null
+            val recording_canvas = node.beginRecording(width, height)
+            try {
+                record(recording_canvas, cache_viewport)
+            } finally {
+                node.endRecording()
+            }
+        } catch (failure: Throwable) {
+            unregister_recording(recording)
+            node.discardDisplayList()
+            throw failure
+        }
+        if (result == null || !result.reusable) {
+            unregister_recording(recording)
+            node.discardDisplayList()
+            return null
+        }
         val recorded = Entry(
             node = node,
             key = key,
-            content_revision = content_revision,
+            dependency_keys = dependency_snapshot,
             zoom = record_viewport.zoom,
             center_x = record_viewport.center_x,
             center_y = record_viewport.center_y,
@@ -125,9 +155,53 @@ internal class MapLayerPanCompositor(
             recorded_ms = SystemClock.elapsedRealtime(),
             status = result.status
         )
-        if (!draw_entry(canvas, draw_viewport, recorded)) return null
-        if (result.reusable) entry = recorded
+        var previous: Entry? = null
+        val installed = synchronized(content_lock) {
+            if (recording_guard !== recording || recording.invalidated) {
+                if (recording_guard === recording) recording_guard = null
+                false
+            } else {
+                previous = entry
+                entry = recorded
+                recording_guard = null
+                true
+            }
+        }
+        if (!installed) {
+            node.discardDisplayList()
+            return null
+        }
+        previous?.node?.discardDisplayList()
+        val drawn = synchronized(content_lock) {
+            entry === recorded &&
+                !recorded.invalidated &&
+                recorded.node.hasDisplayList() &&
+                draw_entry(canvas, draw_viewport, recorded)
+        }
+        if (!drawn) {
+            val discarded = synchronized(content_lock) {
+                if (entry === recorded) {
+                    entry = null
+                    recorded
+                } else {
+                    null
+                }
+            }
+            discarded?.node?.discardDisplayList()
+            return null
+        }
         return result
+    }
+
+    fun content_changed(content_key: String) {
+        synchronized(content_lock) {
+            entry?.let { cached ->
+                if (content_key in cached.dependency_keys) cached.invalidated = true
+            }
+            recording_guard?.let { recording ->
+                if (content_key in recording.dependency_keys) recording.invalidated = true
+            }
+        }
     }
 
     private fun draw_entry(
@@ -153,7 +227,18 @@ internal class MapLayerPanCompositor(
     }
 
     fun clear() {
-        entry = null
+        val previous = synchronized(content_lock) {
+            recording_guard?.invalidated = true
+            recording_guard = null
+            entry.also { entry = null }
+        }
+        previous?.node?.discardDisplayList()
+    }
+
+    private fun unregister_recording(recording: RecordingGuard) {
+        synchronized(content_lock) {
+            if (recording_guard === recording) recording_guard = null
+        }
     }
 
     private companion object {

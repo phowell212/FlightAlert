@@ -33,17 +33,25 @@ class VisibleAircraftFeedController(
     private val has_location: () -> Boolean,
     private val has_usable_viewport: () -> Boolean,
     private val build_request: () -> VisibleAircraftRequest,
-    private val current_total_aircraft: () -> Int,
+    private val has_ready_aircraft_feed: () -> Boolean,
+    private val should_defer_for_interaction: (Long) -> Boolean,
+    private val delay_after_interaction: (Long) -> Long,
     private val set_aircraft_status: (String) -> Unit,
     private val request_redraw: () -> Unit,
-    private val apply_result: (FeedResult, Long, String, FeedPublicationPhase) -> Unit,
+    private val apply_result: (
+        FeedResult,
+        Long,
+        String,
+        FeedPublicationPhase,
+        VisibleAircraftRequest
+    ) -> Unit,
     private val refresh_ms: Long,
     private val force_refresh_ms: Long,
     private val in_flight_retry_ms: Long,
+    private val map_interaction_refresh_delay_ms: Long,
     private val hybrid_supplement_retry_ms: Long,
     private val globe_snapshot_refresh_ms: Long,
-    private val api_grace_ms: Long,
-    private val ready_aircraft_min: Int
+    private val api_grace_ms: Long
 ) {
     private var fetch_in_flight = false
     private var refresh_scheduled = false
@@ -52,7 +60,12 @@ class VisibleAircraftFeedController(
     private var last_globe_snapshot_publish_elapsed_ms = 0L
     private var fetch_token = 0L
     private var fetch_signature: String? = null
+    private var active_fetch_token: Long? = null
     private var waiting_for_viewport = false
+    private var interaction_globe_snapshot_in_flight = false
+    private var pending_interaction_feed_mode: AircraftFeedMode? = null
+    private var interaction_globe_snapshot_token: Long? = null
+    private var interaction_globe_snapshot_signature: String? = null
 
     // One request may publish intermediate and final real feed results, but only the newest token can affect the map.
     fun request_if_needed(force: Boolean = false) {
@@ -62,6 +75,10 @@ class VisibleAircraftFeedController(
             return
         }
         val now = SystemClock.elapsedRealtime()
+        if (should_defer_for_interaction(now)) {
+            if (force) schedule_refresh(delay_after_interaction(now), force = true)
+            return
+        }
         if (fetch_in_flight) {
             schedule_refresh(in_flight_retry_ms, force)
             return
@@ -75,7 +92,11 @@ class VisibleAircraftFeedController(
         fetch_in_flight = true
         last_fetch_elapsed_ms = now
         val request = build_request()
+        pending_interaction_feed_mode = null
+        interaction_globe_snapshot_token = null
+        interaction_globe_snapshot_signature = null
         val token = ++fetch_token
+        active_fetch_token = token
         val signature = request_signature(request)
         fetch_signature = signature
         aircraft_traffic_feed.update_viewport(
@@ -85,11 +106,14 @@ class VisibleAircraftFeedController(
             request.zoom,
             request.feed_mode
         )
-        val publish_intermediate_results = current_total_aircraft() < ready_aircraft_min
+        val publish_intermediate_results = !has_ready_aircraft_feed()
         execute_in_background(on_rejected = {
-            if (is_current_token(token)) {
+            if (active_fetch_token == token) {
+                active_fetch_token = null
                 fetch_in_flight = false
-                set_aircraft_status("Aircraft feed waiting for background capacity")
+                if (is_current_token(token)) {
+                    set_aircraft_status("Aircraft feed waiting for background capacity")
+                }
                 schedule_refresh(in_flight_retry_ms, force = true)
                 request_redraw()
             }
@@ -97,10 +121,12 @@ class VisibleAircraftFeedController(
             try {
                 aircraft_traffic_feed.fetch_aircraft(
                     feed_bounds = request.feed_bounds,
+                    globe_display_bounds = request.globe_display_bounds,
                     safety_api_bounds = request.safety_api_bounds,
                     own_lat = request.own_lat,
                     own_lon = request.own_lon,
-                    exact_search = request.exact_search,
+                    search_query = request.search_query,
+                    selected_aircraft_key = request.selected_aircraft_key,
                     feed_mode = request.feed_mode,
                     on_intermediate_result = { result ->
                         if (publish_intermediate_results) {
@@ -108,12 +134,19 @@ class VisibleAircraftFeedController(
                                 result,
                                 token,
                                 signature,
-                                FeedPublicationPhase.FEED_INTERMEDIATE
+                                FeedPublicationPhase.FEED_INTERMEDIATE,
+                                request
                             )
                         }
                     }
                 )?.let { result ->
-                    apply_result(result, token, signature, FeedPublicationPhase.FINAL)
+                    apply_result(
+                        result,
+                        token,
+                        signature,
+                        FeedPublicationPhase.FINAL,
+                        request
+                    )
                 }
             } catch (_: Exception) {
                 if (is_current_token(token)) {
@@ -125,7 +158,8 @@ class VisibleAircraftFeedController(
                 }
             } finally {
                 post_to_main {
-                    if (is_current_token(token)) {
+                    if (active_fetch_token == token) {
+                        active_fetch_token = null
                         fetch_in_flight = false
                         request_redraw()
                     }
@@ -135,11 +169,21 @@ class VisibleAircraftFeedController(
     }
 
     fun request_after_map_interaction() {
-        request_if_needed(force = true)
+        if (!has_ready_aircraft_feed()) {
+            request_if_needed(force = true)
+        } else {
+            schedule_refresh(map_interaction_refresh_delay_ms, force = true)
+        }
     }
 
     fun publish_startup_globe_snapshot_if_needed(feed_mode: AircraftFeedMode) {
         publish_globe_snapshot_update_if_useful(feed_mode)
+    }
+
+    fun request_interaction_globe_snapshot(feed_mode: AircraftFeedMode) {
+        if (!feed_mode.uses_globe || globe_source == null) return
+        pending_interaction_feed_mode = feed_mode
+        publish_pending_interaction_globe_snapshot()
     }
 
     fun publish_globe_snapshot_update_if_useful(feed_mode: AircraftFeedMode) {
@@ -147,7 +191,11 @@ class VisibleAircraftFeedController(
         if (!feed_mode.uses_globe) return
         if (!has_location() || !has_usable_viewport()) return
         val now = SystemClock.elapsedRealtime()
-        val startup_publish = current_total_aircraft() < ready_aircraft_min
+        val startup_publish = !has_ready_aircraft_feed()
+        if (!startup_publish && should_defer_for_interaction(now)) {
+            request_interaction_globe_snapshot(feed_mode)
+            return
+        }
         if (!startup_publish && fetch_in_flight && now - last_fetch_elapsed_ms < api_grace_ms) return
         if (!startup_publish &&
             now - last_globe_snapshot_publish_elapsed_ms < globe_publish_interval_floor_ms()
@@ -161,15 +209,20 @@ class VisibleAircraftFeedController(
         val result_signature =
             if (publish_while_fetching) fetch_signature ?: signature else signature
         if (!publish_while_fetching) {
+            pending_interaction_feed_mode = null
+            interaction_globe_snapshot_token = null
+            interaction_globe_snapshot_signature = null
             fetch_signature = signature
         }
         last_globe_snapshot_publish_elapsed_ms = now
         execute_in_background {
             val result = source.latest_snapshot(
-                request.feed_bounds,
+                request.globe_display_bounds,
+                request.safety_api_bounds,
                 request.own_lat,
                 request.own_lon,
-                request.exact_search
+                request.search_query,
+                request.selected_aircraft_key
             ) ?: return@execute_in_background
             if (result.status == FeedStatus.OK) {
                 if (publish_while_fetching) {
@@ -179,7 +232,8 @@ class VisibleAircraftFeedController(
                                 result,
                                 token,
                                 result_signature,
-                                FeedPublicationPhase.GLOBE_INTERMEDIATE
+                                FeedPublicationPhase.GLOBE_INTERMEDIATE,
+                                request
                             )
                         }
                     }
@@ -188,9 +242,69 @@ class VisibleAircraftFeedController(
                         result,
                         token,
                         result_signature,
-                        FeedPublicationPhase.GLOBE_INTERMEDIATE
+                        FeedPublicationPhase.GLOBE_INTERMEDIATE,
+                        request
                     )
                 }
+            }
+        }
+    }
+
+    private fun publish_pending_interaction_globe_snapshot() {
+        if (interaction_globe_snapshot_in_flight) return
+        val feed_mode = pending_interaction_feed_mode ?: return
+        pending_interaction_feed_mode = null
+        val source = globe_source ?: return
+        if (!feed_mode.uses_globe || !has_location() || !has_usable_viewport()) return
+
+        val request = build_request()
+        val signature = request_signature(request)
+        val token = interaction_globe_snapshot_token
+            ?: ++fetch_token
+        val result_signature = interaction_globe_snapshot_signature
+            ?: signature
+        interaction_globe_snapshot_token = token
+        interaction_globe_snapshot_signature = result_signature
+        fetch_signature = result_signature
+        aircraft_traffic_feed.update_viewport(
+            request.feed_bounds,
+            request.center_lat,
+            request.center_lon,
+            request.zoom,
+            request.feed_mode
+        )
+        last_globe_snapshot_publish_elapsed_ms = SystemClock.elapsedRealtime()
+        interaction_globe_snapshot_in_flight = true
+        execute_in_background(on_rejected = {
+            post_to_main {
+                interaction_globe_snapshot_in_flight = false
+                publish_pending_interaction_globe_snapshot()
+            }
+        }) {
+            val result = try {
+                source.latest_snapshot(
+                    request.globe_display_bounds,
+                    request.safety_api_bounds,
+                    request.own_lat,
+                    request.own_lon,
+                    request.search_query,
+                    request.selected_aircraft_key
+                )
+            } catch (_: Exception) {
+                null
+            }
+            post_to_main {
+                if (result?.status == FeedStatus.OK && is_current_token(token)) {
+                    apply_result(
+                        result,
+                        token,
+                        result_signature,
+                        FeedPublicationPhase.FINAL,
+                        request
+                    )
+                }
+                interaction_globe_snapshot_in_flight = false
+                publish_pending_interaction_globe_snapshot()
             }
         }
     }
@@ -239,7 +353,8 @@ class VisibleAircraftFeedController(
     private fun request_signature(request: VisibleAircraftRequest): String {
         return listOf(
             request.feed_mode.name,
-            request.exact_search.orEmpty(),
+            request.search_query.orEmpty(),
+            request.selected_aircraft_key.orEmpty(),
             "%.4f".format(Locale.US, request.feed_bounds.min_lat),
             "%.4f".format(Locale.US, request.feed_bounds.min_lon),
             "%.4f".format(Locale.US, request.feed_bounds.max_lat),

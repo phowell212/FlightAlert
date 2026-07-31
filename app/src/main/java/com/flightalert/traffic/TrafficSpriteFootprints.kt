@@ -26,13 +26,20 @@ internal object TrafficSpritePaintGeometry {
     const val SELECTION_RING_SHAPE_RADIUS_DP = 13f
     const val SELECTION_RING_STROKE_WIDTH_DP = 2.6f
 
+    private val general_aviation = TrafficAircraftSymbolPaintGeometry(20.25f)
+    private val airliner = TrafficAircraftSymbolPaintGeometry(26f)
+    private val rotorcraft = TrafficAircraftSymbolPaintGeometry(34.25f, 0.82f)
+    private val glider = TrafficAircraftSymbolPaintGeometry(28.5f)
+    private val uav = TrafficAircraftSymbolPaintGeometry(34.75f)
+    private val surface = TrafficAircraftSymbolPaintGeometry(23.25f)
+
     fun symbol(symbol: AircraftSymbol): TrafficAircraftSymbolPaintGeometry = when (symbol) {
-        AircraftSymbol.GENERAL_AVIATION -> TrafficAircraftSymbolPaintGeometry(20.25f)
-        AircraftSymbol.AIRLINER -> TrafficAircraftSymbolPaintGeometry(26f)
-        AircraftSymbol.ROTORCRAFT -> TrafficAircraftSymbolPaintGeometry(34.25f, 0.82f)
-        AircraftSymbol.GLIDER -> TrafficAircraftSymbolPaintGeometry(28.5f)
-        AircraftSymbol.UAV -> TrafficAircraftSymbolPaintGeometry(34.75f)
-        AircraftSymbol.SURFACE -> TrafficAircraftSymbolPaintGeometry(23.25f)
+        AircraftSymbol.GENERAL_AVIATION -> general_aviation
+        AircraftSymbol.AIRLINER -> airliner
+        AircraftSymbol.ROTORCRAFT -> rotorcraft
+        AircraftSymbol.GLIDER -> glider
+        AircraftSymbol.UAV -> uav
+        AircraftSymbol.SURFACE -> surface
     }
 
     fun shadow_offset_x_dp(shape_progress: Float): Float = 2f + shape_progress
@@ -138,6 +145,7 @@ internal class TrafficSpriteFootprints(
         selected_only: Boolean,
         output: MutableList<ReferenceScreenRect>,
     ) {
+        if (selected_only && selected_key == null) return
         val scale = state.aircraft_transform_scale.coerceAtLeast(0.001f)
         val symbol_visibility = AircraftMarkerMorph.symbol_visibility(marker_blend)
         for (item in state.aircraft) {
@@ -214,6 +222,7 @@ internal class TrafficSpriteFootprints(
         selected_only: Boolean,
         output: MutableList<ReferenceScreenRect>,
     ) {
+        if (selected_only && selected_key == null) return
         val base_radius = traffic_unbatched_dot_painted_radius_px(state.viewport.zoom, dp)
         for (item in state.aircraft) {
             val selected = item.appearance_key == selected_key

@@ -17,6 +17,8 @@
 package com.flightalert.flight
 
 import com.flightalert.aircraft.Aircraft
+import com.flightalert.aircraft.AircraftSymbol
+import com.flightalert.aircraft.AircraftSymbolClassifier
 import com.flightalert.details.AircraftDetails
 import com.flightalert.details.AirportDetails
 import com.flightalert.details.OriginAerodrome
@@ -166,12 +168,11 @@ class AircraftOriginLookupController(
     }
 
     private fun should_skip_airport_origin_fallback(aircraft: Aircraft): Boolean {
-        val type = aircraft.type_code?.trim()?.uppercase(Locale.US).orEmpty()
-        if (type.startsWith("H") || type.startsWith("R") || type.startsWith("UAV") || type.startsWith(
-                "DRON"
-            )
-        ) return true
-        return aircraft.category == 8 || aircraft.category == 14
+        if (aircraft.category == 8 || aircraft.category == 14) return true
+        return when (AircraftSymbolClassifier.special_symbol_for_type_code(aircraft.type_code)) {
+            AircraftSymbol.ROTORCRAFT, AircraftSymbol.UAV -> true
+            else -> false
+        }
     }
 
     private fun trace_request_key(key: String, first_point: TrackPoint): String {

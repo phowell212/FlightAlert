@@ -131,6 +131,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             target_tile_zoom = tile_zoom,
             fallback_tile_zoom = fallback_zoom,
             options = options,
+            label_avoid_rects = label_avoid_rects,
             interaction_active = interaction_active,
         )
         if (interaction_started) {
@@ -159,6 +160,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 next = options,
                 current_package_generation = tile_repository.package_generation(),
             ) &&
+            settled_target.matches_label_avoidance(label_avoid_rects) &&
             retained_renderer.retained_target_frame_can_settle(
                 frame = settled_target,
                 viewport = viewport,
@@ -223,7 +225,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                     viewport = viewport,
                     frame = settled_target,
                     now_ms = now_ms,
-                    label_avoid_rects = label_avoid_rects,
                     destination = retained_renderer.destination,
                 )
                 return ReferenceDictionaryOverlayDrawStats(
@@ -287,7 +288,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                     viewport = viewport,
                     frame = retained_for_interaction,
                     now_ms = now_ms,
-                    label_avoid_rects = label_avoid_rects,
                     destination = retained_renderer.destination,
                 )
             }
@@ -411,7 +411,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 tile_zoom,
                 fallback_zoom,
                 now_ms,
-                label_avoid_rects,
             )
         } else {
             null
@@ -459,7 +458,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 tile_zoom,
                 fallback_zoom,
                 now_ms,
-                label_avoid_rects,
             )
             if (retained != null) {
                 return ReferenceDictionaryOverlayDrawStats(
@@ -501,7 +499,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 tile_zoom,
                 fallback_zoom,
                 now_ms,
-                label_avoid_rects,
             )
             if (retained != null) {
                 return ReferenceDictionaryOverlayDrawStats(
@@ -578,7 +575,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                     viewport,
                     frame,
                     now_ms,
-                    label_avoid_rects,
                 )
             }
             return ReferenceDictionaryOverlayDrawStats(
@@ -602,6 +598,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     next = options,
                     current_package_generation = tile_repository.package_generation(),
                 ) &&
+                target.matches_label_avoidance(label_avoid_rects) &&
                 retained_renderer.retained_target_frame_can_settle(
                     frame = target,
                     viewport = viewport,
@@ -663,7 +660,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                     viewport,
                     target,
                     now_ms,
-                    label_avoid_rects,
                     retained_renderer.destination,
                 )
                 return ReferenceDictionaryOverlayDrawStats(
@@ -702,7 +698,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 target_tile_zoom = tile_zoom,
                 fallback_tile_zoom = fallback_zoom,
                 now_ms = now_ms,
-                label_avoid_rects = label_avoid_rects,
             )
             if (retained != null) {
                 retained_renderer.clear_partial_frame()
@@ -733,7 +728,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 viewport,
                 partial,
                 now_ms,
-                label_avoid_rects,
             )
             return ReferenceDictionaryOverlayDrawStats(
                 available = true,

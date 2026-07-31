@@ -403,7 +403,8 @@ class SelectedFlightPathController(
     private val now_epoch_seconds: () -> Double,
     private val max_projection_seconds: Double,
     private val path_trace_newer_than_feed_seconds: Long,
-    private val max_trail_report_age_seconds: Double
+    private val max_trail_report_age_seconds: Double,
+    private val on_display_endpoint_changed: () -> Unit = {}
 ) {
     var selected_aircraft_id: String? = null
         private set
@@ -438,17 +439,21 @@ class SelectedFlightPathController(
 
     // Selection clears visible path state first; a path returns only after a matching real trace is fetched.
     fun select_aircraft(aircraft: Aircraft) {
+        val endpoint_was_visible = path_visible && has_path()
         selected_aircraft_id = aircraft.icao24
         selected_aircraft_key_cache = aircraft.icao_key
         selected_aircraft_snapshot = aircraft
-        clear_trace()
+        clear_trace_state()
+        if (endpoint_was_visible) on_display_endpoint_changed()
     }
 
     fun clear_selection() {
+        val endpoint_was_visible = path_visible && has_path()
         selected_aircraft_id = null
         selected_aircraft_key_cache = null
         selected_aircraft_snapshot = null
-        clear_trace()
+        clear_trace_state()
+        if (endpoint_was_visible) on_display_endpoint_changed()
     }
 
     fun update_selected_aircraft(aircraft: Aircraft) {
@@ -466,10 +471,12 @@ class SelectedFlightPathController(
     fun apply_trace_result(key: String, next_trace: FlightTrace?) {
         val normalized = normalized_aircraft_key(key)
         if (selected_aircraft_key != normalized) return
+        val endpoint_was_visible = path_visible && has_path()
         selected_trace_aircraft_id = if (next_trace != null) normalized else null
         trace = next_trace
         path_visible = false
         previous_flights_visible = false
+        if (endpoint_was_visible) on_display_endpoint_changed()
     }
 
     fun clear_trace_for_key(key: String) {
@@ -478,6 +485,12 @@ class SelectedFlightPathController(
     }
 
     fun clear_trace() {
+        val endpoint_was_visible = path_visible && has_path()
+        clear_trace_state()
+        if (endpoint_was_visible) on_display_endpoint_changed()
+    }
+
+    private fun clear_trace_state() {
         selected_trace_aircraft_id = null
         trace = null
         path_visible = false
@@ -486,16 +499,20 @@ class SelectedFlightPathController(
 
     fun close_visible_path(): Boolean {
         if (!path_visible) return false
+        val endpoint_was_visible = has_path()
         path_visible = false
         previous_flights_visible = false
+        if (endpoint_was_visible) on_display_endpoint_changed()
         return true
     }
 
     // Show the path only when the selected aircraft has real current trace segments.
     fun show_path(current_aircraft: Aircraft?): Boolean {
         if (!has_path()) return false
+        val endpoint_was_visible = path_visible
         current_aircraft?.let { selected_aircraft_snapshot = it }
         path_visible = true
+        if (!endpoint_was_visible) on_display_endpoint_changed()
         return true
     }
 

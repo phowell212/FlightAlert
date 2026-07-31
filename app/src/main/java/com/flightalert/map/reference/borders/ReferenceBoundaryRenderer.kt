@@ -1138,7 +1138,15 @@ internal class ReferenceBoundaryRenderer(
         key: ReferenceBoundaryRasterKey,
         file: File,
     ): BoundaryRasterTile? {
-        return map_tile_disk_cache.read_if_fresh(file, Long.MAX_VALUE) { cached ->
+        var rewrite_as_empty = false
+        val tile = map_tile_disk_cache.read_if_fresh(file, Long.MAX_VALUE) { cached ->
+            if (cached.length() == EMPTY_BOUNDARY_RASTER_MARKER.size.toLong() &&
+                runCatching {
+                    cached.readBytes().contentEquals(EMPTY_BOUNDARY_RASTER_MARKER)
+                }.getOrDefault(false)
+            ) {
+                return@read_if_fresh empty_boundary_raster_tile(key)
+            }
             val options = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
                 inScaled = false
@@ -1150,6 +1158,16 @@ internal class ReferenceBoundaryRenderer(
                 bitmap.recycle()
                 return@read_if_fresh null
             }
+            if (cached.length() <= EMPTY_BOUNDARY_RASTER_SCAN_MAX_BYTES &&
+                boundary_raster_bitmap_visible_sample_is_transparent(
+                    bitmap,
+                    BOUNDARY_RASTER_GUTTER_PX,
+                )
+            ) {
+                bitmap.recycle()
+                rewrite_as_empty = true
+                return@read_if_fresh empty_boundary_raster_tile(key)
+            }
             bitmap.prepareToDraw()
             BoundaryRasterTile(
                 key = key,
@@ -1159,11 +1177,16 @@ internal class ReferenceBoundaryRenderer(
                 byteCount = bitmap.allocationByteCount.toLong(),
             )
         }
+        if (rewrite_as_empty) {
+            map_tile_disk_cache.write_async(file, EMPTY_BOUNDARY_RASTER_MARKER)
+        }
+        return tile
     }
 
     private fun encode_boundary_raster_png(tile: BoundaryRasterTile): ByteArray? {
+        val bitmap = tile.bitmap ?: return EMPTY_BOUNDARY_RASTER_MARKER
         val output = ByteArrayOutputStream()
-        if (!tile.bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) return null
+        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) return null
         return output.toByteArray()
     }
 
@@ -1279,6 +1302,8 @@ internal class ReferenceBoundaryRenderer(
         sort_boundary_raster_batches(workspace.batches)
 
         if (!boundary_raster_request_is_relevant(key)) return null
+        val boundaries = workspace.batches.sumOf { it.boundaries }
+        if (boundaries == 0) return empty_boundary_raster_tile(key)
         val bitmap_size = band.corePixels + BOUNDARY_RASTER_GUTTER_PX * 2
         val bitmap = Bitmap.createBitmap(bitmap_size, bitmap_size, Bitmap.Config.ARGB_8888)
         draw_boundary_batches(
@@ -1292,13 +1317,63 @@ internal class ReferenceBoundaryRenderer(
             bitmap.recycle()
             return null
         }
+        if (boundary_raster_bitmap_visible_sample_is_transparent(
+                bitmap,
+                BOUNDARY_RASTER_GUTTER_PX,
+            )
+        ) {
+            bitmap.recycle()
+            return empty_boundary_raster_tile(key)
+        }
         bitmap.prepareToDraw()
         return BoundaryRasterTile(
             key = key,
             bitmap = bitmap,
             gutterPixels = BOUNDARY_RASTER_GUTTER_PX,
-            boundaries = workspace.batches.sumOf { it.boundaries },
+            boundaries = boundaries,
             byteCount = bitmap.allocationByteCount.toLong(),
+        )
+    }
+
+    private fun boundary_raster_bitmap_visible_sample_is_transparent(
+        bitmap: Bitmap,
+        gutter_pixels: Int,
+    ): Boolean {
+        val sample_left = (gutter_pixels - 1).coerceAtLeast(0)
+        val sample_top = (gutter_pixels - 1).coerceAtLeast(0)
+        val sample_right = (bitmap.width - gutter_pixels + 1).coerceAtMost(bitmap.width)
+        val sample_bottom = (bitmap.height - gutter_pixels + 1).coerceAtMost(bitmap.height)
+        val sample_width = sample_right - sample_left
+        val sample_height = sample_bottom - sample_top
+        if (sample_width <= 0 || sample_height <= 0) return true
+        val row = IntArray(sample_width)
+        for (y in sample_top until sample_top + sample_height) {
+            bitmap.getPixels(
+                row,
+                0,
+                sample_width,
+                sample_left,
+                y,
+                sample_width,
+                1,
+            )
+            for (pixel in row) {
+                if (pixel ushr 24 != 0) return false
+            }
+        }
+        return true
+    }
+
+    private fun empty_boundary_raster_tile(
+        key: ReferenceBoundaryRasterKey,
+    ): BoundaryRasterTile {
+        val bitmap_size = key.band.corePixels + BOUNDARY_RASTER_GUTTER_PX * 2
+        return BoundaryRasterTile(
+            key = key,
+            bitmap = null,
+            gutterPixels = BOUNDARY_RASTER_GUTTER_PX,
+            boundaries = 0,
+            byteCount = bitmap_size.toLong() * bitmap_size * 4L,
         )
     }
 
@@ -1436,7 +1511,7 @@ internal class ReferenceBoundaryRenderer(
         val previous = boundary_raster_cache.put(tile.key, tile)
         if (previous != null) {
             boundary_raster_cache_bytes -= previous.byteCount
-            previous.bitmap.recycle()
+            previous.bitmap?.recycle()
         }
         boundary_raster_cache_bytes += tile.byteCount
         trim_boundary_raster_cache()
@@ -1454,7 +1529,7 @@ internal class ReferenceBoundaryRenderer(
             ) continue
             iterator.remove()
             boundary_raster_cache_bytes -= entry.value.byteCount
-            entry.value.bitmap.recycle()
+            entry.value.bitmap?.recycle()
         }
     }
 
@@ -1492,6 +1567,7 @@ internal class ReferenceBoundaryRenderer(
         tile: BoundaryRasterTile,
         clip: RectF? = null,
     ) {
+        val bitmap = tile.bitmap ?: return
         val tile_scale = MAP_TILE_SIZE * 2.0.pow(viewport.zoom - cell.zoom)
         val left = cell.drawX * tile_scale - (viewport.center_x - viewport.width / 2.0)
         val top = cell.y * tile_scale - (viewport.center_y - viewport.height / 2.0)
@@ -1513,7 +1589,7 @@ internal class ReferenceBoundaryRenderer(
                     (top + tile_scale).toFloat(),
                 )
             }
-            drawBitmap(tile.bitmap, null, boundary_raster_destination, boundary_raster_paint)
+            drawBitmap(bitmap, null, boundary_raster_destination, boundary_raster_paint)
         }
     }
 
@@ -1617,7 +1693,7 @@ internal class ReferenceBoundaryRenderer(
         boundary_raster_requests.clear()
         boundary_raster_disk_misses.clear()
         boundary_raster_disk_namespaces.clear()
-        boundary_raster_cache.values.forEach { tile -> tile.bitmap.recycle() }
+        boundary_raster_cache.values.forEach { tile -> tile.bitmap?.recycle() }
         boundary_raster_cache.clear()
         boundary_raster_cache_bytes = 0L
         boundary_raster_cells.clear()
@@ -1926,6 +2002,9 @@ internal class ReferenceBoundaryRenderer(
         const val BOUNDARY_RASTER_RESIDENT_CACHE_BYTES = 32L * 1024L * 1024L
         const val BOUNDARY_RASTER_FADE_MS = 220L
         const val MIN_BOUNDARY_DRAW_SCALE = 0.000_1f
+        const val EMPTY_BOUNDARY_RASTER_SCAN_MAX_BYTES = 4L * 1024L
+        val EMPTY_BOUNDARY_RASTER_MARKER =
+            "flightalert-empty-boundary-raster-v1".toByteArray(Charsets.US_ASCII)
     }
 }
 
@@ -2044,7 +2123,7 @@ internal data class BoundaryRasterFade(
 
 internal data class BoundaryRasterTile(
     val key: ReferenceBoundaryRasterKey,
-    val bitmap: Bitmap,
+    val bitmap: Bitmap?,
     val gutterPixels: Int,
     val boundaries: Int,
     val byteCount: Long,

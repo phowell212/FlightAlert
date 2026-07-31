@@ -28,6 +28,9 @@ class AircraftTrafficFeed(
     private val aircraft_feed_client: AircraftFeedClient,
     private val globe_bin_craft_aircraft_source: GlobeBinCraftAircraftSource?
 ) {
+    private var mapped_globe_source: List<FeedAircraft>? = null
+    private var mapped_globe_aircraft = MappedGlobeAircraftStore(emptyList())
+
     // Keep the optional binCraft source pointed at the same broad inventory area as the visible map.
     fun update_viewport(
         feed_bounds: FeedBounds,
@@ -44,17 +47,27 @@ class AircraftTrafficFeed(
     // Fetch according to the selected source mode, reporting intermediate real results when hybrid data arrives in stages.
     fun fetch_aircraft(
         feed_bounds: FeedBounds,
+        globe_display_bounds: List<FeedBounds>,
         safety_api_bounds: FeedBounds?,
         own_lat: Double,
         own_lon: Double,
-        exact_search: String?,
+        search_query: String?,
+        selected_aircraft_key: String?,
         feed_mode: AircraftFeedMode,
         on_intermediate_result: (FeedResult) -> Unit
     ): FeedResult? {
         val globe_source = globe_bin_craft_aircraft_source?.takeIf { feed_mode.uses_globe }
+        val remote_exact_search = search_query ?: selected_aircraft_key
         return when (feed_mode) {
             AircraftFeedMode.BINCRAFT -> {
-                globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+                globe_source?.latest_snapshot(
+                    globe_display_bounds,
+                    safety_api_bounds,
+                    own_lat,
+                    own_lon,
+                    search_query,
+                    selected_aircraft_key
+                )
                     ?: FeedResult(
                         status = FeedStatus.UNAVAILABLE,
                         source = FeedSource.AIRPLANES_LIVE_GLOBE,
@@ -63,19 +76,33 @@ class AircraftTrafficFeed(
             }
 
             AircraftFeedMode.API -> {
-                aircraft_feed_client.fetch_aircraft(feed_bounds, own_lat, own_lon, exact_search)
+                aircraft_feed_client.fetch_aircraft(
+                    feed_bounds,
+                    own_lat,
+                    own_lon,
+                    remote_exact_search
+                )
             }
 
             AircraftFeedMode.HYBRID -> {
                 // Hybrid keeps binCraft as the wide-area inventory, then spends API queries on the safety bubble.
                 val targeted_api_bounds = safety_api_bounds ?: feed_bounds
                 val first_globe_result =
-                    globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+                    globe_source?.latest_snapshot(
+                        globe_display_bounds,
+                        safety_api_bounds,
+                        own_lat,
+                        own_lon,
+                        search_query,
+                        selected_aircraft_key
+                    )
                         ?: globe_source?.await_latest_snapshot(
-                            feed_bounds,
+                            globe_display_bounds,
+                            safety_api_bounds,
                             own_lat,
                             own_lon,
-                            exact_search
+                            search_query,
+                            selected_aircraft_key
                         )
                 if (first_globe_result?.status == FeedStatus.OK) {
                     on_intermediate_result(first_globe_result)
@@ -84,10 +111,17 @@ class AircraftTrafficFeed(
                     targeted_api_bounds,
                     own_lat,
                     own_lon,
-                    exact_search
+                    remote_exact_search
                 )
                 val globe_result =
-                    globe_source?.latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+                    globe_source?.latest_snapshot(
+                        globe_display_bounds,
+                        safety_api_bounds,
+                        own_lat,
+                        own_lon,
+                        search_query,
+                        selected_aircraft_key
+                    )
                         ?: first_globe_result
                 when {
                     api_result.status == FeedStatus.OK && globe_result?.status == FeedStatus.OK -> {
@@ -111,16 +145,26 @@ class AircraftTrafficFeed(
         }
     }
 
-    fun map_aircraft_or_cancelled(
+    fun map_aircraft(aircraft: FeedAircraft, fallback: Aircraft? = null): Aircraft {
+        return aircraft.to_map_aircraft(fallback)
+    }
+
+    @Synchronized
+    internal fun map_globe_aircraft_or_cancelled(
         result: FeedResult,
         is_cancelled: () -> Boolean
-    ): List<Aircraft>? {
-        val mapped = ArrayList<Aircraft>(result.aircraft.size)
-        result.aircraft.forEachIndexed { index, item ->
+    ): MappedGlobeAircraftStore? {
+        val source = result.globe_aircraft ?: return null
+        if (source === mapped_globe_source) return mapped_globe_aircraft
+        val mapped = ArrayList<Aircraft>(source.size)
+        source.forEachIndexed { index, item ->
             if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
             mapped += item.to_map_aircraft()
         }
-        return mapped
+        return MappedGlobeAircraftStore(mapped).also {
+            mapped_globe_source = source
+            mapped_globe_aircraft = it
+        }
     }
 
     // Turn feed coverage into short UI text so partial coverage stays visible to the user.
@@ -158,7 +202,9 @@ class AircraftTrafficFeed(
             aircraft = merged.values.sortedBy { it.distance_m },
             epoch_sec = max_epoch(api_result.epoch_sec, globe_result.epoch_sec),
             query_count = api_result.query_count + globe_result.query_count,
-            partial_coverage = globe_result.partial_coverage
+            partial_coverage = globe_result.partial_coverage,
+            content_revision = globe_result.content_revision,
+            globe_aircraft = globe_result.globe_aircraft,
         )
     }
 
@@ -218,26 +264,35 @@ class AircraftTrafficFeed(
     }
 
     // Keep the shared Aircraft model as a direct translation of feed data with nullable unknowns preserved.
-    private fun FeedAircraft.to_map_aircraft(): Aircraft {
+    private fun FeedAircraft.to_map_aircraft(fallback: Aircraft? = null): Aircraft {
+        val resolved_callsign =
+            callsign.takeUnless { it.isBlank() || it.equals("Unknown", ignoreCase = true) }
+                ?: fallback?.callsign
+                ?: callsign
         return Aircraft(
             icao24 = icao24,
-            callsign = callsign,
-            registration = registration,
-            type_code = type_code,
-            metadata_seed = metadata,
-            is_military = db_flags?.let { it and DB_FLAG_MILITARY != 0 } == true,
+            callsign = resolved_callsign,
+            registration = registration ?: fallback?.registration,
+            type_code = type_code ?: fallback?.type_code,
+            metadata_seed = metadata ?: fallback?.metadata_seed,
+            is_military = db_flags?.let { it and DB_FLAG_MILITARY != 0 } == true ||
+                    fallback?.is_military == true,
             lat = lat,
             lon = lon,
-            on_ground = on_ground,
-            altitude_m = altitude_m,
-            velocity_ms = velocity_ms,
-            track_deg = track_deg,
-            vertical_rate_ms = vertical_rate_ms,
-            category = category,
+            on_ground = on_ground ?: fallback?.on_ground,
+            altitude_m = altitude_m ?: fallback?.altitude_m,
+            velocity_ms = velocity_ms ?: fallback?.velocity_ms,
+            track_deg = track_deg ?: fallback?.track_deg,
+            vertical_rate_ms = vertical_rate_ms ?: fallback?.vertical_rate_ms,
+            category = category ?: fallback?.category,
             position_time_sec = position_time_sec,
             last_contact_sec = last_contact_sec,
             distance_m = distance_m,
-            telemetry = telemetry
+            telemetry = if (fallback == null) {
+                telemetry
+            } else {
+                telemetry?.with_fallback(fallback.telemetry) ?: fallback.telemetry
+            }
         )
     }
 
@@ -253,13 +308,22 @@ class AircraftTrafficFeed(
     }
 
     private fun GlobeBinCraftAircraftSource.await_latest_snapshot(
-        feed_bounds: FeedBounds,
+        globe_display_bounds: List<FeedBounds>,
+        safety_bounds: FeedBounds?,
         own_lat: Double,
         own_lon: Double,
-        exact_search: String?
+        search_query: String?,
+        selected_aircraft_key: String?
     ): FeedResult? {
         val deadline = SystemClock.elapsedRealtime() + HYBRID_GLOBE_STARTUP_GRACE_MS
-        var result = latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+        var result = latest_snapshot(
+            globe_display_bounds,
+            safety_bounds,
+            own_lat,
+            own_lon,
+            search_query,
+            selected_aircraft_key
+        )
         while (result?.status != FeedStatus.OK && SystemClock.elapsedRealtime() < deadline) {
             try {
                 Thread.sleep(HYBRID_GLOBE_STARTUP_POLL_MS)
@@ -267,8 +331,19 @@ class AircraftTrafficFeed(
                 Thread.currentThread().interrupt()
                 return result
             }
-            result = latest_snapshot(feed_bounds, own_lat, own_lon, exact_search)
+            result = latest_snapshot(
+                globe_display_bounds,
+                safety_bounds,
+                own_lat,
+                own_lon,
+                search_query,
+                selected_aircraft_key
+            )
         }
         return result
     }
 }
+
+internal data class MappedGlobeAircraftStore(
+    val aircraft: List<Aircraft>
+)
