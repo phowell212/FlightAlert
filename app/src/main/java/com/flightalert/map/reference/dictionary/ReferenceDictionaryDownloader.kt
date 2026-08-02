@@ -20,7 +20,14 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.UUID
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -152,19 +159,21 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
     @Volatile
     private var cancelled = false
 
-    @Volatile
-    private var connection: HttpURLConnection? = null
+    private val active_connections: MutableSet<HttpURLConnection> =
+        Collections.newSetFromMap(IdentityHashMap<HttpURLConnection, Boolean>())
 
     fun cancel() {
-        synchronized(publication_lock) {
+        val connections = synchronized(publication_lock) {
             cancelled = true
+            active_connections.toList()
         }
-        connection?.disconnect()
+        connections.forEach { it.disconnect() }
     }
 
     @Throws(IOException::class)
     fun download(on_progress: (downloaded: Long, total: Long) -> Unit): Boolean {
         if (cancelled) return false
+        var worker_failure: Throwable? = null
         return try {
             val installed = ReferenceDictionaryPackage.package_candidates(
                 context,
@@ -188,6 +197,7 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
             }
 
             var staged_payload_bytes = 0L
+            val pending_files = ArrayList<ReferenceDictionaryDownloadFile>()
             plan.files.forEach { download_file ->
                 val file = File(staging, download_file.name)
                 if (file.exists() && !file.isFile) {
@@ -196,7 +206,9 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
                 if (file.length() > download_file.byte_count) {
                     RandomAccessFile(file, "rw").use { it.setLength(0L) }
                 }
-                staged_payload_bytes = Math.addExact(staged_payload_bytes, file.length())
+                val staged_bytes = file.length()
+                staged_payload_bytes = Math.addExact(staged_payload_bytes, staged_bytes)
+                if (staged_bytes < download_file.byte_count) pending_files += download_file
             }
             val remaining_disk_bytes = Math.subtractExact(
                 plan.total_byte_count,
@@ -211,19 +223,60 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
                 throw IOException("Insufficient space for the reference dictionary")
             }
 
+            val progress_lock = Any()
             var downloaded = manifest_bytes.size.toLong() + staged_payload_bytes
-            on_progress(downloaded, plan.total_byte_count)
-            plan.files.forEach { download_file ->
-                if (cancelled) return false
-                val file = File(staging, download_file.name)
-                val existing_bytes = file.length()
-                if (existing_bytes == download_file.byte_count) return@forEach
-                val bytes_before_file = downloaded - existing_bytes
-                if (!download_file(file, download_file, bytes_before_file, plan, on_progress)) {
-                    return false
-                }
-                downloaded = bytes_before_file + download_file.byte_count
+            synchronized(progress_lock) {
+                on_progress(downloaded, plan.total_byte_count)
             }
+            val next_pending_file = AtomicInteger()
+            val first_failure = AtomicReference<Throwable?>(null)
+            val workers = Executors.newFixedThreadPool(DOWNLOAD_WORKER_COUNT)
+            try {
+                repeat(DOWNLOAD_WORKER_COUNT) {
+                    workers.execute {
+                        while (!cancelled && first_failure.get() == null) {
+                            val pending_index = next_pending_file.getAndIncrement()
+                            if (pending_index >= pending_files.size) return@execute
+                            val download_file = pending_files[pending_index]
+                            try {
+                                if (
+                                    !download_file(
+                                        destination = File(staging, download_file.name),
+                                        download_file = download_file,
+                                        should_stop = { first_failure.get() != null },
+                                        on_downloaded = { byte_count ->
+                                            synchronized(progress_lock) {
+                                                downloaded = Math.addExact(downloaded, byte_count)
+                                                on_progress(downloaded, plan.total_byte_count)
+                                            }
+                                        },
+                                    )
+                                ) {
+                                    return@execute
+                                }
+                            } catch (exception: Throwable) {
+                                val connections = synchronized(publication_lock) {
+                                    if (
+                                        (cancelled && exception is IOException) ||
+                                        !first_failure.compareAndSet(null, exception)
+                                    ) {
+                                        emptyList()
+                                    } else {
+                                        active_connections.toList()
+                                    }
+                                }
+                                connections.forEach { it.disconnect() }
+                                return@execute
+                            }
+                        }
+                    }
+                }
+            } finally {
+                workers.shutdown()
+                await_workers(workers)
+            }
+            worker_failure = first_failure.get()
+            worker_failure?.let { throw it }
             if (cancelled) return false
 
             val manifest_file = File(staging, MANIFEST_FILE_NAME)
@@ -243,10 +296,12 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
                     publish_replacing_invalid(staging, final_dir)
                 }
             }
-            on_progress(plan.total_byte_count, plan.total_byte_count)
+            synchronized(progress_lock) {
+                on_progress(plan.total_byte_count, plan.total_byte_count)
+            }
             true
         } catch (exception: IOException) {
-            if (cancelled) false else throw exception
+            if (worker_failure !== exception && cancelled) false else throw exception
         }
     }
 
@@ -281,12 +336,14 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
     private fun download_file(
         destination: File,
         download_file: ReferenceDictionaryDownloadFile,
-        bytes_before_file: Long,
-        plan: ReferenceDictionaryDownloadPlan,
-        on_progress: (downloaded: Long, total: Long) -> Unit,
+        should_stop: () -> Boolean,
+        on_downloaded: (byte_count: Long) -> Unit,
     ): Boolean {
         var offset = destination.length()
-        val opened = open_connection(URL("$RAW_BASE/${download_file.name}")) ?: return false
+        val opened = open_connection(
+            URL("$RAW_BASE/${download_file.name}"),
+            should_stop,
+        ) ?: return false
         return try {
             if (offset > 0L) {
                 opened.setRequestProperty("Range", "bytes=$offset-")
@@ -294,8 +351,8 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
             val response_code = opened.responseCode
             if (offset > 0L && response_code == HttpURLConnection.HTTP_OK) {
                 RandomAccessFile(destination, "rw").use { it.setLength(0L) }
+                on_downloaded(-offset)
                 offset = 0L
-                on_progress(bytes_before_file, plan.total_byte_count)
             } else if (offset > 0L) {
                 val expected_content_range =
                     "bytes $offset-${download_file.byte_count - 1L}/${download_file.byte_count}"
@@ -315,7 +372,7 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
                     val buffer = ByteArray(BUFFER_BYTES)
                     var written = offset
                     while (true) {
-                        if (cancelled) return false
+                        if (cancelled || should_stop()) return false
                         val count = input.read(buffer)
                         if (count < 0) break
                         if (count.toLong() > download_file.byte_count - written) {
@@ -323,10 +380,7 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
                         }
                         output.write(buffer, 0, count)
                         written += count.toLong()
-                        on_progress(
-                            bytes_before_file + written,
-                            plan.total_byte_count,
-                        )
+                        on_downloaded(count.toLong())
                     }
                     if (written != download_file.byte_count) {
                         throw IOException("Reference dictionary file ended early")
@@ -340,22 +394,41 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
         }
     }
 
-    private fun open_connection(url: URL): HttpURLConnection? {
+    private fun open_connection(
+        url: URL,
+        should_stop: () -> Boolean = { false },
+    ): HttpURLConnection? {
         if (cancelled) return null
         val opened = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
             setRequestProperty("Accept-Encoding", "identity")
         }
-        connection = opened
-        if (!cancelled) return opened
-        close_connection(opened)
+        val registered = synchronized(publication_lock) {
+            if (cancelled || should_stop()) false else active_connections.add(opened)
+        }
+        if (registered) return opened
+        opened.disconnect()
         return null
     }
 
     private fun close_connection(opened: HttpURLConnection) {
-        if (connection === opened) connection = null
+        synchronized(publication_lock) {
+            active_connections.remove(opened)
+        }
         opened.disconnect()
+    }
+
+    private fun await_workers(workers: ExecutorService) {
+        var interrupted = false
+        while (!workers.isTerminated) {
+            try {
+                workers.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS)
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
     }
 
     private fun File.is_available_package(): Boolean {
@@ -405,5 +478,6 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
         private const val FREE_SPACE_RESERVE_BYTES = 128L * 1024L * 1024L
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 30_000
+        private const val DOWNLOAD_WORKER_COUNT = 3
     }
 }

@@ -33,6 +33,9 @@ class ReferenceDictionaryDownloadService : Service() {
     private var download_running = false
     private var foreground_active = false
     private var last_progress_update_ms = 0L
+    private var rate_baseline_downloaded: Long? = null
+    private var rate_baseline_elapsed_ms = 0L
+    private var smoothed_download_rate_bytes_per_second: Double? = null
     private var latest_start_id = 0
 
     override fun onCreate() {
@@ -110,6 +113,9 @@ class ReferenceDictionaryDownloadService : Service() {
             if (download_running) return
             download_running = true
             last_progress_update_ms = 0L
+            rate_baseline_downloaded = null
+            rate_baseline_elapsed_ms = 0L
+            smoothed_download_rate_bytes_per_second = null
             download_generation += 1L
             download_generation
         }
@@ -152,20 +158,51 @@ class ReferenceDictionaryDownloadService : Service() {
 
     private fun update_progress(generation: Long, downloaded: Long, total: Long) {
         val now = SystemClock.elapsedRealtime()
-        synchronized(state_lock) {
+        val bytes_per_second = synchronized(state_lock) {
             if (generation != download_generation || !download_running) return
             if (now - last_progress_update_ms < PROGRESS_UPDATE_INTERVAL_MS) return
             last_progress_update_ms = now
+            update_download_rate(downloaded, now)
         }
         mainExecutor.execute {
             synchronized(state_lock) {
                 if (generation != download_generation || !download_running) return@execute
                 notification_manager().notify(
                     NOTIFICATION_ID,
-                    downloading_notification(downloaded, total),
+                    downloading_notification(downloaded, total, bytes_per_second),
                 )
             }
         }
+    }
+
+    private fun update_download_rate(downloaded: Long, now: Long): Double? {
+        val baseline_downloaded = rate_baseline_downloaded
+        if (baseline_downloaded == null || downloaded < baseline_downloaded) {
+            rate_baseline_downloaded = downloaded
+            rate_baseline_elapsed_ms = now
+            smoothed_download_rate_bytes_per_second = null
+            return null
+        }
+        val elapsed_ms = now - rate_baseline_elapsed_ms
+        if (elapsed_ms <= 0L) return smoothed_download_rate_bytes_per_second
+        val observed_bytes_per_second =
+            (downloaded - baseline_downloaded).toDouble() * MILLIS_PER_SECOND / elapsed_ms
+        rate_baseline_downloaded = downloaded
+        rate_baseline_elapsed_ms = now
+        if (
+            observed_bytes_per_second.isNaN() ||
+            observed_bytes_per_second.isInfinite() ||
+            observed_bytes_per_second < 0.0
+        ) {
+            smoothed_download_rate_bytes_per_second = null
+            return null
+        }
+        smoothed_download_rate_bytes_per_second =
+            smoothed_download_rate_bytes_per_second?.let { previous ->
+                previous * (1.0 - RATE_SMOOTHING_ALPHA) +
+                    observed_bytes_per_second * RATE_SMOOTHING_ALPHA
+            } ?: observed_bytes_per_second
+        return smoothed_download_rate_bytes_per_second
     }
 
     private fun post_result(generation: Long, result: () -> Unit) {
@@ -192,22 +229,23 @@ class ReferenceDictionaryDownloadService : Service() {
             active_downloader.also { active_downloader = null }
         }
         if (cancel_download) downloader_to_cancel?.cancel()
+        notification_manager().notify(NOTIFICATION_ID, notification)
         if (foreground_active) stopForeground(STOP_FOREGROUND_DETACH)
         foreground_active = false
-        notification_manager().notify(NOTIFICATION_ID, notification)
         stopSelfResult(latest_start_id)
     }
 
     private fun downloading_notification(
         downloaded: Long? = null,
         total: Long? = null,
+        bytes_per_second: Double? = null,
     ): Notification {
         val builder = base_notification(
             title = "Downloading reference dictionary",
             text = if (downloaded == null || total == null) {
                 "Preparing download…"
             } else {
-                exact_progress_text(downloaded, total)
+                exact_progress_text(downloaded, total, bytes_per_second)
             },
             ongoing = true,
         ).addAction(
@@ -303,12 +341,30 @@ class ReferenceDictionaryDownloadService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-    private fun exact_progress_text(downloaded: Long, total: Long): String = String.format(
-        Locale.US,
-        "%,d / %,d bytes",
-        downloaded.coerceAtLeast(0L),
-        total.coerceAtLeast(0L),
-    )
+    private fun exact_progress_text(
+        downloaded: Long,
+        total: Long,
+        bytes_per_second: Double?,
+    ): String {
+        val progress = String.format(
+            Locale.US,
+            "%,d / %,d bytes",
+            downloaded.coerceAtLeast(0L),
+            total.coerceAtLeast(0L),
+        )
+        if (
+            bytes_per_second == null ||
+            bytes_per_second.isNaN() ||
+            bytes_per_second.isInfinite() ||
+            bytes_per_second < 0.0
+        ) return progress
+        return String.format(
+            Locale.US,
+            "%s \u2022 %.1f MB/s",
+            progress,
+            bytes_per_second / DECIMAL_MB_BYTES,
+        )
+    }
 
     private fun notification_manager(): NotificationManager =
         getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -320,6 +376,9 @@ class ReferenceDictionaryDownloadService : Service() {
         private const val NOTIFICATION_ID = 2200
         private const val NOTIFICATION_PROGRESS_MAX = 10_000
         private const val PROGRESS_UPDATE_INTERVAL_MS = 500L
+        private const val MILLIS_PER_SECOND = 1_000.0
+        private const val DECIMAL_MB_BYTES = 1_000_000.0
+        private const val RATE_SMOOTHING_ALPHA = 0.25
         private const val MAX_ERROR_TEXT_LENGTH = 120
         private const val PREFERENCES_NAME = "reference_dictionary_download"
         private const val KEY_EXPLICITLY_PAUSED = "explicitly_paused"
