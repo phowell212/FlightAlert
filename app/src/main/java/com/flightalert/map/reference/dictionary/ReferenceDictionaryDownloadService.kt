@@ -24,19 +24,19 @@ import com.flightalert.map.reference.CatalogControlStatus
 import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 class ReferenceDictionaryDownloadService : Service() {
     private val state_lock = Any()
     private val executor = Executors.newSingleThreadExecutor()
-    private val downloader = ReferenceDictionaryDownloader(this)
+    private var active_downloader: ReferenceDictionaryDownloader? = null
     private var download_generation = 0L
     private var download_running = false
+    private var foreground_active = false
     private var last_progress_update_ms = 0L
+    private var latest_start_id = 0
 
     override fun onCreate() {
         super.onCreate()
-        start_requested.set(true)
         notification_manager().createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
@@ -50,11 +50,24 @@ class ReferenceDictionaryDownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(
-            NOTIFICATION_ID,
-            downloading_notification(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-        )
+        latest_start_id = startId
+        val explicitly_paused = preferences().getBoolean(KEY_EXPLICITLY_PAUSED, false)
+        if (!foreground_active) {
+            val initial_notification = if (
+                intent?.action == ACTION_PAUSE ||
+                (intent?.action != ACTION_RESUME && explicitly_paused)
+            ) {
+                paused_notification()
+            } else {
+                downloading_notification()
+            }
+            startForeground(
+                NOTIFICATION_ID,
+                initial_notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+            foreground_active = true
+        }
         when (intent?.action) {
             ACTION_PAUSE -> pause_download()
             ACTION_RESUME -> {
@@ -64,7 +77,7 @@ class ReferenceDictionaryDownloadService : Service() {
                 start_download()
             }
             else -> {
-                if (preferences().getBoolean(KEY_EXPLICITLY_PAUSED, false)) {
+                if (explicitly_paused) {
                     stop_with_notification(paused_notification(), cancel_download = true)
                 } else {
                     start_download()
@@ -79,13 +92,14 @@ class ReferenceDictionaryDownloadService : Service() {
     }
 
     override fun onDestroy() {
-        synchronized(state_lock) {
+        val downloader_to_cancel = synchronized(state_lock) {
             download_generation += 1L
             download_running = false
+            active_downloader.also { active_downloader = null }
         }
-        downloader.cancel()
+        downloader_to_cancel?.cancel()
+        foreground_active = false
         executor.shutdownNow()
-        start_requested.set(false)
         super.onDestroy()
     }
 
@@ -100,6 +114,16 @@ class ReferenceDictionaryDownloadService : Service() {
             download_generation
         }
         executor.execute {
+            val downloader = ReferenceDictionaryDownloader(this)
+            val run_is_current = synchronized(state_lock) {
+                if (generation != download_generation || !download_running) {
+                    false
+                } else {
+                    active_downloader = downloader
+                    true
+                }
+            }
+            if (!run_is_current) return@execute
             try {
                 val completed = downloader.download { downloaded, total ->
                     update_progress(generation, downloaded, total)
@@ -117,6 +141,10 @@ class ReferenceDictionaryDownloadService : Service() {
                         error_notification(exception.message ?: "Download failed"),
                         cancel_download = false,
                     )
+                }
+            } finally {
+                synchronized(state_lock) {
+                    if (active_downloader === downloader) active_downloader = null
                 }
             }
         }
@@ -153,14 +181,16 @@ class ReferenceDictionaryDownloadService : Service() {
     }
 
     private fun stop_with_notification(notification: Notification, cancel_download: Boolean) {
-        synchronized(state_lock) {
+        val downloader_to_cancel = synchronized(state_lock) {
             download_generation += 1L
             download_running = false
-            notification_manager().notify(NOTIFICATION_ID, notification)
+            active_downloader.also { active_downloader = null }
         }
-        if (cancel_download) downloader.cancel()
-        stopForeground(STOP_FOREGROUND_DETACH)
-        stopSelf()
+        if (cancel_download) downloader_to_cancel?.cancel()
+        if (foreground_active) stopForeground(STOP_FOREGROUND_DETACH)
+        foreground_active = false
+        notification_manager().notify(NOTIFICATION_ID, notification)
+        stopSelfResult(latest_start_id)
     }
 
     private fun downloading_notification(
@@ -295,7 +325,6 @@ class ReferenceDictionaryDownloadService : Service() {
         private const val PAUSE_REQUEST_CODE = 2201
         private const val RESUME_REQUEST_CODE = 2202
         private const val OPEN_APP_REQUEST_CODE = 2203
-        private val start_requested = AtomicBoolean(false)
 
         fun start_if_missing(context: Context) {
             val app_context = context.applicationContext
@@ -310,15 +339,9 @@ class ReferenceDictionaryDownloadService : Service() {
                 app_context.getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
                     .getBoolean(KEY_EXPLICITLY_PAUSED, false)
             ) return
-            if (!start_requested.compareAndSet(false, true)) return
-            try {
-                app_context.startForegroundService(
-                    Intent(app_context, ReferenceDictionaryDownloadService::class.java),
-                )
-            } catch (exception: RuntimeException) {
-                start_requested.set(false)
-                throw exception
-            }
+            app_context.startForegroundService(
+                Intent(app_context, ReferenceDictionaryDownloadService::class.java),
+            )
         }
     }
 }
