@@ -156,10 +156,15 @@ class ReferenceDictionaryDownloadService : Service() {
             if (generation != download_generation || !download_running) return
             if (now - last_progress_update_ms < PROGRESS_UPDATE_INTERVAL_MS) return
             last_progress_update_ms = now
-            notification_manager().notify(
-                NOTIFICATION_ID,
-                downloading_notification(downloaded, total),
-            )
+        }
+        mainExecutor.execute {
+            synchronized(state_lock) {
+                if (generation != download_generation || !download_running) return@execute
+                notification_manager().notify(
+                    NOTIFICATION_ID,
+                    downloading_notification(downloaded, total),
+                )
+            }
         }
     }
 
