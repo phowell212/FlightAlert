@@ -105,6 +105,9 @@ class MainActivity : ComponentActivity() {
         globe_bin_craft_aircraft_source?.start()
         flight_map_view?.start()
         update_alert_service()
+        if (has_notification_permission()) {
+            ReferenceDictionaryDownloadService.start_if_missing(this)
+        }
     }
 
     // Android calls this when the app is leaving the foreground; stop screen-only work here.
@@ -165,14 +168,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun request_notification_permission_if_needed() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!has_notification_permission()) {
             notification_permission_launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             ReferenceDictionaryDownloadService.start_if_missing(this)
         }
     }
+
+    private fun has_notification_permission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
     // Keep the background watcher alive only when alerts need it and Android has granted location.
     private fun update_alert_service() {
