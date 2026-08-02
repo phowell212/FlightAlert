@@ -7,6 +7,7 @@ This file contains durable repository constraints. It is not a backlog, roadmap,
 ## Scope and priorities
 
 - Work only on the current request and the changes needed to complete or verify it. Do not infer tasks from this file.
+- Work directly on the current branch. Do not create branches, tags, or worktrees unless the user explicitly requests them.
 - Do not start unrelated cleanup, refactors, experiments, profiling, releases, pushes, or broad verification passes.
 - Prioritize user functionality, visual fidelity, frame timing, then implementation elegance.
 - Use the current working tree as the baseline unless the user names another one. Preserve unrelated user changes.
@@ -42,6 +43,7 @@ This file contains durable repository constraints. It is not a backlog, roadmap,
 - Maintain one buildable Android project. Do not create duplicate source trees, manifests, or Gradle projects.
 - Keep the reproducible Gradle project files tracked: `.gitignore`, `build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradlew`, `gradlew.bat`, `gradle/libs.versions.toml`, and the Gradle wrapper JAR and properties.
 - The only tracked Android Studio file is `.idea/runConfigurations/Flight_Alert.xml`. Keep all other IDE state, `local.properties`, build outputs, generated files, temporary media, comparison artifacts, agent scratch files, and secrets out of Git.
+- Store all Superpowers designs, plans, ledgers, briefs, reviews, and scratch files in the sister folder `C:\Users\h\AndroidStudioProjects\FlightAlert-superpowers`. Do not create `.superpowers/`, `docs/superpowers/`, or other Superpowers artifacts inside this app checkout, and never stage or commit them.
 - `world-reference-dictionary/` contains large, immutable runtime dictionary data, not experiment tooling. Do not copy, rewrite, hash, or include it in broad text scans unless the task requires it. If the assets move or change names, update every corresponding Kotlin path and format expectation.
 - Keep `README.md` public-facing and accurate. Keep only reusable agent constraints here; do not add task prompts, plans, run logs, generated evidence, or stale experiment notes.
 - Prefer HTTPS. Never hardcode credentials, API keys, tokens, personal device IDs, or private test artifacts. Avoid exposing sensitive details in lock-screen notifications.
