@@ -2,6 +2,7 @@
     "ArrayInDataClass",
     "FunctionName",
     "LocalVariableName",
+    "PrivatePropertyName",
     "PropertyName",
     "unused",
 )
@@ -19,6 +20,7 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -145,6 +147,8 @@ internal data class ReferenceDictionaryDownloadPlan(
 }
 
 internal class ReferenceDictionaryDownloader(private val context: Context) {
+    private val publication_lock = Any()
+
     @Volatile
     private var cancelled = false
 
@@ -152,7 +156,9 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
     private var connection: HttpURLConnection? = null
 
     fun cancel() {
-        cancelled = true
+        synchronized(publication_lock) {
+            cancelled = true
+        }
         connection?.disconnect()
     }
 
@@ -231,11 +237,11 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
             }
 
             val final_dir = File(references_dir, ReferenceDictionaryPackage.RENDER_PACKAGE_ID)
-            if (final_dir.exists()) {
-                throw IOException("Reference dictionary publication target already exists")
-            }
-            if (!staging.renameTo(final_dir)) {
-                throw IOException("Reference dictionary publication failed")
+            synchronized(publication_lock) {
+                if (cancelled) return false
+                if (!final_dir.is_available_package()) {
+                    publish_replacing_invalid(staging, final_dir)
+                }
             }
             on_progress(plan.total_byte_count, plan.total_byte_count)
             true
@@ -356,6 +362,36 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
         val opened = ReferenceDictionaryPackage.open_if_available(this) ?: return false
         return opened.use {
             it.reference_class_catalog.status == CatalogControlStatus.AVAILABLE
+        }
+    }
+
+    private fun publish_replacing_invalid(staging: File, final_dir: File) {
+        val quarantined = if (final_dir.exists()) {
+            val backup = unique_quarantine_path(final_dir)
+            if (!final_dir.renameTo(backup)) {
+                throw IOException("Invalid reference dictionary could not be quarantined")
+            }
+            backup
+        } else {
+            null
+        }
+        if (staging.renameTo(final_dir)) return
+        if (quarantined != null && !quarantined.renameTo(final_dir)) {
+            throw IOException(
+                "Reference dictionary publication failed and the invalid package " +
+                    "remains quarantined as ${quarantined.name}",
+            )
+        }
+        throw IOException("Reference dictionary publication failed")
+    }
+
+    private fun unique_quarantine_path(final_dir: File): File {
+        while (true) {
+            val candidate = File(
+                final_dir.parentFile,
+                ".${final_dir.name}.invalid-${UUID.randomUUID()}",
+            )
+            if (!candidate.exists()) return candidate
         }
     }
 
