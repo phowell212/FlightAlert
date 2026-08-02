@@ -10,6 +10,7 @@
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE"
         tools:ignore="ForegroundServicePermission,ForegroundServicesPolicy" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <application
@@ -28,6 +29,11 @@
             android:name="com.flightalert.alerts.AircraftAlertService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <service
+            android:name="com.flightalert.map.reference.dictionary.ReferenceDictionaryDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <service
             android:name="com.flightalert.alerts.MonitoringNotificationHiderService"

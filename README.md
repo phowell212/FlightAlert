@@ -19,11 +19,9 @@ From a configured local checkout:
 ```powershell
 .\gradlew.bat assembleDebug
 adb install -r ".\build\outputs\apk\debug\Flight Alert-debug.apk"
-
-$deviceReferences = "/sdcard/Android/data/com.flightalert/files/references"
-adb shell mkdir -p $deviceReferences
-adb push ".\references\world-reference-dictionary-v5" "$deviceReferences/"
 ```
+
+When the offline reference dictionary is missing, Flight Alert automatically downloads the approximately 12.52 GiB package from GitHub. Download progress and Pause are available in the notification.
 
 ## Data and attribution
 

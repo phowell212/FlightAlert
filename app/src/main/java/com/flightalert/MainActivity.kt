@@ -18,6 +18,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import com.flightalert.alerts.AircraftAlertService
+import com.flightalert.map.reference.dictionary.ReferenceDictionaryDownloadService
 import com.flightalert.sources.GlobeBinCraftAircraftSource
 import com.flightalert.ui.FlightAlertSettings
 
@@ -40,8 +41,9 @@ class MainActivity : ComponentActivity() {
     }
     private val notification_permission_launcher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) {
+    ) { granted ->
         update_alert_service()
+        if (granted) ReferenceDictionaryDownloadService.start_if_missing(this)
     }
 
     // Android calls this once to build the screen; after this, the custom view owns the app flow.
@@ -167,6 +169,8 @@ class MainActivity : ComponentActivity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             notification_permission_launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            ReferenceDictionaryDownloadService.start_if_missing(this)
         }
     }
 
