@@ -148,8 +148,8 @@ internal object ReferenceDictionaryV3ClassCatalogLoader {
     private fun unavailable(reason: String): ReferenceClassCatalog =
         ReferenceClassCatalog.unavailable(reason)
 
-    private const val CLASS_CATALOG_FILE_NAME = "class-catalog.bin"
-    private const val CLASS_CATALOG_BYTE_COUNT = 754
+    internal const val CLASS_CATALOG_FILE_NAME = "class-catalog.bin"
+    internal const val CLASS_CATALOG_BYTE_COUNT = 754
 }
 
 internal data class ReferenceDictionaryPackageInfo(
@@ -377,8 +377,8 @@ internal class ReferenceDictionaryPackage private constructor(
     companion object {
         const val REFERENCE_PACKAGE_ID = "world-reference-dictionary"
         const val RENDER_PACKAGE_ID = "world-reference-dictionary-v5"
-        private const val RECORDS_FILE_NAME = "world-reference-records.bin"
-        private const val INDEX_FILE_NAME = "world-reference-tile-index.bin"
+        internal const val RECORDS_FILE_NAME = "world-reference-records.bin"
+        internal const val INDEX_FILE_NAME = "world-reference-tile-index.bin"
 
         fun package_candidates(context: Context, package_id: String? = null): List<File> {
             val root = context.getExternalFilesDir("references") ?: return emptyList()
