@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Flight Alert" type="AndroidRunConfigurationType" factoryName="Android App">
+    <module name="Flight_Alert.main" />
+    <option name="ANDROID_RUN_CONFIGURATION_SCHEMA_VERSION" value="1" />
+    <option name="DEPLOY" value="true" />
+    <option name="MODE" value="default_activity" />
+    <option name="TARGET_SELECTION_MODE" value="DEVICE_AND_SNAPSHOT_COMBO_BOX" />
+    <method v="2">
+      <option name="Android.Gradle.BeforeRunTask" enabled="true" />
+    </method>
+  </configuration>
+</component>

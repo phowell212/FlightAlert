@@ -1,0 +1,25 @@
+# Project exclude paths
+/.idea/*
+!/.idea/runConfigurations/
+/.idea/runConfigurations/*
+!/.idea/runConfigurations/Flight_Alert.xml
+/.gradle/
+/build/
+/app/build/
+/app/src/androidTest/
+/app/src/test/
+/.kotlin/
+/local.properties
+*.iml
+*.apk
+*.aab
+/captures/
+/.externalNativeBuild/
+/.cxx/
+/*.png
+/tools/perf/
+/tmp/
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+~$*.xlsx
