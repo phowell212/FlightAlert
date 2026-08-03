@@ -162,8 +162,7 @@ internal class SatelliteBaseTileRenderer(
             return last_frame_result
         }
 
-        if (!state.interaction_active &&
-            should_record_pan_cache(
+        if (should_record_pan_cache(
                 key = pan_cache_key,
                 now_ms = now_ms,
             )

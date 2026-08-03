@@ -4,7 +4,7 @@
 
 Flight Alert turns an Android phone or tablet into an aircraft-awareness display. It combines live public traffic, with user specified settings to ensure you always know when a risky aircraft is in your area.
 
-Current release: **1.10** · Minimum Android version: **Android 10 (API 29)**
+Current release: **1.11** · Minimum Android version: **Android 10 (API 29)**
 
 > Flight Alert is supplemental situational awareness. It is not a certified detect-and-avoid system.
 
