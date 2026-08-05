@@ -1,3 +1,8 @@
+@file:Suppress(
+    "ConstPropertyName",
+    "PropertyName",
+)
+
 package com.flightalert.map
 
 /**
@@ -10,6 +15,7 @@ package com.flightalert.map
 internal object SourcedTextUnicode17Profile {
     const val profileSha256 =
         "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb"
+    @Suppress("unused")
     const val sourceSha256 =
         "9f5e50d3abaee7d6ce09480f325c706f485ae3240912527e651954d2d6b035bf"
     const val intervalCount = 1_718

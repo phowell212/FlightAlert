@@ -1,3 +1,8 @@
+@file:Suppress(
+    "ConvertTwoComparisonsToRangeCheck",
+    "FunctionName",
+)
+
 package com.flightalert.map
 
 import java.io.ByteArrayOutputStream

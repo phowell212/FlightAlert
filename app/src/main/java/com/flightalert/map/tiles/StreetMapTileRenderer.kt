@@ -16,7 +16,6 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import com.flightalert.MAP_TILE_CACHE_MAX_AGE_MS
-import com.flightalert.with_alpha
 import com.flightalert.details.throwable_safe_https_url
 import com.flightalert.map.*
 import java.io.File
@@ -380,10 +379,10 @@ internal class StreetMapTileRenderer(
                     var worst: TileRequestTask? = null
                     for (queued in queue) {
                         val candidate = queued as? TileRequestTask ?: continue
-                        if (worst == null || candidate.compareTo(worst) > 0) worst = candidate
+                        if (worst == null || candidate > worst) worst = candidate
                     }
                     if (worst != null &&
-                        task.compareTo(worst) < 0 &&
+                        task < worst &&
                         queue.remove(worst)
                     ) {
                         discarded = worst

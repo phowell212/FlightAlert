@@ -34,6 +34,8 @@ import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.nextDown
 import kotlin.math.nextUp
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -346,7 +348,6 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
     }
 
     private companion object {
-        private const val TAG = "FlightAlert"
         private const val EXTRACT_INTERVAL_MS = 1000L
         private const val STARTUP_RETRY_MS = 450L
         private const val GLOBE_INVENTORY_ZOOM = 0.0
@@ -571,7 +572,7 @@ internal class GlobeAircraftStore(
             if (!(distance_meters > 0.0)) return 0
             if (!distance_meters.isFinite()) return FULL_GLOBE_PROJECTION_BAND
             val rounded_exponent =
-                (Math.getExponent(Math.nextDown(distance_meters)) + 1).coerceAtLeast(0)
+                (Math.getExponent(distance_meters.nextDown()) + 1).coerceAtLeast(0)
             return if (rounded_exponent >= FULL_GLOBE_PROJECTION_BAND - 1) {
                 FULL_GLOBE_PROJECTION_BAND
             } else {
@@ -619,7 +620,7 @@ internal data class GlobeQueryBounds(
             return GlobeQueryBounds(-90.0, -180.0, 90.0, 180.0, false)
         }
         val angular_distance =
-            Math.nextUp(distance_meters / GLOBE_EARTH_RADIUS_M)
+            (distance_meters / GLOBE_EARTH_RADIUS_M).nextUp()
         val latitude_delta = Math.toDegrees(angular_distance)
         val expanded_min_lat = (min_lat - latitude_delta).coerceAtLeast(-90.0)
         val expanded_max_lat = (max_lat + latitude_delta).coerceAtMost(90.0)
@@ -670,8 +671,8 @@ internal data class GlobeQueryBounds(
 }
 
 private fun FeedBounds.to_globe_query_bounds(): GlobeQueryBounds {
-    val min_latitude = kotlin.math.min(min_lat, max_lat).coerceIn(-90.0, 90.0)
-    val max_latitude = kotlin.math.max(min_lat, max_lat).coerceIn(-90.0, 90.0)
+    val min_latitude = min(min_lat, max_lat).coerceIn(-90.0, 90.0)
+    val max_latitude = max(min_lat, max_lat).coerceIn(-90.0, 90.0)
     val min_longitude = min_lon.coerceIn(-180.0, 180.0)
     val max_longitude = max_lon.coerceIn(-180.0, 180.0)
     return GlobeQueryBounds(
@@ -1214,7 +1215,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val decimal_labels = Array(256) { it.toString() }
         val hex_labels = Array(256) { it.toString(16).uppercase(Locale.US) }
         val adsb_version_labels = Array(16) { "v$it" }
-        val nav_mode_labels = Array<List<String>>(64) { bits ->
+        val nav_mode_labels = Array(64) { bits ->
             buildList(6) {
                 if (bits and 1 != 0) add("autopilot")
                 if (bits and 2 != 0) add("vnav")

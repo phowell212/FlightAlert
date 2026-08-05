@@ -1,7 +1,12 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+    "PrivatePropertyName",
+    "PropertyName",
+)
+
 package com.flightalert.map.reference.dictionary
 
-import com.flightalert.map.*
-import com.flightalert.map.reference.*
 
 import java.io.Closeable
 import java.io.File

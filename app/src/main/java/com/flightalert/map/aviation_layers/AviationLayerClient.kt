@@ -16,7 +16,6 @@
 
 package com.flightalert.map.aviation_layers
 
-import com.flightalert.map.*
 import java.net.URL
 
 class AviationLayerClient(
@@ -171,15 +170,16 @@ class AviationLayerClient(
         return result.records
     }
 
-    private fun AviationLayerHealth.to_layer_state(): AviationLayerState = when {
-        availability == AviationLayerAvailability.USABLE && can_claim_complete ->
-            AviationLayerState.LOADED
-        availability == AviationLayerAvailability.USABLE &&
+    private fun AviationLayerHealth.to_layer_state(): AviationLayerState = when (availability) {
+        AviationLayerAvailability.USABLE -> when {
+            can_claim_complete -> AviationLayerState.LOADED
             completeness == AviationLayerCompleteness.PARTIAL &&
-            freshness == AviationLayerFreshness.CURRENT -> AviationLayerState.PARTIAL
-        availability == AviationLayerAvailability.EMPTY && can_claim_complete ->
-            AviationLayerState.EMPTY
-        else -> AviationLayerState.UNAVAILABLE
+                freshness == AviationLayerFreshness.CURRENT -> AviationLayerState.PARTIAL
+            else -> AviationLayerState.UNAVAILABLE
+        }
+        AviationLayerAvailability.EMPTY ->
+            if (can_claim_complete) AviationLayerState.EMPTY else AviationLayerState.UNAVAILABLE
+        AviationLayerAvailability.UNAVAILABLE -> AviationLayerState.UNAVAILABLE
     }
 
     private fun <T> AviationSourceResult<T>.to_status_message(

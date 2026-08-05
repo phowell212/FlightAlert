@@ -65,13 +65,11 @@ enum class ThemeTreatment {
 
 enum class VisualTheme(
     val display_name: String,
-    val short_name: String,
     val colors: ThemeColors,
     val style: ThemeStyle
 ) {
     COCKPIT(
         display_name = "Cockpit",
-        short_name = "Cockpit",
         colors = ThemeColors(
             map_empty = Color.rgb(70, 102, 89),
             panel = Color.rgb(13, 29, 25),
@@ -116,7 +114,6 @@ enum class VisualTheme(
     ),
     TOWER(
         display_name = "Tower Glass",
-        short_name = "Tower",
         colors = ThemeColors(
             map_empty = Color.rgb(61, 84, 92),
             panel = Color.rgb(14, 25, 32),
@@ -162,7 +159,6 @@ enum class VisualTheme(
     ),
     RADAR(
         display_name = "Radar Scope",
-        short_name = "Radar",
         colors = ThemeColors(
             map_empty = Color.rgb(78, 83, 62),
             panel = Color.rgb(24, 25, 18),
@@ -208,7 +204,6 @@ enum class VisualTheme(
     ),
     DAYLIGHT(
         display_name = "VFR Chart",
-        short_name = "Chart",
         colors = ThemeColors(
             map_empty = Color.rgb(117, 150, 153),
             panel = Color.rgb(236, 242, 238),
@@ -254,7 +249,6 @@ enum class VisualTheme(
     ),
     STORM(
         display_name = "Stormscope",
-        short_name = "Storm",
         colors = ThemeColors(
             map_empty = Color.rgb(62, 70, 83),
             panel = Color.rgb(18, 21, 30),
@@ -300,7 +294,6 @@ enum class VisualTheme(
     ),
     TERMINAL(
         display_name = "CRT Terminal",
-        short_name = "CRT",
         colors = ThemeColors(
             map_empty = Color.rgb(47, 80, 68),
             panel = Color.rgb(5, 24, 17),

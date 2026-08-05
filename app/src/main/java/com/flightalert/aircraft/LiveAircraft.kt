@@ -343,10 +343,6 @@ object AircraftRegistryResolver {
         return null
     }
 
-    fun label_for(registration: String?, icao24: String): String? {
-        return country_for(registration, icao24)?.label
-    }
-
     private fun country_from_registration(registration: String?): RegistryCountry? {
         val reg = registration?.trim()?.uppercase(Locale.US) ?: return null
         return when {

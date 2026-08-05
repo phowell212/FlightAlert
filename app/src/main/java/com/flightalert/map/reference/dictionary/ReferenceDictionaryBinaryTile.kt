@@ -1,4 +1,4 @@
-@file:Suppress("ArrayInDataClass")
+@file:Suppress("ArrayInDataClass", "ConvertTwoComparisonsToRangeCheck")
 
 package com.flightalert.map.reference.dictionary
 
@@ -599,7 +599,6 @@ internal object ReferenceDictionaryBinaryTileCodec {
         val displayMinimumZoomCenti: Int,
         val displayMaximumZoomCenti: Int,
     ) {
-        val textSourceFieldId: ULong get() = publicValue.textSourceFieldId
         val semanticPriority: Int get() = publicValue.semanticPriority
     }
 
@@ -686,10 +685,6 @@ internal object ReferenceDictionaryBinaryTileCodec {
         fun finish(message: String) {
             requireBinary(remaining == 0) { message }
         }
-    }
-
-    private fun ByteArray.toLowerHex(): String = joinToString("") {
-        "%02x".format(it.toInt() and 0xff)
     }
 
     private const val REFERENCE_EXTENT = 4_096.0

@@ -1,4 +1,4 @@
-@file:Suppress("FunctionName", "PropertyName")
+@file:Suppress("FunctionName", "PropertyName", "ConstPropertyName", "LocalVariableName")
 
 package com.flightalert.ui
 

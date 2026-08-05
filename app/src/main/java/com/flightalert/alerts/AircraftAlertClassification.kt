@@ -77,15 +77,6 @@ object AlertPositionProjector {
         )
     }
 
-    fun contact_age_seconds(
-        position_time_sec: Double?,
-        last_contact_sec: Double?,
-        now_epoch_sec: Double
-    ): Double? {
-        val contact = last_contact_sec ?: position_time_sec ?: return null
-        return (now_epoch_sec - contact).coerceAtLeast(0.0)
-    }
-
     fun has_fresh_projectable_motion(
         velocity_ms: Double?,
         track_deg: Double?,

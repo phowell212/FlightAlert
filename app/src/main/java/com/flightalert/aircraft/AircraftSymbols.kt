@@ -20,19 +20,11 @@ import com.flightalert.lerp
 import com.flightalert.mix_color
 import com.flightalert.safe_smooth_step
 import com.flightalert.smooth_step
-import java.util.LinkedHashMap
 import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
-import kotlin.math.roundToInt
 import kotlin.math.sin
-
-data class AltitudeColorPalette(
-    val low: Int,
-    val mid: Int,
-    val high: Int
-)
 
 object AircraftMarkerMorph {
     fun marker_dot_blend(viewport: Viewport): Float {
@@ -54,10 +46,6 @@ object AircraftMarkerMorph {
             SYMBOL_VISIBILITY_FULL,
             symbol_progress(dot_blend)
         )
-    }
-
-    fun dot_progress(dot_blend: Float): Float {
-        return smooth_step(DOT_FADE_OUT_START, DOT_FADE_OUT_FULL, dot_blend)
     }
 
     fun shape_progress(dot_blend: Float): Float {
@@ -120,25 +108,11 @@ object AircraftMarkerMorph {
     private const val SYMBOL_BLEND_FULL = 0.78f
     private const val SYMBOL_VISIBILITY_START = 0.0f
     private const val SYMBOL_VISIBILITY_FULL = 0.26f
-    private const val DOT_FADE_OUT_START = 0.0f
-    private const val DOT_FADE_OUT_FULL = 0.86f
     private const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
 }
 
 object AircraftSymbolRenderer {
     private val path = Path()
-    private val body_path_cache = object : LinkedHashMap<SymbolBodyPathKey, Path>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<SymbolBodyPathKey, Path>): Boolean {
-            return size > SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES
-        }
-    }
-    private val body_point_cache =
-        object : LinkedHashMap<SymbolBodyPathKey, FloatArray>(64, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<SymbolBodyPathKey, FloatArray>): Boolean {
-                return size > SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES
-            }
-        }
-
     fun draw(
         canvas: Canvas,
         symbol: AircraftSymbol,
@@ -160,49 +134,6 @@ object AircraftSymbolRenderer {
                 stroke_paint,
                 dp
             )
-        }
-    }
-
-    fun draw_cached_morph(
-        canvas: Canvas,
-        symbol: AircraftSymbol,
-        progress: Float,
-        paint: Paint,
-        stroke_paint: Paint,
-        dp: (Float) -> Float
-    ) {
-        when (symbol) {
-            AircraftSymbol.GENERAL_AVIATION -> draw_cached_morphed_polygon(
-                canvas,
-                symbol,
-                GENERAL_AVIATION_POINTS,
-                progress,
-                paint,
-                stroke_paint,
-                dp
-            )
-
-            AircraftSymbol.GLIDER -> draw_cached_morphed_polygon(
-                canvas,
-                symbol,
-                GLIDER_POINTS,
-                progress,
-                paint,
-                stroke_paint,
-                dp
-            )
-
-            AircraftSymbol.AIRLINER -> draw_cached_airliner(
-                canvas,
-                progress,
-                paint,
-                stroke_paint,
-                dp
-            )
-
-            AircraftSymbol.SURFACE -> draw_cached_surface(canvas, progress, paint, stroke_paint, dp)
-            AircraftSymbol.ROTORCRAFT,
-            AircraftSymbol.UAV -> draw(canvas, symbol, progress, paint, stroke_paint, dp)
         }
     }
 
@@ -409,106 +340,6 @@ object AircraftSymbolRenderer {
         stroke_paint.strokeWidth = dp(1.2f)
     }
 
-    private fun draw_cached_airliner(
-        canvas: Canvas,
-        progress: Float,
-        paint: Paint,
-        stroke_paint: Paint,
-        dp: (Float) -> Float
-    ) {
-        val p = progress.coerceIn(0f, 1f)
-        draw_cached_morphed_polygon(
-            canvas,
-            AircraftSymbol.AIRLINER,
-            AIRLINER_POINTS,
-            p,
-            paint,
-            stroke_paint,
-            dp
-        )
-        draw_airliner_details(canvas, p, stroke_paint, dp)
-    }
-
-    private fun draw_airliner_details(
-        canvas: Canvas,
-        progress: Float,
-        stroke_paint: Paint,
-        dp: (Float) -> Float
-    ) {
-        val p = progress.coerceIn(0f, 1f)
-        val engine = smooth_step(0.48f, 1f, p)
-        if (engine > 0f) {
-            canvas.drawCircle(
-                -dp(11.8f * engine),
-                dp(5.6f * engine),
-                dp(2.2f * engine),
-                stroke_paint
-            )
-            canvas.drawCircle(
-                dp(11.8f * engine),
-                dp(5.6f * engine),
-                dp(2.2f * engine),
-                stroke_paint
-            )
-        }
-    }
-
-    private fun draw_cached_surface(
-        canvas: Canvas,
-        progress: Float,
-        paint: Paint,
-        stroke_paint: Paint,
-        dp: (Float) -> Float
-    ) {
-        val p = progress.coerceIn(0f, 1f)
-        draw_cached_morphed_polygon(
-            canvas,
-            AircraftSymbol.SURFACE,
-            SURFACE_POINTS,
-            p,
-            paint,
-            stroke_paint,
-            dp
-        )
-        draw_surface_details(canvas, p, stroke_paint, dp)
-    }
-
-    private fun draw_surface_details(
-        canvas: Canvas,
-        progress: Float,
-        stroke_paint: Paint,
-        dp: (Float) -> Float
-    ) {
-        val p = progress.coerceIn(0f, 1f)
-        val body = smooth_step(0f, 0.6f, p)
-        val gear = smooth_step(0.55f, 1f, p)
-        stroke_paint.strokeWidth = dp(2f)
-        canvas.drawLine(
-            -dp(5f + 9f * gear),
-            dp(8f + 10f * body),
-            dp(5f + 9f * gear),
-            dp(8f + 10f * body),
-            stroke_paint
-        )
-        canvas.drawCircle(-dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
-        canvas.drawCircle(dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
-        stroke_paint.strokeWidth = dp(1.2f)
-    }
-
-    private fun draw_cached_morphed_polygon(
-        canvas: Canvas,
-        symbol: AircraftSymbol,
-        target: FloatArray,
-        progress: Float,
-        paint: Paint,
-        stroke_paint: Paint,
-        dp: (Float) -> Float
-    ) {
-        val body = cached_morphed_polygon(symbol, target, progress, dp)
-        canvas.drawPath(body, paint)
-        canvas.drawPath(body, stroke_paint)
-    }
-
     private fun draw_morphed_polygon(
         canvas: Canvas,
         target: FloatArray,
@@ -542,69 +373,6 @@ object AircraftSymbolRenderer {
         canvas.drawPath(path, stroke_paint)
     }
 
-    private fun cached_morphed_polygon(
-        symbol: AircraftSymbol,
-        target: FloatArray,
-        progress: Float,
-        dp: (Float) -> Float
-    ): Path {
-        val key = symbol_body_key(symbol, progress, dp)
-        body_path_cache[key]?.let { return it }
-        val body = Path()
-        val points = cached_morphed_points(symbol, target, progress, dp)
-        var index = 0
-        var point_index = 0
-        while (index + 1 < points.size) {
-            if (point_index == 0) {
-                body.moveTo(points[index], points[index + 1])
-            } else {
-                body.lineTo(points[index], points[index + 1])
-            }
-            index += 2
-            point_index++
-        }
-        body.close()
-        body_path_cache[key] = body
-        return body
-    }
-
-    private fun cached_morphed_points(
-        symbol: AircraftSymbol,
-        target: FloatArray,
-        progress: Float,
-        dp: (Float) -> Float
-    ): FloatArray {
-        val key = symbol_body_key(symbol, progress, dp)
-        body_point_cache[key]?.let { return it }
-        val p = smooth_step(0f, 1f, key.progress_bucket / SYMBOL_VECTOR_PROGRESS_STEPS.toFloat())
-        val points = FloatArray(target.size)
-        var target_index = 0
-        while (target_index + 1 < target.size) {
-            val point_x = target[target_index]
-            val point_y = target[target_index + 1]
-            val angle = atan2(point_y.toDouble(), point_x.toDouble())
-            val start_x = (cos(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
-            val start_y = (sin(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
-            points[target_index] = dp(lerp(start_x, point_x, p))
-            points[target_index + 1] = dp(lerp(start_y, point_y, p))
-            target_index += 2
-        }
-        body_point_cache[key] = points
-        return points
-    }
-
-    private fun symbol_body_key(
-        symbol: AircraftSymbol,
-        progress: Float,
-        dp: (Float) -> Float
-    ): SymbolBodyPathKey {
-        val progress_bucket = (progress.coerceIn(0f, 1f) * SYMBOL_VECTOR_PROGRESS_STEPS)
-            .roundToInt()
-            .coerceIn(0, SYMBOL_VECTOR_PROGRESS_STEPS)
-        val dp_unit_bucket = (dp(1f) * 1000f).roundToInt()
-        return SymbolBodyPathKey(symbol, progress_bucket, dp_unit_bucket)
-    }
-
     private fun draw_uav_rotor(
         canvas: Canvas,
         x: Float,
@@ -619,16 +387,7 @@ object AircraftSymbolRenderer {
         canvas.drawLine(x - blade, y, x + blade, y, stroke_paint)
     }
 
-    private data class SymbolBodyPathKey(
-        val symbol: AircraftSymbol,
-        val progress_bucket: Int,
-        val dp_unit_bucket: Int
-    )
-
     private const val AIRCRAFT_MORPH_SEED_RADIUS_DP = 4f
-    private const val SYMBOL_VECTOR_PROGRESS_STEPS = 96
-    private const val SYMBOL_BODY_PATH_CACHE_MAX_ENTRIES = 768
-
     private val GENERAL_AVIATION_POINTS = floatArrayOf(
         0f, -17f,
         3.2f, -4.2f,
@@ -790,15 +549,12 @@ object AircraftColorResolver {
         lower_feet: Double,
         upper_feet: Double
     ): Float {
-        return smooth_step(
+        return safe_smooth_step(
             0f,
             1f,
             ((altitude_feet - lower_feet) / (upper_feet - lower_feet)).toFloat()
         )
     }
-
-    private fun smooth_step(edge0: Float, edge1: Float, value: Float): Float =
-        safe_smooth_step(edge0, edge1, value)
 
     private const val FEET_PER_METER = 3.28084
     private const val LOW_ALTITUDE_FEET = 5000.0
@@ -872,13 +628,10 @@ object AircraftSymbolClassifier {
     }
 
     private fun special_symbol_for_normalized_type_code(type_code: String): AircraftSymbol? {
-        return when {
-            type_code in ROTORCRAFT_TYPE_CODES -> AircraftSymbol.ROTORCRAFT
-            type_code == "GLID" || type_code == "GLIM" -> AircraftSymbol.GLIDER
-            type_code == "FFLO" ||
-                    type_code == "VFHC" ||
-                    type_code == "UAV" ||
-                    type_code == "DRON" -> AircraftSymbol.UAV
+        return when (type_code) {
+            in ROTORCRAFT_TYPE_CODES -> AircraftSymbol.ROTORCRAFT
+            "GLID", "GLIM" -> AircraftSymbol.GLIDER
+            "FFLO", "VFHC", "UAV", "DRON" -> AircraftSymbol.UAV
             else -> null
         }
     }

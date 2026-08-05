@@ -18,12 +18,11 @@ import com.flightalert.map.UnitSystem
 
 enum class AircraftFeedMode(
     val display_name: String,
-    val compact_name: String,
     val uses_globe: Boolean
 ) {
-    HYBRID("Hybrid", "Hybrid", true),
-    BINCRAFT("binCraft", "binCraft", true),
-    API("API", "API", false);
+    HYBRID("Hybrid", true),
+    BINCRAFT("binCraft", true),
+    API("API", false);
 
     fun next(): AircraftFeedMode = when (this) {
         HYBRID -> BINCRAFT

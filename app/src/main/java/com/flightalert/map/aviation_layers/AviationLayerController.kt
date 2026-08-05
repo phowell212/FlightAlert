@@ -18,7 +18,6 @@ package com.flightalert.map.aviation_layers
 
 import com.flightalert.FlightAlertAppSettings
 import android.os.SystemClock
-import com.flightalert.TILE_SIZE
 import com.flightalert.map.*
 import java.net.URL
 import kotlin.math.max

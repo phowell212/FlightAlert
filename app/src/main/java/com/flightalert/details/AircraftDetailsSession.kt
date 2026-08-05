@@ -1,5 +1,6 @@
 ﻿@file:Suppress(
     "CanBeVal",
+    "ClassName",
     "FunctionName",
     "KotlinConstantConditions",
     "LocalVariableName",

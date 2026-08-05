@@ -242,7 +242,7 @@ internal class ReferenceFiltersPanelLayout(
         top = controls.last().bounds.bottom + CONTROL_GAP
         rows.forEach { row ->
             val stateLabel = when {
-                row.storedEnabled && !masterEnabled -> "On; ${sectionTitle} master off"
+                row.storedEnabled && !masterEnabled -> "On; $sectionTitle master off"
                 row.storedEnabled -> "On"
                 else -> "Off"
             }
@@ -579,7 +579,6 @@ internal class ReferenceFiltersPanelLayout(
             )
         }.toMutableList()
         statusMessage?.bounds?.intersection(contentViewport)?.let { statusBounds ->
-            val status = requireNotNull(statusMessage)
             val stableId = if (content == ReferenceFiltersPanelContent.MAP_UNAVAILABLE) {
                 "status.map.unavailable"
             } else {
@@ -591,7 +590,7 @@ internal class ReferenceFiltersPanelLayout(
                 bounds = statusBounds,
                 role = ReferenceAccessibilityRole.STATUS,
                 category = ReferenceAccessibilityCategory.MAP,
-                label = status.text,
+                label = statusMessage.text,
                 selected = null,
                 onOff = null,
                 stateDescription = null,

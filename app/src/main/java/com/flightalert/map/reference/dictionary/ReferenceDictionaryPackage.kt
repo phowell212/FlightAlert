@@ -1,4 +1,7 @@
 @file:Suppress(
+    "ArrayInDataClass",
+    "ConvertTryFinallyToUseCall",
+    "ConstPropertyName",
     "FunctionName",
     "LocalVariableName",
     "PackageName",
@@ -89,8 +92,7 @@ internal object ReferenceDictionaryV3ClassCatalogLoader {
         ) {
             return unavailable("class catalog is not defined for this reference package schema")
         }
-        val renderer_semantic_sha256 = renderer_semantic_stream_sha256
-        if (renderer_semantic_sha256 == null || !renderer_semantic_sha256.is_sha256()) {
+        if (renderer_semantic_stream_sha256 == null || !renderer_semantic_stream_sha256.is_sha256()) {
             return unavailable(
                 "V3 manifest rendererSemanticStreamSha256 is missing or malformed",
             )
@@ -107,7 +109,7 @@ internal object ReferenceDictionaryV3ClassCatalogLoader {
                 "V3 manifest classCatalog.rendererContractSha256 is missing or malformed",
             )
         }
-        if (renderer_contract_sha256 != renderer_semantic_sha256) {
+        if (renderer_contract_sha256 != renderer_semantic_stream_sha256) {
             return unavailable(
                 "V3 manifest classCatalog.rendererContractSha256 must exactly equal " +
                     "rendererSemanticStreamSha256",
@@ -128,7 +130,7 @@ internal object ReferenceDictionaryV3ClassCatalogLoader {
             ReferenceClassCatalog.from_installed_bytes(
                 catalog_bytes = catalog_bytes,
                 expected_catalog_sha256 = catalog_sha256,
-                expected_renderer_semantic_stream_sha256 = renderer_semantic_sha256,
+                expected_renderer_semantic_stream_sha256 = renderer_semantic_stream_sha256,
                 expected_renderer_contract_sha256 = renderer_contract_sha256,
                 expected_presentation_policy_sha256 = presentation_policy_sha256,
             )
@@ -469,27 +471,6 @@ internal class ReferenceDictionaryPackage private constructor(
             }
         }
 
-        internal fun open_from_manifest(
-            manifest: ReferenceDictionaryParsedManifest,
-            records_file: File,
-            index_file: File,
-            read_catalog_bytes: (File) -> ByteArray = { file -> file.readBytes() },
-        ): ReferenceDictionaryPackage {
-            val records_source = ReferenceDictionarySegmentedFile.open(records_file)
-            try {
-                val index_source = ReferenceDictionarySegmentedFile.open(index_file)
-                return open_from_manifest(
-                    manifest = manifest,
-                    records_file = records_source,
-                    index_file = index_source,
-                    read_catalog_bytes = read_catalog_bytes,
-                )
-            } catch (exception: Exception) {
-                records_source.close()
-                throw exception
-            }
-        }
-
         private fun open_from_manifest(
             manifest: ReferenceDictionaryParsedManifest,
             records_file: ReferenceDictionarySegmentedFile,
@@ -647,7 +628,7 @@ internal class ReferenceDictionaryPackage private constructor(
             val inflater = Inflater(true)
             val output = ByteArray(expected_size)
             var output_offset = 0
-            var finished = false
+            var finished: Boolean
             try {
                 inflater.setInput(compressed)
                 while (!inflater.finished() && output_offset < output.size) {

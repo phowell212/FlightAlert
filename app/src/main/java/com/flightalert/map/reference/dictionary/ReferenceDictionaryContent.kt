@@ -1,4 +1,4 @@
-@file:Suppress("ArrayInDataClass")
+@file:Suppress("ArrayInDataClass", "FunctionName", "LocalVariableName", "PropertyName")
 
 package com.flightalert.map.reference.dictionary
 
@@ -230,11 +230,6 @@ internal data class ReferenceDrawCounts(
     val labels: Int
 )
 
-internal data class RetainedReferenceContent(
-    val boundaries: Int,
-    val labels: List<DictionaryLabelCandidate>,
-)
-
 internal enum class ReferenceDictionaryLayerGroup {
     PLACES,
     WATER,
@@ -250,10 +245,6 @@ internal data class ReferenceDictionaryLayerGroups(
     val regions: Boolean,
     val public_lands: Boolean
 ) {
-    val cache_suffix: String =
-        "${if (places) 'p' else '-'}${if (water) 'w' else '-'}" +
-                "${if (regions) 'r' else '-'}${if (public_lands) 'l' else '-'}"
-
     fun enabled(group: ReferenceDictionaryLayerGroup): Boolean {
         return when (group) {
             ReferenceDictionaryLayerGroup.PLACES -> places

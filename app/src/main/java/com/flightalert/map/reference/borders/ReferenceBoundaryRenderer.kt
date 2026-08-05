@@ -1,4 +1,10 @@
-@file:Suppress("FunctionName", "LocalVariableName", "PropertyName", "ArrayInDataClass")
+@file:Suppress(
+    "ArrayInDataClass",
+    "FunctionName",
+    "LocalVariableName",
+    "PrivatePropertyName",
+    "PropertyName",
+)
 
 package com.flightalert.map.reference.borders
 
@@ -11,6 +17,7 @@ import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withSave
 import com.flightalert.MIN_ZOOM
 import com.flightalert.map.*
@@ -134,42 +141,6 @@ internal class ReferenceBoundaryRenderer(
         return drawn
     }
 
-    fun prepare_batches(
-        viewport: Viewport,
-        tiles: List<DictionaryTileDrawRef>,
-        groups: ReferenceDictionaryLayerGroups,
-        filterMask: ReferenceFilterMask,
-        keepDrawing: () -> Boolean,
-        includeHidden: Boolean,
-    ): List<BoundaryPathBatch> {
-        val records = ArrayList<DictionaryLineRecordRef>(256)
-        collect_boundary_record_refs(
-            viewport = viewport,
-            tiles = tiles,
-            groups = groups,
-            filter_mask = filterMask,
-            output = records,
-            occurrence_ids = HashSet(256),
-            include_hidden = includeHidden,
-        )
-        if (!keepDrawing()) return emptyList()
-        return prepare_boundary_batches(viewport, records, keepDrawing)
-    }
-
-    fun draw_batches(
-        canvas: Canvas,
-        viewport_zoom: Double,
-        batches: List<BoundaryPathBatch>,
-        draw_scale: Float = 1f,
-        frame_alpha: Int = 255,
-    ): Int = draw_boundary_batches(
-        canvas = canvas,
-        viewport_zoom = viewport_zoom,
-        batches = batches,
-        draw_scale = draw_scale,
-        frame_alpha = frame_alpha,
-    )
-
     override fun close() {
         lifecycle_lock.lock()
         try {
@@ -228,7 +199,7 @@ internal class ReferenceBoundaryRenderer(
         }
         val continuity_blend = if (continuity_scene != null) {
             reference_boundary_raster_safety_blend(
-                active = requireNotNull(active_before_promotion),
+                active = active_before_promotion,
                 safety = continuity_scene.band,
                 viewportZoom = viewport.zoom,
             )
@@ -1059,12 +1030,12 @@ internal class ReferenceBoundaryRenderer(
                     var worst: BoundaryRasterTask? = null
                     for (queued in queue) {
                         val candidate = queued as? BoundaryRasterTask ?: continue
-                        if (worst == null || candidate.compareTo(worst) > 0) {
+                        if (worst == null || candidate > worst) {
                             worst = candidate
                         }
                     }
                     if (worst != null &&
-                        task.compareTo(worst) < 0 &&
+                        task < worst &&
                         queue.remove(worst)
                     ) {
                         discarded += worst
@@ -1161,7 +1132,6 @@ internal class ReferenceBoundaryRenderer(
             if (cached.length() <= EMPTY_BOUNDARY_RASTER_SCAN_MAX_BYTES &&
                 boundary_raster_bitmap_visible_sample_is_transparent(
                     bitmap,
-                    BOUNDARY_RASTER_GUTTER_PX,
                 )
             ) {
                 bitmap.recycle()
@@ -1305,7 +1275,7 @@ internal class ReferenceBoundaryRenderer(
         val boundaries = workspace.batches.sumOf { it.boundaries }
         if (boundaries == 0) return empty_boundary_raster_tile(key)
         val bitmap_size = band.corePixels + BOUNDARY_RASTER_GUTTER_PX * 2
-        val bitmap = Bitmap.createBitmap(bitmap_size, bitmap_size, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(bitmap_size, bitmap_size, Bitmap.Config.ARGB_8888)
         draw_boundary_batches(
             canvas = Canvas(bitmap),
             viewport_zoom = band.visibilityCentizoom / 100.0,
@@ -1319,7 +1289,6 @@ internal class ReferenceBoundaryRenderer(
         }
         if (boundary_raster_bitmap_visible_sample_is_transparent(
                 bitmap,
-                BOUNDARY_RASTER_GUTTER_PX,
             )
         ) {
             bitmap.recycle()
@@ -1337,12 +1306,13 @@ internal class ReferenceBoundaryRenderer(
 
     private fun boundary_raster_bitmap_visible_sample_is_transparent(
         bitmap: Bitmap,
-        gutter_pixels: Int,
     ): Boolean {
-        val sample_left = (gutter_pixels - 1).coerceAtLeast(0)
-        val sample_top = (gutter_pixels - 1).coerceAtLeast(0)
-        val sample_right = (bitmap.width - gutter_pixels + 1).coerceAtMost(bitmap.width)
-        val sample_bottom = (bitmap.height - gutter_pixels + 1).coerceAtMost(bitmap.height)
+        val sample_left = (BOUNDARY_RASTER_GUTTER_PX - 1).coerceAtLeast(0)
+        val sample_top = (BOUNDARY_RASTER_GUTTER_PX - 1).coerceAtLeast(0)
+        val sample_right =
+            (bitmap.width - BOUNDARY_RASTER_GUTTER_PX + 1).coerceAtMost(bitmap.width)
+        val sample_bottom =
+            (bitmap.height - BOUNDARY_RASTER_GUTTER_PX + 1).coerceAtMost(bitmap.height)
         val sample_width = sample_right - sample_left
         val sample_height = sample_bottom - sample_top
         if (sample_width <= 0 || sample_height <= 0) return true

@@ -1,3 +1,8 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+)
+
 package com.flightalert
 
 import android.graphics.Bitmap

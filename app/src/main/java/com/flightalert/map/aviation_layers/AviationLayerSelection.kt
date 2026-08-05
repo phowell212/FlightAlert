@@ -1,6 +1,11 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+    "PropertyName",
+)
+
 package com.flightalert.map.aviation_layers
 
-import com.flightalert.map.*
 import java.time.Instant
 import java.util.Locale
 
@@ -96,11 +101,6 @@ internal object AviationSelectionPolicy {
             .firstOrNull { it.selection_key() == key }
             ?.let(AviationSelection::OceanicTrack)
     }
-
-    fun rebind(
-        selection: AviationSelection,
-        snapshot: AviationLayerSnapshot
-    ): AviationSelection? = resolve(selection.key, snapshot)
 
     fun after_toggle(
         selected_key: AviationSelectionKey?,
@@ -216,13 +216,15 @@ internal object AviationSelectionPolicy {
     private fun compare_keys(first: AviationSelectionKey, second: AviationSelectionKey): Int {
         val kind_order = first.kind.ordinal.compareTo(second.kind.ordinal)
         if (kind_order != 0) return kind_order
-        return when {
-            first is AviationSelectionKey.ArcGis && second is AviationSelectionKey.ArcGis ->
-                first.object_id.compareTo(second.object_id)
-            first is AviationSelectionKey.Nat && second is AviationSelectionKey.Nat ->
-                compare_nat_keys(first, second)
-            first is AviationSelectionKey.ArcGis -> -1
-            else -> 1
+        return when (first) {
+            is AviationSelectionKey.ArcGis ->
+                if (second is AviationSelectionKey.ArcGis) {
+                    first.object_id.compareTo(second.object_id)
+                } else {
+                    -1
+                }
+            is AviationSelectionKey.Nat ->
+                if (second is AviationSelectionKey.Nat) compare_nat_keys(first, second) else 1
         }
     }
 

@@ -1,8 +1,10 @@
+@file:Suppress(
+    "FunctionName",
+)
+
 package com.flightalert.map.reference.borders
 
-import com.flightalert.map.*
 import com.flightalert.map.reference.*
-import com.flightalert.map.reference.dictionary.*
 
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -199,14 +201,6 @@ internal fun reference_boundary_raster_window_covers(
     return alignedFirstX >= bounds.firstDrawX && alignedLastX <= bounds.lastDrawX ||
         alignedFirstX + tileLimit >= bounds.firstDrawX &&
         alignedLastX + tileLimit <= bounds.lastDrawX
-}
-
-internal fun reference_boundary_raster_should_draw_safety(
-    active: ReferenceBoundaryRasterBand,
-    safety: ReferenceBoundaryRasterBand,
-    viewportZoom: Double,
-): Boolean {
-    return reference_boundary_raster_safety_blend(active, safety, viewportZoom) >= 1f
 }
 
 internal fun reference_boundary_raster_safety_blend(

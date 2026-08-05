@@ -1,9 +1,14 @@
+@file:Suppress(
+    "ConstPropertyName",
+    "FunctionName",
+    "LocalVariableName",
+    "PropertyName",
+)
+
 package com.flightalert.map.reference.labels
 
 import com.flightalert.map.*
 import com.flightalert.map.reference.*
-import com.flightalert.map.reference.borders.*
-import com.flightalert.map.reference.dictionary.*
 
 enum class ProminenceEvidenceKind(val stable_id: Int) {
     PROVIDER_RANK(1), CAPITAL_LEVEL(2), POPULATION(3), COMPLETE_AREA_M2(4),
@@ -241,11 +246,10 @@ internal object ReferenceProminencePolicy {
             SemanticSubtype.CANAL_CHANNEL,
             SemanticSubtype.UNSPECIFIED_WATERCOURSE -> for_waterway(
                 WaterwayFacts(
-                    facts.subtype,
-                    facts.complete_named_relation,
-                    facts.complete_relation_length_m,
-                    facts.evidence_context,
-                    facts.provider_evidence,
+                    subtype = facts.subtype,
+                    complete_named_relation = facts.complete_named_relation,
+                    complete_relation_length_m = facts.complete_relation_length_m,
+                    evidence_context = facts.evidence_context,
                 ),
             )
             SemanticSubtype.PROTECTED_LAND -> if (facts.complete_area_verified) {

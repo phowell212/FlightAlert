@@ -111,27 +111,8 @@ class AircraftFilterController(private val prefs: SharedPreferences) {
         return AircraftFilterEngine.is_active(current_state())
     }
 
-    fun is_normal_airborne_mode(): Boolean {
-        return AircraftFilterEngine.is_normal_airborne_mode(current_state())
-    }
-
     fun restricts_aircraft(): Boolean {
         return AircraftFilterEngine.restricts_aircraft(current_state())
-    }
-
-    fun stats(
-        aircraft: List<Aircraft>,
-        now_epoch_sec: Double,
-        distance_meters: (Aircraft) -> Double,
-        is_hazard_aircraft: (Aircraft) -> Boolean
-    ): FilterStats {
-        return AircraftFilterEngine.stats(
-            aircraft = aircraft,
-            filters = current_state(),
-            now_epoch_sec = now_epoch_sec,
-            distance_meters = distance_meters,
-            is_hazard_aircraft = is_hazard_aircraft
-        )
     }
 
     fun stats_from_counts(total: Int, matched: Int): FilterStats {
@@ -171,19 +152,7 @@ data class AircraftFilterState(
     val flight_status: FlightStatusFilter,
     val report_age: ReportAgeFilter,
     val alert_volume_only: Boolean
-) {
-    companion object {
-        val DEFAULT = AircraftFilterState(
-            search_query = "",
-            aircraft_type = AircraftTypeFilter.ALL,
-            altitude = AltitudeFilter.ANY,
-            distance = DistanceFilter.ANY,
-            flight_status = FlightStatusFilter.AIRBORNE,
-            report_age = ReportAgeFilter.ANY,
-            alert_volume_only = false
-        )
-    }
-}
+)
 
 data class FilterStats(val total: Int, val matched: Int, val summary: String)
 
@@ -270,29 +239,6 @@ object AircraftFilterEngine {
                 filters.alert_volume_only
     }
 
-    fun stats(
-        aircraft: List<Aircraft>,
-        filters: AircraftFilterState,
-        now_epoch_sec: Double,
-        distance_meters: (Aircraft) -> Double,
-        is_hazard_aircraft: (Aircraft) -> Boolean
-    ): FilterStats {
-        val matched = aircraft.count {
-            passes(
-                it,
-                filters,
-                now_epoch_sec,
-                distance_meters,
-                is_hazard_aircraft
-            )
-        }
-        return stats_from_counts(
-            total = aircraft.size,
-            matched = matched,
-            filters = filters
-        )
-    }
-
     fun stats_from_counts(
         total: Int,
         matched: Int,
@@ -370,12 +316,12 @@ object AircraftFilterEngine {
         if (filter == AltitudeFilter.ANY) return true
         val feet = aircraft.altitude_m?.times(FEET_PER_METER)
         return when (filter) {
-            AltitudeFilter.ANY -> true
             AltitudeFilter.BELOW_1000 -> feet != null && feet < 1000.0
             AltitudeFilter.FROM_1000_TO_5000 -> feet != null && feet >= 1000.0 && feet < 5000.0
             AltitudeFilter.FROM_5000_TO_18000 -> feet != null && feet >= 5000.0 && feet < 18000.0
             AltitudeFilter.ABOVE_18000 -> feet != null && feet >= 18000.0
             AltitudeFilter.UNKNOWN -> feet == null
+            else -> true
         }
     }
 

@@ -1,4 +1,4 @@
-@file:Suppress("FunctionName", "LocalVariableName", "PropertyName")
+@file:Suppress("FunctionName", "LocalVariableName", "PropertyName", "PrivatePropertyName")
 
 package com.flightalert.map.reference.dictionary
 
@@ -29,7 +29,6 @@ internal class ReferenceTileRepository(
     private val package_lifecycle_lock = ReentrantLock()
     @Volatile
     private var closed = false
-    private val content_revision = AtomicLong()
     private val request_generation = AtomicLong()
     private val tile_cache = ReferenceDictionaryTileMemoryCache<ParsedDictionaryTile>(
         normalLimit = MAX_MEMORY_TILES,
@@ -38,8 +37,6 @@ internal class ReferenceTileRepository(
     private val requested_tiles = HashSet<String>()
     private val desired_tile_keys = HashSet<String>()
     private val next_desired_tile_keys = HashSet<String>()
-    private val zoom_ahead_desired_tile_keys = HashSet<String>()
-    private val next_zoom_ahead_desired_tile_keys = HashSet<String>()
     private val worker_id = AtomicInteger()
     private val tile_task_sequence = AtomicLong()
     private val tile_request_admission_lock = Any()
@@ -57,8 +54,6 @@ internal class ReferenceTileRepository(
             isDaemon = true
         }
     }
-
-    fun content_revision(): Long = content_revision.get()
 
     fun package_check_pending(): Boolean = package_probe_pending.get() != null
 
@@ -92,11 +87,8 @@ internal class ReferenceTileRepository(
                 requested_tiles.clear()
                 desired_tile_keys.clear()
                 next_desired_tile_keys.clear()
-                zoom_ahead_desired_tile_keys.clear()
-                next_zoom_ahead_desired_tile_keys.clear()
             }
             package_probe_pending.set(null)
-            content_revision.incrementAndGet()
             package_store.close()
         } finally {
             package_lifecycle_lock.unlock()
@@ -253,39 +245,8 @@ internal class ReferenceTileRepository(
         if (closed) return false
         if (generation == request_generation.get()) return true
         return synchronized(tile_cache) {
-            desired_tile_keys.contains(cache_key) ||
-                zoom_ahead_desired_tile_keys.contains(cache_key)
+            desired_tile_keys.contains(cache_key)
         }
-    }
-
-    fun update_zoom_ahead_desired_tile_keys(
-        tiles: List<VisibleDictionaryTile>,
-    ): Long {
-        val generation = synchronized(tile_cache) {
-            next_zoom_ahead_desired_tile_keys.clear()
-            for (tile in tiles) {
-                next_zoom_ahead_desired_tile_keys += tile.cache_key()
-            }
-            if (zoom_ahead_desired_tile_keys != next_zoom_ahead_desired_tile_keys) {
-                zoom_ahead_desired_tile_keys.clear()
-                zoom_ahead_desired_tile_keys += next_zoom_ahead_desired_tile_keys
-                request_generation.incrementAndGet()
-            } else {
-                request_generation.get()
-            }
-        }
-        purge_obsolete_tile_requests()
-        return generation
-    }
-
-    fun clear_zoom_ahead_desired_tile_keys() {
-        val changed = synchronized(tile_cache) {
-            if (zoom_ahead_desired_tile_keys.isEmpty()) return@synchronized false
-            zoom_ahead_desired_tile_keys.clear()
-            request_generation.incrementAndGet()
-            true
-        }
-        if (changed) purge_obsolete_tile_requests()
     }
 
     private fun empty_parsed_tile(tile: VisibleDictionaryTile): ParsedDictionaryTile {
@@ -306,7 +267,7 @@ internal class ReferenceTileRepository(
                 if (queue.size >= MAX_PENDING_DICTIONARY_TILE_REQUESTS) {
                     val worst = worst_queued_tile_request(queue)
                     if (worst != null &&
-                        task.compareTo(worst) < 0 &&
+                        task < worst &&
                         queue.remove(worst)
                     ) {
                         discarded += worst
@@ -347,7 +308,7 @@ internal class ReferenceTileRepository(
         var worst: TileRequestTask? = null
         for (queued in queue) {
             val candidate = queued as? TileRequestTask ?: continue
-            if (worst == null || candidate.compareTo(worst) > 0) worst = candidate
+            if (worst == null || candidate > worst) worst = candidate
         }
         return worst
     }
@@ -411,7 +372,6 @@ internal class ReferenceTileRepository(
                 synchronized(tile_cache) {
                     if (!keep_loading()) return@synchronized
                     tile_cache.put(cache_key, tile.low_zoom_profile(), parsed)
-                    content_revision.incrementAndGet()
                     published = true
                 }
             } catch (_: Exception) {
@@ -422,7 +382,6 @@ internal class ReferenceTileRepository(
                             tile.low_zoom_profile(),
                             empty_parsed_tile(tile),
                         )
-                        content_revision.incrementAndGet()
                         published = true
                     }
                 }
@@ -433,10 +392,7 @@ internal class ReferenceTileRepository(
                     if (
                         request_became_obsolete &&
                         !tile_cache.contains(cache_key, tile.low_zoom_profile()) &&
-                        (
-                            desired_tile_keys.contains(cache_key) ||
-                                zoom_ahead_desired_tile_keys.contains(cache_key)
-                            )
+                        desired_tile_keys.contains(cache_key)
                     ) {
                         replacement_generation = request_generation.get()
                     }

@@ -160,7 +160,7 @@ internal class ReferenceDictionaryDownloader(private val context: Context) {
     private var cancelled = false
 
     private val active_connections: MutableSet<HttpURLConnection> =
-        Collections.newSetFromMap(IdentityHashMap<HttpURLConnection, Boolean>())
+        Collections.newSetFromMap(IdentityHashMap())
 
     fun cancel() {
         val connections = synchronized(publication_lock) {

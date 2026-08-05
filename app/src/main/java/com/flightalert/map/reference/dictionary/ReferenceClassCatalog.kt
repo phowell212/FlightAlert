@@ -1,3 +1,12 @@
+@file:Suppress(
+    "CanBeParameter",
+    "ConstPropertyName",
+    "FunctionName",
+    "LocalVariableName",
+    "PrivatePropertyName",
+    "PropertyName",
+)
+
 package com.flightalert.map.reference.dictionary
 
 import com.flightalert.map.*

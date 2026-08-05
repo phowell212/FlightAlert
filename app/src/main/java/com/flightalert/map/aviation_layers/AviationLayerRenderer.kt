@@ -6,6 +6,7 @@
     "ObsoleteSdkInt",
     "PackageName",
     "PrivatePropertyName",
+    "UseWithIndex",
     "PropertyName",
     "RedundantQualifierName",
     "SameParameterValue",
@@ -17,18 +18,15 @@
 package com.flightalert.map.aviation_layers
 
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import androidx.core.graphics.withTranslation
-import com.flightalert.TILE_SIZE
 import com.flightalert.ThemeTreatment
 import com.flightalert.map.*
 import com.flightalert.lerp
 import com.flightalert.smooth_step
 import com.flightalert.with_alpha
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow

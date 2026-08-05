@@ -4,6 +4,7 @@
     "PackageName",
     "PrivatePropertyName",
     "PropertyName",
+    "SpellCheckingInspection",
 )
 
 package com.flightalert.flight
@@ -553,8 +554,10 @@ data class FlightTrace(
 ) {
     val point_count: Int get() = segments.sumOf { it.points.size }
 
+    @Suppress("unused")
     val previous_point_count: Int get() = previous_segments.sumOf { it.points.size }
 
+    @Suppress("unused")
     val all_points: List<TrackPoint> get() = segments.flatMap { it.points }
 
     companion object {

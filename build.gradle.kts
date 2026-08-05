@@ -42,6 +42,6 @@ android {
 dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.core.ktx)
-    //noinspection UseTomlInstead
+    //noinspection NewerVersionAvailable,UseTomlInstead
     implementation("com.github.luben:zstd-jni:1.5.7-11@aar")
 }

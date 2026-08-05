@@ -1,4 +1,4 @@
-@file:Suppress("FunctionName", "PropertyName")
+@file:Suppress("FunctionName", "PropertyName", "LocalVariableName")
 
 package com.flightalert.map.reference
 
@@ -128,40 +128,6 @@ internal fun reference_should_defer_target_work(
     return interactionActive &&
         (!labelsEnabled || retainedLabelsAvailable) &&
         (!bordersEnabled || compatibleActiveBoundaryBand)
-}
-
-internal fun reference_retained_scene_has_content(
-    labelCount: Int,
-    boundaryBatchCount: Int,
-): Boolean {
-    return labelCount > 0 || boundaryBatchCount > 0
-}
-
-internal fun reference_retained_viewport_at_zoom(
-    viewport: Viewport,
-    targetZoom: Double,
-): Viewport? {
-    if (targetZoom <= viewport.zoom) return null
-    val scale = 2.0.pow(targetZoom - viewport.zoom)
-    return Viewport(
-        zoom = targetZoom,
-        center_x = viewport.center_x * scale,
-        center_y = viewport.center_y * scale,
-        width = viewport.width,
-        height = viewport.height,
-    )
-}
-
-internal fun reference_retained_zoom_ahead_target(
-    viewportZoom: Double,
-    step: Int,
-    interval: Double,
-    maximumZoom: Double,
-): Double? {
-    if (step <= 0 || interval <= 0.0 || viewportZoom >= maximumZoom) return null
-    val previous_target = viewportZoom + interval * (step - 1)
-    if (previous_target >= maximumZoom) return null
-    return minOf(viewportZoom + interval * step, maximumZoom)
 }
 
 internal fun reference_retained_zoom_ahead_can_handoff(

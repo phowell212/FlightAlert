@@ -1,3 +1,8 @@
+@file:Suppress(
+    "ConstPropertyName",
+    "PropertyName",
+)
+
 package com.flightalert.map
 
 enum class SourcedTextScalarClass {
@@ -29,11 +34,15 @@ internal class SourcedTextDecision internal constructor(
 
 /** The one source-exact policy and factory for live sourced map text. */
 object SourcedMapTextPolicy {
+    @Suppress("unused")
     const val unicodeScriptProfileSha256 = SourcedTextUnicode17Profile.profileSha256
+    @Suppress("unused")
     const val policySha256 =
         "ca7bd559b3d84758d17e11b5e619f04da7e5093d67d0f90506ab509e2ef6543a"
+    @Suppress("unused")
     const val bilingualPresentationToken =
         "flightalert.sourced-map-text.primary-with-english.v1"
+    @Suppress("unused")
     const val decisionPathId = "flightalert.sourced-text.source-exact-v2"
     const val maxSourcedTextUtf8Bytes = 4_096
 

@@ -1,16 +1,14 @@
-@file:Suppress("FunctionName", "LocalVariableName", "PropertyName", "ArrayInDataClass")
+@file:Suppress("FunctionName", "LocalVariableName", "PropertyName", "ArrayInDataClass", "PrivatePropertyName")
 
 package com.flightalert.map.reference.labels
 
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PathMeasure
 import android.graphics.RectF
 import android.graphics.Typeface
 import androidx.core.graphics.withSave
-import com.flightalert.with_alpha
 import com.flightalert.map.*
 import com.flightalert.map.reference.*
 import com.flightalert.map.reference.borders.ReferenceBoundaryOccurrenceSelector
@@ -21,8 +19,7 @@ internal val ALWAYS_KEEP_LABEL_PLAN: () -> Boolean = { true }
 
 internal class ReferenceLabelRenderer(
     private val text_paint: Paint,
-    private val dp: (Float) -> Float,
-    private val sp: (Float) -> Float,
+    sp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int,
     private val boundary_density: Float,
 ) {
@@ -305,11 +302,7 @@ internal class ReferenceLabelRenderer(
             resolve_line_label(line, label_avoid_rects)
         }.orEmpty()
         if (!keep_planning()) return false
-        val candidates = if (line_candidates.isNotEmpty()) {
-            line_candidates
-        } else {
-            listOfNotNull(prepared.point)
-        }
+        val candidates = line_candidates.ifEmpty { listOfNotNull(prepared.point) }
         var added = false
         for (candidate in candidates) {
             if (

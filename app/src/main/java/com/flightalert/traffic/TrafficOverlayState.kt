@@ -8,7 +8,6 @@
 
 package com.flightalert.traffic
 
-import android.graphics.Path
 import android.graphics.RectF
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftAppearance
@@ -27,7 +26,6 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
-import kotlin.math.roundToInt
 
 data class TrafficOverlayStyle(val visual_theme: VisualTheme)
 

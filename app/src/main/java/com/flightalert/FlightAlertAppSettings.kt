@@ -11,7 +11,6 @@ package com.flightalert
 object FlightAlertAppSettings {
     object App {
         const val USER_AGENT = "FlightAlertPrototype/0.1"
-        const val TAG = "FlightAlert"
     }
 
     object MapTuning {
@@ -34,7 +33,6 @@ object FlightAlertAppSettings {
         const val MAP_TILE_INTERACTION_SETTLE_MS = 280L
         const val BINCRAFT_FEED_READY_AIRCRAFT_MIN = 1000
         const val PARTIAL_FEED_REGRESSION_RATIO = 0.5f
-        const val FAR_ZOOM_POSITION_ESTIMATE_THRESHOLD = 8.0
         const val PHOTO_LONG_PRESS_MS = 550L
         const val PHOTO_REPLACEMENT_TRANSITION_MS = 180L
         const val AIRCRAFT_BOUNDS_PADDING_PX = 96.0
@@ -48,8 +46,6 @@ object FlightAlertAppSettings {
         const val AVIATION_LAYER_REFRESH_MS = 5L * 60L * 1000L
         const val AVIATION_LAYER_BOUNDS_PADDING_FRACTION = 0.75
         const val PATH_FIT_CONTEXT_MULTIPLIER = 1.5
-        const val PRIORITY_PANEL_ROWS = 5
-        const val PROOF_QUOTE_LINES = 3
         const val AIRCRAFT_TAP_RADIUS_DP = 42
         const val HOLE_PUNCH_MAX_SIZE_DP = 72
         const val MAX_ESTIMATION_SECONDS = 10.0 * 60.0
@@ -63,12 +59,9 @@ object FlightAlertAppSettings {
         const val DETAILS_PREFETCH_SCAN_LIMIT = 512
         const val PATH_TRACE_NEWER_THAN_FEED_SECONDS = 45L
         const val MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS = 180.0
-        const val ALTITUDE_COLOR_MAX_FEET = 45000.0
-        const val KNOTS_TO_METERS_PER_SECOND = 0.514444
         const val DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M = 30000.0
         const val INITIAL_RANGE_MULTIPLIER = 1.25
         const val USER_AGENT = App.USER_AGENT
-        const val TAG = App.TAG
     }
 
     object CurrentRoute {
@@ -207,8 +200,6 @@ const val BINCRAFT_FEED_READY_AIRCRAFT_MIN =
     FlightAlertAppSettings.MapTuning.BINCRAFT_FEED_READY_AIRCRAFT_MIN
 const val PARTIAL_FEED_REGRESSION_RATIO =
     FlightAlertAppSettings.MapTuning.PARTIAL_FEED_REGRESSION_RATIO
-const val FAR_ZOOM_POSITION_ESTIMATE_THRESHOLD =
-    FlightAlertAppSettings.MapTuning.FAR_ZOOM_POSITION_ESTIMATE_THRESHOLD
 const val PHOTO_LONG_PRESS_MS = FlightAlertAppSettings.MapTuning.PHOTO_LONG_PRESS_MS
 const val PHOTO_REPLACEMENT_TRANSITION_MS =
     FlightAlertAppSettings.MapTuning.PHOTO_REPLACEMENT_TRANSITION_MS
@@ -228,8 +219,6 @@ const val AVIATION_LAYER_REFRESH_MS = FlightAlertAppSettings.MapTuning.AVIATION_
 const val AVIATION_LAYER_BOUNDS_PADDING_FRACTION =
     FlightAlertAppSettings.MapTuning.AVIATION_LAYER_BOUNDS_PADDING_FRACTION
 const val PATH_FIT_CONTEXT_MULTIPLIER = FlightAlertAppSettings.MapTuning.PATH_FIT_CONTEXT_MULTIPLIER
-const val PRIORITY_PANEL_ROWS = FlightAlertAppSettings.MapTuning.PRIORITY_PANEL_ROWS
-const val PROOF_QUOTE_LINES = FlightAlertAppSettings.MapTuning.PROOF_QUOTE_LINES
 const val AIRCRAFT_TAP_RADIUS_DP = FlightAlertAppSettings.MapTuning.AIRCRAFT_TAP_RADIUS_DP
 const val HOLE_PUNCH_MAX_SIZE_DP = FlightAlertAppSettings.MapTuning.HOLE_PUNCH_MAX_SIZE_DP
 const val MAX_ESTIMATION_SECONDS = FlightAlertAppSettings.MapTuning.MAX_ESTIMATION_SECONDS
@@ -251,10 +240,7 @@ const val PATH_TRACE_NEWER_THAN_FEED_SECONDS =
     FlightAlertAppSettings.MapTuning.PATH_TRACE_NEWER_THAN_FEED_SECONDS
 const val MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS =
     FlightAlertAppSettings.MapTuning.MAX_SELECTED_PATH_TRAIL_REPORT_AGE_SECONDS
-const val ALTITUDE_COLOR_MAX_FEET = FlightAlertAppSettings.MapTuning.ALTITUDE_COLOR_MAX_FEET
-const val KNOTS_TO_METERS_PER_SECOND = FlightAlertAppSettings.MapTuning.KNOTS_TO_METERS_PER_SECOND
 const val DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M =
     FlightAlertAppSettings.MapTuning.DJI_MAVIC_3_MAX_FLIGHT_DISTANCE_M
 const val INITIAL_RANGE_MULTIPLIER = FlightAlertAppSettings.MapTuning.INITIAL_RANGE_MULTIPLIER
 const val USER_AGENT = FlightAlertAppSettings.MapTuning.USER_AGENT
-const val TAG = FlightAlertAppSettings.MapTuning.TAG

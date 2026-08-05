@@ -1,4 +1,4 @@
-@file:Suppress("FunctionName", "PackageName")
+@file:Suppress("FunctionName", "PackageName", "LocalVariableName")
 
 package com.flightalert.alerts
 

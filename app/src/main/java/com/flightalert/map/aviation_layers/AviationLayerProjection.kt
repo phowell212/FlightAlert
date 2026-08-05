@@ -1,3 +1,8 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+)
+
 package com.flightalert.map.aviation_layers
 
 import com.flightalert.TILE_SIZE
@@ -39,20 +44,6 @@ internal object AviationAirspaceRenderPolicy {
             visibleBounds.min_lon,
             visibleBounds.max_lon
         )
-    }
-
-    fun forEachSourcePolygon(
-        feature: AviationAirspaceFeature,
-        action: (AviationPolygon) -> Unit
-    ) {
-        for (polygon in feature.geometry.polygons) action(polygon)
-    }
-
-    fun forEachSourceRing(
-        polygon: AviationPolygon,
-        action: (List<AviationLayerPoint>) -> Unit
-    ) {
-        for (ring in polygon.all_rings) action(ring)
     }
 
     fun contains(feature: AviationAirspaceFeature, lat: Double, lon: Double): Boolean {
@@ -201,7 +192,7 @@ internal fun project_aviation_source_point_to_screen(
 ): ScreenPoint? {
     project_aviation_point_to_screen(point, viewport, lat_lon_to_world)?.let { return it }
     val world = lat_lon_to_world(point.lat, point.lon, viewport.zoom)
-    val world_span = com.flightalert.TILE_SIZE * 2.0.pow(viewport.zoom)
+    val world_span = TILE_SIZE * 2.0.pow(viewport.zoom)
     if (!world.x.isFinite() || !world.y.isFinite() ||
         !world_span.isFinite() || world_span <= 0.0
     ) return null

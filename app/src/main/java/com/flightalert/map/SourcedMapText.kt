@@ -1,3 +1,10 @@
+@file:Suppress(
+    "CanBeParameter",
+    "ConstPropertyName",
+    "LocalVariableName",
+    "PropertyName",
+)
+
 package com.flightalert.map
 
 import java.lang.Character.UnicodeScript
@@ -66,10 +73,13 @@ class SourcedMapText internal constructor(
     val primaryText: String,
     val primarySourceFieldId: ULong,
     val englishText: String?,
+    @Suppress("unused")
     val englishSourceFieldId: ULong?,
     val layoutMode: SourcedTextLayoutMode,
+    @Suppress("unused")
     val englishGapReason: SourcedTextEnglishGapReason,
     val primaryScriptSignals: SourcedTextScriptSignals,
+    @Suppress("unused")
     val englishScriptSignals: SourcedTextScriptSignals?,
     canonicalBytes: ByteArray,
     canonicalSha256: ByteArray,
@@ -79,10 +89,15 @@ class SourcedMapText internal constructor(
     private val canonicalSha256Value = canonicalSha256.copyOf()
     private val fullSha256Value = fullSha256.copyOf()
 
+    @Suppress("unused")
     val canonicalBytes: ByteArray get() = canonicalBytesValue.copyOf()
+    @Suppress("unused")
     val canonicalSha256: ByteArray get() = canonicalSha256Value.copyOf()
+    @Suppress("unused")
     val fullSha256: ByteArray get() = fullSha256Value.copyOf()
+    @Suppress("unused")
     val hotIdBytes: ByteArray get() = fullSha256Value.copyOfRange(0, 8)
+    @Suppress("unused")
     val hotId: ULong get() = first_u64_big_endian(fullSha256Value)
     val isAtomicBilingual: Boolean
         get() = layoutMode == SourcedTextLayoutMode.PRIMARY_WITH_ENGLISH && englishText != null
@@ -237,6 +252,7 @@ object SourcedMapTextBinaryCodec {
         "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb"
     const val policySha256 =
         "ca7bd559b3d84758d17e11b5e619f04da7e5093d67d0f90506ab509e2ef6543a"
+    @Suppress("unused")
     const val bilingualPresentationToken =
         "flightalert.sourced-map-text.primary-with-english.v1"
     const val maxSourcedTextUtf8Bytes = 4_096
@@ -248,6 +264,7 @@ object SourcedMapTextBinaryCodec {
     private val policyIdentity = decodeLowerHex(policySha256)
     private val identityDomain = "FAE8SOURCEDTEXT1\u0000".toByteArray(Charsets.US_ASCII)
 
+    @Suppress("unused")
     fun decode(canonicalBytes: ByteArray, expectedFullSha256: String): SourcedMapText {
         if (canonicalBytes.isEmpty() || canonicalBytes.size > maximumCanonicalRecordBytes) {
             throw SourcedMapTextException("sourced-text record byte length is outside its bound")

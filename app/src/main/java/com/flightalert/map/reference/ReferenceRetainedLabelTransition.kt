@@ -1,6 +1,12 @@
+@file:Suppress(
+    "ArrayInDataClass",
+    "FunctionName",
+    "LocalVariableName",
+    "PropertyName",
+)
+
 package com.flightalert.map.reference
 
-import com.flightalert.map.*
 import com.flightalert.map.reference.labels.*
 
 internal data class ReferenceRetainedLabelTransition<T>(

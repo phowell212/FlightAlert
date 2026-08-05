@@ -1,9 +1,5 @@
 package com.flightalert.map.reference.labels
 
-import com.flightalert.map.*
-import com.flightalert.map.reference.*
-import com.flightalert.map.reference.borders.*
-import com.flightalert.map.reference.dictionary.*
 
 import kotlin.math.hypot
 import kotlin.math.max
@@ -243,24 +239,15 @@ internal object ReferenceLabelLayoutSelector {
     private fun collides(
         first: ReferenceLabelCollisionShape,
         second: ReferenceLabelCollisionShape,
-    ): Boolean = when {
-        first is ReferenceLabelCollisionShape.Box &&
-            second is ReferenceLabelCollisionShape.Box ->
-            strictlyOverlaps(first.rect, second.rect)
-
-        first is ReferenceLabelCollisionShape.Path &&
-            second is ReferenceLabelCollisionShape.Box ->
-            pathCollidesWithBox(first, second.rect)
-
-        first is ReferenceLabelCollisionShape.Box &&
-            second is ReferenceLabelCollisionShape.Path ->
-            pathCollidesWithBox(second, first.rect)
-
-        first is ReferenceLabelCollisionShape.Path &&
-            second is ReferenceLabelCollisionShape.Path ->
-            pathsCollide(first, second)
-
-        else -> error("unknown reference-label collision shapes")
+    ): Boolean = when (first) {
+        is ReferenceLabelCollisionShape.Box -> when (second) {
+            is ReferenceLabelCollisionShape.Box -> strictlyOverlaps(first.rect, second.rect)
+            is ReferenceLabelCollisionShape.Path -> pathCollidesWithBox(second, first.rect)
+        }
+        is ReferenceLabelCollisionShape.Path -> when (second) {
+            is ReferenceLabelCollisionShape.Box -> pathCollidesWithBox(first, second.rect)
+            is ReferenceLabelCollisionShape.Path -> pathsCollide(first, second)
+        }
     }
 
     private fun strictlyOverlaps(first: ReferenceScreenRect, second: ReferenceScreenRect): Boolean =

@@ -1,9 +1,10 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+)
+
 package com.flightalert.map.reference.labels
 
-import com.flightalert.map.*
-import com.flightalert.map.reference.*
-import com.flightalert.map.reference.borders.*
-import com.flightalert.map.reference.dictionary.*
 
 private const val LOW_ZOOM_COUNTRY_LIMIT = 4.0
 private const val LOW_ZOOM_COUNTRY_RANK_RANGE = 0x100

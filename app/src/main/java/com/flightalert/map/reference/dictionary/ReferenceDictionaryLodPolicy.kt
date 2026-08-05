@@ -1,6 +1,11 @@
+@file:Suppress(
+    "ConvertTwoComparisonsToRangeCheck",
+    "FunctionName",
+    "LocalVariableName",
+)
+
 package com.flightalert.map.reference.dictionary
 
-import com.flightalert.map.*
 import com.flightalert.map.reference.*
 
 import kotlin.math.floor
@@ -35,7 +40,6 @@ internal object ReferenceDictionaryLodPolicy {
     }
 
     fun select_fallback(
-        viewportZoom: Double,
         targetZoom: Int,
         availableZooms: Set<Int>,
     ): Int? {

@@ -1,7 +1,5 @@
 package com.flightalert.map.reference
 
-import com.flightalert.map.*
-import com.flightalert.map.reference.labels.*
 
 internal data class ReferenceRetainedBitmapRequestToken<Key>(
     val id: Long,

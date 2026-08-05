@@ -1,9 +1,11 @@
+@file:Suppress(
+    "ConstPropertyName",
+    "PropertyName",
+)
+
 package com.flightalert.map.reference.labels
 
-import com.flightalert.map.*
 import com.flightalert.map.reference.*
-import com.flightalert.map.reference.borders.*
-import com.flightalert.map.reference.dictionary.*
 
 import java.util.Collections
 import java.util.PriorityQueue
@@ -25,8 +27,6 @@ internal class ReferenceSupportIntervalUnion(
     private var values = DoubleArray(max(1, initialIntervalCapacity) * 2)
     private var count = 0
     private var batchEvaluation = false
-
-    internal val usesBatchEvaluation: Boolean get() = batchEvaluation
 
     fun clear() {
         count = 0
@@ -265,9 +265,7 @@ internal data class ReferencePathLabelPlacement(
     val centerDistanceQ8Px: Long,
     val repeatOrdinal: Long,
     val normalOffsetPx: Double,
-) {
-    val textScaleX: Double get() = 1.0
-}
+)
 
 internal object ReferencePathLabelPlanner {
     private const val epsilon = 1e-9
@@ -325,7 +323,7 @@ internal object ReferencePathLabelPlanner {
         }
 
         private fun createFailoverQueue(): PriorityQueue<CurvedHalfSpanInterval> {
-            val queue = PriorityQueue<CurvedHalfSpanInterval>(
+            val queue = PriorityQueue(
                 compareByDescending<CurvedHalfSpanInterval> {
                     it.upperQ8 - it.lowerQ8 - 1L
                 }.thenBy { it.lowerQ8 },
@@ -377,13 +375,12 @@ internal object ReferencePathLabelPlanner {
         request: ReferencePathLabelRequest,
         prepared: ReferencePreparedPathGeometry,
     ): List<ReferencePathLabelPlacement> {
-        val viewport = request.viewport
         val parts = prepared.parts
         if (parts.isEmpty()) return emptyList()
 
         val curved = if (request.allowCurvedPlacement) {
             parts.flatMap { part ->
-                visibleSpans(part, viewport).flatMap { span -> curvedPlacements(request, span) }
+                visibleSpans(part).flatMap { span -> curvedPlacements(request, span) }
             }
         } else {
             emptyList()
@@ -396,7 +393,7 @@ internal object ReferencePathLabelPlanner {
 
         return rank(
             parts.flatMap { part ->
-                visibleSpans(part, viewport).flatMap { span -> tangentPlacements(request, span) }
+                visibleSpans(part).flatMap { span -> tangentPlacements(request, span) }
             },
         )
     }
@@ -481,7 +478,6 @@ internal object ReferencePathLabelPlanner {
 
     private fun visibleSpans(
         part: ReferencePreparedPathPart,
-        viewport: ReferenceScreenRect,
     ): List<VisibleSpan> {
         val result = mutableListOf<VisibleSpan>()
         var currentStart: Double? = null
@@ -497,7 +493,7 @@ internal object ReferencePathLabelPlanner {
             } else if (start <= currentEnd + epsilon) {
                 currentEnd = max(currentEnd, end)
             } else {
-                result += VisibleSpan(part, currentStart!!, currentEnd)
+                result += VisibleSpan(part, currentStart, currentEnd)
                 currentStart = start
                 currentEnd = end
             }
@@ -505,12 +501,6 @@ internal object ReferencePathLabelPlanner {
         currentStart?.let { result += VisibleSpan(part, it, currentEnd) }
         return result
     }
-
-    private fun clipToRect(
-        start: ReferencePathLabelPoint,
-        end: ReferencePathLabelPoint,
-        rect: ReferenceScreenRect,
-    ): ClipInterval? = clipToRect(start.x, start.y, end.x, end.y, rect)
 
     private fun clipToRect(
         startX: Double,
@@ -1241,7 +1231,7 @@ internal object ReferencePathLabelPlanner {
         val canonicalMaximumDistance = max(minimumDistance, maximumDistance)
         val bestFirst = compareBy<CenterCandidate> { it.viewportDistanceQ8 }
             .thenBy { it.sourceDistanceQ8 }
-        val selected = PriorityQueue<CenterCandidate>(
+        val selected = PriorityQueue(
             maximumCurvedCenterCandidates,
             bestFirst.reversed(),
         )

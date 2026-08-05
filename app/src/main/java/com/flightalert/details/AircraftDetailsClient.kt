@@ -480,8 +480,8 @@ class AircraftDetailsClient(private val user_agent: String) {
         val destination = route.optJSONObject("destination")?.details_to_adsb_db_airport()
         if (origin == null && destination == null) return null
         val route_label = listOfNotNull(
-            origin?.icao ?: origin?.iata,
-            destination?.icao ?: destination?.iata
+            origin?.icao,
+            destination?.icao
         ).joinToString("-").ifEmpty { null }
         return RouteLookup(route_label, origin, destination)
     }
@@ -1046,7 +1046,6 @@ internal const val DETAILS_CACHE_MAX_ENTRIES =
 internal const val DETAILS_STATIC_DB_CACHE_MAX_ENTRIES =
     FlightAlertAppSettings.AircraftDetails.STATIC_DB_CACHE_MAX_ENTRIES
 
-internal const val DETAILS_TAG = FlightAlertAppSettings.App.TAG
 
 internal const val DETAILS_US_N_NUMBER_ICAO_END = 0xADF7C7L
 

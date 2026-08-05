@@ -1,9 +1,5 @@
 package com.flightalert.map.reference.labels
 
-import com.flightalert.map.*
-import com.flightalert.map.reference.*
-import com.flightalert.map.reference.borders.*
-import com.flightalert.map.reference.dictionary.*
 import kotlin.math.max
 import kotlin.math.min
 

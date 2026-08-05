@@ -5,7 +5,6 @@ package com.flightalert.map.reference.dictionary
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
-import com.flightalert.map.*
 import com.flightalert.map.reference.*
 import com.flightalert.map.reference.labels.*
 import org.json.JSONArray
@@ -459,7 +458,6 @@ internal class ReferenceDictionaryTileDecoder {
                     null
                 }
                 val style_template = label_style_template_for(
-                    text = text,
                     source_kind = source_kind,
                     source_layer = source_layer,
                     label_placement = label_placement,
@@ -650,7 +648,6 @@ internal class ReferenceDictionaryTileDecoder {
     }
 
     private fun label_style_template_for(
-        text: String,
         source_kind: String,
         source_layer: String,
         label_placement: String,
@@ -735,11 +732,11 @@ internal class ReferenceDictionaryTileDecoder {
         rank: Int?
     ): Int {
         if (rank != null) return rank.coerceIn(0, 160)
-        return when {
-            source_kind == "admin" -> 10
-            source_kind == "water" -> 18
-            source_kind == "place" && source_layer.contains("City", ignoreCase = true) -> 24
-            source_kind == "county" -> 46
+        return when (source_kind) {
+            "admin" -> 10
+            "water" -> 18
+            "place" -> if (source_layer.contains("City", ignoreCase = true)) 24 else 80
+            "county" -> 46
             else -> 80
         }
     }
@@ -1037,9 +1034,6 @@ internal class ReferenceDictionaryTileDecoder {
     private companion object {
         const val PRESENTATION_CANCELLATION_INTERVAL = 64
         const val MAX_LABEL_TEXT_LENGTH = 48
-        const val MAP_LABEL_TEXT_SCALE_MIN = 1f
-        const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
-        const val LEGACY_LABEL_HALO_WIDTH_MILLI_EM = 220
         val REFERENCE_TOKEN_SEPARATOR = Regex("[^a-z0-9]+")
         val ROAD_SHIELD_LABEL = Regex("^\\d+[A-Z]?$")
     }

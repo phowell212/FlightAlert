@@ -1,3 +1,5 @@
+@file:Suppress("ConvertTwoComparisonsToRangeCheck")
+
 package com.flightalert.ui
 
 fun interface ReferenceFiltersTextMeasurer {
@@ -307,16 +309,6 @@ class ReferenceFiltersPanel(
 
     fun plan(input: ReferenceFiltersPanelInput): ReferenceFiltersPanelPlan =
         layout.plan(input)
-
-    fun actionAt(
-        plan: ReferenceFiltersPanelPlan,
-        xDp: Float,
-        yDp: Float,
-    ): ReferencePanelIntent? = plan.controls.firstOrNull { control ->
-        control.bounds.contains(xDp, yDp) &&
-            (control.kind != ReferenceControlKind.SWITCH ||
-                plan.contentViewport.contains(xDp, yDp))
-    }?.intent
 
     fun keyIntent(
         plan: ReferenceFiltersPanelPlan,

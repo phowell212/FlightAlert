@@ -1,4 +1,4 @@
-@file:Suppress("ArrayInDataClass")
+@file:Suppress("ArrayInDataClass", "ConvertTwoComparisonsToRangeCheck")
 
 package com.flightalert.map.reference.dictionary
 
@@ -11,19 +11,6 @@ import kotlin.math.min
 /** Bounded decoder for the render-ready tile stored by reference package v5. */
 internal object ReferenceDictionaryRenderTileCodec {
     private val magic = "FAE8RTILE1\u0000".toByteArray(Charsets.US_ASCII)
-
-    fun decode(
-        coordinate: ReferenceDictionaryTileCoordinate,
-        bytes: ByteArray,
-        outlineVisibilityCentizoom: Int? = null,
-    ): ReferenceDictionaryBinaryTile {
-        return decodeStrict(
-            coordinate,
-            bytes,
-            outlineVisibilityCentizoom,
-            DecodeControl(requestIsRelevant = null),
-        )!!
-    }
 
     fun decodeIfRelevant(
         coordinate: ReferenceDictionaryTileCoordinate,

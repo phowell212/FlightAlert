@@ -1,3 +1,8 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+)
+
 package com.flightalert.map.reference
 
 import com.flightalert.map.*

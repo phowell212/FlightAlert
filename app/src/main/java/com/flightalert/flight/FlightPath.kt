@@ -16,7 +16,6 @@ import android.graphics.RectF
 import com.flightalert.MAX_ZOOM
 import com.flightalert.MIN_ZOOM
 import com.flightalert.PATH_FIT_CONTEXT_MULTIPLIER
-import com.flightalert.with_alpha
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftPositionProjector
 import com.flightalert.map.Bounds

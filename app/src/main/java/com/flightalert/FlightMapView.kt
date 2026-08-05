@@ -67,7 +67,6 @@ import com.flightalert.details.AircraftDetailsContentBuilder
 import com.flightalert.details.AircraftDetailsCoordinator
 import com.flightalert.details.AircraftDetailsDrawResult
 import com.flightalert.details.AircraftDetailsEffect
-import com.flightalert.details.AircraftDetailsPage
 import com.flightalert.details.AircraftDetailsMainState
 import com.flightalert.details.AircraftDetailsPanelRenderer
 import com.flightalert.details.AircraftDetailsPanelState
@@ -194,7 +193,6 @@ import com.flightalert.ui.FlightMapLayout
 import com.flightalert.ui.FlightMapLayoutState
 import com.flightalert.ui.FlightMapPanelRenderer
 import com.flightalert.ui.FlightMapPanelStyle
-import com.flightalert.ui.FloatScale
 import com.flightalert.ui.ImpactMethodologyPanelState
 import com.flightalert.ui.MapLabelsPanelState
 import com.flightalert.ui.MapSurfaceAction
@@ -280,11 +278,11 @@ class FlightMapView(
     private val icon_path = Path()
     private val prefs: SharedPreferences = FlightAlertSettings.prefs(context)
 
-    private val layout = FlightMapLayout(FloatScale { value -> dp(value) })
+    private val layout = FlightMapLayout { value -> dp(value) }
     private val chrome_bridge = FlightMapChromeBridge(
         layout = layout,
-        dp_value = FloatScale { value -> dp(value) },
-        sp_value = FloatScale { value -> sp(value) },
+        dp_value = { value -> dp(value) },
+        sp_value = { value -> sp(value) },
         fit_text = { value, max_width -> ellipsize(value, max_width) },
         control_radius_value = { control_radius() },
         panel_surface = { canvas, rect, fill, alpha ->
@@ -2486,7 +2484,7 @@ class FlightMapView(
                         ?.let { reusable_published_traffic_visuals() }
             )
         } ?: return
-        if (start_worker == false &&
+        if (!start_worker &&
             should_keep_current_aircraft_for_partial_result(
                 result,
                 result.globe_aircraft?.size ?: result.aircraft.size
@@ -2781,8 +2779,8 @@ class FlightMapView(
         val by_icao: Map<String, Aircraft>
         val metadata_by_key: Map<String, Aircraft>
         if (reuse_existing_indexes) {
-            by_icao = checkNotNull(existing_aircraft_by_icao)
-            metadata_by_key = checkNotNull(existing_metadata_by_key)
+            by_icao = existing_aircraft_by_icao
+            metadata_by_key = existing_metadata_by_key
         } else {
             val next_by_icao = HashMap<String, Aircraft>(parsed.size)
             val next_metadata_by_key = HashMap<String, Aircraft>(parsed.size)
@@ -5707,6 +5705,7 @@ class FlightMapView(
         return aircraft_filter_controller.is_active()
     }
 
+    @Suppress("SimplifiableBooleanExpression", "SimplifyBooleanWithConstants")
     private fun reference_layer_filters_active(): Boolean {
         return place_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED ||
                 water_labels_layer_enabled != FlightAlertSettings.DEFAULT_LAYER_WATER_LABELS_ENABLED ||

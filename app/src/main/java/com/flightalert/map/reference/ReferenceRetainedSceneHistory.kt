@@ -1,7 +1,9 @@
+@file:Suppress(
+    "FunctionName",
+)
+
 package com.flightalert.map.reference
 
-import com.flightalert.map.*
-import com.flightalert.map.reference.labels.*
 
 import java.util.ArrayDeque
 

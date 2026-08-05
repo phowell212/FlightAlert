@@ -1,8 +1,7 @@
-@file:Suppress("FunctionName", "PackageName")
+@file:Suppress("FunctionName", "PackageName", "LocalVariableName", "PrivatePropertyName", "PropertyName")
 
 package com.flightalert.map.reference
 
-import com.flightalert.map.*
 import com.flightalert.map.reference.labels.*
 
 internal class ReferenceRetainedLabelCoverage(

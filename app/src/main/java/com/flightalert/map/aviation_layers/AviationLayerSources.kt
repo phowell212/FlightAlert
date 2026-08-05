@@ -1,3 +1,11 @@
+@file:Suppress(
+    "ConvertTwoComparisonsToRangeCheck",
+    "FunctionName",
+    "LocalVariableName",
+    "PrivatePropertyName",
+    "PropertyName",
+)
+
 package com.flightalert.map.aviation_layers
 
 import com.flightalert.map.*
@@ -243,7 +251,6 @@ class AviationArcGisSource(
         val before_response = get(metadata_url, should_continue).require_success()
         val before = parse_metadata(before_response)
         val expected_ids = TreeSet<Long>()
-        var last_response = before_response
         for (envelope in envelopes) {
             val id_url = query_url(
                 layer.query_url,
@@ -268,7 +275,6 @@ class AviationArcGisSource(
                 throw failure.with_revision(before.revision)
             }
             expected_ids += ids
-            last_response = response
         }
         val captured_at = now_ms()
         val records_by_id = linkedMapOf<Long, T>()
@@ -373,7 +379,6 @@ class AviationArcGisSource(
                     duplicate_ids += record_id
                 }
             }
-            last_response = response
         }
 
         val after_response: AviationHttpResponse
@@ -400,7 +405,6 @@ class AviationArcGisSource(
                     "final revision check failed: ${failure.message}").joinToString("; ")
             )
         }
-        last_response = after_response
         return ArcGisAttempt(
             envelopes = envelopes,
             records = records_by_id.values.toList(),
@@ -412,7 +416,7 @@ class AviationArcGisSource(
             exceeded_transfer_limit = exceeded,
             captured_at_epoch_ms = captured_at,
             observed_at_epoch_ms = now_ms(),
-            final_url = last_response.final_url,
+            final_url = after_response.final_url,
             advertised_revision = after.revision,
             revision_changed = before != after,
             failure_reason = integrity_reasons.takeIf(Set<String>::isNotEmpty)
@@ -590,9 +594,6 @@ class AviationArcGisSource(
         failure: ArcGisSourceFailure
     ): AviationSourceResult<T> = AviationSourceResult(
         records = emptyList(),
-        expected_object_ids = null,
-        returned_object_ids = emptySet(),
-        invalid_object_ids = emptySet(),
         identity = AviationSourceIdentity(
             provider = layer.source_provider,
             service = layer.source_service,
@@ -705,9 +706,6 @@ class AviationArcGisSource(
             }
             return AviationSourceResult(
                 records = records,
-                expected_object_ids = expected_ids,
-                returned_object_ids = returned_ids,
-                invalid_object_ids = invalid_ids,
                 identity = AviationSourceIdentity(
                     provider = layer.source_provider,
                     service = layer.source_service,
@@ -801,9 +799,6 @@ class AviationNatSource(
         message: String
     ): AviationSourceResult<AviationOceanicTrack> = AviationSourceResult(
         records = emptyList(),
-        expected_object_ids = null,
-        returned_object_ids = emptySet(),
-        invalid_object_ids = emptySet(),
         identity = nat_identity(final_url, observed_at),
         health = AviationLayerHealth(
             AviationLayerAvailability.UNAVAILABLE,
@@ -960,7 +955,6 @@ object AviationNatParser {
                     end_datetime = end_datetime,
                     entry_datetime = entry_datetime,
                     last_updated = last_updated,
-                    raw_condition_message = condition,
                     raw_track_line = raw_line,
                     start_epoch_ms = time.start_epoch_ms,
                     end_epoch_ms = time.end_epoch_ms,
@@ -1077,21 +1071,20 @@ object AviationNatParser {
         val latitude_token = raw.substringBefore('/')
         val longitude_token = raw.substringAfter('/')
         if (!latitude_token.all { it in '0'..'9' } || !longitude_token.all { it in '0'..'9' }) return null
-        val latitude = parse_coordinate_side(latitude_token, degree_width = 2, max_degrees = 90)
+        val latitude = parse_coordinate_side(latitude_token, max_degrees = 90)
             ?: return null
-        val longitude = parse_coordinate_side(longitude_token, degree_width = 2, max_degrees = 180)
+        val longitude = parse_coordinate_side(longitude_token, max_degrees = 180)
             ?: return null
         return AviationLayerPoint(latitude, -longitude)
     }
 
     private fun parse_coordinate_side(
         raw: String,
-        degree_width: Int,
         max_degrees: Int
     ): Double? {
-        if (raw.length != degree_width && raw.length != degree_width + 2) return null
-        val degrees = raw.take(degree_width).toIntOrNull() ?: return null
-        val minutes = raw.drop(degree_width).takeIf(String::isNotEmpty)?.toIntOrNull() ?: 0
+        if (raw.length != 2 && raw.length != 4) return null
+        val degrees = raw.take(2).toIntOrNull() ?: return null
+        val minutes = raw.drop(2).takeIf(String::isNotEmpty)?.toIntOrNull() ?: 0
         if (degrees !in 0..max_degrees || minutes !in 0..59) return null
         if (degrees == max_degrees && minutes != 0) return null
         return degrees + minutes / 60.0
@@ -1126,9 +1119,6 @@ object AviationNatParser {
         message: String
     ): AviationSourceResult<AviationOceanicTrack> = AviationSourceResult(
         records = records,
-        expected_object_ids = null,
-        returned_object_ids = emptySet(),
-        invalid_object_ids = emptySet(),
         identity = identity,
         health = AviationLayerHealth(availability, completeness, freshness),
         message = message
@@ -1191,20 +1181,6 @@ object AviationNatRenderPolicy {
         return Collections.unmodifiableList(selected)
     }
 
-    internal fun temporal_state_token(
-        tracks: List<AviationOceanicTrack>,
-        now_epoch_ms: Long
-    ): Long {
-        var passed_boundary_count = 0L
-        for (track in tracks) {
-            val start_epoch_ms = track.start_epoch_ms ?: continue
-            val end_epoch_ms = track.end_epoch_ms ?: continue
-            if (start_epoch_ms >= end_epoch_ms) continue
-            if (now_epoch_ms >= start_epoch_ms) passed_boundary_count += 1L
-            if (now_epoch_ms >= end_epoch_ms) passed_boundary_count += 1L
-        }
-        return passed_boundary_count
-    }
 }
 
 private fun nat_identity(final_url: URL, observed_at: Long): AviationSourceIdentity =

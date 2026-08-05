@@ -3,6 +3,7 @@
 !/.idea/runConfigurations/
 /.idea/runConfigurations/*
 !/.idea/runConfigurations/Flight_Alert.xml
+/app/.idea/
 /.gradle/
 /build/
 /app/build/

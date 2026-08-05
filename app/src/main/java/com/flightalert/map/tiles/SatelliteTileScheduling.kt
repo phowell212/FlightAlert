@@ -1,3 +1,7 @@
+@file:Suppress(
+    "FunctionName",
+)
+
 package com.flightalert.map.tiles
 
 internal enum class SatelliteBaseRequestKind {

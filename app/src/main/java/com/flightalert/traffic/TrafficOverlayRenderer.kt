@@ -16,10 +16,10 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.os.SystemClock
 import android.graphics.Shader
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withRotation
 import androidx.core.graphics.withTranslation
@@ -42,7 +42,6 @@ import com.flightalert.with_alpha
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executors
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
@@ -242,7 +241,6 @@ class TrafficOverlayRenderer(
         reset_aircraft_symbol_batch()
         var drawn_count = 0
         val scale = transform_scale.coerceAtLeast(0.001f)
-        val now_ms = now_elapsed_ms
         val has_selected_aircraft = normalized_selected_id != null
         val draw_any_labels = draw_labels && label_count > 0
         val max_cull_icon_scale =
@@ -252,7 +250,7 @@ class TrafficOverlayRenderer(
             )
         for (item in aircraft) {
             val selected = has_selected_aircraft && item.appearance_key == normalized_selected_id
-            val elapsed_sec = traffic_motion_elapsed_seconds(item, now_ms)
+            val elapsed_sec = traffic_motion_elapsed_seconds(item, now_elapsed_ms)
             val x =
                 (item.screen_point.x + item.screen_velocity_x_px_per_sec * elapsed_sec) * scale + translation_x
             val y =
@@ -266,7 +264,7 @@ class TrafficOverlayRenderer(
             ) {
                 continue
             }
-            val appearance = current_aircraft_appearance_progress_at(item, now_ms)
+            val appearance = current_aircraft_appearance_progress_at(item, now_elapsed_ms)
             draw_aircraft_icon(
                 canvas = canvas,
                 x = x,
@@ -276,7 +274,7 @@ class TrafficOverlayRenderer(
                 appearance = appearance,
                 frame_style = frame_style,
                 draw_internal_dot = draw_internal_dot,
-                now_ms = now_ms,
+                now_ms = now_elapsed_ms,
                 batch_atlas = batch_atlas,
             )
             if (draw_any_labels && drawn_count < label_count) {
@@ -925,10 +923,9 @@ class TrafficOverlayRenderer(
         now_ms: Long,
         batch_atlas: AircraftSymbolBatchAtlas?,
     ) {
-        val appear = appearance
-        val enter_scale = 0.18f + 0.82f * appear
-        val alpha = (appear * 255).toInt().coerceIn(0, 255)
-        val symbol_alpha = (appear * frame_style.symbol_visibility * 255).toInt().coerceIn(0, 255)
+        val enter_scale = 0.18f + 0.82f * appearance
+        val alpha = (appearance * 255).toInt().coerceIn(0, 255)
+        val symbol_alpha = (appearance * frame_style.symbol_visibility * 255).toInt().coerceIn(0, 255)
         val symbol = item.symbol
         val type_scale = item.symbol_scale
         val icon_scale = frame_style.base_icon_scale * type_scale * enter_scale *
@@ -940,7 +937,7 @@ class TrafficOverlayRenderer(
                 x,
                 y,
                 icon_scale,
-                appear,
+                appearance,
                 item.color,
                 selected,
                 colors.accent_green,
@@ -949,11 +946,11 @@ class TrafficOverlayRenderer(
             return
         }
         if (alpha > 4 && symbol_alpha > 4) {
-            val shadow_alpha = (74 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 74)
+            val shadow_alpha = (74 * appearance * frame_style.symbol_visibility).toInt().coerceIn(0, 74)
             val fill_color = with_alpha(item.color, symbol_alpha)
             val stroke_color = with_alpha(
                 colors.scrim,
-                (235 * appear * frame_style.symbol_visibility).toInt().coerceIn(0, 235)
+                (235 * appearance * frame_style.symbol_visibility).toInt().coerceIn(0, 235)
             )
             val batch_vertices =
                 if (symbol == AircraftSymbol.ROTORCRAFT) {
@@ -1525,8 +1522,6 @@ class TrafficOverlayRenderer(
         val bottom = top + atlas.key.size_px
         val local_left = -half_size
         val local_top = -half_size
-        val local_right = half_size
-        val local_bottom = half_size
         val vertex_offset = symbol_batch_vertex_count * 2
 
         write_rotated_symbol_batch_vertex(
@@ -1544,7 +1539,7 @@ class TrafficOverlayRenderer(
             vertex_offset + 2,
             center_x,
             center_y,
-            local_right,
+            half_size,
             local_top,
             rotation_cos,
             rotation_sin,
@@ -1555,8 +1550,8 @@ class TrafficOverlayRenderer(
             vertex_offset + 4,
             center_x,
             center_y,
-            local_right,
-            local_bottom,
+            half_size,
+            half_size,
             rotation_cos,
             rotation_sin,
             right,
@@ -1567,7 +1562,7 @@ class TrafficOverlayRenderer(
             center_x,
             center_y,
             local_left,
-            local_bottom,
+            half_size,
             rotation_cos,
             rotation_sin,
             left,
@@ -1709,10 +1704,6 @@ class TrafficOverlayRenderer(
             stroke_paint,
         )
         stroke_paint.alpha = 255
-    }
-
-    private fun aircraft_motion_elapsed_sec(item: TrafficAircraftOverlayState): Float {
-        return traffic_motion_elapsed_seconds(item, SystemClock.elapsedRealtime())
     }
 
     private fun current_aircraft_appearance_progress_at(
@@ -1984,18 +1975,6 @@ class TrafficOverlayRenderer(
         if (rotorcraft_animation_frame_requested) return
         rotorcraft_animation_frame_requested = true
         chrome.request_animation_frame()
-    }
-
-    private fun aircraft_symbol_mask(
-        symbol: AircraftSymbol,
-        shape_progress: Float
-    ): AircraftSymbolMask {
-        return aircraft_symbol_mask(
-            symbol = symbol,
-            progress_bucket = aircraft_symbol_progress_bucket(shape_progress),
-            size_px = aircraft_symbol_mask_size_px(1f),
-            mask_resolution_scale = 1f
-        )
     }
 
     private fun aircraft_symbol_mask(
@@ -2846,7 +2825,6 @@ class TrafficOverlayRenderer(
         const val AIRCRAFT_FAST_DOT_BLEND = 0.995f
         const val AIRCRAFT_BATCH_DOT_BLEND = 0.995f
         const val ROTORCRAFT_BLADE_CYCLE_MS = 288L
-        const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
         const val SYMBOL_MASK_SIZE_DP = 72f
         const val SYMBOL_MASK_PROGRESS_STEPS = 96
         const val SYMBOL_MASK_CACHE_MAX_ENTRIES = 640
@@ -2862,8 +2840,6 @@ class TrafficOverlayRenderer(
         const val ROTORCRAFT_SYMBOL_BATCH_VERTICES =
             ROTORCRAFT_SYMBOL_BATCH_QUADS * SYMBOL_BATCH_VERTICES_PER_QUAD
         const val MAX_SYMBOL_BATCH_VERTICES = 32_760
-        const val DIRECT_ICON_DETAIL_SAMPLE_PERIOD = 16
-        const val SYMBOL_MASK_DETAIL_SAMPLE_PERIOD = 5
         const val DOT_OVERLAY_CACHE_MIN_DOTS = 3200
         const val DOT_OVERLAY_CACHE_MAX_ZOOM = 6.2
         const val DOT_OVERLAY_CACHE_MIN_ALPHA = 0.999f

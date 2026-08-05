@@ -1,4 +1,4 @@
-@file:Suppress("FunctionName", "PropertyName")
+@file:Suppress("FunctionName", "PropertyName", "LocalVariableName", "PrivatePropertyName")
 
 package com.flightalert.traffic
 
@@ -104,7 +104,7 @@ internal class TrafficSpriteFootprints(
                 clearance_px,
                 selected_key,
                 marker_blend,
-                selected_only = selected_only,
+                selected_only = true,
                 output = output,
             )
 
@@ -391,9 +391,6 @@ internal fun traffic_selected_dot_painted_radius_px(
         dp(TrafficSpritePaintGeometry.SELECTION_RING_STROKE_WIDTH_DP) / 2f
     return max(shadow_radius, max(stroke_radius, selection_radius))
 }
-
-internal fun traffic_aircraft_symbol_radius_dp(symbol: AircraftSymbol): Float =
-    TrafficSpritePaintGeometry.symbol(symbol).maximum_radius_dp
 
 internal fun traffic_aircraft_icon_scale_multiplier(symbol: AircraftSymbol): Float =
     TrafficSpritePaintGeometry.symbol(symbol).icon_scale_multiplier

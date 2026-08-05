@@ -1,5 +1,6 @@
 @file:Suppress(
     "CanBeVal",
+    "ClassName",
     "FunctionName",
     "KotlinConstantConditions",
     "LocalVariableName",
@@ -18,7 +19,6 @@ package com.flightalert.sources
 
 import com.flightalert.FlightAlertAppSettings
 import android.os.SystemClock
-import com.flightalert.aircraft.Aircraft
 import com.flightalert.ui.AircraftFeedMode
 import java.util.Locale
 import java.util.concurrent.Executor
@@ -116,7 +116,7 @@ class VisibleAircraftFeedController(
         force: Boolean,
         environment_snapshot: VisibleAircraftFeedEnvironment,
     ) {
-        val environment = when (val snapshot = environment_snapshot) {
+        val environment = when (environment_snapshot) {
             VisibleAircraftFeedEnvironment.NO_LOCATION -> {
                 publish_state(VisibleAircraftFeedState.WAITING_FOR_LOCATION)
                 return
@@ -126,7 +126,7 @@ class VisibleAircraftFeedController(
                 publish_state(VisibleAircraftFeedState.WAITING_FOR_VIEWPORT)
                 return
             }
-            is VisibleAircraftFeedEnvironment.READY -> snapshot
+            is VisibleAircraftFeedEnvironment.READY -> environment_snapshot
         }
         val now = environment.now_elapsed_ms
         if (environment.interaction_deferred) {
@@ -318,7 +318,7 @@ class VisibleAircraftFeedController(
         pending_interaction_feed_mode = null
         val source = globe_source ?: return
         if (!feed_mode.uses_globe) return
-        environment_source.snapshot() as? VisibleAircraftFeedEnvironment.READY ?: return
+        if (environment_source.snapshot() !is VisibleAircraftFeedEnvironment.READY) return
 
         val request = environment_source.build_request()
         val signature = request_signature(request)
@@ -432,7 +432,6 @@ class VisibleAircraftFeedController(
     }
 
     private companion object {
-        const val TAG = FlightAlertAppSettings.App.TAG
         const val GLOBE_SNAPSHOT_CADENCE_JITTER_MS =
             FlightAlertAppSettings.AircraftFeed.GLOBE_SNAPSHOT_CADENCE_JITTER_MS
     }

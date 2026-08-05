@@ -1410,10 +1410,10 @@ internal class SatelliteBaseTileRenderer(
                     var worst: SatelliteTileRequestTask? = null
                     for (queued in queue) {
                         val candidate = queued as? SatelliteTileRequestTask ?: continue
-                        if (worst == null || candidate.compareTo(worst) > 0) worst = candidate
+                        if (worst == null || candidate > worst) worst = candidate
                     }
                     if (worst != null &&
-                        task.compareTo(worst) < 0 &&
+                        task < worst &&
                         queue.remove(worst)
                     ) {
                         discarded = worst

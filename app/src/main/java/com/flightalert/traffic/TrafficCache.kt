@@ -314,17 +314,6 @@ internal class TrafficCacheController(
         return current_cached_traffic()
     }
 
-    fun build_cached_traffic(
-        all: List<Aircraft>,
-        context: TrafficCacheBuildContext,
-    ): CachedTraffic = checkNotNull(
-        build_cached_traffic_or_cancelled(
-            all = all,
-            context = context,
-            is_cancelled = { false },
-        )
-    )
-
     fun build_cached_traffic_or_cancelled(
         all: List<Aircraft>,
         context: TrafficCacheBuildContext,

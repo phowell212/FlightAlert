@@ -1,3 +1,10 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+    "PrivatePropertyName",
+    "PropertyName",
+)
+
 package com.flightalert.map.tiles
 
 import android.os.Process
@@ -155,7 +162,7 @@ internal class MapTileDiskCache(
         val metadata = synchronized(state_lock) {
             if (path in evicting_paths || path in write_reserved_paths) return null
             pinned_paths[path] = (pinned_paths[path] ?: 0) + 1
-            if (initialized) reconcile_entry_locked(path, size, modified)
+            if (initialized) reconcile_entry_locked(path, size)
             ReadMetadata(size, modified)
         }
 
@@ -170,7 +177,7 @@ internal class MapTileDiskCache(
             synchronized(state_lock) {
                 if (read_succeeded) {
                     if (initialized) {
-                        reconcile_entry_locked(path, metadata.size, metadata.modified)
+                        reconcile_entry_locked(path, metadata.size)
                         mark_used_locked(path)
                     } else {
                         pending_access_sequence += 1L
@@ -178,7 +185,6 @@ internal class MapTileDiskCache(
                         pending_accesses[path] = PendingAccess(
                             path = path,
                             size = metadata.size,
-                            modified = metadata.modified,
                             completion_order = pending_access_sequence,
                         )
                         while (pending_accesses.size > MAX_PENDING_ACCESS_PATHS) {
@@ -293,7 +299,7 @@ internal class MapTileDiskCache(
             if (existing_metadata == null) {
                 remove_entry_locked(target)
             } else {
-                reconcile_entry_locked(target, existing_metadata.size, existing_metadata.modified)
+                reconcile_entry_locked(target, existing_metadata.size)
             }
             if (
                 pinned_paths.containsKey(target) ||
@@ -432,7 +438,7 @@ internal class MapTileDiskCache(
         val startup_eviction_order = new_eviction_order()
         var startup_total_bytes = 0L
         var startup_access_sequence = 0L
-        scanned.sortedWith(compareBy<ScannedEntry>({ it.last_modified_ms }, { it.relative_path }))
+        scanned.sortedWith(compareBy({ it.last_modified_ms }, { it.relative_path }))
             .forEach { scanned_entry ->
                 startup_access_sequence += 1L
                 val entry = CacheEntry(
@@ -500,10 +506,10 @@ internal class MapTileDiskCache(
         return true
     }
 
-    private fun reconcile_entry_locked(path: Path, size: Long, modified: Long) {
+    private fun reconcile_entry_locked(path: Path, size: Long) {
         val existing = entries[path]
         if (existing != null && existing.size == size) return
-        val access = if (existing != null) existing.last_used_order else next_access_locked()
+        val access = existing?.last_used_order ?: next_access_locked()
         put_entry_locked(path, size, access, relative_path(path))
     }
 
@@ -529,7 +535,7 @@ internal class MapTileDiskCache(
             .filter { it.completion_order > after_completion_order }
             .sortedBy { it.completion_order }
             .forEach { access ->
-                reconcile_entry_locked(access.path, access.size, access.modified)
+                reconcile_entry_locked(access.path, access.size)
                 mark_used_locked(access.path)
                 latest = access.completion_order
             }
@@ -692,7 +698,6 @@ internal class MapTileDiskCache(
     private data class PendingAccess(
         val path: Path,
         val size: Long,
-        val modified: Long,
         val completion_order: Long,
     )
 

@@ -1,4 +1,11 @@
-@file:Suppress("FunctionName", "PropertyName")
+@file:Suppress(
+    "ConvertTwoComparisonsToRangeCheck",
+    "FunctionName",
+    "PropertyName",
+    "ConstPropertyName",
+    "LocalVariableName",
+    "PrivatePropertyName",
+)
 
 package com.flightalert.map.reference
 
@@ -66,12 +73,12 @@ enum class ProminenceTier(val stable_id: String, val stable_code: Int) {
     LOCAL("local", 2), FINE("fine", 3)
 }
 
-enum class CapitalLevel(val stable_id: String) {
-    NONE("none"), REGIONAL("regional"), NATIONAL("national")
+enum class CapitalLevel {
+    NONE, REGIONAL, NATIONAL
 }
 
-enum class CatalogControlStatus(val stable_id: String) {
-    AVAILABLE("available"), UNAVAILABLE("unavailable")
+enum class CatalogControlStatus {
+    AVAILABLE, UNAVAILABLE
 }
 
 enum class FontSlant(val stable_id: String) {
@@ -222,6 +229,7 @@ data class FilterPanelCatalog private constructor(
     val reason: String,
     private val canonical_filter_ids: List<FilterId>,
 ) {
+    @Suppress("unused")
     val filter_ids: List<FilterId> = canonical_filter_ids
 
     constructor(
@@ -259,12 +267,12 @@ object ReferencePresentationPolicy {
     const val label_handoff_max_ms = 220
 
     fun filter_spec(filter_id: FilterId): FilterSpec = ReferencePresentationTables.filter_spec(filter_id)
-    fun style_family_for_subtype(subtype: SemanticSubtype): StyleFamily = style_spec_for_subtype(subtype).family
     fun style_spec_for_subtype(subtype: SemanticSubtype): StyleSpec = ReferencePresentationTables.style_spec(subtype)
     fun resolved_style_for_subtype(subtype: SemanticSubtype): ResolvedStyleDetails =
         ReferencePresentationTables.resolved_style(subtype)
     fun outline_visibility_rule(subtype: SemanticSubtype): OutlineVisibilityRule =
         ReferencePresentationTables.outline_rule(subtype)
+    @Suppress("unused")
     fun available_filter_catalog(catalog: ReferenceClassCatalog?): FilterPanelCatalog =
         ReferenceCatalogPolicy.available_filter_catalog(catalog)
 
@@ -272,16 +280,21 @@ object ReferencePresentationPolicy {
         ReferenceProminencePolicy.default_tier(subtype)
     fun prominence_for_label(facts: LabelFacts): ProminenceTier = ReferenceProminencePolicy.for_label(facts)
     fun prominence_for_waterway(facts: WaterwayFacts): ProminenceTier = ReferenceProminencePolicy.for_waterway(facts)
+    @Suppress("unused")
     fun semantic_priority_for(subtype: SemanticSubtype, tier: ProminenceTier): Int =
         ReferenceProminencePolicy.semantic_priority(subtype, tier)
+    @Suppress("unused")
     fun prominence_decision_for_label(facts: LabelFacts): ProminenceDecision =
         ReferenceProminencePolicy.decision_for_label(facts)
+    @Suppress("unused")
     fun visibility_rule_for_label(facts: LabelFacts): LabelVisibilityRule =
         ReferencePresentationTables.visibility_rule(facts.subtype, prominence_for_label(facts))
+    @Suppress("unused")
     fun visibility_rule_for_waterway(facts: WaterwayFacts): LabelVisibilityRule =
         ReferencePresentationTables.visibility_rule(facts.subtype, prominence_for_waterway(facts))
     fun complete_geometry_measure_bucket(measure: Long?, verified: Boolean): Int =
         ReferenceProminencePolicy.measure_bucket(measure, verified)
+    @Suppress("unused")
     fun prominence_rule_id(
         subtype: SemanticSubtype,
         tier: ProminenceTier,
@@ -289,9 +302,11 @@ object ReferencePresentationPolicy {
     ): ULong = ReferenceProminencePolicy.rule_id(subtype, tier, evidence_kind)
     fun canonical_prominence_decision_bytes(decision: ProminenceDecision): ByteArray =
         ReferenceProminencePolicy.canonical_bytes(decision)
+    @Suppress("unused")
     fun prominence_decision_sha256(decision: ProminenceDecision): String =
         sha256_hex(canonical_prominence_decision_bytes(decision))
 
+    @Suppress("unused")
     fun canonical_class_catalog_bytes(
         renderer_semantic_stream_sha256: String,
         renderer_contract_sha256: String,
@@ -331,6 +346,7 @@ object ReferencePresentationPolicy {
         return fade_alpha(rule.max_zoom_centi - current_centizoom, rule.max_zoom_centi - rule.fade_out_zoom_centi)
     }
 
+    @Suppress("unused")
     fun point_label_placement_eligible(
         placement_source_kind: PlacementSourceKind,
         exact_source_point: Boolean,
@@ -341,6 +357,7 @@ object ReferencePresentationPolicy {
         PlacementSourceKind.SOURCE_OWNED_AREA_LABEL_POINT,
     ) && exact_source_point && source_text_evidence_verified && !inferred_centroid
 
+    @Suppress("unused")
     fun line_label_span_eligible(
         shaped_advance_milli_px: Long,
         end_clearance_milli_px: Long,
@@ -361,6 +378,7 @@ object ReferencePresentationPolicy {
         return available_span_milli_px >= shaped_advance_milli_px + 2L * end_clearance_milli_px
     }
 
+    @Suppress("unused")
     fun verify_canonical_policy_hash(actual_sha256: String): String {
         require_sha256(actual_sha256, "presentation policy SHA-256")
         policy_require(actual_sha256 == canonical_policy_sha256) {

@@ -1,8 +1,5 @@
 package com.flightalert.map.reference.borders
 
-import com.flightalert.map.*
-import com.flightalert.map.reference.*
-import com.flightalert.map.reference.dictionary.*
 
 internal data class ReferenceBoundaryOccurrenceKey(
     val dedupeId: ULong,

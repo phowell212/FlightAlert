@@ -1,20 +1,8 @@
-@file:Suppress("FunctionName")
+@file:Suppress("FunctionName", "LocalVariableName")
 
 package com.flightalert.map.reference.labels
 
-import com.flightalert.map.*
 import com.flightalert.map.reference.*
-import com.flightalert.map.reference.borders.*
-import com.flightalert.map.reference.dictionary.*
-
-internal data class ReferenceLabelRuntimePresentation(
-    val textSizeMilliSp: Int,
-    val alphaMilli: Int,
-    val haloWidthMilliEm: Int,
-    val fontWeight: Int,
-    val italic: Boolean,
-    val letterSpacingMilliEm: Int,
-)
 
 internal data class ReferenceLabelRuntimeTypography(
     val textSizeMilliSp: Int,
@@ -32,7 +20,7 @@ internal object ReferenceLabelRuntimePresentationPolicy {
 
     private val typography_by_subtype_tier =
         Array(SemanticSubtype.entries.size) { subtype_index ->
-            Array<ReferenceLabelRuntimeTypography?>(ProminenceTier.entries.size) { tier_index ->
+            Array(ProminenceTier.entries.size) { tier_index ->
                 val subtype = SemanticSubtype.entries[subtype_index]
                 val tier = ProminenceTier.entries[tier_index]
                 if (subtype.is_label) create_typography(subtype, tier) else null
@@ -124,22 +112,6 @@ internal object ReferenceLabelRuntimePresentationPolicy {
             alpha = minOf(alpha, fade_out_alpha)
         }
         return alpha
-    }
-
-    fun resolve(
-        subtype: SemanticSubtype,
-        tier: ProminenceTier,
-        currentCentizoom: Int,
-    ): ReferenceLabelRuntimePresentation {
-        val typography = typography(subtype, tier)
-        return ReferenceLabelRuntimePresentation(
-            textSizeMilliSp = typography.textSizeMilliSp,
-            alphaMilli = visibilityAlphaMilli(subtype, tier, currentCentizoom),
-            haloWidthMilliEm = typography.haloWidthMilliEm,
-            fontWeight = typography.fontWeight,
-            italic = typography.italic,
-            letterSpacingMilliEm = typography.letterSpacingMilliEm,
-        )
     }
 
     fun hasVisiblePaintAlpha(

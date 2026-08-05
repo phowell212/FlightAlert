@@ -1,3 +1,9 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+    "PropertyName",
+)
+
 package com.flightalert.map.aviation_layers
 
 import com.flightalert.ThemeTreatment
@@ -7,7 +13,7 @@ import java.util.Collections
 import kotlin.math.max
 import kotlin.math.min
 
-enum class AviationLayerAvailability { OFF, LOADING, USABLE, EMPTY, UNAVAILABLE }
+enum class AviationLayerAvailability { USABLE, EMPTY, UNAVAILABLE }
 enum class AviationLayerCompleteness { COMPLETE, PARTIAL, UNKNOWN }
 enum class AviationLayerFreshness { CURRENT, STALE }
 
@@ -47,8 +53,6 @@ data class AviationLayerHealth(
         get() = completeness == AviationLayerCompleteness.COMPLETE &&
             (availability == AviationLayerAvailability.USABLE ||
                 availability == AviationLayerAvailability.EMPTY)
-    val must_label_stale: Boolean
-        get() = freshness == AviationLayerFreshness.STALE
 }
 
 class AviationSourceIdentity(
@@ -65,9 +69,6 @@ class AviationSourceIdentity(
     val final_source_url_is_valid: Boolean =
         final_source_url.protocol.equals("https", ignoreCase = true) && final_source_url.host.isNotBlank()
     val final_source_url: String = final_source_url.toString()
-    val request_url: String = this.final_source_url
-    val observed_at_epoch_ms: Long = response_observed_at_epoch_ms
-    val source_revision: Long? = advertised_revision
 }
 
 data class AviationLayerPoint(val lat: Double, val lon: Double)
@@ -180,7 +181,6 @@ class AviationOceanicTrack(
     val end_datetime: String?,
     val entry_datetime: String?,
     val last_updated: String?,
-    val raw_condition_message: String,
     val raw_track_line: String,
     val start_epoch_ms: Long?,
     val end_epoch_ms: Long?,
@@ -194,9 +194,6 @@ class AviationOceanicTrack(
         primarySourceFieldId = AviationMapTextSourceField.NAT_DESIGNATOR.stable_source_field_id,
     )
     val source: String = source_notam ?: icao_id ?: "FAA NMS"
-    val active_window: String? = listOfNotNull(start_datetime, end_datetime)
-        .joinToString(" to ")
-        .ifBlank { null }
     val waypoints: List<AviationNatWaypoint> = immutable_list(waypoints)
     val drawable_segments: List<List<AviationLayerPoint>> = immutable_nested_list(drawable_segments)
     val bounds: AviationGeoBounds? = this.drawable_segments.to_bounds_or_null()
@@ -224,17 +221,11 @@ class AviationParsedBatch<T>(
 
 class AviationSourceResult<T>(
     records: List<T>,
-    expected_object_ids: Set<Long>?,
-    returned_object_ids: Set<Long>,
-    invalid_object_ids: Set<Long>,
     val identity: AviationSourceIdentity,
     val health: AviationLayerHealth,
     val message: String
 ) {
     val records: List<T> = immutable_list(records)
-    val expected_object_ids: Set<Long>? = expected_object_ids?.let(::immutable_set)
-    val returned_object_ids: Set<Long> = immutable_set(returned_object_ids)
-    val invalid_object_ids: Set<Long> = immutable_set(invalid_object_ids)
 }
 
 enum class AviationLayerKind(val display_name: String) {
