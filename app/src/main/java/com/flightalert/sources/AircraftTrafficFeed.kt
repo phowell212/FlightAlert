@@ -19,7 +19,6 @@ package com.flightalert.sources
 import com.flightalert.FlightAlertAppSettings
 import android.os.SystemClock
 import com.flightalert.aircraft.Aircraft
-import com.flightalert.details.max_epoch
 import com.flightalert.ui.AircraftFeedMode
 import java.util.Locale
 import kotlin.math.abs

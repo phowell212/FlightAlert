@@ -9,8 +9,6 @@ import com.flightalert.map.reference.labels.*
 import java.util.Collections
 import kotlin.math.floor
 
-class ReferencePolicyException(message: String) : IllegalArgumentException(message)
-
 enum class SemanticSubtype(val stable_id: Int) {
     COUNTRY_TERRITORY(100), FIRST_ORDER_REGION(110), SECOND_LOCAL_REGION(120),
     CAPITAL_MAJOR_CITY(200), CITY_TOWN(210), LOCAL_PLACE(220), ISLAND_ISLET(230),

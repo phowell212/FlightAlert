@@ -10,6 +10,7 @@ import android.graphics.PathMeasure
 import android.graphics.RectF
 import android.graphics.Typeface
 import androidx.core.graphics.withSave
+import com.flightalert.with_alpha
 import com.flightalert.map.*
 import com.flightalert.map.reference.*
 import com.flightalert.map.reference.borders.ReferenceBoundaryOccurrenceSelector

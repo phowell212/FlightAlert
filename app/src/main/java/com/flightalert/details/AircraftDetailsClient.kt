@@ -16,7 +16,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
-import kotlin.math.max
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -762,33 +761,6 @@ internal fun normalized_photo_registration(value: String?): String? {
         ?.replace(Regex("[^A-Z0-9-]"), "")
         ?.trim('-')
         ?.takeIf { it.isNotBlank() && it != "NA" }
-}
-
-internal fun JSONArray.json_number_or_null(index: Int): Double? {
-    if (index >= length() || isNull(index)) return null
-    return optDouble(index)
-}
-
-internal fun JSONObject.json_number_or_null(key: String): Double? {
-    if (!has(key) || isNull(key)) return null
-    return when (val raw = opt(key)) {
-        is Number -> raw.toDouble()
-        is String -> raw.toDoubleOrNull()
-        else -> null
-    }
-}
-
-internal fun JSONArray.json_int_or_null(index: Int): Int? {
-    if (index >= length() || isNull(index)) return null
-    return optInt(index)
-}
-
-internal fun max_epoch(first: Double?, second: Double?): Double? {
-    return when {
-        first == null -> second
-        second == null -> first
-        else -> max(first, second)
-    }
 }
 
 internal fun plain_text_from_html(html: String): String {

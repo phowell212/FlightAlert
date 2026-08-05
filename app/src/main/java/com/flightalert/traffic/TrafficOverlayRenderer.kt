@@ -35,11 +35,10 @@ import com.flightalert.map.Viewport
 import com.flightalert.map.is_inside_viewport
 import com.flightalert.ThemeColors
 import com.flightalert.ThemeTreatment
-import com.flightalert.ui.ensure_point_capacity
-import com.flightalert.ui.mix_color
-import com.flightalert.ui.recycle_bitmap_pair
-import com.flightalert.ui.smooth_step
-import com.flightalert.ui.with_alpha
+import com.flightalert.mix_color
+import com.flightalert.recycle_bitmap_pair
+import com.flightalert.smooth_step
+import com.flightalert.with_alpha
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executors

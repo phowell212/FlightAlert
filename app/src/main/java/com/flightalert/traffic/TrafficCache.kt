@@ -14,7 +14,7 @@ import com.flightalert.aircraft.AircraftSymbol
 import com.flightalert.aircraft.AircraftSymbolClassifier
 import com.flightalert.alerts.AlertAircraft
 import com.flightalert.map.Viewport
-import com.flightalert.ui.ensure_point_capacity
+import com.flightalert.ensure_point_capacity
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.sqrt

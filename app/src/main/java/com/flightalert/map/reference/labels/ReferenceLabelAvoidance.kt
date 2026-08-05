@@ -31,6 +31,15 @@ data class ReferenceScreenRect(
     }
 }
 
+internal data class ReferencePathLabelPoint(
+    val x: Double,
+    val y: Double,
+) {
+    init {
+        require(x.isFinite() && y.isFinite()) { "path-label coordinates must be finite" }
+    }
+}
+
 internal object ReferenceLabelAvoidance {
     fun ownship_rect(
         center_x: Double,

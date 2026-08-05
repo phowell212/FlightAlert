@@ -20,7 +20,7 @@ import com.flightalert.MAP_TILE_CACHE_MAX_AGE_MS
 import com.flightalert.MAP_TILE_DISK_CACHE_MAX_BYTES
 import com.flightalert.details.throwable_safe_https_url
 import com.flightalert.map.*
-import com.flightalert.ui.smooth_step
+import com.flightalert.smooth_step
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL

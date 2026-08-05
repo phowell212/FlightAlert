@@ -18,15 +18,6 @@ import kotlin.math.min
 import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
-internal data class ReferencePathLabelPoint(
-    val x: Double,
-    val y: Double,
-) {
-    init {
-        require(x.isFinite() && y.isFinite()) { "path-label coordinates must be finite" }
-    }
-}
-
 internal class ReferenceSupportIntervalUnion(
     private val mergeEpsilon: Double,
     initialIntervalCapacity: Int = 16,

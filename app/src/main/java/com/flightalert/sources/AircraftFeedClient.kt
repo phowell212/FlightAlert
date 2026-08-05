@@ -18,15 +18,13 @@ package com.flightalert.sources
 
 import com.flightalert.FlightAlertAppSettings
 import com.flightalert.aircraft.AircraftTelemetry
-import com.flightalert.details.json_int_or_null
-import com.flightalert.details.json_number_or_null
-import com.flightalert.details.max_epoch
 import com.flightalert.map.clamped_haversine_distance_meters
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
 import kotlin.math.ceil
+import kotlin.math.max
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -752,6 +750,33 @@ internal fun JSONArray.feed_json_array_boolean_or_null(index: Int): Boolean? {
 
 internal fun JSONObject.feed_json_int_or_null(key: String): Int? {
     return if (has(key) && !isNull(key)) optInt(key) else null
+}
+
+internal fun JSONArray.json_number_or_null(index: Int): Double? {
+    if (index >= length() || isNull(index)) return null
+    return optDouble(index)
+}
+
+internal fun JSONObject.json_number_or_null(key: String): Double? {
+    if (!has(key) || isNull(key)) return null
+    return when (val raw = opt(key)) {
+        is Number -> raw.toDouble()
+        is String -> raw.toDoubleOrNull()
+        else -> null
+    }
+}
+
+internal fun JSONArray.json_int_or_null(index: Int): Int? {
+    if (index >= length() || isNull(index)) return null
+    return optInt(index)
+}
+
+internal fun max_epoch(first: Double?, second: Double?): Double? {
+    return when {
+        first == null -> second
+        second == null -> first
+        else -> max(first, second)
+    }
 }
 
 internal fun JSONObject.feed_json_finite_double_or_null(key: String): Double? {

@@ -27,7 +27,7 @@ import com.flightalert.ThemeTreatment
 import com.flightalert.VisualTheme
 import com.flightalert.ui.draw_fitted_text
 import com.flightalert.ui.draw_wrapped_text
-import com.flightalert.ui.with_alpha
+import com.flightalert.with_alpha
 import com.flightalert.ui.wrapped_text_lines
 import java.util.Locale
 import kotlin.math.abs

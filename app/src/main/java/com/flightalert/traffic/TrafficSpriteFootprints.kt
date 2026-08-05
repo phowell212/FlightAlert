@@ -6,7 +6,7 @@ import com.flightalert.AIRCRAFT_APPEAR_DURATION_MS
 import com.flightalert.aircraft.AircraftMarkerMorph
 import com.flightalert.aircraft.AircraftSymbol
 import com.flightalert.map.reference.labels.ReferenceScreenRect
-import com.flightalert.ui.smooth_step
+import com.flightalert.smooth_step
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max

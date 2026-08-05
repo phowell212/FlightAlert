@@ -226,9 +226,7 @@ import com.flightalert.ui.map_label_text_scale_for_x
 import com.flightalert.ui.priority_adjust_button_at
 import com.flightalert.ui.priority_adjust_button_bounds
 import com.flightalert.ui.priority_tracker_panel_hit_result
-import com.flightalert.ui.safe_smooth_step
 import com.flightalert.ui.settings_panel_hit_result
-import com.flightalert.ui.with_alpha
 import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Executors

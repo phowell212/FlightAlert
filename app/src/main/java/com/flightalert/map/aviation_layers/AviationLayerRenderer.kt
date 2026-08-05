@@ -25,178 +25,27 @@ import androidx.core.graphics.withTranslation
 import com.flightalert.TILE_SIZE
 import com.flightalert.ThemeTreatment
 import com.flightalert.map.*
-import com.flightalert.ui.lerp
-import com.flightalert.ui.smooth_step
-import com.flightalert.ui.with_alpha
+import com.flightalert.lerp
+import com.flightalert.smooth_step
+import com.flightalert.with_alpha
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 
-internal object AviationAirspaceRenderPolicy {
-    fun forEachApplicable(
-        features: List<AviationAirspaceFeature>,
-        visibleBounds: AviationGeoBounds,
-        excludedFeature: AviationAirspaceFeature?,
-        action: (AviationAirspaceFeature) -> Unit
-    ) {
-        for (feature in features) {
-            if (isApplicable(feature, visibleBounds, excludedFeature)) action(feature)
-        }
-    }
+internal data class AviationLayerRenderCacheBinding(
+    val snapshot_identity: Int,
+    val selection_key: AviationSelectionKey?
+)
 
-    fun isApplicable(
-        feature: AviationAirspaceFeature,
-        visibleBounds: AviationGeoBounds,
-        excludedFeature: AviationAirspaceFeature?
-    ): Boolean {
-        if (feature == excludedFeature ||
-            feature.bounds.max_lat < visibleBounds.min_lat ||
-            feature.bounds.min_lat > visibleBounds.max_lat
-        ) return false
-        val rawLongitudeSpan = feature.bounds.max_lon - feature.bounds.min_lon
-        val span = if (rawLongitudeSpan <= 180.0) {
-            LongitudeSpan(feature.bounds.min_lon, feature.bounds.max_lon)
-        } else {
-            longitudeSpan(feature)
-        }
-        return longitudeSpansIntersect(
-            span.min,
-            span.max,
-            visibleBounds.min_lon,
-            visibleBounds.max_lon
-        )
-    }
-
-    fun forEachSourcePolygon(
-        feature: AviationAirspaceFeature,
-        action: (AviationPolygon) -> Unit
-    ) {
-        for (polygon in feature.geometry.polygons) action(polygon)
-    }
-
-    fun forEachSourceRing(
-        polygon: AviationPolygon,
-        action: (List<AviationLayerPoint>) -> Unit
-    ) {
-        for (ring in polygon.all_rings) action(ring)
-    }
-
-    fun contains(feature: AviationAirspaceFeature, lat: Double, lon: Double): Boolean {
-        val featureAnchorLon = feature.geometry.polygons.first().shell.first().lon
-        return feature.geometry.polygons.any { polygon ->
-            val polygonAnchorLon = unwrapLongitude(polygon.shell.first().lon, featureAnchorLon)
-            pointInsideRing(lat, lon, polygon.shell, polygonAnchorLon) &&
-                    polygon.holes.none { hole ->
-                        pointInsideRing(lat, lon, hole, polygonAnchorLon)
-                    }
-        }
-    }
-
-    fun boundsArea(feature: AviationAirspaceFeature): Double {
-        val latitudeSpan = (feature.bounds.max_lat - feature.bounds.min_lat).coerceAtLeast(0.0)
-        val rawLongitudeSpan = (feature.bounds.max_lon - feature.bounds.min_lon).coerceAtLeast(0.0)
-        val longitudeWidth = if (rawLongitudeSpan <= 180.0) {
-            rawLongitudeSpan
-        } else {
-            val span = longitudeSpan(feature)
-            (span.max - span.min).coerceIn(0.0, 360.0)
-        }
-        return latitudeSpan * longitudeWidth
-    }
-
-    fun unwrapLongitude(lon: Double, referenceLon: Double): Double {
-        var unwrapped = lon
-        while (unwrapped - referenceLon > 180.0) unwrapped -= 360.0
-        while (unwrapped - referenceLon < -180.0) unwrapped += 360.0
-        return unwrapped
-    }
-
-    fun firstWrappedShift(
-        baseLeft: Float,
-        baseRight: Float,
-        extendedLeft: Float,
-        extendedRight: Float,
-        worldSpan: Float,
-        maxCopies: Int = 8
-    ): Float {
-        if (worldSpan <= 0f || !worldSpan.isFinite() || maxCopies <= 0) return 0f
-        var shift = 0f
-        var copies = 0
-        while (baseLeft + shift > extendedRight && copies++ < maxCopies) shift -= worldSpan
-        copies = 0
-        while (baseRight + shift < extendedLeft && copies++ < maxCopies) shift += worldSpan
-        return shift
-    }
-
-    private fun pointInsideRing(
-        lat: Double,
-        lon: Double,
-        ring: List<AviationLayerPoint>,
-        anchorLon: Double
-    ): Boolean {
-        if (ring.size < 3) return false
-        val first = ring.first()
-        val firstLon = unwrapLongitude(first.lon, anchorLon)
-        val queryLon = unwrapLongitude(lon, firstLon)
-        var inside = false
-        var previousLat = first.lat
-        var previousLon = firstLon
-        for (index in 1 until ring.size) {
-            val current = ring[index]
-            val currentLon = unwrapLongitude(current.lon, previousLon)
-            val crossesLat = (current.lat > lat) != (previousLat > lat)
-            if (crossesLat) {
-                val lonAtLat = (previousLon - currentLon) *
-                        (lat - current.lat) /
-                        (previousLat - current.lat) +
-                        currentLon
-                if (queryLon < lonAtLat) inside = !inside
-            }
-            previousLat = current.lat
-            previousLon = currentLon
-        }
-        return inside
-    }
-
-    internal fun longitudeSpansIntersect(
-        firstMin: Double,
-        firstMax: Double,
-        secondMin: Double,
-        secondMax: Double
-    ): Boolean {
-        if (firstMax - firstMin >= 360.0 || secondMax - secondMin >= 360.0) return true
-        if (secondMin > secondMax) {
-            return longitudeSpansIntersect(firstMin, firstMax, secondMin, 180.0) ||
-                    longitudeSpansIntersect(firstMin, firstMax, -180.0, secondMax)
-        }
-        for (worldCopy in -2..2) {
-            val shift = worldCopy * 360.0
-            if (firstMax + shift >= secondMin && firstMin + shift <= secondMax) return true
-        }
-        return false
-    }
-
-    private fun longitudeSpan(feature: AviationAirspaceFeature): LongitudeSpan {
-        val featureAnchorLon = feature.geometry.polygons.first().shell.first().lon
-        var minLon = Double.POSITIVE_INFINITY
-        var maxLon = Double.NEGATIVE_INFINITY
-        for (polygon in feature.geometry.polygons) {
-            val polygonAnchorLon = unwrapLongitude(polygon.shell.first().lon, featureAnchorLon)
-            for (ring in polygon.all_rings) {
-                var previousLon = polygonAnchorLon
-                for (point in ring) {
-                    val currentLon = unwrapLongitude(point.lon, previousLon)
-                    minLon = min(minLon, currentLon)
-                    maxLon = max(maxLon, currentLon)
-                    previousLon = currentLon
-                }
-            }
-        }
-        return LongitudeSpan(minLon, maxLon)
-    }
-
-    private data class LongitudeSpan(val min: Double, val max: Double)
+internal object AviationLayerRenderCachePolicy {
+    fun binding(
+        snapshot: AviationLayerSnapshot,
+        selection: AviationSelection?
+    ): AviationLayerRenderCacheBinding = AviationLayerRenderCacheBinding(
+        snapshot_identity = System.identityHashCode(snapshot),
+        selection_key = selection?.key
+    )
 }
 
 internal data class AviationPreparedAirspaceLayer(
@@ -238,7 +87,7 @@ internal class AviationLayerRenderer(
     private val ellipsize: (String, Float) -> String,
     private val now_epoch_ms: () -> Long = System::currentTimeMillis
 ) {
-    private val selection_hit_collector = AviationSelectionHitCollector(
+    private val interaction_coordinator = AviationLayerInteractionCoordinator(
         lat_lon_to_world = MapProjection::lat_lon_to_world,
         world_to_lat_lon = MapProjection::world_to_lat_lon
     )
@@ -331,7 +180,7 @@ internal class AviationLayerRenderer(
         visible_bounds: AviationGeoBounds,
         visibility: AviationLayerVisibility,
         now_epoch_ms: Long = this.now_epoch_ms()
-    ): AviationSelectionKey? = selection_hit_collector.selection_key_at(
+    ): AviationSelectionKey? = interaction_coordinator.selection_key_at(
         x = x,
         y = y,
         density = density,
@@ -354,7 +203,7 @@ internal class AviationLayerRenderer(
         draw_time_epoch_ms: Long
     ) {
         layer_label_rects.clear()
-        selection_hit_collector.begin_draw(snapshot, viewport, visible_bounds, visibility)
+        interaction_coordinator.begin_draw(snapshot, viewport, visible_bounds, visibility)
         val selected_restricted_airspace =
             (selection as? AviationSelection.SpecialUse)?.feature
         val restricted_airspaces =
@@ -678,7 +527,7 @@ internal class AviationLayerRenderer(
                     style
                 )
                 if (!restricted && accepted_label != null) {
-                    selection_hit_collector.accept_atc_label(
+                    interaction_coordinator.accept_atc_label(
                         feature.source,
                         accepted_label.point,
                         accepted_label.label_bounds
@@ -1093,7 +942,7 @@ internal class AviationLayerRenderer(
             paint.color = color
             canvas.drawCircle(point.x, point.y, dp(3f), paint)
             draw_sourced_map_label(canvas, label, rect.left + dp(5f), anchor_baseline)
-            selection_hit_collector.accept_airport_marker(
+            interaction_coordinator.accept_airport_marker(
                 airport,
                 point,
                 AviationScreenRect(rect.left, rect.top, rect.right, rect.bottom)
@@ -1280,26 +1129,4 @@ internal class AviationLayerRenderer(
         const val AIRSPACE_LABEL_MIN_ZOOM = 7.2
         const val OCEANIC_TRACK_MIN_ZOOM = 3.0
     }
-}
-
-internal fun project_aviation_point_to_screen(
-    point: AviationLayerPoint,
-    viewport: Viewport,
-    lat_lon_to_world: (Double, Double, Double) -> WorldPoint
-): ScreenPoint? {
-    val world = lat_lon_to_world(point.lat, point.lon, viewport.zoom)
-    var screen_x = (world.x - viewport.center_x + viewport.width / 2.0).toFloat()
-    val world_span = (TILE_SIZE * 2.0.pow(viewport.zoom)).toFloat()
-    while (screen_x < -world_span / 2f) screen_x += world_span
-    while (screen_x > viewport.width + world_span / 2f) screen_x -= world_span
-    val screen_y = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
-    if (
-        screen_x < -viewport.width ||
-        screen_x > viewport.width * 2f ||
-        screen_y < -viewport.height ||
-        screen_y > viewport.height * 2f
-    ) {
-        return null
-    }
-    return ScreenPoint(screen_x, screen_y)
 }

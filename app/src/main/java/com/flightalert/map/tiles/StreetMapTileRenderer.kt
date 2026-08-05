@@ -16,6 +16,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import com.flightalert.MAP_TILE_CACHE_MAX_AGE_MS
+import com.flightalert.with_alpha
 import com.flightalert.details.throwable_safe_https_url
 import com.flightalert.map.*
 import java.io.File

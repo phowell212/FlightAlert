@@ -11,6 +11,24 @@ enum class AviationLayerAvailability { OFF, LOADING, USABLE, EMPTY, UNAVAILABLE 
 enum class AviationLayerCompleteness { COMPLETE, PARTIAL, UNKNOWN }
 enum class AviationLayerFreshness { CURRENT, STALE }
 
+/**
+ * Exact provider fields used to construct an aviation map label.
+ *
+ * This is deliberately not a script, translation, shaping, or font policy.
+ * The shared sourced-map-text runtime owns those decisions; aviation supplies
+ * only source text and the fields that justify it.
+ */
+enum class AviationMapTextSourceField(
+    val stable_source_field_id: ULong,
+) {
+    AIRSPACE_NAME(0x4641_4141_0001_0001uL),
+    AIRSPACE_IDENT(0x4641_4141_0001_0002uL),
+    AIRPORT_ICAO_ID(0x4641_4141_0002_0001uL),
+    AIRPORT_IDENT(0x4641_4141_0002_0002uL),
+    AIRPORT_NAME(0x4641_4141_0002_0003uL),
+    NAT_DESIGNATOR(0x4641_414e_0001_0001uL),
+}
+
 data class AviationLayerHealth(
     val availability: AviationLayerAvailability,
     val completeness: AviationLayerCompleteness,
@@ -108,7 +126,10 @@ data class AviationAirspaceFeature(
         AviationMapTextSourceField.AIRSPACE_NAME,
 ) {
     val rings: List<List<AviationLayerPoint>> = geometry.all_rings
-    val map_text: SourcedMapText = AviationMapTextAdapter.airspace(this).sourced_text
+    val map_text: SourcedMapText = SourcedMapTextPolicy.create(
+        primary = name,
+        primarySourceFieldId = map_text_source_field.stable_source_field_id,
+    )
 }
 
 data class AviationAirportFeature(
@@ -123,7 +144,15 @@ data class AviationAirportFeature(
         if (ident.isNotEmpty()) AviationMapTextSourceField.AIRPORT_IDENT else null,
 ) {
     val military: Boolean = military_code.equals("MIL", ignoreCase = true)
-    val map_text: SourcedMapText = AviationMapTextAdapter.airport(this).sourced_text
+    val map_text: SourcedMapText = map_text_ident_source_field?.let {
+        SourcedMapTextPolicy.create(
+            primary = ident,
+            primarySourceFieldId = it.stable_source_field_id,
+        )
+    } ?: SourcedMapTextPolicy.create(
+        primary = name,
+        primarySourceFieldId = AviationMapTextSourceField.AIRPORT_NAME.stable_source_field_id,
+    )
 }
 
 sealed interface AviationNatWaypoint {
@@ -160,7 +189,10 @@ class AviationOceanicTrack(
     drawable_segments: List<List<AviationLayerPoint>>
 ) {
     val name: String = "NAT $designator"
-    val map_text: SourcedMapText = AviationMapTextAdapter.oceanic_track(this).sourced_text
+    val map_text: SourcedMapText = SourcedMapTextPolicy.create(
+        primary = designator,
+        primarySourceFieldId = AviationMapTextSourceField.NAT_DESIGNATOR.stable_source_field_id,
+    )
     val source: String = source_notam ?: icao_id ?: "FAA NMS"
     val active_window: String? = listOfNotNull(start_datetime, end_datetime)
         .joinToString(" to ")

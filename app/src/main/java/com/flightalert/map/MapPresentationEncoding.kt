@@ -2,7 +2,8 @@ package com.flightalert.map
 
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
-import com.flightalert.map.reference.ReferencePolicyException
+
+class ReferencePolicyException(message: String) : IllegalArgumentException(message)
 
 internal inline fun policy_require(condition: Boolean, message: () -> String) {
     if (!condition) throw ReferencePolicyException(message())

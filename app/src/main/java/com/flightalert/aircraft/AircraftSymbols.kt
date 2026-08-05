@@ -16,10 +16,10 @@ import android.graphics.RectF
 import com.flightalert.map.Viewport
 import com.flightalert.ThemeTreatment
 import com.flightalert.VisualTheme
-import com.flightalert.ui.lerp
-import com.flightalert.ui.mix_color
-import com.flightalert.ui.safe_smooth_step
-import com.flightalert.ui.smooth_step
+import com.flightalert.lerp
+import com.flightalert.mix_color
+import com.flightalert.safe_smooth_step
+import com.flightalert.smooth_step
 import java.util.LinkedHashMap
 import java.util.Locale
 import kotlin.math.atan2

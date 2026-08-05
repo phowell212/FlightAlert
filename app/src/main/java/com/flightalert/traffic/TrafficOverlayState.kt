@@ -21,7 +21,7 @@ import com.flightalert.map.TileSource
 import com.flightalert.map.Viewport
 import com.flightalert.map.WorldPoint
 import com.flightalert.VisualTheme
-import com.flightalert.ui.ensure_point_capacity
+import com.flightalert.ensure_point_capacity
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max

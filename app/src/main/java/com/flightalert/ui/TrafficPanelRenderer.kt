@@ -9,6 +9,7 @@
 package com.flightalert.ui
 
 import com.flightalert.VisualTheme
+import com.flightalert.with_alpha
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF

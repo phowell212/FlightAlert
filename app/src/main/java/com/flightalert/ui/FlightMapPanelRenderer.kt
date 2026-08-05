@@ -18,6 +18,7 @@ package com.flightalert.ui
 
 import com.flightalert.VisualTheme
 import com.flightalert.ThemeTreatment
+import com.flightalert.with_alpha
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect

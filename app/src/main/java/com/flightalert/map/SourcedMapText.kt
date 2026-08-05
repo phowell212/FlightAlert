@@ -1,6 +1,5 @@
 package com.flightalert.map
 
-import com.flightalert.map.reference.ReferencePolicyException
 import java.lang.Character.UnicodeScript
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
