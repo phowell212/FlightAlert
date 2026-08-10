@@ -1,0 +1,972 @@
+@file:Suppress(
+    "FunctionName",
+    "LocalVariableName",
+    "PrivatePropertyName",
+    "PropertyName",
+)
+
+package com.flightalert.aircraft
+
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import java.util.Locale
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.sin
+import com.flightalert.ThemeTreatment
+import com.flightalert.VisualTheme
+import com.flightalert.lerp
+import com.flightalert.map.Viewport
+import com.flightalert.mix_color
+import com.flightalert.safe_smooth_step
+import com.flightalert.smooth_step
+
+object AircraftMarkerMorph {
+    fun marker_dot_blend(viewport: Viewport): Float {
+        return zoom_marker_dot_blend(viewport.zoom)
+    }
+
+    fun zoom_marker_dot_blend(zoom: Double): Float {
+        val zoom_dot_blend = 1f - smooth_step(DOT_ZOOM_FULL, DOT_ZOOM_SYMBOL, zoom.toFloat())
+        return smooth_step(0f, 1f, zoom_dot_blend)
+    }
+
+    fun symbol_progress(dot_blend: Float): Float {
+        return smooth_step(SYMBOL_BLEND_START, SYMBOL_BLEND_FULL, 1f - dot_blend)
+    }
+
+    fun symbol_visibility(dot_blend: Float): Float {
+        return smooth_step(
+            SYMBOL_VISIBILITY_START,
+            SYMBOL_VISIBILITY_FULL,
+            symbol_progress(dot_blend)
+        )
+    }
+
+    fun shape_progress(dot_blend: Float): Float {
+        return smooth_step(0f, 1f, 1f - dot_blend)
+    }
+
+    fun aircraft_icon_scale(zoom: Double): Float {
+        val zoom_progress = smooth_step(SCALE_ZOOM_MIN, SCALE_ZOOM_MAX, zoom.toFloat())
+        return SCALE_MIN + (SCALE_MAX - SCALE_MIN) * zoom_progress
+    }
+
+    fun aircraft_dot_scale(zoom: Double): Float {
+        val far_progress =
+            smooth_step(DOT_SCALE_FLOOR_ZOOM_MIN, DOT_SCALE_FLOOR_ZOOM_MAX, zoom.toFloat())
+        val far_scale = lerp(DOT_SCALE_FLOOR_MIN, DOT_SCALE_FLOOR_MAX, far_progress)
+        val transition_progress = smooth_step(
+            DOT_SCALE_TRANSITION_ZOOM_START,
+            DOT_SCALE_TRANSITION_ZOOM_END,
+            zoom.toFloat()
+        )
+        return max(
+            READABLE_DOT_SCALE_MIN,
+            lerp(far_scale, DOT_SCALE_TRANSITION_MAX, transition_progress)
+        )
+    }
+
+    fun blended_icon_scale(zoom: Double, dot_blend: Float): Float {
+        return lerp(aircraft_icon_scale(zoom), aircraft_dot_scale(zoom), dot_blend)
+    }
+
+    fun dense_batch_dot_alpha(dot_blend: Float): Float {
+        return 0.38f + 0.62f * smooth_step(0.12f, 0.92f, dot_blend)
+    }
+
+    fun batch_dot_outline_scale(dot_scale: Float): Float {
+        return (dot_scale / DOT_SCALE_TRANSITION_MAX).coerceIn(BATCH_DOT_OUTLINE_MIN_SCALE, 1f)
+    }
+
+    fun smooth_step(edge0: Float, edge1: Float, value: Float): Float =
+        safe_smooth_step(edge0, edge1, value)
+
+    const val SYMBOL_ACTIVE_MIN_PROGRESS = 0.03f
+    const val SYMBOL_IDLE_MIN_PROGRESS = 0.03f
+    const val READABLE_DOT_SCALE_MIN = 0.24f
+
+    private const val SCALE_ZOOM_MIN = 5.6f
+    private const val SCALE_ZOOM_MAX = 13.2f
+    private const val SCALE_MIN = 0.30f
+    private const val SCALE_MAX = 1.0f
+    private const val DOT_SCALE_FLOOR_MIN = 0.06f
+    private const val DOT_SCALE_FLOOR_MAX = 0.34f
+    private const val DOT_SCALE_TRANSITION_MAX = 1.08f
+    private const val DOT_SCALE_FLOOR_ZOOM_MIN = 3.0f
+    private const val DOT_SCALE_FLOOR_ZOOM_MAX = 6.4f
+    private const val DOT_SCALE_TRANSITION_ZOOM_START = 3.8f
+    private const val DOT_SCALE_TRANSITION_ZOOM_END = 13.6f
+    private const val DOT_ZOOM_FULL = 2.0f
+    private const val DOT_ZOOM_SYMBOL = 13.6f
+    private const val SYMBOL_BLEND_START = 0.0f
+    private const val SYMBOL_BLEND_FULL = 0.78f
+    private const val SYMBOL_VISIBILITY_START = 0.0f
+    private const val SYMBOL_VISIBILITY_FULL = 0.26f
+    private const val BATCH_DOT_OUTLINE_MIN_SCALE = 0.22f
+}
+
+object AircraftSymbolRenderer {
+    private val path = Path()
+    fun draw(
+        canvas: Canvas,
+        symbol: AircraftSymbol,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        when (symbol) {
+            AircraftSymbol.ROTORCRAFT -> draw_rotorcraft(canvas, progress, paint, stroke_paint, dp)
+            AircraftSymbol.GLIDER -> draw_glider(canvas, progress, paint, stroke_paint, dp)
+            AircraftSymbol.UAV -> draw_uav(canvas, progress, paint, stroke_paint, dp)
+            AircraftSymbol.SURFACE -> draw_surface(canvas, progress, paint, stroke_paint, dp)
+            AircraftSymbol.AIRLINER -> draw_airliner(canvas, progress, paint, stroke_paint, dp)
+            AircraftSymbol.GENERAL_AVIATION -> draw_general_aviation(
+                canvas,
+                progress,
+                paint,
+                stroke_paint,
+                dp
+            )
+        }
+    }
+
+    private fun draw_general_aviation(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        draw_morphed_polygon(
+            canvas = canvas,
+            target = GENERAL_AVIATION_POINTS,
+            progress = progress,
+            paint = paint,
+            stroke_paint = stroke_paint,
+            dp = dp
+        )
+    }
+
+    private fun draw_airliner(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val p = progress.coerceIn(0f, 1f)
+        draw_morphed_polygon(
+            canvas = canvas,
+            target = AIRLINER_POINTS,
+            progress = p,
+            paint = paint,
+            stroke_paint = stroke_paint,
+            dp = dp
+        )
+
+        val engine = smooth_step(0.48f, 1f, p)
+        if (engine > 0f) {
+            canvas.drawCircle(
+                -dp(11.8f * engine),
+                dp(5.6f * engine),
+                dp(2.2f * engine),
+                stroke_paint
+            )
+            canvas.drawCircle(
+                dp(11.8f * engine),
+                dp(5.6f * engine),
+                dp(2.2f * engine),
+                stroke_paint
+            )
+        }
+    }
+
+    private fun draw_rotorcraft(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val p = progress.coerceIn(0f, 1f)
+        val body = smooth_step(0f, 0.55f, p)
+        val rotor = smooth_step(0.25f, 1f, p)
+        val tail = smooth_step(0.45f, 1f, p)
+        val body_rect =
+            RectF(-dp(4f + 4f * body), -dp(4f + 3f * body), dp(4f + 5f * body), dp(4f + 4f * body))
+        canvas.drawOval(body_rect, paint)
+        canvas.drawOval(body_rect, stroke_paint)
+        stroke_paint.strokeWidth = dp(2.5f)
+        canvas.drawLine(-dp(5f + 19f * rotor), 0f, dp(5f + 19f * rotor), 0f, stroke_paint)
+        canvas.drawLine(0f, -dp(5f + 17f * rotor), 0f, dp(5f + 17f * rotor), stroke_paint)
+        stroke_paint.strokeWidth = dp(2f)
+        canvas.drawLine(
+            dp(5f + 4f * body),
+            dp(1f),
+            dp(7f + 16f * tail),
+            dp(4f + 5f * tail),
+            stroke_paint
+        )
+        canvas.drawLine(
+            dp(8f + 13f * tail),
+            dp(3f + 2f * tail),
+            dp(9f + 16f * tail),
+            dp(5f + 8f * tail),
+            stroke_paint
+        )
+        stroke_paint.strokeWidth = dp(1.2f)
+    }
+
+    private fun draw_glider(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        draw_morphed_polygon(
+            canvas = canvas,
+            target = GLIDER_POINTS,
+            progress = progress,
+            paint = paint,
+            stroke_paint = stroke_paint,
+            dp = dp
+        )
+    }
+
+    private fun draw_uav(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        path.reset()
+        val p = progress.coerceIn(0f, 1f)
+        val body = smooth_step(0f, 0.55f, p)
+        val arms = smooth_step(0.2f, 1f, p)
+        val rotors = smooth_step(0.55f, 1f, p)
+        path.moveTo(0f, -dp(5f + 8f * body))
+        path.lineTo(dp(3f + 5f * body), 0f)
+        path.lineTo(0f, dp(5f + 8f * body))
+        path.lineTo(-dp(3f + 5f * body), 0f)
+        path.close()
+        canvas.drawPath(path, paint)
+        canvas.drawPath(path, stroke_paint)
+        stroke_paint.strokeWidth = dp(2f)
+        val arm_inner = dp(4f + 2f * body)
+        val arm_outer = dp(7f + 11f * arms)
+        canvas.drawLine(-arm_inner, -arm_inner, -arm_outer, -arm_outer, stroke_paint)
+        canvas.drawLine(arm_inner, -arm_inner, arm_outer, -arm_outer, stroke_paint)
+        canvas.drawLine(-arm_inner, arm_inner, -arm_outer, arm_outer, stroke_paint)
+        canvas.drawLine(arm_inner, arm_inner, arm_outer, arm_outer, stroke_paint)
+        val rotor_offset = dp(8f + 12f * arms)
+        val rotor_radius = dp(1.5f + 3.5f * rotors)
+        val rotor_blade = dp(5f * rotors)
+        draw_uav_rotor(
+            canvas,
+            -rotor_offset,
+            -rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
+        draw_uav_rotor(
+            canvas,
+            rotor_offset,
+            -rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
+        draw_uav_rotor(
+            canvas,
+            -rotor_offset,
+            rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
+        draw_uav_rotor(
+            canvas,
+            rotor_offset,
+            rotor_offset,
+            rotor_radius,
+            rotor_blade,
+            paint,
+            stroke_paint
+        )
+        stroke_paint.strokeWidth = dp(1.2f)
+    }
+
+    private fun draw_surface(
+        canvas: Canvas,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        val p = progress.coerceIn(0f, 1f)
+        val body = smooth_step(0f, 0.6f, p)
+        val gear = smooth_step(0.55f, 1f, p)
+        draw_morphed_polygon(
+            canvas = canvas,
+            target = SURFACE_POINTS,
+            progress = p,
+            paint = paint,
+            stroke_paint = stroke_paint,
+            dp = dp
+        )
+        stroke_paint.strokeWidth = dp(2f)
+        canvas.drawLine(
+            -dp(5f + 9f * gear),
+            dp(8f + 10f * body),
+            dp(5f + 9f * gear),
+            dp(8f + 10f * body),
+            stroke_paint
+        )
+        canvas.drawCircle(-dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
+        canvas.drawCircle(dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
+        stroke_paint.strokeWidth = dp(1.2f)
+    }
+
+    private fun draw_morphed_polygon(
+        canvas: Canvas,
+        target: FloatArray,
+        progress: Float,
+        paint: Paint,
+        stroke_paint: Paint,
+        dp: (Float) -> Float
+    ) {
+        path.reset()
+        val p = smooth_step(0f, 1f, progress.coerceIn(0f, 1f))
+        var target_index = 0
+        var point_index = 0
+        while (target_index + 1 < target.size) {
+            val point_x = target[target_index]
+            val point_y = target[target_index + 1]
+            val angle = atan2(point_y.toDouble(), point_x.toDouble())
+            val start_x = (cos(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
+            val start_y = (sin(angle) * AIRCRAFT_MORPH_SEED_RADIUS_DP).toFloat()
+            val x = lerp(start_x, point_x, p)
+            val y = lerp(start_y, point_y, p)
+            if (point_index == 0) {
+                path.moveTo(dp(x), dp(y))
+            } else {
+                path.lineTo(dp(x), dp(y))
+            }
+            target_index += 2
+            point_index++
+        }
+        path.close()
+        canvas.drawPath(path, paint)
+        canvas.drawPath(path, stroke_paint)
+    }
+
+    private fun draw_uav_rotor(
+        canvas: Canvas,
+        x: Float,
+        y: Float,
+        radius: Float,
+        blade: Float,
+        paint: Paint,
+        stroke_paint: Paint
+    ) {
+        canvas.drawCircle(x, y, radius, paint)
+        canvas.drawCircle(x, y, radius, stroke_paint)
+        canvas.drawLine(x - blade, y, x + blade, y, stroke_paint)
+    }
+
+    private const val AIRCRAFT_MORPH_SEED_RADIUS_DP = 4f
+    private val GENERAL_AVIATION_POINTS = floatArrayOf(
+        0f, -17f,
+        3.2f, -4.2f,
+        17f, 0.8f,
+        15.2f, 4.4f,
+        3.3f, 3.4f,
+        2.2f, 13.8f,
+        8.4f, 17.2f,
+        0f, 12.7f,
+        -8.4f, 17.2f,
+        -2.2f, 13.8f,
+        -3.3f, 3.4f,
+        -15.2f, 4.4f,
+        -17f, 0.8f,
+        -3.2f, -4.2f
+    )
+
+    private val AIRLINER_POINTS = floatArrayOf(
+        0f, -21f,
+        5.5f, -4.8f,
+        23.5f, 0.8f,
+        21.5f, 5.8f,
+        7.2f, 6.2f,
+        5.1f, 16.5f,
+        13.5f, 21f,
+        2.8f, 17.2f,
+        0f, 13.5f,
+        -2.8f, 17.2f,
+        -13.5f, 21f,
+        -5.1f, 16.5f,
+        -7.2f, 6.2f,
+        -21.5f, 5.8f,
+        -23.5f, 0.8f,
+        -5.5f, -4.8f
+    )
+
+    private val GLIDER_POINTS = floatArrayOf(
+        0f, -16f,
+        3f, 2f,
+        27f, 5f,
+        4f, 8f,
+        1.8f, 17f,
+        -1.8f, 17f,
+        -4f, 8f,
+        -27f, 5f,
+        -3f, 2f
+    )
+
+    private val SURFACE_POINTS = floatArrayOf(
+        0f, -15f,
+        5f, -4f,
+        18f, 1f,
+        15f, 6f,
+        4f, 4f,
+        2f, 13f,
+        -2f, 13f,
+        -4f, 4f,
+        -15f, 6f,
+        -18f, 1f,
+        -5f, -4f
+    )
+}
+
+data class TrafficAltitudeColorPalette(
+    val aggressive: Int,
+    val aggressive_shade: Int,
+    val distinct: Int,
+    val calmest: Int
+)
+
+object AircraftColorResolver {
+    fun aircraft_color(aircraft: Aircraft, theme: VisualTheme): Int {
+        val altitude_feet = aircraft.altitude_m?.times(FEET_PER_METER)
+        return if (aircraft.is_military) {
+            military_altitude_color(altitude_feet, theme)
+        } else {
+            altitude_color(altitude_feet, theme)
+        }
+    }
+
+    private fun altitude_color(altitude_feet: Double?, theme: VisualTheme): Int {
+        val palette = altitude_color_palette(theme)
+        val altitude = altitude_feet ?: return mix_color(palette.calmest, theme.colors.muted, 0.48f)
+        return when {
+            altitude < LOW_ALTITUDE_FEET -> {
+                val progress = altitude_progress(altitude, 0.0, LOW_ALTITUDE_FEET)
+                mix_color(palette.aggressive, palette.aggressive_shade, progress)
+            }
+
+            altitude < MID_ALTITUDE_FEET -> {
+                val progress = altitude_progress(altitude, LOW_ALTITUDE_FEET, MID_ALTITUDE_FEET)
+                mix_color(palette.aggressive_shade, palette.distinct, progress)
+            }
+
+            else -> {
+                val progress = altitude_progress(altitude, MID_ALTITUDE_FEET, HIGH_ALTITUDE_FEET)
+                mix_color(palette.distinct, palette.calmest, progress)
+            }
+        }
+    }
+
+    private fun military_altitude_color(altitude_feet: Double?, theme: VisualTheme): Int {
+        val progress =
+            altitude_feet?.let { altitude_progress(it, 0.0, HIGH_ALTITUDE_FEET) } ?: 0.55f
+        val low_gray = mix_color(theme.colors.military, Color.WHITE, 0.34f)
+        val high_gray = mix_color(theme.colors.military, theme.colors.scrim, 0.22f)
+        return mix_color(low_gray, high_gray, progress)
+    }
+
+    private fun altitude_color_palette(theme: VisualTheme): TrafficAltitudeColorPalette {
+        val colors = theme.colors
+        return when (theme.style.treatment) {
+            ThemeTreatment.RADAR_GRID -> TrafficAltitudeColorPalette(
+                aggressive = colors.accent_orange,
+                aggressive_shade = colors.accent_yellow,
+                distinct = colors.accent_green,
+                calmest = colors.accent_blue
+            )
+
+            ThemeTreatment.CRT_SCANLINE -> TrafficAltitudeColorPalette(
+                aggressive = colors.danger,
+                aggressive_shade = colors.accent_yellow,
+                distinct = colors.accent_green,
+                calmest = mix_color(colors.accent_blue, colors.muted, 0.25f)
+            )
+
+            ThemeTreatment.DAYLIGHT_CARD -> TrafficAltitudeColorPalette(
+                aggressive = colors.danger,
+                aggressive_shade = colors.accent_orange,
+                distinct = colors.accent_green,
+                calmest = colors.accent_blue
+            )
+
+            ThemeTreatment.STORM_BAND -> TrafficAltitudeColorPalette(
+                aggressive = colors.danger,
+                aggressive_shade = colors.accent_pink,
+                distinct = colors.accent_green,
+                calmest = colors.accent_blue
+            )
+
+            ThemeTreatment.GLASS -> TrafficAltitudeColorPalette(
+                aggressive = colors.accent_orange,
+                aggressive_shade = colors.accent_yellow,
+                distinct = colors.accent_green,
+                calmest = colors.accent_blue
+            )
+
+            ThemeTreatment.PLAIN -> TrafficAltitudeColorPalette(
+                aggressive = colors.danger,
+                aggressive_shade = colors.accent_orange,
+                distinct = colors.accent_green,
+                calmest = colors.accent_blue
+            )
+        }
+    }
+
+    private fun altitude_progress(
+        altitude_feet: Double,
+        lower_feet: Double,
+        upper_feet: Double
+    ): Float {
+        return safe_smooth_step(
+            0f,
+            1f,
+            ((altitude_feet - lower_feet) / (upper_feet - lower_feet)).toFloat()
+        )
+    }
+
+    private const val FEET_PER_METER = 3.28084
+    private const val LOW_ALTITUDE_FEET = 5000.0
+    private const val MID_ALTITUDE_FEET = 25000.0
+    private const val HIGH_ALTITUDE_FEET = 45000.0
+}
+
+enum class AircraftSymbol {
+    GENERAL_AVIATION,
+    AIRLINER,
+    ROTORCRAFT,
+    GLIDER,
+    UAV,
+    SURFACE
+}
+
+object AircraftSymbolClassifier {
+    fun symbol_for(aircraft: Aircraft): AircraftSymbol {
+        if (aircraft.on_ground == true) return AircraftSymbol.SURFACE
+        when (aircraft.category) {
+            8 -> return AircraftSymbol.ROTORCRAFT
+            9, 10 -> return AircraftSymbol.GLIDER
+            14 -> return AircraftSymbol.UAV
+            16, 17, 18, 19, 20 -> return AircraftSymbol.SURFACE
+        }
+        val type_code = normalized_type_code(aircraft.type_code)
+        special_symbol_for_normalized_type_code(type_code)?.let { return it }
+        if (type_code.startsWith("H25") ||
+            type_code == "HDJT" ||
+            type_code.startsWith("GLF") ||
+            type_code == "GLEX" ||
+            type_code == "GL5T" ||
+            type_code == "GL7T"
+        ) return AircraftSymbol.GENERAL_AVIATION
+        return if (aircraft.category in 4..6 || is_airliner_type_code(type_code)) {
+            AircraftSymbol.AIRLINER
+        } else {
+            AircraftSymbol.GENERAL_AVIATION
+        }
+    }
+
+    internal fun special_symbol_for_type_code(type_code: String?): AircraftSymbol? {
+        return special_symbol_for_normalized_type_code(normalized_type_code(type_code))
+    }
+
+    fun size_multiplier(aircraft: Aircraft, symbol: AircraftSymbol): Float {
+        val code = normalized_type_code(aircraft.type_code)
+        return when (symbol) {
+            AircraftSymbol.AIRLINER -> when {
+                HEAVY_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.18f
+                LARGE_AIRLINER_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.10f
+                REGIONAL_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 0.98f
+                else -> 1.05f
+            }
+
+            AircraftSymbol.GENERAL_AVIATION -> when {
+                LIGHT_JET_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 1.04f
+                SMALL_GENERAL_AVIATION_SIZE_TYPE_PREFIXES.any { code.startsWith(it) } -> 0.86f
+                else -> 1.0f
+            }
+
+            AircraftSymbol.ROTORCRAFT -> 0.9f
+            AircraftSymbol.GLIDER -> 0.82f
+            AircraftSymbol.UAV -> 0.74f
+            AircraftSymbol.SURFACE -> 0.86f
+        }
+    }
+
+    private fun normalized_type_code(type_code: String?): String {
+        return type_code?.trim()?.uppercase(Locale.US).orEmpty()
+    }
+
+    private fun special_symbol_for_normalized_type_code(type_code: String): AircraftSymbol? {
+        return when (type_code) {
+            in ROTORCRAFT_TYPE_CODES -> AircraftSymbol.ROTORCRAFT
+            "GLID", "GLIM" -> AircraftSymbol.GLIDER
+            "FFLO", "VFHC", "UAV", "DRON" -> AircraftSymbol.UAV
+            else -> null
+        }
+    }
+
+    private fun is_airliner_type_code(type_code: String): Boolean {
+        return AIRLINER_TYPE_PREFIXES.any { type_code.startsWith(it) }
+    }
+
+    private val ROTORCRAFT_TYPE_CODES = setOf(
+        "A002", "A109", "A119", "A129", "A139", "A149", "A169", "A189",
+        "A205", "A2RT", "A600", "AC10", "AC31", "AC33", "ADEL", "AG1",
+        "ALH", "ALO2", "ALO3", "ANST", "AR1", "AS32", "AS3B", "AS50",
+        "AS55", "AS65", "B06", "B06T", "B105", "B150", "B212", "B214",
+        "B222", "B230", "B305", "B407", "B412", "B427", "B429", "B430",
+        "B47G", "B47J", "B47T", "B505", "B525", "B609", "BABY", "BK17",
+        "BR54", "BRB2", "BSTP", "CDUS", "CH12", "CH14", "CH7", "CHIF",
+        "CHSY", "CLD2", "CLON", "CMD1", "CMDE", "CMDT", "COMU", "DEAG",
+        "DJIN", "DRAG", "DYH2", "DYH3", "EC20", "EC25", "EC30", "EC35",
+        "EC45", "EC55", "EC75", "EGL3", "EH10", "EL10", "ELA7", "ELTO",
+        "EN28", "EN48", "ES11", "EXEC", "EXEJ", "EXPL", "FH11", "FREL",
+        "G2CA", "GAZL", "GOBU", "GYRO", "H12T", "H160", "H2", "H21",
+        "H269", "H43A", "H43B", "H46", "H47", "H500", "H53", "H53S",
+        "H60", "H64", "HA2", "HAW3", "HSMT", "HUCO", "HW4P", "HW4T",
+        "HX2", "IS2", "J4B2", "JAG2", "JAS4", "JE2", "JRO", "K126",
+        "K209", "K226", "KA25", "KA26", "KA27", "KA50", "KA52", "KA62",
+        "KH4", "KMAX", "LAMA", "LCH", "LR2T", "LYNX", "M74", "MD52",
+        "MD60", "MH20", "MI10", "MI14", "MI2", "MI24", "MI26", "MI28",
+        "MI34", "MI38", "MI4", "MI6", "MI8", "MM14", "MM16", "MM19",
+        "MM21", "MM22", "MM24", "MMAX", "MT", "NA40", "NH90", "OH1",
+        "OKHO", "PAV4", "PCA2", "PHIL", "PHIX", "PSW4", "PUMA", "R22",
+        "R4", "R44", "R66", "RAF2", "REV6", "RMOU", "RP1", "RPUP",
+        "RVAL", "S274", "S278", "S285", "S330", "S360", "S434", "S51",
+        "S52", "S55P", "S55T", "S58P", "S58T", "S61", "S61R", "S62",
+        "S64", "S65C", "S76", "S92", "S97", "SB1", "SCII", "SCOR",
+        "SCOU", "SH09", "SH4", "SNAD", "SPGY", "SPHA", "SSC", "SUCO",
+        "SURN", "SYCA", "TIGR", "TSTR", "UFHT", "UH1", "UH12", "UH1Y",
+        "UHEL", "ULTS", "UM18", "V22", "V280", "V500", "W3", "WASP",
+        "WESX", "WZ10", "X2", "X3", "X49", "XNON", "YNHL", "ZA6", "ZEFR"
+    )
+
+    private val HEAVY_SIZE_TYPE_PREFIXES = listOf(
+        "A34",
+        "A35",
+        "A38",
+        "B74",
+        "B77",
+        "B78",
+        "C5",
+        "C17",
+        "DC10",
+        "MD11"
+    )
+
+    private val LARGE_AIRLINER_SIZE_TYPE_PREFIXES = listOf(
+        "A30",
+        "A31",
+        "A32",
+        "A33",
+        "B70",
+        "B71",
+        "B72",
+        "B73",
+        "B75",
+        "B76",
+        "B79"
+    )
+
+    private val REGIONAL_SIZE_TYPE_PREFIXES = listOf(
+        "AT4",
+        "AT7",
+        "BCS",
+        "CRJ",
+        "DH8",
+        "E17",
+        "E19",
+        "E70",
+        "E75",
+        "F70",
+        "F90"
+    )
+
+    private val LIGHT_JET_SIZE_TYPE_PREFIXES = listOf(
+        "C25",
+        "C55",
+        "C56",
+        "E50",
+        "E55",
+        "GLF",
+        "LJ",
+        "PRM",
+        "SF50"
+    )
+
+    private val SMALL_GENERAL_AVIATION_SIZE_TYPE_PREFIXES = listOf(
+        "BE23",
+        "BE35",
+        "BE36",
+        "C15",
+        "C17",
+        "C18",
+        "C19",
+        "C20",
+        "C21",
+        "DA40",
+        "DA42",
+        "P28",
+        "PA2",
+        "SR20",
+        "SR22"
+    )
+
+    private val AIRLINER_TYPE_PREFIXES = listOf(
+        "A19",
+        "A20",
+        "A21",
+        "A30",
+        "A31",
+        "A32",
+        "A33",
+        "A34",
+        "A35",
+        "A38",
+        "AT4",
+        "AT7",
+        "B37",
+        "B38",
+        "B39",
+        "B70",
+        "B71",
+        "B72",
+        "B73",
+        "B74",
+        "B75",
+        "B76",
+        "B77",
+        "B78",
+        "BCS",
+        "CRJ",
+        "DH8",
+        "E17",
+        "E19",
+        "E29",
+        "E70",
+        "E75",
+        "F70",
+        "F90",
+        "MD8",
+        "MD9"
+    )
+}
+
+fun display_model_name(manufacturer: String?, type: String?, type_code: String?): String? {
+    val code = type_code?.uppercase(Locale.US)?.trim()
+    val known_model = when (code) {
+        "A19N" -> "Airbus A319neo"
+        "A20N" -> "Airbus A320neo"
+        "A21N" -> "Airbus A321neo"
+        "A319" -> "Airbus A319"
+        "A320" -> "Airbus A320"
+        "A321" -> "Airbus A321"
+        "A359" -> "Airbus A350-900"
+        "A35K" -> "Airbus A350-1000"
+        "A388" -> "Airbus A380-800"
+        "B37M" -> "Boeing 737 MAX 7"
+        "B38M" -> "Boeing 737 MAX 8"
+        "B39M" -> "Boeing 737 MAX 9"
+        "B3XM" -> "Boeing 737 MAX 10"
+        "B737" -> "Boeing 737"
+        "B738" -> "Boeing 737-800"
+        "B739" -> "Boeing 737-900"
+        "B752" -> "Boeing 757-200"
+        "B762" -> "Boeing 767-200"
+        "B763" -> "Boeing 767-300"
+        "B764" -> "Boeing 767-400"
+        "B772" -> "Boeing 777-200"
+        "B77L" -> "Boeing 777-200LR"
+        "B77W" -> "Boeing 777-300ER"
+        "B788" -> "Boeing 787-8"
+        "B789" -> "Boeing 787-9"
+        "B78X" -> "Boeing 787-10"
+        "B744" -> "Boeing 747-400"
+        "B748" -> "Boeing 747-8"
+        "BCS1" -> "Airbus A220-100"
+        "BCS3" -> "Airbus A220-300"
+        "AT72" -> "ATR 72"
+        "AT76" -> "ATR 72-600"
+        "AA1" -> "Grumman American AA-1 Yankee"
+        "AA5" -> "Grumman American AA-5 Traveler"
+        "AG5B" -> "American General AG-5B Tiger"
+        "BE20" -> "Beechcraft King Air 200"
+        "BE30" -> "Beechcraft King Air 300"
+        "BE33" -> "Beechcraft Bonanza"
+        "BE35" -> "Beechcraft Bonanza"
+        "BE36" -> "Beechcraft Bonanza"
+        "BE40" -> "Beechjet 400"
+        "BE55" -> "Beechcraft Baron"
+        "BE58" -> "Beechcraft Baron"
+        "BE76" -> "Beechcraft Duchess"
+        "B350" -> "Beechcraft King Air 350"
+        "B407" -> "Bell 407"
+        "C120" -> "Cessna 120"
+        "C140" -> "Cessna 140"
+        "C150" -> "Cessna 150"
+        "C152" -> "Cessna 152"
+        "C172" -> "Cessna 172"
+        "C175" -> "Cessna 175 Skylark"
+        "C177" -> "Cessna 177 Cardinal"
+        "C180" -> "Cessna 180"
+        "C182" -> "Cessna 182"
+        "C195" -> "Cessna 195"
+        "C185" -> "Cessna 185"
+        "C206" -> "Cessna 206"
+        "C208" -> "Cessna 208 Caravan"
+        "C210" -> "Cessna 210"
+        "C337" -> "Cessna 337 Skymaster"
+        "C25A" -> "Cessna Citation CJ2"
+        "C25B" -> "Cessna Citation CJ3"
+        "C25C" -> "Cessna Citation CJ4"
+        "C310" -> "Cessna 310"
+        "C414" -> "Cessna 414"
+        "C421" -> "Cessna 421"
+        "C525" -> "Cessna CitationJet"
+        "C56X" -> "Cessna Citation Excel"
+        "C680" -> "Cessna Citation Sovereign"
+        "C68A" -> "Cessna Citation Latitude"
+        "C700" -> "Cessna Citation Longitude"
+        "C130" -> "Lockheed C-130 Hercules"
+        "C17" -> "Boeing C-17 Globemaster III"
+        "CL30" -> "Bombardier Challenger 300"
+        "CL35" -> "Bombardier Challenger 350"
+        "CL60" -> "Bombardier Challenger 600"
+        "CRJ2" -> "Bombardier CRJ200"
+        "CRJ7" -> "Bombardier CRJ700"
+        "CRJ9" -> "Bombardier CRJ900"
+        "DA40" -> "Diamond DA40"
+        "DA42" -> "Diamond DA42"
+        "GA7" -> "Grumman American GA-7 Cougar"
+        "DH8D" -> "De Havilland Canada Dash 8 Q400"
+        "A139" -> "Leonardo AW139"
+        "AS50" -> "Airbus Helicopters AS350"
+        "EC30" -> "Airbus Helicopters EC130"
+        "EC35" -> "Airbus Helicopters EC135"
+        "EC45" -> "Airbus Helicopters EC145"
+        "E170" -> "Embraer 170"
+        "E75L", "E75S" -> "Embraer 175"
+        "E190" -> "Embraer 190"
+        "E195" -> "Embraer 195"
+        "E50P" -> "Embraer Phenom 100"
+        "E55P" -> "Embraer Phenom 300"
+        "F2TH" -> "Dassault Falcon 2000"
+        "F900" -> "Dassault Falcon 900"
+        "FA50" -> "Dassault Falcon 50"
+        "GL5T" -> "Bombardier Global 5000"
+        "GL7T" -> "Bombardier Global 7500"
+        "GLEX" -> "Bombardier Global Express"
+        "GLF4" -> "Gulfstream IV"
+        "GLF5" -> "Gulfstream V"
+        "GLF6" -> "Gulfstream G650"
+        "H25B" -> "Hawker 800"
+        "LJ31" -> "Learjet 31"
+        "LJ35" -> "Learjet 35"
+        "LJ45" -> "Learjet 45"
+        "LJ60" -> "Learjet 60"
+        "P28A" -> "Piper PA-28 Cherokee"
+        "PA28" -> "Piper PA-28 Cherokee"
+        "PA30" -> "Piper PA-30 Twin Comanche"
+        "PA31" -> "Piper PA-31 Navajo"
+        "PA32" -> "Piper PA-32 Cherokee Six"
+        "PA34" -> "Piper PA-34 Seneca"
+        "PA44" -> "Piper PA-44 Seminole"
+        "P46T" -> "Piper PA-46 Malibu"
+        "PC12" -> "Pilatus PC-12"
+        "R44" -> "Robinson R44"
+        "R66" -> "Robinson R66"
+        "S22T" -> "Cirrus SR22T"
+        "SF34" -> "Saab 340"
+        "SR20" -> "Cirrus SR20"
+        "SR22" -> "Cirrus SR22"
+        "M20P" -> "Mooney M20"
+        "M20T" -> "Mooney M20"
+        "RV6" -> "Van's RV-6"
+        "RV7" -> "Van's RV-7"
+        "RV8" -> "Van's RV-8"
+        "RV9" -> "Van's RV-9"
+        "TBM7" -> "Socata TBM 700"
+        "TBM8" -> "Socata TBM 850"
+        "TBM9" -> "Daher TBM 900"
+        else -> null
+    }
+    if (known_model != null) return known_model
+    val maker = human_aircraft_name_part(manufacturer)
+    val model = human_aircraft_name_part(type ?: type_code)
+    return when {
+        model == null -> maker
+        maker == null || model_starts_with_aircraft_brand(model) -> model
+        else -> "$maker $model"
+    }
+}
+
+private fun model_starts_with_aircraft_brand(value: String): Boolean {
+    val normalized = value.uppercase(Locale.US)
+    return listOf(
+        "AIRBUS",
+        "BOEING",
+        "CESSNA",
+        "PIPER",
+        "BEECHCRAFT",
+        "CIRRUS",
+        "DIAMOND",
+        "EMBRAER",
+        "BOMBARDIER",
+        "DASSAULT",
+        "GULFSTREAM",
+        "LEARJET",
+        "PILATUS",
+        "ROBINSON",
+        "SAAB",
+        "ATR",
+        "EUROCOPTER",
+        "DE HAVILLAND",
+        "HAWKER",
+        "MOONEY",
+        "DAHER",
+        "SOCATA"
+    ).any { brand -> normalized == brand || normalized.startsWith("$brand ") }
+}
+
+private fun human_aircraft_name_part(value: String?): String? {
+    val clean = value?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() }
+        ?: return null
+    return clean.split(" ").joinToString(" ") { word ->
+        if (word.any(Char::isLowerCase) || word.any(Char::isDigit) || word.length <= 3) {
+            word
+        } else {
+            word.lowercase(Locale.US).replaceFirstChar { char -> char.titlecase(Locale.US) }
+        }
+    }
+}
+
