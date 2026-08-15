@@ -6,8 +6,8 @@
 
 package com.flightalert.map.reference.dictionary
 
-import kotlin.math.floor
 import com.flightalert.map.reference.ReferencePresentationPolicy
+import kotlin.math.floor
 
 internal object ReferenceDictionaryLodPolicy {
     const val LABEL_ONLY_OUTLINE_PROFILE = 0

@@ -10,15 +10,7 @@ package com.flightalert.map.reference.dictionary
 import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.util.LinkedHashMap
 
-internal data class ReferenceDictionaryIndexEntry(
-    val offset: Long,
-    val compressed_length: Int,
-    val raw_length: Int,
-    val raw_hash32: Int,
-    val flags: Int,
-)
 
 /** Bounded, page-cached access to the whole-world tile index. */
 internal class ReferenceDictionaryIndexReader private constructor(

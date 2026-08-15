@@ -13,9 +13,8 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
-import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.Files
-
+import java.nio.file.attribute.BasicFileAttributes
 
 
 /** Positional reads over either one binary file or fixed-size numbered parts. */

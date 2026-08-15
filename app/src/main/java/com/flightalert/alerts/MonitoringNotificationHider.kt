@@ -12,11 +12,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 
-enum class MonitoringNotificationHiderStatus {
-    BOOTING,
-    DOWN,
-    UP
-}
+
 
 internal object MonitoringNotificationHider {
     private const val WATCHER_BOOT_TIMEOUT_MS = 30L * 1000L

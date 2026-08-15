@@ -12,15 +12,7 @@ import com.flightalert.map.policy_require
 import com.flightalert.map.reference.ProminenceTier
 import com.flightalert.map.reference.SemanticSubtype
 
-enum class ProminenceEvidenceKind(val stable_id: Int) {
-    PROVIDER_RANK(1), CAPITAL_LEVEL(2), POPULATION(3), COMPLETE_AREA_M2(4),
-    COMPLETE_RELATION_LENGTH_M(5), TYPED_SUBTYPE_DEFAULT(6)
-}
 
-enum class PlacementSourceKind(val stable_id: Int) {
-    NONE(0), DIRECT_SOURCE_POINT(1), SOURCE_OWNED_AREA_LABEL_POINT(2),
-    DIRECT_SOURCE_PATH(3), EXACT_PARENT_PATH(4)
-}
 
 internal object ReferenceProminencePolicy {
     internal const val globalRiverLength = 500_000L

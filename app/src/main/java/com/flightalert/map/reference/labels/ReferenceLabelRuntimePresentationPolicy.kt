@@ -9,13 +9,7 @@ import com.flightalert.map.reference.ProminenceTier
 import com.flightalert.map.reference.ReferencePresentationPolicy
 import com.flightalert.map.reference.SemanticSubtype
 
-internal data class ReferenceLabelRuntimeTypography(
-    val textSizeMilliSp: Int,
-    val haloWidthMilliEm: Int,
-    val fontWeight: Int,
-    val italic: Boolean,
-    val letterSpacingMilliEm: Int,
-)
+
 
 /** Applies phone styling without changing source-bound package policy. */
 internal object ReferenceLabelRuntimePresentationPolicy {

@@ -54,14 +54,7 @@ import com.flightalert.recycle_bitmap_pair
 import com.flightalert.smooth_step
 import com.flightalert.with_alpha
 
-interface TrafficOverlayChrome {
-    fun dp(value: Float): Float
-    fun sp(value: Float): Float
-    fun ellipsize(value: String, max_width: Float): String
-    fun aircraft_label_detail(aircraft: Aircraft): String
-    fun request_animation_frame()
-    fun retire_bitmap_after_frame_commit(bitmap: Bitmap)
-}
+
 
 class TrafficOverlayRenderer(
     private val paint: Paint,
