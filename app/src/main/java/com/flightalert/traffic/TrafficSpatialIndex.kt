@@ -7,6 +7,7 @@
 
 package com.flightalert.traffic
 
+import java.util.IdentityHashMap
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.sqrt
@@ -25,6 +26,8 @@ internal class TrafficSpatialIndex(
     is_cancelled: () -> Boolean = { false }
 ) {
     private val cells = arrayOfNulls<MutableList<TrafficSpatialEntry>>(CELL_COUNT * CELL_COUNT)
+    private val entries_by_aircraft =
+        IdentityHashMap<Aircraft, TrafficSpatialEntry>(entries.size)
     val complete: Boolean
 
     init {
@@ -41,8 +44,15 @@ internal class TrafficSpatialIndex(
             val index = row * CELL_COUNT + column
             val cell = cells[index] ?: ArrayList<TrafficSpatialEntry>().also { cells[index] = it }
             cell += entry
+            if (!entries_by_aircraft.containsKey(entry.aircraft)) {
+                entries_by_aircraft[entry.aircraft] = entry
+            }
         }
         complete = completed
+    }
+
+    fun entry_for_aircraft(aircraft: Aircraft): TrafficSpatialEntry? {
+        return entries_by_aircraft[aircraft]
     }
 
     // Pan frames use this grid to ask only the cells near the viewport instead of scanning all aircraft.

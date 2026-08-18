@@ -259,7 +259,7 @@ class AircraftTrafficFeed(
             callsign.takeUnless { it.isBlank() || it.equals("Unknown", ignoreCase = true) }
                 ?: fallback?.callsign
                 ?: callsign
-        return Aircraft(
+        val mapped = Aircraft(
             icao24 = icao24,
             callsign = resolved_callsign,
             registration = registration ?: fallback?.registration,
@@ -284,6 +284,7 @@ class AircraftTrafficFeed(
                 telemetry?.with_fallback(fallback.telemetry) ?: fallback.telemetry
             }
         )
+        return if (fallback != null && mapped == fallback) fallback else mapped
     }
 
     private companion object {

@@ -70,6 +70,7 @@ internal class TrafficCacheController(
         var nearest: Aircraft? = null
         var nearest_distance = Double.POSITIVE_INFINITY
         var max_projected_speed_squared = 0.0
+        var earliest_projection_epoch_sec = Double.POSITIVE_INFINITY
         val prepare_alerts = context.safety.alerts_enabled
         all.forEachIndexed { index, item ->
             if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
@@ -89,6 +90,8 @@ internal class TrafficCacheController(
                 entries?.let { destination ->
                     val entry = policy.spatial_entry_for(item, context)
                     destination += entry
+                    earliest_projection_epoch_sec =
+                        minOf(earliest_projection_epoch_sec, entry.projection_epoch_sec)
                     if (entry.projected_motion_remaining_sec > 0.0) {
                         val dx = entry.projected_velocity_x_zoom_zero
                         val dy = entry.projected_velocity_y_zoom_zero
@@ -116,6 +119,7 @@ internal class TrafficCacheController(
         if (reusable != null) {
             return reusable.copy(
                 nearest_aircraft = nearest ?: reusable.aircraft.firstOrNull(),
+                total = all.size,
                 matched_total = filtered.size,
                 hazard_present = priority_aircraft.isNotEmpty(),
                 priority_notification_aircraft = priority_alerts
@@ -128,8 +132,12 @@ internal class TrafficCacheController(
             filtered.forEachIndexed { index, item ->
                 if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
                 rebuilt_by_icao.putIfAbsent(policy.aircraft_icao_key(item), item)
-                val entry = policy.spatial_entry_for(item, context)
+                val entry =
+                    reusable_visual_cache?.spatial_index?.entry_for_aircraft(item)
+                        ?: policy.spatial_entry_for(item, context)
                 entries += entry
+                earliest_projection_epoch_sec =
+                    minOf(earliest_projection_epoch_sec, entry.projection_epoch_sec)
                 if (entry.projected_motion_remaining_sec > 0.0) {
                     val dx = entry.projected_velocity_x_zoom_zero
                     val dy = entry.projected_velocity_y_zoom_zero
@@ -142,7 +150,11 @@ internal class TrafficCacheController(
         }
         val completed_entries = entries
         val completed_aircraft_by_icao = checkNotNull(filtered_by_icao)
-        val world_dot_batch = build_world_dot_batch(completed_entries, is_cancelled) ?: return null
+        val world_dot_batch = build_world_dot_batch(
+            completed_entries,
+            context.now_epoch_sec,
+            is_cancelled
+        ) ?: return null
         if (is_cancelled()) return null
         val spatial_index = TrafficSpatialIndex(completed_entries, is_cancelled)
         if (!spatial_index.complete || is_cancelled()) return null
@@ -160,7 +172,9 @@ internal class TrafficCacheController(
             extreme_priority_aircraft = priority_aircraft,
             priority_notification_aircraft = priority_alerts,
             max_projected_speed_zoom_zero = max_projected_speed,
-            projection_epoch_sec = context.now_epoch_sec
+            projection_epoch_sec = earliest_projection_epoch_sec
+                .takeIf { it.isFinite() }
+                ?: context.now_epoch_sec
         )
     }
 
@@ -201,6 +215,7 @@ internal class TrafficCacheController(
 
     private fun build_world_dot_batch(
         entries: List<TrafficSpatialEntry>,
+        now_epoch_sec: Double,
         is_cancelled: () -> Boolean
     ): TrafficWorldDotBatch? {
         if (entries.isEmpty()) return TrafficWorldDotBatch.empty()
@@ -217,8 +232,19 @@ internal class TrafficCacheController(
         val fill_counts = IntArray(TrafficDotGrouper.GROUP_COUNT)
         for ((index, entry) in entries.withIndex()) {
             if (index and CANCELLATION_CHECK_MASK == 0 && is_cancelled()) return null
-            val x = entry.world_x_zoom_zero.toFloat()
-            val y = entry.world_y_zoom_zero.toFloat()
+            val elapsed_sec =
+                (now_epoch_sec - entry.projection_epoch_sec).coerceIn(
+                    0.0,
+                    minOf(MAX_ESTIMATION_SECONDS, entry.projected_motion_remaining_sec)
+                )
+            val x = (
+                entry.world_x_zoom_zero +
+                    entry.projected_velocity_x_zoom_zero * elapsed_sec
+                ).toFloat()
+            val y = (
+                entry.world_y_zoom_zero +
+                    entry.projected_velocity_y_zoom_zero * elapsed_sec
+                ).toFloat()
             outline_points = ensure_point_capacity(outline_points, outline_count + 2)
             outline_points[outline_count++] = x
             outline_points[outline_count++] = y
@@ -240,4 +266,3 @@ internal class TrafficCacheController(
         const val CANCELLATION_CHECK_MASK = 127
     }
 }
-

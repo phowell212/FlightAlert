@@ -734,7 +734,6 @@ internal class TrafficRuntimeCoordinator(
         val feed_request: VisibleAircraftRequest?
         val previous_appearances: Map<String, AircraftAppearance>
         val previous_appearance_animation_until_ms: Long
-        val retained_previous_added: Boolean
         when (val content = request.content) {
             is AircraftPrepareContent.Feed -> {
                 val fresh =
@@ -753,7 +752,6 @@ internal class TrafficRuntimeCoordinator(
                             is_cancelled = is_cancelled
                         ) ?: return null
                     }
-                var added_retained_aircraft = false
                 base_aircraft = if (content.retain_previous_aircraft) {
                     // Fresh order stays authoritative; only records outside its bounds retain the gesture corridor.
                     val merged = LinkedHashMap<String, Aircraft>(
@@ -771,9 +769,7 @@ internal class TrafficRuntimeCoordinator(
                             } &&
                             !item.matches_exact_key(authoritative_exact_key)
                         ) {
-                            if (merged.putIfAbsent(item.appearance_key(), item) == null) {
-                                added_retained_aircraft = true
-                            }
+                            merged.putIfAbsent(item.appearance_key(), item)
                         }
                     }
                     merged.values.toList()
@@ -789,7 +785,6 @@ internal class TrafficRuntimeCoordinator(
                 previous_appearances = content.previous_appearances
                 previous_appearance_animation_until_ms =
                     content.previous_appearance_animation_until_ms
-                retained_previous_added = added_retained_aircraft
             }
             is AircraftPrepareContent.Committed -> {
                 base_aircraft = content.aircraft
@@ -802,7 +797,6 @@ internal class TrafficRuntimeCoordinator(
                 previous_appearances = content.appearances
                 previous_appearance_animation_until_ms =
                     content.appearance_animation_until_ms
-                retained_previous_added = false
             }
         }
         if (is_cancelled()) return null
@@ -952,8 +946,7 @@ internal class TrafficRuntimeCoordinator(
             all = parsed,
             context = cache_context,
             is_cancelled = is_cancelled,
-            reusable_visual_cache =
-                request.reusable_visual_cache.takeUnless { retained_previous_added },
+            reusable_visual_cache = request.reusable_visual_cache,
         ) ?: return null
         val completed_cache = global_aircraft?.let {
             parsed_cache.copy(
