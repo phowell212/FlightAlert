@@ -13,6 +13,7 @@ import com.flightalert.map.reference.FilterId
 import com.flightalert.map.reference.dictionary.FilterState
 
 object ReferenceFilterPreferences {
+    // Keep one versioned filter schema across decoding and migration.
     const val schema = "flight-alert-reference-filters-v1"
     private val app_default_state = fromLegacyGroups(
         placesEnabled = FlightAlertSettings.DEFAULT_LAYER_PLACE_LABELS_ENABLED,
@@ -139,4 +140,3 @@ object ReferenceFilterPreferences {
         if (!condition) throw ReferencePolicyException(lazy_message())
     }
 }
-

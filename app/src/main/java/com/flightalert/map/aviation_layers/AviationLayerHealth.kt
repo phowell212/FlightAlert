@@ -6,6 +6,11 @@
 
 package com.flightalert.map.aviation_layers
 
+enum class AviationLayerAvailability { USABLE, EMPTY, UNAVAILABLE }
+
+enum class AviationLayerCompleteness { COMPLETE, PARTIAL, UNKNOWN }
+
+enum class AviationLayerFreshness { CURRENT, STALE }
 
 data class AviationLayerHealth(
     val availability: AviationLayerAvailability,

@@ -18,6 +18,7 @@ internal object MonitoringNotificationHider {
     private const val WATCHER_BOOT_TIMEOUT_MS = 30L * 1000L
     private const val SERVICE_CLASS_NAME = "com.flightalert.MonitoringNotificationHiderService"
 
+    // Keep notification-listener state shared across Android component rebinds.
     @JvmField
     @Volatile
     internal var connected = false
@@ -58,4 +59,10 @@ internal object MonitoringNotificationHider {
     private fun component_name(context: Context): ComponentName {
         return ComponentName(context, SERVICE_CLASS_NAME)
     }
+}
+
+enum class MonitoringNotificationHiderStatus {
+    BOOTING,
+    DOWN,
+    UP
 }

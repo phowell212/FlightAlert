@@ -23,12 +23,31 @@ import android.os.SystemClock
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.withRotation
 import androidx.core.graphics.withTranslation
+import com.flightalert.ThemeColors
+import com.flightalert.ThemeTreatment
+import com.flightalert.aircraft.AircraftSymbol
+import com.flightalert.aircraft.AircraftSymbolRenderer
+import com.flightalert.aircraft.aircraft_dot_scale
+import com.flightalert.aircraft.aircraft_icon_scale
+import com.flightalert.aircraft.batch_dot_outline_scale
+import com.flightalert.aircraft.blended_icon_scale
+import com.flightalert.aircraft.dense_batch_dot_alpha
+import com.flightalert.aircraft.marker_dot_blend
+import com.flightalert.aircraft.shape_progress
+import com.flightalert.aircraft.symbol_visibility
+import com.flightalert.map.GeoPoint
+import com.flightalert.map.MapProjection
+import com.flightalert.map.ScreenPoint
+import com.flightalert.map.TileSource
+import com.flightalert.map.Viewport
+import com.flightalert.mix_color
+import com.flightalert.smooth_step
+import com.flightalert.with_alpha
 import java.util.Arrays
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.function.BooleanSupplier
 import java.util.function.IntSupplier
-import java.util.LinkedHashMap
-import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
@@ -37,23 +56,6 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
-import com.flightalert.ThemeColors
-import com.flightalert.ThemeTreatment
-import com.flightalert.aircraft.Aircraft
-import com.flightalert.aircraft.AircraftMarkerMorph
-import com.flightalert.aircraft.AircraftSymbol
-import com.flightalert.aircraft.AircraftSymbolRenderer
-import com.flightalert.map.GeoPoint
-import com.flightalert.map.MapProjection
-import com.flightalert.map.ScreenPoint
-import com.flightalert.map.TileSource
-import com.flightalert.map.Viewport
-import com.flightalert.map.is_inside_viewport
-import com.flightalert.mix_color
-import com.flightalert.recycle_bitmap_pair
-import com.flightalert.smooth_step
-import com.flightalert.with_alpha
-
 
 
 class TrafficOverlayRenderer(
@@ -138,11 +140,11 @@ class TrafficOverlayRenderer(
     ) {
         rotorcraft_animation_frame_requested = false
         state.dot_batch?.let { batch ->
-            val marker_blend = AircraftMarkerMorph.marker_dot_blend(state.viewport)
+            val marker_blend = marker_dot_blend(state.viewport)
             val draw_symbols =
                 state.aircraft.isNotEmpty() && marker_blend < AIRCRAFT_BATCH_DOT_BLEND
             if (draw_symbols) {
-                val dot_alpha = AircraftMarkerMorph.dense_batch_dot_alpha(marker_blend)
+                val dot_alpha = dense_batch_dot_alpha(marker_blend)
                 draw_prepared_aircraft_dot_batch(
                     canvas = canvas,
                     batch = batch,
@@ -177,7 +179,7 @@ class TrafficOverlayRenderer(
             }
             return
         }
-        val marker_blend = AircraftMarkerMorph.marker_dot_blend(state.viewport)
+        val marker_blend = marker_dot_blend(state.viewport)
         if (marker_blend >= AIRCRAFT_BATCH_DOT_BLEND) {
             draw_aircraft_dot_batch(
                 canvas,
@@ -243,8 +245,8 @@ class TrafficOverlayRenderer(
         val draw_any_labels = draw_labels && label_count > 0
         val max_cull_icon_scale =
             max(
-                AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom),
-                AircraftMarkerMorph.aircraft_icon_scale(viewport.zoom)
+                aircraft_dot_scale(viewport.zoom),
+                aircraft_icon_scale(viewport.zoom)
             )
         for (item in aircraft) {
             val selected = has_selected_aircraft && item.appearance_key == normalized_selected_id
@@ -325,7 +327,7 @@ class TrafficOverlayRenderer(
         draw_selected_overlay: Boolean = true,
         interaction_active: Boolean = false
     ) {
-        val base_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom)
+        val base_scale = aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(TrafficSpritePaintGeometry.DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
@@ -390,7 +392,7 @@ class TrafficOverlayRenderer(
                     canvas.drawPoints(outline_draw_points, 0, batch.outline_count, paint)
                 }
                 paint.strokeWidth = batch_radius_px * 2f / transform_scale
-                for (group in 0 until TrafficDotGrouper.GROUP_COUNT) {
+                for (group in 0 until TRAFFIC_DOT_GROUP_COUNT) {
                     val count = batch.fill_counts[group]
                     if (count == 0) continue
                     paint.color = with_scaled_alpha(batch_dot_group_color(group, colors), dot_alpha)
@@ -411,7 +413,7 @@ class TrafficOverlayRenderer(
         batch.selected_aircraft?.let { item ->
             val transform_scale = batch.transform_scale.coerceAtLeast(0.001f)
             val appear = item.appearance_progress.coerceIn(0f, 1f)
-            val icon_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom) *
+            val icon_scale = aircraft_dot_scale(viewport.zoom) *
                     item.symbol_scale *
                     (0.18f + 0.82f * appear)
             draw_aircraft_dot(
@@ -586,7 +588,7 @@ class TrafficOverlayRenderer(
                 ),
                 outline_color =
                     with_alpha(colors.scrim, (150 * dot_alpha).round_to_int()),
-                fill_colors = IntArray(TrafficDotGrouper.GROUP_COUNT) { group ->
+                fill_colors = IntArray(TRAFFIC_DOT_GROUP_COUNT) { group ->
                     with_scaled_alpha(batch_dot_group_color(group, colors), dot_alpha)
                 },
                 batch_radius_px = batch_radius_px,
@@ -731,7 +733,7 @@ class TrafficOverlayRenderer(
     private fun dot_overlay_source_signature(batch: TrafficDotBatchOverlayState): Int {
         var result = 31 * batch.visible_count + batch.outline_count
         result = 31 * result + System.identityHashCode(batch.outline_points)
-        for (group in 0 until TrafficDotGrouper.GROUP_COUNT) {
+        for (group in 0 until TRAFFIC_DOT_GROUP_COUNT) {
             result = 31 * result + batch.fill_counts[group]
             result = 31 * result + System.identityHashCode(batch.fill_points[group])
         }
@@ -740,7 +742,7 @@ class TrafficOverlayRenderer(
 
     private fun dot_overlay_theme_key(colors: ThemeColors): Int {
         var result = colors.scrim
-        for (group in 0 until TrafficDotGrouper.GROUP_COUNT) {
+        for (group in 0 until TRAFFIC_DOT_GROUP_COUNT) {
             result = 31 * result + batch_dot_group_color(group, colors)
         }
         return result
@@ -778,7 +780,7 @@ class TrafficOverlayRenderer(
         reset_dot_batch_buffers()
         var selected_item: TrafficAircraftOverlayState? = null
         val normalized_selected_id = normalized_selected_aircraft_id(selected_aircraft_id)
-        val base_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom)
+        val base_scale = aircraft_dot_scale(viewport.zoom)
         val batch_radius_px = chrome.dp(TrafficSpritePaintGeometry.DOT_RADIUS_DP) * base_scale
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
@@ -818,7 +820,7 @@ class TrafficOverlayRenderer(
         if (!draw_selected_overlay) return
         selected_item?.let { item ->
             val appear = item.appearance_progress.coerceIn(0f, 1f)
-            val icon_scale = AircraftMarkerMorph.aircraft_dot_scale(viewport.zoom) *
+            val icon_scale = aircraft_dot_scale(viewport.zoom) *
                     item.symbol_scale *
                     (0.18f + 0.82f * appear)
             draw_aircraft_dot(
@@ -1111,10 +1113,10 @@ class TrafficOverlayRenderer(
         now_elapsed_ms: Long,
     ): AircraftIconFrameStyle {
         val blend = marker_blend.coerceIn(0f, 1f)
-        val shape_progress = AircraftMarkerMorph.shape_progress(blend)
+        val shape_progress = shape_progress(blend)
         val progress_bucket = aircraft_symbol_progress_bucket(shape_progress)
-        val base_icon_scale = AircraftMarkerMorph.blended_icon_scale(viewport_zoom, blend)
-        val symbol_visibility = AircraftMarkerMorph.symbol_visibility(blend)
+        val base_icon_scale = blended_icon_scale(viewport_zoom, blend)
+        val symbol_visibility = symbol_visibility(blend)
         val mask_resolution_scale = aircraft_symbol_mask_resolution_scale(base_icon_scale)
         val mask_size_px = aircraft_symbol_mask_size_px(mask_resolution_scale)
         Arrays.fill(frame_symbol_masks, null)
@@ -1729,12 +1731,12 @@ class TrafficOverlayRenderer(
     ) {
         val blend = marker_blend.coerceIn(0f, 1f)
         val appear = current_aircraft_appearance_progress_at(item, now_elapsed_ms)
-        val shape_progress = AircraftMarkerMorph.shape_progress(blend)
-        val symbol_visibility = AircraftMarkerMorph.symbol_visibility(blend)
+        val shape_progress = shape_progress(blend)
+        val symbol_visibility = symbol_visibility(blend)
         val selected_alpha = (235 * appear * symbol_visibility).toInt().coerceIn(0, 235)
         if (selected_alpha <= 4) return
         val enter_scale = 0.18f + 0.82f * appear
-        val base_icon_scale = AircraftMarkerMorph.blended_icon_scale(viewport_zoom, blend)
+        val base_icon_scale = blended_icon_scale(viewport_zoom, blend)
         val icon_scale = base_icon_scale * item.symbol_scale * enter_scale
         val color = style.visual_theme.colors.accent_green
         stroke_paint.style = Paint.Style.STROKE
@@ -2552,7 +2554,7 @@ class TrafficOverlayRenderer(
     }
 
     private fun batch_dot_outline_extra_px(dot_scale: Float): Float {
-        return chrome.dp(TrafficSpritePaintGeometry.BATCH_DOT_OUTLINE_EXTRA_DP) * AircraftMarkerMorph.batch_dot_outline_scale(
+        return chrome.dp(TrafficSpritePaintGeometry.BATCH_DOT_OUTLINE_EXTRA_DP) * batch_dot_outline_scale(
             dot_scale
         )
     }
@@ -2565,8 +2567,8 @@ class TrafficOverlayRenderer(
         return aircraft_cull_padding(
             item,
             max(
-                AircraftMarkerMorph.aircraft_dot_scale(zoom),
-                AircraftMarkerMorph.aircraft_icon_scale(zoom)
+                aircraft_dot_scale(zoom),
+                aircraft_icon_scale(zoom)
             ),
             selected
         )
@@ -2601,7 +2603,10 @@ class TrafficOverlayRenderer(
     }
 
     private fun is_on_screen(x: Float, y: Float, viewport: Viewport, padding: Float): Boolean {
-        return is_inside_viewport(x, y, viewport, padding)
+        return x >= -padding &&
+                x <= viewport.width + padding &&
+                y >= -padding &&
+                y <= viewport.height + padding
     }
 
     private fun Float.round_to_int(): Int = roundToInt()
@@ -2617,10 +2622,10 @@ class TrafficOverlayRenderer(
 
     private fun batch_dot_group_color(group: Int, colors: ThemeColors): Int {
         return when (group) {
-            TrafficDotGrouper.GROUP_LOW -> colors.danger
-            TrafficDotGrouper.GROUP_MID -> colors.accent_green
-            TrafficDotGrouper.GROUP_HIGH -> colors.accent_blue
-            TrafficDotGrouper.GROUP_MILITARY -> colors.military
+            TRAFFIC_DOT_GROUP_LOW -> colors.danger
+            TRAFFIC_DOT_GROUP_MID -> colors.accent_green
+            TRAFFIC_DOT_GROUP_HIGH -> colors.accent_blue
+            TRAFFIC_DOT_GROUP_MILITARY -> colors.military
             else -> colors.muted
         }
     }
@@ -2646,7 +2651,8 @@ class TrafficOverlayRenderer(
         val stroke: Bitmap
     ) {
         fun recycle() {
-            recycle_bitmap_pair(fill, stroke)
+            fill.recycle()
+            stroke.recycle()
         }
     }
 
@@ -2814,7 +2820,7 @@ class TrafficOverlayRenderer(
                         }
                     }
                     paint.strokeWidth = request.batch_radius_px * 2f / transform_scale
-                    for (group in 0 until TrafficDotGrouper.GROUP_COUNT) {
+                    for (group in 0 until TRAFFIC_DOT_GROUP_COUNT) {
                         val count = batch.fill_counts[group]
                         if (count == 0) continue
                         paint.color = request.fill_colors[group]
@@ -2895,7 +2901,7 @@ class TrafficOverlayRenderer(
         const val DOT_OVERLAY_RECORDING_CHUNK_FLOATS = 4096
         const val MIN_WORLD_REPEAT = -4
         const val MAX_WORLD_REPEAT = 4
-        const val DOT_BATCH_GROUP_COUNT = TrafficDotGrouper.GROUP_COUNT
+        const val DOT_BATCH_GROUP_COUNT = TRAFFIC_DOT_GROUP_COUNT
         fun aircraft_symbol_mask_resolution_scale(base_icon_scale: Float): Float {
             val scale = base_icon_scale.coerceAtLeast(0f)
             return when {
@@ -2907,4 +2913,3 @@ class TrafficOverlayRenderer(
         }
     }
 }
-

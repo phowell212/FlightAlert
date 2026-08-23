@@ -17,12 +17,12 @@ import java.nio.file.Files
 import java.nio.file.attribute.BasicFileAttributes
 
 
-/** Positional reads over either one binary file or fixed-size numbered parts. */
 internal class ReferenceDictionarySegmentedFile private constructor(
     private val parts: List<File>,
     private val part_byte_count: Long,
     val byte_count: Long,
 ) : Closeable {
+    // Read one binary file or fixed-size numbered parts by position.
     private val lock = Any()
     private var closed = false
     private var open_part_index = -1
@@ -141,4 +141,3 @@ internal class ReferenceDictionarySegmentedFile private constructor(
         }
     }
 }
-

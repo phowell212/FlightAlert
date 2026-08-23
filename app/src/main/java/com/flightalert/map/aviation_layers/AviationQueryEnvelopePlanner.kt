@@ -8,7 +8,6 @@
 package com.flightalert.map.aviation_layers
 
 
-object AviationQueryEnvelopePlanner {
     fun for_viewport(
         min_lat: Double,
         west_lon: Double,
@@ -33,4 +32,3 @@ object AviationQueryEnvelopePlanner {
             )
         }
     }
-}

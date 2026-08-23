@@ -9,11 +9,10 @@ package com.flightalert.map.reference.dictionary
 import com.flightalert.map.reference.ReferencePresentationPolicy
 import kotlin.math.floor
 
-internal object ReferenceDictionaryLodPolicy {
-    const val LABEL_ONLY_OUTLINE_PROFILE = 0
-    const val LOW_ZOOM_OUTLINE_PROFILE = 400
+    internal const val LABEL_ONLY_OUTLINE_PROFILE = 0
+    internal const val LOW_ZOOM_OUTLINE_PROFILE = 400
 
-    fun select(viewportZoom: Double, availableZooms: Set<Int>): Int? {
+    internal fun dictionary_tile_zoom(viewportZoom: Double, availableZooms: Set<Int>): Int? {
         if (availableZooms.isEmpty()) return null
         if (viewportZoom < LOW_ZOOM_SOURCE_LOD) {
             return LOW_ZOOM_SOURCE_LOD.takeIf { it in availableZooms }
@@ -38,7 +37,7 @@ internal object ReferenceDictionaryLodPolicy {
         return bestBelowTarget.takeUnless { it == Int.MIN_VALUE } ?: minimumZoom
     }
 
-    fun select_fallback(
+    internal fun select_fallback(
         targetZoom: Int,
         availableZooms: Set<Int>,
     ): Int? {
@@ -51,12 +50,12 @@ internal object ReferenceDictionaryLodPolicy {
         return fallback
     }
 
-    fun can_reuse_scene(sceneZoom: Int, targetZoom: Int, fallbackZoom: Int?): Boolean {
+    internal fun can_reuse_scene(sceneZoom: Int, targetZoom: Int, fallbackZoom: Int?): Boolean {
         return sceneZoom in targetZoom..targetZoom + 1 ||
             (fallbackZoom != null && sceneZoom in fallbackZoom until targetZoom)
     }
 
-    fun can_reuse_scene_during_interaction(
+    internal fun can_reuse_scene_during_interaction(
         sceneZoom: Int,
         targetZoom: Int,
         fallbackZoom: Int?,
@@ -65,14 +64,14 @@ internal object ReferenceDictionaryLodPolicy {
             sceneZoom < targetZoom
     }
 
-    fun outline_decode_profile(viewport_zoom: Double, source_zoom: Int): Int? {
+    internal fun outline_decode_profile(viewport_zoom: Double, source_zoom: Int): Int? {
         return outline_decode_profile(
             ReferencePresentationPolicy.centizoom(viewport_zoom),
             source_zoom,
         )
     }
 
-    fun outline_decode_profile(current_centizoom: Int, source_zoom: Int): Int? {
+    internal fun outline_decode_profile(current_centizoom: Int, source_zoom: Int): Int? {
         require(current_centizoom >= 0) { "current centizoom must be nonnegative" }
         require(source_zoom in 0..29) { "source zoom must be inside [0, 29]" }
         val effective_centizoom = maxOf(current_centizoom, source_zoom * 100)
@@ -89,7 +88,5 @@ internal object ReferenceDictionaryLodPolicy {
     private const val PHONE_OVERZOOM_START = 8.0
     private const val PHONE_OVERZOOM = 1.5
     private const val MINIMUM_PHONE_OVERZOOM_LOD = 7
-    const val LOW_ZOOM_SOURCE_LOD = 4
+    internal const val LOW_ZOOM_SOURCE_LOD = 4
     private const val MAX_FALLBACK_DELTA = 2
-}
-

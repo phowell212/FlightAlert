@@ -54,4 +54,8 @@ class MonitoringNotificationHiderService : NotificationListenerService() {
                 FlightAlertAppSettings.AlertService.MONITORING_CHANNEL_ID &&
                 sbn.notification.flags and Notification.FLAG_FOREGROUND_SERVICE != 0
     }
+
+    private companion object {
+        const val WATCHER_SNOOZE_MS = 24L * 60L * 60L * 1000L
+    }
 }

@@ -11,8 +11,8 @@ import com.flightalert.map.reference.SemanticSubtype
 
 
 
-/** Applies phone styling without changing source-bound package policy. */
 internal object ReferenceLabelRuntimePresentationPolicy {
+    // Precompute typography without changing package-bound visibility policy.
     private const val FULL_ALPHA_MILLI = 1_000
     private const val HALO_WIDTH_MILLI_EM = 160
     private val stream_name_suffixes = arrayOf("Creek", "Brook", "Run", "Falls", "Branch")
@@ -352,4 +352,3 @@ internal object ReferenceLabelRuntimePresentationPolicy {
     private const val GLOBAL_RIVER_TEXT_SIZE_MILLI_SP = 10_750
     private const val MAXIMUM_RIVER_TEXT_SIZE_MILLI_SP = 11_250
 }
-

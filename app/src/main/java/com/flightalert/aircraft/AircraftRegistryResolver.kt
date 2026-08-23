@@ -8,21 +8,11 @@
 package com.flightalert.aircraft
 
 import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.asin
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.max
-import kotlin.math.pow
-import kotlin.math.sin
-import kotlin.math.sqrt
-import com.flightalert.FlightAlertAppSettings
-import com.flightalert.map.GeoPoint
-import com.flightalert.map.MapProjection
-
 
 
 object AircraftRegistryResolver {
+    private data class IcaoRange(val start: Int, val end: Int, val country: RegistryCountry)
+
     fun country_for(registration: String?, icao24: String): RegistryCountryMatch? {
         country_from_registration(registration)?.let {
             return RegistryCountryMatch(it, RegistryCountrySource.REGISTRATION)
@@ -105,6 +95,7 @@ object AircraftRegistryResolver {
         return ICAO_REGISTRY_RANGES.firstOrNull { value in it.start..it.end }?.country
     }
 
+    // Build the registration and ICAO tables once for shared lookups.
     private val REGISTRY_UNITED_STATES = country("US", "United States")
 
     private fun country(
@@ -121,8 +112,8 @@ object AircraftRegistryResolver {
         iso_code: String,
         name: String,
         flag_code: String? = iso_code
-    ): IcaoRegistryRange {
-        return IcaoRegistryRange(start, end, country(iso_code, name, flag_code))
+    ): IcaoRange {
+        return IcaoRange(start, end, country(iso_code, name, flag_code))
     }
 
     // Reserved and unallocated ICAO blocks are intentionally absent so unresolved addresses stay honest.
@@ -297,7 +288,7 @@ object AircraftRegistryResolver {
         icao_range(0x900000, 0x9003FF, "MH", "Marshall Islands"),
         icao_range(0x901000, 0x9013FF, "CK", "Cook Islands"),
         icao_range(0x902000, 0x9023FF, "WS", "Samoa"),
-        IcaoRegistryRange(0xA00000, 0xAFFFFF, REGISTRY_UNITED_STATES),
+        IcaoRange(0xA00000, 0xAFFFFF, REGISTRY_UNITED_STATES),
         icao_range(0xC00000, 0xC3FFFF, "CA", "Canada"),
         icao_range(0xC80000, 0xC87FFF, "NZ", "New Zealand"),
         icao_range(0xC88000, 0xC88FFF, "FJ", "Fiji"),

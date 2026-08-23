@@ -6,10 +6,10 @@ import kotlin.math.min
 
 
 
-/** Exact screen-space segment AABB queries with results in the supplied source order. */
 internal class ReferenceScreenSegmentAabbIndex(
     segmentsInSourceOrder: List<ReferencePreparedPathSegment>,
 ) {
+    // Keep exact screen-space AABB results in source order.
     private val segments = segmentsInSourceOrder.toList()
     private val root: Node? = if (segments.isEmpty()) {
         null

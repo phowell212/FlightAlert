@@ -8,8 +8,7 @@ package com.flightalert.map.aviation_layers
 import kotlin.math.max
 import kotlin.math.min
 
-internal object AviationAirspaceRenderPolicy {
-    fun forEachApplicable(
+    internal fun forEachApplicable(
         features: List<AviationAirspaceFeature>,
         visibleBounds: AviationGeoBounds,
         excludedFeature: AviationAirspaceFeature?,
@@ -20,7 +19,7 @@ internal object AviationAirspaceRenderPolicy {
         }
     }
 
-    fun isApplicable(
+    internal fun isApplicable(
         feature: AviationAirspaceFeature,
         visibleBounds: AviationGeoBounds,
         excludedFeature: AviationAirspaceFeature?
@@ -43,7 +42,7 @@ internal object AviationAirspaceRenderPolicy {
         )
     }
 
-    fun contains(feature: AviationAirspaceFeature, lat: Double, lon: Double): Boolean {
+    internal fun contains(feature: AviationAirspaceFeature, lat: Double, lon: Double): Boolean {
         val featureAnchorLon = feature.geometry.polygons.first().shell.first().lon
         return feature.geometry.polygons.any { polygon ->
             val polygonAnchorLon = unwrapLongitude(polygon.shell.first().lon, featureAnchorLon)
@@ -54,7 +53,7 @@ internal object AviationAirspaceRenderPolicy {
         }
     }
 
-    fun boundsArea(feature: AviationAirspaceFeature): Double {
+    internal fun boundsArea(feature: AviationAirspaceFeature): Double {
         val latitudeSpan = (feature.bounds.max_lat - feature.bounds.min_lat).coerceAtLeast(0.0)
         val rawLongitudeSpan = (feature.bounds.max_lon - feature.bounds.min_lon).coerceAtLeast(0.0)
         val longitudeWidth = if (rawLongitudeSpan <= 180.0) {
@@ -66,14 +65,14 @@ internal object AviationAirspaceRenderPolicy {
         return latitudeSpan * longitudeWidth
     }
 
-    fun unwrapLongitude(lon: Double, referenceLon: Double): Double {
+    internal fun unwrapLongitude(lon: Double, referenceLon: Double): Double {
         var unwrapped = lon
         while (unwrapped - referenceLon > 180.0) unwrapped -= 360.0
         while (unwrapped - referenceLon < -180.0) unwrapped += 360.0
         return unwrapped
     }
 
-    fun firstWrappedShift(
+    internal fun firstWrappedShift(
         baseLeft: Float,
         baseRight: Float,
         extendedLeft: Float,
@@ -158,4 +157,3 @@ internal object AviationAirspaceRenderPolicy {
     }
 
     private data class LongitudeSpan(val min: Double, val max: Double)
-}

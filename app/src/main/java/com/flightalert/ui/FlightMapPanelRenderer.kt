@@ -16,8 +16,6 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.SystemClock
 import androidx.core.graphics.withSave
-import java.util.Locale
-import kotlin.math.sqrt
 import com.flightalert.ThemeTreatment
 import com.flightalert.alerts.MonitoringNotificationHiderStatus
 import com.flightalert.draw_fitted_text
@@ -31,6 +29,8 @@ import com.flightalert.traffic.DistanceFilter
 import com.flightalert.traffic.FlightStatusFilter
 import com.flightalert.traffic.ReportAgeFilter
 import com.flightalert.with_alpha
+import java.util.Locale
+import kotlin.math.sqrt
 
 class FlightMapPanelRenderer(
     private val paint: Paint,

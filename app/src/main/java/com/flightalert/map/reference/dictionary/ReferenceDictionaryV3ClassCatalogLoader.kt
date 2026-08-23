@@ -14,6 +14,7 @@ import java.io.File
 
 
 internal object ReferenceDictionaryV3ClassCatalogLoader {
+    // Validate the catalog name, size, and install state while opening it.
     fun load(
         package_dir: File,
         runtime_schema: ReferenceDictionaryRuntimeSchema,

@@ -3,15 +3,14 @@ package com.flightalert.map.reference.labels
 import kotlin.math.max
 import kotlin.math.min
 
-internal object ReferenceLineLabelFitPolicy {
     private val waterScaleMilli = intArrayOf(1_000, 900, 800)
 
-    fun attemptCount(isWater: Boolean): Int = if (isWater) waterScaleMilli.size else 1
+    internal fun attemptCount(isWater: Boolean): Int = if (isWater) waterScaleMilli.size else 1
 
-    fun acceptAttempt(isWater: Boolean, hasCurvedPlacement: Boolean): Boolean =
+    internal fun acceptAttempt(isWater: Boolean, hasCurvedPlacement: Boolean): Boolean =
         !isWater || hasCurvedPlacement
 
-    fun textSizePx(
+    internal fun textSizePx(
         baseTextSizePx: Float,
         minimumTextSizePx: Float,
         isWater: Boolean,
@@ -27,4 +26,3 @@ internal object ReferenceLineLabelFitPolicy {
             baseTextSizePx * waterScaleMilli[attemptIndex] / 1_000f,
         )
     }
-}

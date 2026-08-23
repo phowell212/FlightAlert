@@ -9,6 +9,19 @@ package com.flightalert.map.aviation_layers
 import com.flightalert.map.SourcedMapText
 import com.flightalert.map.SourcedMapTextPolicy
 
+enum class AviationNatTemporalState { ACTIVE, UPCOMING, EXPIRED, UNKNOWN }
+
+sealed interface AviationNatWaypoint {
+    val source_token: String
+
+    data class Coordinate(
+        override val source_token: String,
+        val point: AviationLayerPoint
+    ) : AviationNatWaypoint
+
+    data class NamedFix(override val source_token: String) : AviationNatWaypoint
+    data class Unrecognized(override val source_token: String) : AviationNatWaypoint
+}
 
 class AviationOceanicTrack(
     val designator: String,

@@ -11,7 +11,6 @@ package com.flightalert.map.aviation_layers
 import java.util.Collections
 
 
-object AviationNatRenderPolicy {
     fun select_active_tracks(
         tracks: List<AviationOceanicTrack>,
         visible_bounds: AviationGeoBounds,
@@ -35,5 +34,3 @@ object AviationNatRenderPolicy {
             .toList()
         return Collections.unmodifiableList(selected)
     }
-
-}

@@ -1,8 +1,7 @@
 package com.flightalert.map.reference.labels
 
 
-internal object ReferenceLineLabelPlacementAdapter {
-    fun fromPlanner(
+    internal fun fromPlanner(
         placements: List<ReferencePathLabelPlacement>,
         renderedWorldCopy: Long,
     ): List<ReferenceLineLabelPlacementOption> = placements.mapIndexed { index, placement ->
@@ -16,5 +15,3 @@ internal object ReferenceLineLabelPlacementAdapter {
             placementRank = index,
         )
     }
-}
-

@@ -15,6 +15,7 @@ import com.flightalert.map.reference.SemanticSubtype
 
 
 internal object ReferenceProminencePolicy {
+    // Keep prominence thresholds and defaults in reviewed order.
     internal const val globalRiverLength = 500_000L
     internal const val regionalRiverLength = 25_000L
     internal const val localRiverLength = 5_000L

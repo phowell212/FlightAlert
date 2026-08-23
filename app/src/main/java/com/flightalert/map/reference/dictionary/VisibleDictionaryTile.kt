@@ -23,5 +23,5 @@ internal data class VisibleDictionaryTile(
     }
 
     fun low_zoom_profile(): Boolean =
-        outline_visibility_centizoom == ReferenceDictionaryLodPolicy.LOW_ZOOM_OUTLINE_PROFILE
+        outline_visibility_centizoom == LOW_ZOOM_OUTLINE_PROFILE
 }

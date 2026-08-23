@@ -7,18 +7,11 @@
 
 package com.flightalert.details
 
-import java.util.Locale
-import kotlin.math.max
 import com.flightalert.aircraft.Aircraft
-import com.flightalert.aircraft.AircraftDetails
-import com.flightalert.aircraft.AircraftPositionProjector
-import com.flightalert.aircraft.AirportDetails
-import com.flightalert.aircraft.display_model_name
-import com.flightalert.flight.CurrentRouteValidator
-import com.flightalert.flight.FlightTrace
-import com.flightalert.flight.TraceSegment
+import com.flightalert.aircraft.contact_age_seconds
+import com.flightalert.aircraft.reported_position as aircraft_reported_position
 import com.flightalert.map.MapMeasurementFormatter
-import com.flightalert.map.MapProjection
+import java.util.Locale
 
 internal class AircraftTelemetryFormatter(
     private val measurement_formatter: MapMeasurementFormatter,
@@ -106,12 +99,12 @@ internal class AircraftTelemetryFormatter(
     }
 
     fun reported_position(aircraft: Aircraft): String {
-        val reported = AircraftPositionProjector.reported_position(aircraft)
+        val reported = aircraft_reported_position(aircraft)
         return String.format(Locale.US, "%.4f, %.4f", reported.lat, reported.lon)
     }
 
     fun age(aircraft: Aircraft): String {
-        val age = AircraftPositionProjector.contact_age_seconds(
+        val age = contact_age_seconds(
             aircraft = aircraft,
             now_epoch_sec = now_epoch_seconds()
         ) ?: return "Age unavailable"

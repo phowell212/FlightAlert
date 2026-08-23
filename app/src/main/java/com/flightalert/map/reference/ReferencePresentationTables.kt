@@ -46,6 +46,7 @@ internal object ReferencePresentationTables {
             Collections.unmodifiableList(dash.toList()), 0, "round", "round",
         )
 
+    // Keep table order stable because it feeds the reviewed digest.
     private val filter_specs = listOf(
         FilterSpec(FilterId.LABELS_REGIONS, "Regions", FilterKind.LABEL, listOf(
             SemanticSubtype.COUNTRY_TERRITORY,

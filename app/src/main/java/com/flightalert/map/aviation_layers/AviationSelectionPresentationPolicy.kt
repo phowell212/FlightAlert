@@ -11,8 +11,7 @@ import java.util.Locale
 
 
 
-internal object AviationSelectionPresentationPolicy {
-    fun build(
+    internal fun build(
         selection: AviationSelection,
         snapshot: AviationLayerSnapshot,
         now_epoch_ms: Long
@@ -23,7 +22,7 @@ internal object AviationSelectionPresentationPolicy {
         now_epoch_ms = now_epoch_ms
     )
 
-    fun build(
+    internal fun build(
         selection: AviationSelection,
         status: AviationLayerStatus?,
         publication: AviationLayerPublication?,
@@ -38,7 +37,7 @@ internal object AviationSelectionPresentationPolicy {
         }
     }
 
-    fun provenance(
+    internal fun provenance(
         kind: AviationLayerKind,
         status: AviationLayerStatus?,
         publication: AviationLayerPublication?
@@ -57,7 +56,7 @@ internal object AviationSelectionPresentationPolicy {
     }
 
     // Validate typed evidence without assigning an unsupported layer kind.
-    fun provenance(
+    internal fun provenance(
         status: AviationLayerStatus?,
         publication: AviationLayerPublication?
     ): AviationProvenancePresentation {
@@ -348,4 +347,3 @@ internal object AviationSelectionPresentationPolicy {
             source = "Unavailable",
             observed_utc = "Unavailable"
         )
-}

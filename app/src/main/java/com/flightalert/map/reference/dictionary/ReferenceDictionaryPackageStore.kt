@@ -72,6 +72,14 @@ internal class ReferenceDictionaryPackageStore(
         }
     }
 
+    private fun <T> first_available_reference_package(
+        candidates: List<File>,
+        opener: (File) -> T?,
+    ): T? {
+        candidates.forEach { candidate -> opener(candidate)?.let { return it } }
+        return null
+    }
+
     private fun open_package_if_available(): ReferenceDictionaryPackage? {
         package_ref?.let { return it }
         return synchronized(package_lock) {

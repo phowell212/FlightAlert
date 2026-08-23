@@ -5,8 +5,7 @@
 
 package com.flightalert.map.reference.labels
 
-internal object ReferenceLabelAdmissionPolicy {
-    fun <R, K> visitPreferredSeedRecords(
+    internal fun <R, K> visitPreferredSeedRecords(
         records: Iterable<R>,
         preferredLookupKeys: Set<K>,
         lookupKey: (R) -> K,
@@ -25,7 +24,7 @@ internal object ReferenceLabelAdmissionPolicy {
         return true
     }
 
-    fun <T> retainPreferredSeeds(
+    internal fun <T> retainPreferredSeeds(
         candidates: Iterable<T>,
         preferredOccurrences: Set<ReferenceLabelOccurrenceId>,
         occurrenceId: (T) -> ReferenceLabelOccurrenceId,
@@ -36,7 +35,7 @@ internal object ReferenceLabelAdmissionPolicy {
         }
     }
 
-    fun <T> appendActivePreferredSeeds(
+    internal fun <T> appendActivePreferredSeeds(
         seeds: Iterable<T>,
         priorityFrontier: Int,
         priority: (T) -> Int,
@@ -47,12 +46,12 @@ internal object ReferenceLabelAdmissionPolicy {
         }
     }
 
-    fun initial_threshold(labelBudget: Int): Int {
+    internal fun initial_threshold(labelBudget: Int): Int {
         require(labelBudget > 0) { "label budget must be positive" }
         return labelBudget
     }
 
-    fun next_threshold(admittedCandidateCount: Int): Int {
+    internal fun next_threshold(admittedCandidateCount: Int): Int {
         require(admittedCandidateCount > 0) { "admitted candidate count must be positive" }
         return if (admittedCandidateCount > Int.MAX_VALUE / 2) {
             Int.MAX_VALUE
@@ -60,5 +59,3 @@ internal object ReferenceLabelAdmissionPolicy {
             admittedCandidateCount * 2
         }
     }
-}
-

@@ -8,22 +8,19 @@
 
 package com.flightalert.flight
 
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.roundToLong
-import kotlin.math.sin
-import org.json.JSONObject
 import com.flightalert.FlightAlertAppSettings
 import com.flightalert.aircraft.TrackPoint
-import com.flightalert.map.clamped_haversine_distance_meters
-import com.flightalert.sources.AirplanesLiveHttp
-import com.flightalert.sources.json_int_or_null
-import com.flightalert.sources.json_number_or_null
 
+
+internal const val TRACE_FEET_PER_METER = 3.28084
+
+internal const val TRACE_METERS_PER_NAUTICAL_MILE = 1852.0
+
+internal const val TRACE_MAX_TRACE_GAP_SECONDS =
+    FlightAlertAppSettings.FlightTrace.MAX_TRACE_GAP_SECONDS
+
+
+data class TraceSegment(val points: List<TrackPoint>)
 
 
 data class FlightTrace(

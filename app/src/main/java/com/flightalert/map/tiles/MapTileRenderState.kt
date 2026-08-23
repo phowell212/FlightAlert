@@ -10,6 +10,12 @@ import com.flightalert.map.reference.dictionary.FilterState
 import com.flightalert.map.reference.labels.ReferenceScreenRect
 
 
+data class MapTileRenderStyle(
+    val map_empty: Int,
+    val panel_alt: Int,
+    val text: Int
+)
+
 data class MapTileRenderState(
     val map_source: TileSource,
     val map_labels_enabled: Boolean,

@@ -7,8 +7,7 @@
 package com.flightalert.map.aviation_layers
 
 
-internal object AviationSelectionPolicy {
-    fun resolve(
+    internal fun resolve(
         key: AviationSelectionKey,
         snapshot: AviationLayerSnapshot
     ): AviationSelection? = when (key) {
@@ -29,7 +28,7 @@ internal object AviationSelectionPolicy {
             ?.let(AviationSelection::OceanicTrack)
     }
 
-    fun after_toggle(
+    internal fun after_toggle(
         selected_key: AviationSelectionKey?,
         changed_kind: AviationLayerKind,
         enabled: Boolean
@@ -37,18 +36,18 @@ internal object AviationSelectionPolicy {
         return if (!enabled && selected_key?.kind == changed_kind) null else selected_key
     }
 
-    fun layer_is_eligible(
+    internal fun layer_is_eligible(
         kind: AviationLayerKind,
         enabled: Boolean,
         status: AviationLayerStatus?,
         publication: AviationLayerPublication?
     ): Boolean {
         if (!enabled) return false
-        return AviationSelectionPresentationPolicy.provenance(kind, status, publication).state !=
+        return provenance(kind, status, publication).state !=
             AviationProvenanceState.UNAVAILABLE
     }
 
-    fun airport_is_eligible(
+    internal fun airport_is_eligible(
         enabled: Boolean,
         zoom: Double,
         status: AviationLayerStatus?,
@@ -57,7 +56,7 @@ internal object AviationSelectionPolicy {
         zoom >= AVIATION_AIRPORT_LABEL_MIN_ZOOM &&
         layer_is_eligible(AviationLayerKind.AIRPORTS, enabled, status, publication)
 
-    fun nat_is_eligible(
+    internal fun nat_is_eligible(
         enabled: Boolean,
         track: AviationOceanicTrack,
         now_epoch_ms: Long,
@@ -79,7 +78,7 @@ internal object AviationSelectionPolicy {
             track.drawable_segments.any { it.size >= 2 }
     }
 
-    fun hit_radius_dp(kind: AviationHitKind): Double? = when (kind) {
+    internal fun hit_radius_dp(kind: AviationHitKind): Double? = when (kind) {
         AviationHitKind.AIRPORT -> 20.0
         AviationHitKind.NAT_SEGMENT -> 16.0
         AviationHitKind.SPECIAL_USE_BOUNDARY -> 18.0
@@ -87,7 +86,7 @@ internal object AviationSelectionPolicy {
         AviationHitKind.SPECIAL_USE_INTERIOR -> null
     }
 
-    fun choose_hit(candidates: List<AviationHitCandidate>): AviationSelectionKey? {
+    internal fun choose_hit(candidates: List<AviationHitCandidate>): AviationSelectionKey? {
         val valid_candidates = candidates.filter(::candidate_kind_matches_key)
         val nearest = valid_candidates.mapNotNull { candidate ->
             val radius = hit_radius_dp(candidate.kind) ?: return@mapNotNull null
@@ -180,4 +179,3 @@ internal object AviationSelectionPolicy {
         val candidate: AviationHitCandidate,
         val normalized_distance: Double
     )
-}

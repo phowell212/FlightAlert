@@ -7,6 +7,7 @@ import com.flightalert.map.reference.SemanticSubtype
 
 
 internal object ReferenceDictionaryBinaryPresenter {
+    // Build the validated subtype-to-filter table once.
     private val filterBySubtype: Map<SemanticSubtype, FilterId> by lazy {
         buildMap {
             ReferencePresentationTables.all_filter_specs().forEach { specification ->
@@ -121,4 +122,3 @@ internal object ReferenceDictionaryBinaryPresenter {
         require(actual == expected) { "binary label layer group differs from its subtype" }
     }
 }
-

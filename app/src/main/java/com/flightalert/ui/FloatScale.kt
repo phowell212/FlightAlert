@@ -7,13 +7,8 @@
 
 package com.flightalert.ui
 
-import android.graphics.RectF
-import kotlin.math.max
-import kotlin.math.min
-import com.flightalert.map.ScreenPoint
-
-
 
 fun interface FloatScale {
+    // Scale primitive floats without boxing Function1.
     fun scale(value: Float): Float
 }

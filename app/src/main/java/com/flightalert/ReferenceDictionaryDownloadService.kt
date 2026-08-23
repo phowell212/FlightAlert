@@ -19,12 +19,12 @@ import android.graphics.drawable.Icon
 import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.content.edit
-import java.io.IOException
-import java.util.concurrent.Executors
-import java.util.Locale
 import com.flightalert.map.reference.CatalogControlStatus
 import com.flightalert.map.reference.dictionary.ReferenceDictionaryDownloader
 import com.flightalert.map.reference.dictionary.ReferenceDictionaryPackage
+import java.io.IOException
+import java.util.Locale
+import java.util.concurrent.Executors
 
 class ReferenceDictionaryDownloadService : Service() {
     private val state_lock = Any()

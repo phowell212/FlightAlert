@@ -7,40 +7,24 @@
 
 package com.flightalert.flight
 
-import android.graphics.Canvas
-import android.graphics.DashPathEffect
-import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.RectF
-import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.asin
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.ln
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.pow
-import kotlin.math.sin
-import kotlin.math.sqrt
-import com.flightalert.MAX_ZOOM
-import com.flightalert.MIN_ZOOM
-import com.flightalert.PATH_FIT_CONTEXT_MULTIPLIER
-import com.flightalert.aircraft.Aircraft
-import com.flightalert.aircraft.AircraftPositionProjector
-import com.flightalert.aircraft.TrackPoint
+import com.flightalert.FlightAlertAppSettings
 import com.flightalert.map.Bounds
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapProjection
 import com.flightalert.map.Viewport
-
-
+import kotlin.math.abs
+import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.min
 
 
 internal class SelectedFlightPathViewportController(
     private val selected_path_controller: SelectedFlightPathController
 ) {
-    fun fit_camera(width: Float, height: Float, usable: RectF): FlightPathCameraUpdate? {
+    internal data class CameraUpdate(val zoom: Double, val center: GeoPoint)
+
+    internal fun fit_camera(width: Float, height: Float, usable: RectF): CameraUpdate? {
         val bounds = selected_path_controller.bounds() ?: return null
         if (usable.width() <= 0f || usable.height() <= 0f) return null
 
@@ -54,11 +38,11 @@ internal class SelectedFlightPathViewportController(
             MIN_PATH_FIT_SPAN_ZOOM_ZERO_PX,
             abs(bottom_right.y - top_left.y)
         )
-        val width_fit = usable.width() / (path_width_at_zoom_zero * PATH_FIT_CONTEXT_MULTIPLIER)
-        val height_fit = usable.height() / (path_height_at_zoom_zero * PATH_FIT_CONTEXT_MULTIPLIER)
+        val width_fit = usable.width() / (path_width_at_zoom_zero * FlightAlertAppSettings.MapTuning.PATH_FIT_CONTEXT_MULTIPLIER)
+        val height_fit = usable.height() / (path_height_at_zoom_zero * FlightAlertAppSettings.MapTuning.PATH_FIT_CONTEXT_MULTIPLIER)
         val zoom = (ln(min(width_fit, height_fit)) / ln(2.0)).coerceIn(
-            MIN_ZOOM.toDouble(),
-            MAX_ZOOM.toDouble()
+            FlightAlertAppSettings.MapTuning.MIN_ZOOM.toDouble(),
+            FlightAlertAppSettings.MapTuning.MAX_ZOOM.toDouble()
         )
 
         val center_lat = (bounds.min_lat + bounds.max_lat) / 2.0
@@ -69,7 +53,7 @@ internal class SelectedFlightPathViewportController(
             center_world.y + height / 2.0 - usable.centerY(),
             zoom
         )
-        return FlightPathCameraUpdate(zoom = zoom, center = center)
+        return CameraUpdate(zoom = zoom, center = center)
     }
 
     fun should_show_path_button(viewport: Viewport, usable: RectF): Boolean {
@@ -99,4 +83,3 @@ internal class SelectedFlightPathViewportController(
         const val MIN_PATH_FIT_SPAN_ZOOM_ZERO_PX = 0.03
     }
 }
-

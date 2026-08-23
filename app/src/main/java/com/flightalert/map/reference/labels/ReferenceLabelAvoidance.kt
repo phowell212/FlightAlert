@@ -10,8 +10,7 @@ import kotlin.math.max
 
 
 
-internal object ReferenceLabelAvoidance {
-    fun ownship_rect(
+    internal fun ownship_rect(
         center_x: Double,
         center_y: Double,
         marker_radius_px: Double,
@@ -36,5 +35,3 @@ internal object ReferenceLabelAvoidance {
             bottom = center_y + bottom_offset,
         ).padded(padding_px)
     }
-}
-

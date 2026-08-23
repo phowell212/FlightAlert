@@ -9,15 +9,11 @@ package com.flightalert.traffic
 
 import android.content.SharedPreferences
 import androidx.core.content.edit
-import java.util.Locale
-import kotlin.math.max
 import com.flightalert.FlightAlertSettings
 import com.flightalert.aircraft.Aircraft
-import com.flightalert.aircraft.AircraftSymbol
-import com.flightalert.aircraft.AircraftSymbolClassifier
 
 class AircraftFilterController(private val prefs: SharedPreferences) {
-    var search_query = AircraftFilterEngine.sanitize_search(
+    var search_query = sanitize_aircraft_filter_search(
         prefs.getString(FlightAlertSettings.KEY_FILTER_SEARCH_QUERY, "").orEmpty()
     )
         private set
@@ -38,7 +34,7 @@ class AircraftFilterController(private val prefs: SharedPreferences) {
         private set
 
     fun set_search_query(value: String): Boolean {
-        val sanitized = AircraftFilterEngine.sanitize_search(value)
+        val sanitized = sanitize_aircraft_filter_search(value)
         if (search_query == sanitized) return false
         search_query = sanitized
         prefs.edit { putString(FlightAlertSettings.KEY_FILTER_SEARCH_QUERY, search_query) }
@@ -107,15 +103,15 @@ class AircraftFilterController(private val prefs: SharedPreferences) {
     }
 
     fun is_active(): Boolean {
-        return AircraftFilterEngine.is_active(current_state())
+        return aircraft_filters_active(current_state())
     }
 
     fun restricts_aircraft(): Boolean {
-        return AircraftFilterEngine.restricts_aircraft(current_state())
+        return aircraft_filters_restrict_aircraft(current_state())
     }
 
     fun stats_from_counts(total: Int, matched: Int): FilterStats {
-        return AircraftFilterEngine.stats_from_counts(
+        return filter_stats_from_counts(
             total = total,
             matched = matched,
             filters = current_state()
@@ -128,7 +124,7 @@ class AircraftFilterController(private val prefs: SharedPreferences) {
         distance_meters: (Aircraft) -> Double,
         is_hazard_aircraft: (Aircraft) -> Boolean
     ): Boolean {
-        return AircraftFilterEngine.passes(
+        return aircraft_passes_filters(
             aircraft = aircraft,
             filters = current_state(),
             now_epoch_sec = now_epoch_sec,

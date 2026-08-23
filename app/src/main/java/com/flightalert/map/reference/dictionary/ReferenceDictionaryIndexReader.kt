@@ -12,11 +12,11 @@ import java.io.IOException
 import java.nio.ByteBuffer
 
 
-/** Bounded, page-cached access to the whole-world tile index. */
 internal class ReferenceDictionaryIndexReader private constructor(
     private val index_file: ReferenceDictionarySegmentedFile,
     private val expected_byte_count: Long,
 ) : Closeable {
+    // Bound whole-world index access with a small page cache.
     private val pages = object : LinkedHashMap<Long, ByteArray>(
         MAX_CACHED_PAGES,
         0.75f,
@@ -112,4 +112,3 @@ internal class ReferenceDictionaryIndexReader private constructor(
         private const val MAX_CACHED_PAGES = 32
     }
 }
-

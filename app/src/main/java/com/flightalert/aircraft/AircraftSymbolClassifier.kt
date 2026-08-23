@@ -7,24 +7,7 @@
 
 package com.flightalert.aircraft
 
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.RectF
 import java.util.Locale
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.max
-import kotlin.math.sin
-import com.flightalert.ThemeTreatment
-import com.flightalert.VisualTheme
-import com.flightalert.lerp
-import com.flightalert.map.Viewport
-import com.flightalert.mix_color
-import com.flightalert.safe_smooth_step
-import com.flightalert.smooth_step
-
 
 
 object AircraftSymbolClassifier {
@@ -96,6 +79,7 @@ object AircraftSymbolClassifier {
         return AIRLINER_TYPE_PREFIXES.any { type_code.startsWith(it) }
     }
 
+    // Reuse the type-code tables across every classification path.
     private val ROTORCRAFT_TYPE_CODES = setOf(
         "A002", "A109", "A119", "A129", "A139", "A149", "A169", "A189",
         "A205", "A2RT", "A600", "AC10", "AC31", "AC33", "ADEL", "AG1",

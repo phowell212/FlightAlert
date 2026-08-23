@@ -7,12 +7,6 @@
 
 package com.flightalert.ui
 
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.RectF
-import java.util.Locale
-import kotlin.math.min
-import com.flightalert.VisualTheme
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftDetails
 import com.flightalert.aircraft.AircraftSymbol
@@ -20,11 +14,10 @@ import com.flightalert.aircraft.AircraftSymbolClassifier
 import com.flightalert.aircraft.AirportDetails
 import com.flightalert.aircraft.TrafficDisplay
 import com.flightalert.details.AircraftDetailsSession
-import com.flightalert.details.AircraftRoutePresenter
 import com.flightalert.details.AircraftTelemetryFormatter
-import com.flightalert.draw_fitted_text
+import com.flightalert.details.route_aircraft_type
 import com.flightalert.traffic.FilterStats
-
+import java.util.Locale
 
 
 internal class TrafficPanelStateBuilder(
@@ -144,7 +137,7 @@ internal class TrafficPanelStateBuilder(
     }
 
     private fun aircraft_display_model(target: Aircraft, details: AircraftDetails? = null): String {
-        return AircraftRoutePresenter.aircraft_type(details, target)
+        return route_aircraft_type(details, target)
             .takeIf { it != "Unavailable" }
             ?: aircraft_category_label(target)
     }
@@ -285,4 +278,3 @@ internal class TrafficPanelStateBuilder(
         )
     }
 }
-

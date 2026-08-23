@@ -19,6 +19,7 @@ internal class SourcedTextDecision internal constructor(
     seal: Any,
 ) {
     init {
+        // Reject decisions that do not carry this exact seal.
         if (seal !== SourcedTextDecisionSeal) {
             throw SourcedMapTextException("sourced-text decision proof is invalid")
         }

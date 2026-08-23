@@ -7,17 +7,9 @@
 
 package com.flightalert.traffic
 
-import kotlin.math.max
-import kotlin.math.pow
-import kotlin.math.sqrt
-import com.flightalert.MAX_ESTIMATION_SECONDS
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftSymbol
 import com.flightalert.aircraft.AircraftSymbolClassifier
-import com.flightalert.aircraft.AlertAircraft
-import com.flightalert.ensure_point_capacity
-import com.flightalert.map.Viewport
-
 
 
 internal data class TrafficSpatialEntry(
@@ -31,7 +23,7 @@ internal data class TrafficSpatialEntry(
     val appearance_key: String = aircraft.appearance_key(),
     val symbol: AircraftSymbol = AircraftSymbolClassifier.symbol_for(aircraft),
     val symbol_scale: Float = AircraftSymbolClassifier.size_multiplier(aircraft, symbol),
-    val dot_group: Int = TrafficDotGrouper.dot_group(aircraft),
+    val dot_group: Int = traffic_dot_group(aircraft),
     val color: Int = 0,
     val color_theme_key: Int = 0
 )

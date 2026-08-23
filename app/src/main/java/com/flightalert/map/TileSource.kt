@@ -7,6 +7,9 @@
 
 package com.flightalert.map
 
+private const val LOCAL_REFERENCE_DICTIONARY_ATTRIBUTION =
+    "Local whole-world OpenStreetMap-derived reference data, © OpenStreetMap contributors"
+
 
 enum class TileSource(
     val base_cache_key: String,

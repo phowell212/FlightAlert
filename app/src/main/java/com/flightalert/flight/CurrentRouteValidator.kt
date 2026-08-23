@@ -7,6 +7,11 @@
 
 package com.flightalert.flight
 
+import com.flightalert.FlightAlertAppSettings
+import com.flightalert.aircraft.ADSBDB_CALLSIGN_ROUTE_SOURCE
+import com.flightalert.aircraft.AircraftDetails
+import com.flightalert.aircraft.TrackPoint
+import com.flightalert.map.spherical_distance_meters
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -14,36 +19,30 @@ import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
-import com.flightalert.FlightAlertAppSettings
-import com.flightalert.aircraft.AircraftDetails
-import com.flightalert.aircraft.AircraftRouteSource
-import com.flightalert.aircraft.TrackPoint
-import com.flightalert.map.spherical_distance_meters
 
-object CurrentRouteValidator {
-    fun has_route_metadata(details: AircraftDetails): Boolean {
+internal fun has_route_metadata(details: AircraftDetails): Boolean {
         return details.route != null || details.origin_airport != null || details.destination_airport != null
     }
 
-    fun evaluate(
+internal fun is_current_route(
         details: AircraftDetails,
         aircraft_icao24: String,
         selected_trace_aircraft_id: String?,
         trace_segments: List<TraceSegment>?
-    ): CurrentRouteValidation {
+    ): Boolean {
         val id = aircraft_icao24.lowercase(Locale.US)
         if (selected_trace_aircraft_id != id) {
-            return rejected()
+            return false
         }
-        val origin = details.origin_airport ?: return rejected()
-        val origin_lat = origin.latitude ?: return rejected()
-        val origin_lon = origin.longitude ?: return rejected()
+        val origin = details.origin_airport ?: return false
+        val origin_lat = origin.latitude ?: return false
+        val origin_lon = origin.longitude ?: return false
         val points = trace_segments
             ?.flatMap { it.points }
             ?.sortedBy { it.epoch_sec }
             ?.takeIf { it.size >= 2 }
-            ?: return rejected()
-        val first = points.firstOrNull() ?: return rejected()
+            ?: return false
+        val first = points.firstOrNull() ?: return false
         val destination = details.destination_airport
         val dest_lat = destination?.latitude
         val dest_lon = destination?.longitude
@@ -72,22 +71,22 @@ object CurrentRouteValidator {
                     direct_route_meters
                 )
             ) {
-                return accepted()
+                return true
             }
-            return rejected()
+            return false
         }
         if (
             dest_lat != null &&
             dest_lon != null &&
             !trace_direction_matches_route(points, origin_lat, origin_lon, dest_lat, dest_lon)
         ) {
-            return rejected()
+            return false
         }
-        return accepted()
+        return true
     }
 
     private fun AircraftDetails.is_trusted_current_callsign_route(): Boolean {
-        return route_source == AircraftRouteSource.ADSBDB_CALLSIGN
+        return route_source == ADSBDB_CALLSIGN_ROUTE_SOURCE
     }
 
     private fun trace_matches_partial_current_route(
@@ -188,14 +187,6 @@ object CurrentRouteValidator {
         ) <= FlightAlertAppSettings.CurrentRoute.MAX_BEARING_DELTA_DEG
     }
 
-    private fun accepted(): CurrentRouteValidation {
-        return CurrentRouteValidation(true)
-    }
-
-    private fun rejected(): CurrentRouteValidation {
-        return CurrentRouteValidation(false)
-    }
-
     private fun distance_meters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
         spherical_distance_meters(lat1, lon1, lat2, lon2)
 
@@ -216,5 +207,3 @@ object CurrentRouteValidator {
     private fun angular_delta_degrees(first: Double, second: Double): Double {
         return abs((first - second + 540.0) % 360.0 - 180.0)
     }
-
-}

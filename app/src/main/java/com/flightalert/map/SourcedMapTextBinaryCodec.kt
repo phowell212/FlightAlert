@@ -13,11 +13,9 @@ import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 
 
-/**
- * Decodes package-bound sourced text whose script/source decision is fixed by the hash chain.
- * Live text enters through [SourcedMapTextPolicy]; rendering never reclassifies either path.
- */
 object SourcedMapTextBinaryCodec {
+    // Keep package text bound to the script and source fixed by the hash chain.
+    // Route live text through the policy and never reclassify either path while drawing.
     const val unicodeScriptProfileSha256 =
         "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb"
     const val policySha256 =
@@ -238,4 +236,3 @@ object SourcedMapTextBinaryCodec {
         }
     }
 }
-

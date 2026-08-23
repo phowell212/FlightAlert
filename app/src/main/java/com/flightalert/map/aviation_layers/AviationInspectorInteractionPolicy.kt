@@ -8,8 +8,7 @@
 package com.flightalert.map.aviation_layers
 
 
-internal object AviationInspectorInteractionPolicy {
-    fun action_for(
+    internal fun action_for(
         inside_panel: Boolean,
         inside_close_button: Boolean
     ): AviationInspectorTapAction = if (inside_close_button || !inside_panel) {
@@ -17,4 +16,3 @@ internal object AviationInspectorInteractionPolicy {
     } else {
         AviationInspectorTapAction.CONSUME
     }
-}

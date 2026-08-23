@@ -8,14 +8,9 @@ package com.flightalert.map
 
 
 
-/**
- * Unicode 17.0.0 Scripts.txt compiled into source-exact policy classes.
- *
- * Generated from the frozen 1,718-interval profile whose canonical SHA-256 is
- * 4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb.
- * Product runtime performs no JSON loading and delegates to no platform script API.
- */
 internal object SourcedTextUnicode17Profile {
+    // Keep the Unicode 17.0.0 source-exact policy in generated code.
+    // This frozen 1,718-interval profile uses no runtime JSON or platform script API.
     const val profileSha256 =
         "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb"
     const val intervalCount = 1_718
@@ -215,4 +210,3 @@ internal object SourcedTextUnicode17Profile {
         }
     }
 }
-

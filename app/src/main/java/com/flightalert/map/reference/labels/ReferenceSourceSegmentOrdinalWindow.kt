@@ -1,8 +1,7 @@
 package com.flightalert.map.reference.labels
 
 
-internal object ReferenceSourceSegmentOrdinalWindow {
-    fun startInclusive(
+    internal fun startInclusive(
         segments: List<ReferencePreparedPathSegment>,
         sourceStartDistance: Double,
         epsilon: Double,
@@ -24,7 +23,7 @@ internal object ReferenceSourceSegmentOrdinalWindow {
         return lower
     }
 
-    fun endExclusive(
+    internal fun endExclusive(
         segments: List<ReferencePreparedPathSegment>,
         sourceEndDistance: Double,
         epsilon: Double,
@@ -46,4 +45,3 @@ internal object ReferenceSourceSegmentOrdinalWindow {
         }
         return lower
     }
-}

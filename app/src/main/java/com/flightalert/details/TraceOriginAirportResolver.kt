@@ -7,31 +7,21 @@
 
 package com.flightalert.details
 
-import java.net.HttpURLConnection
-import java.net.URLEncoder
-import java.util.concurrent.Executor
-import java.util.concurrent.RejectedExecutionException
-import java.util.Locale
-import org.json.JSONArray
-import org.json.JSONObject
-import com.flightalert.FlightAlertAppSettings
-import com.flightalert.aircraft.Aircraft
-import com.flightalert.aircraft.AircraftDetails
-import com.flightalert.aircraft.AircraftMetadataSeed
-import com.flightalert.aircraft.AircraftRouteSource
-import com.flightalert.aircraft.AircraftSymbol
-import com.flightalert.aircraft.AircraftSymbolClassifier
-import com.flightalert.aircraft.AircraftTelemetry
+import com.flightalert.fetch_json_object
 import com.flightalert.aircraft.AirportDetails
 import com.flightalert.aircraft.TrackPoint
-import com.flightalert.flight.CurrentRouteValidator
-import com.flightalert.flight.OriginAerodrome
-import com.flightalert.flight.TraceSegment
 import com.flightalert.map.MapProjection
-import com.flightalert.sources.AirplanesLiveHttp
-import com.flightalert.sources.fetch_json_object
-import com.flightalert.sources.https_url
+import org.json.JSONObject
+import java.net.URLEncoder
+import java.util.Locale
 
+
+private fun JSONObject.trace_origin_json_clean_string(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return optString(key)
+        .trim()
+        .takeIf { it.isNotBlank() && !it.equals("n/a", ignoreCase = true) }
+}
 
 
 class TraceOriginAirportResolver(private val user_agent: String) {

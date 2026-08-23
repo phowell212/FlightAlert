@@ -6,6 +6,12 @@
 
 package com.flightalert.map.aviation_layers
 
+enum class AviationLayerState {
+    LOADED,
+    PARTIAL,
+    EMPTY,
+    UNAVAILABLE
+}
 
 data class AviationLayerStatus(
     val state: AviationLayerState,

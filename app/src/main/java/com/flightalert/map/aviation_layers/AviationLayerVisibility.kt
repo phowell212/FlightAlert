@@ -6,6 +6,8 @@
 
 package com.flightalert.map.aviation_layers
 
+internal const val AVIATION_AIRPORT_LABEL_MIN_ZOOM = 8.4
+
 
 data class AviationLayerVisibility(
     val restricted_airspaces_enabled: Boolean,
