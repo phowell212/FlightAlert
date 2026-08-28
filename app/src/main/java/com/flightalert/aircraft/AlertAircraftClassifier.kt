@@ -68,9 +68,7 @@ fun should_show_persistent_priority_notification(
     return alerts_enabled && extreme_priority_aircraft.any { it.is_extreme_priority } && has_notification_permission
 }
 
-private fun meters_to_feet(meters: Double): Double = meters * FEET_PER_METER
+private fun meters_to_feet(meters: Double): Double = meters / 0.3048
 
 const val EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS =
     FlightAlertAppSettings.AlertProjection.MAX_SECONDS
-
-private const val FEET_PER_METER = 3.28084
