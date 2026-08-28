@@ -25,7 +25,7 @@ class ReferenceRuntimeStyleSwatchTest {
 
         assertEquals(runtime.resolved.color_argb.toInt(), swatch.colorArgb)
         assertEquals(runtime.style.line_width_milli_dp / 1_000f, swatch.lineWidthDp)
-        assertEquals(ReferenceOutlinePattern.SOLID, swatch.pattern)
+        assertEquals(ReferenceOutlinePattern.LONG_DASH, swatch.pattern)
     }
 
     @Test

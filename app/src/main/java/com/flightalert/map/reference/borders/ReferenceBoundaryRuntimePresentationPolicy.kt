@@ -20,7 +20,7 @@ internal data class ReferenceBoundaryRuntimePresentation(
 )
 
 internal object ReferenceBoundaryRuntimePresentationPolicy {
-    const val cacheIdentity = "satellite-boundaries-current-v1"
+    const val cacheIdentity = "satellite-boundaries-balanced-v1"
 
     private val presentation_by_subtype =
         arrayOfNulls<ReferenceBoundaryRuntimePresentation>(SemanticSubtype.entries.size).apply {
@@ -41,16 +41,16 @@ internal object ReferenceBoundaryRuntimePresentationPolicy {
         return when (subtype) {
             SemanticSubtype.INTERNATIONAL_BOUNDARY -> ReferenceBoundaryRuntimePresentation(
                 style = canonical_style.copy(
-                    line_pattern = LinePattern.SOLID,
-                    line_width_milli_dp = 1_550,
+                    line_pattern = LinePattern.LONG_DASH,
+                    line_width_milli_dp = 1_250,
                 ),
                 resolved = resolved_style(
                     canonical = canonical_resolved,
                     colorArgb = 0xFFEEF2F4u,
-                    alphaMilli = 902,
-                    haloAlphaMilli = 651,
-                    lineHaloWidthMilliDp = 900,
-                    dashMilliDp = emptyList(),
+                    alphaMilli = 850,
+                    haloAlphaMilli = 500,
+                    lineHaloWidthMilliDp = 500,
+                    dashMilliDp = listOf(5_000, 3_200),
                 ),
                 visibilityRule = canonical_visibility,
                 drawOrder = 24,
@@ -58,19 +58,54 @@ internal object ReferenceBoundaryRuntimePresentationPolicy {
 
             SemanticSubtype.STATE_PROVINCE_BOUNDARY -> ReferenceBoundaryRuntimePresentation(
                 style = canonical_style.copy(
-                    line_pattern = LinePattern.DOT,
+                    line_pattern = LinePattern.SOLID,
                     line_width_milli_dp = 750,
                 ),
                 resolved = resolved_style(
                     canonical = canonical_resolved,
                     colorArgb = 0xFFD2DADEu,
-                    alphaMilli = 471,
-                    haloAlphaMilli = 98,
-                    lineHaloWidthMilliDp = 150,
-                    dashMilliDp = listOf(900, 2_700),
+                    alphaMilli = 520,
+                    haloAlphaMilli = 160,
+                    lineHaloWidthMilliDp = 180,
+                    dashMilliDp = emptyList(),
                 ),
-                visibilityRule = canonical_visibility.copy(full_alpha_zoom_centi = 700),
-                drawOrder = canonical_visibility.draw_order,
+                visibilityRule = canonical_visibility.copy(full_alpha_zoom_centi = 550),
+                drawOrder = 22,
+            )
+
+            SemanticSubtype.COUNTY_LOCAL_BOUNDARY -> ReferenceBoundaryRuntimePresentation(
+                style = canonical_style.copy(
+                    line_pattern = LinePattern.SHORT_DASH,
+                    line_width_milli_dp = 600,
+                ),
+                resolved = resolved_style(
+                    canonical = canonical_resolved,
+                    alphaMilli = 400,
+                    haloAlphaMilli = 120,
+                    lineHaloWidthMilliDp = 150,
+                    dashMilliDp = listOf(3_200, 2_600),
+                ),
+                visibilityRule = canonical_visibility.copy(full_alpha_zoom_centi = 750),
+                drawOrder = 20,
+            )
+
+            SemanticSubtype.OTHER_ADMIN_BOUNDARY -> ReferenceBoundaryRuntimePresentation(
+                style = canonical_style.copy(
+                    line_pattern = LinePattern.DOT,
+                    line_width_milli_dp = 500,
+                ),
+                resolved = resolved_style(
+                    canonical = canonical_resolved,
+                    alphaMilli = 260,
+                    haloAlphaMilli = 80,
+                    lineHaloWidthMilliDp = 100,
+                    dashMilliDp = listOf(900, 2_600),
+                ),
+                visibilityRule = canonical_visibility.copy(
+                    min_zoom_centi = 850,
+                    full_alpha_zoom_centi = 950,
+                ),
+                drawOrder = 18,
             )
 
             else -> ReferenceBoundaryRuntimePresentation(
