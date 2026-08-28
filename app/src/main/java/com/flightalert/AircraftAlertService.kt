@@ -58,6 +58,10 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
+internal fun should_enter_monitoring_foreground_on_ordinary_start(
+    priority_notification_showing: Boolean
+): Boolean = !priority_notification_showing
+
 // Watches live ownship and aircraft only; no tracks are stored.
 class AircraftAlertService : Service(), LocationListener {
     private val executor = Executors.newSingleThreadExecutor()
@@ -120,7 +124,11 @@ class AircraftAlertService : Service(), LocationListener {
             stopSelf()
             return START_NOT_STICKY
         }
-        enter_monitoring_foreground()
+        synchronized(priority_snapshot_lock) {
+            if (should_enter_monitoring_foreground_on_ordinary_start(priority_notification_showing)) {
+                enter_monitoring_foreground()
+            }
+        }
         return START_STICKY
     }
 
