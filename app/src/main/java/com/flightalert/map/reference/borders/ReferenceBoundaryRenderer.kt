@@ -1872,10 +1872,17 @@ internal class ReferenceBoundaryRenderer(
         target_paint.strokeJoin = style.stroke_join
         target_paint.strokeCap = style.stroke_cap
         target_paint.pathEffect = style.dash_pattern_dp.takeIf { it.isNotEmpty() }
-            ?.map { value -> value * inverse_scale }
-            ?.toFloatArray()
+            ?.let { pattern ->
+                reference_boundary_dash_pattern_px(
+                    pattern,
+                    boundary_density * inverse_scale,
+                )
+            }
             ?.let { intervals ->
-                DashPathEffect(intervals, style.dash_phase_dp * inverse_scale)
+                DashPathEffect(
+                    intervals,
+                    style.dash_phase_dp * boundary_density * inverse_scale,
+                )
             }
     }
 

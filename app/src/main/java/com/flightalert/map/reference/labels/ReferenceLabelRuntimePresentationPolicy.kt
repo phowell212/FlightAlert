@@ -13,6 +13,7 @@ import com.flightalert.map.reference.SemanticSubtype
 
 internal object ReferenceLabelRuntimePresentationPolicy {
     // Precompute typography without changing package-bound visibility policy.
+    const val minimumPathLabelZoom = 10.0
     private const val FULL_ALPHA_MILLI = 1_000
     private const val HALO_WIDTH_MILLI_EM = 160
     private val stream_name_suffixes = arrayOf("Creek", "Brook", "Run", "Falls", "Branch")

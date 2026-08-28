@@ -3,12 +3,13 @@ package com.flightalert.ui
 import com.flightalert.map.reference.CatalogControlStatus
 import com.flightalert.map.reference.FilterId
 import com.flightalert.map.reference.FilterKind
-import com.flightalert.map.reference.FontSlant
 import com.flightalert.map.reference.LinePattern
 import com.flightalert.map.reference.ReferencePresentationPolicy
 import com.flightalert.map.reference.SemanticSubtype
+import com.flightalert.map.reference.borders.ReferenceBoundaryRuntimePresentationPolicy
 import com.flightalert.map.reference.dictionary.FilterState
 import com.flightalert.map.reference.dictionary.ReferenceClassCatalog
+import com.flightalert.map.reference.labels.ReferenceLabelRuntimePresentationPolicy
 import java.util.Collections
 
 
@@ -79,34 +80,38 @@ class ReferenceFiltersPanelController(
         )
     }
 
-    private fun swatchFor(
+    internal fun swatchFor(
         kind: FilterKind,
         subtype: SemanticSubtype,
     ): ReferenceStyleSwatch {
-        val style = ReferencePresentationPolicy.style_spec_for_subtype(subtype)
-        val resolved = ReferencePresentationPolicy.resolved_style_for_subtype(subtype)
         return when (kind) {
             FilterKind.LABEL -> {
-                require(subtype.is_label && style.font_slant != FontSlant.NOT_APPLICABLE) {
+                require(subtype.is_label) {
                     "label filter representative must use a label presentation style"
                 }
+                val resolved = ReferencePresentationPolicy.resolved_style_for_subtype(subtype)
+                val typography = ReferenceLabelRuntimePresentationPolicy.typography(
+                    subtype,
+                    ReferencePresentationPolicy.default_prominence_for_subtype(subtype),
+                )
                 ReferenceLabelStyleSwatch(
                     colorArgb = resolved.color_argb.toInt(),
                     haloArgb = resolved.halo_argb.toInt(),
-                    fontWeight = style.font_weight,
-                    italic = style.font_slant == FontSlant.ITALIC,
-                    letterSpacingEm = style.letter_spacing_milli_em / 1_000f,
+                    fontWeight = typography.fontWeight,
+                    italic = typography.italic,
+                    letterSpacingEm = typography.letterSpacingMilliEm / 1_000f,
                 )
             }
             FilterKind.OUTLINE -> {
-                require(!subtype.is_label && style.line_width_milli_dp > 0) {
+                require(!subtype.is_label) {
                     "outline filter representative must use an outline presentation style"
                 }
+                val presentation = ReferenceBoundaryRuntimePresentationPolicy.presentation(subtype)
                 ReferenceOutlineStyleSwatch(
-                    colorArgb = resolved.color_argb.toInt(),
-                    haloArgb = resolved.halo_argb.toInt(),
-                    lineWidthDp = style.line_width_milli_dp / 1_000f,
-                    pattern = style.line_pattern.toUiPattern(),
+                    colorArgb = presentation.resolved.color_argb.toInt(),
+                    haloArgb = presentation.resolved.halo_argb.toInt(),
+                    lineWidthDp = presentation.style.line_width_milli_dp / 1_000f,
+                    pattern = presentation.style.line_pattern.toUiPattern(),
                 )
             }
         }

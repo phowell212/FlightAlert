@@ -613,7 +613,10 @@ internal class ReferenceLabelRenderer(
         filter_mask: ReferenceFilterMask,
     ): Boolean {
         if (!record.drawable || !record.visible_at(zoom)) return false
-        if (record.line_label && zoom < MIN_PATH_LABEL_ZOOM) return false
+        if (
+            record.line_label &&
+            zoom < ReferenceLabelRuntimePresentationPolicy.minimumPathLabelZoom
+        ) return false
         if (!filter_mask.allows(record.filter_id, groups.enabled(record.layer_group))) return false
         val visibility_alpha_milli = label_visibility_alpha_milli(record, zoom)
         return ReferenceLabelRuntimePresentationPolicy.hasVisiblePaintAlpha(
@@ -1471,7 +1474,6 @@ internal class ReferenceLabelRenderer(
         const val DICTIONARY_EXTENT = 4096.0
         const val MAP_LABEL_TEXT_SCALE_MIN = 1f
         const val MAP_LABEL_TEXT_SCALE_MAX = 1.75f
-        const val MIN_PATH_LABEL_ZOOM = 10.0
         const val LEGACY_LABEL_HALO_WIDTH_MILLI_EM = 220
         const val ENGLISH_FONT_WEIGHT = 400
         const val ENGLISH_ITALIC = true
