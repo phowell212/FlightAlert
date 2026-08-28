@@ -20,6 +20,7 @@ internal fun reference_boundary_raster_disk_namespace(
     schemaVersion: Int,
     rendererSemanticStreamSha256: String,
     densityRawBits: Int,
+    runtimePresentationIdentity: String = ReferenceBoundaryRuntimePresentationPolicy.cacheIdentity,
 ): String {
     val identity = listOf(
         REFERENCE_BOUNDARY_RASTER_CACHE_VERSION,
@@ -27,6 +28,7 @@ internal fun reference_boundary_raster_disk_namespace(
         schemaVersion.toString(),
         rendererSemanticStreamSha256,
         ReferencePresentationPolicy.canonical_policy_sha256,
+        runtimePresentationIdentity,
         densityRawBits.toString(),
         band.sourceZoom.toString(),
         band.rasterZoom.toString(),

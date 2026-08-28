@@ -46,7 +46,10 @@ data class FilterState private constructor(
 
     companion object {
         fun defaults(): FilterState = of(
-            FilterId.entries.toSet() - FilterId.OUTLINES_COASTLINES,
+            FilterId.entries.toSet() - setOf(
+                FilterId.OUTLINES_COASTLINES,
+                FilterId.OUTLINES_OTHER,
+            ),
             labels_master_enabled = true,
             outlines_master_enabled = true,
         )

@@ -38,6 +38,7 @@ import com.flightalert.map.reference.labels.ReferenceLabelCandidateKey
 import com.flightalert.map.reference.labels.ReferenceLabelCollisionShape
 import com.flightalert.map.reference.labels.ReferenceLabelOccurrenceId
 import com.flightalert.map.reference.labels.ReferenceLabelRenderer
+import com.flightalert.map.reference.labels.ReferenceLabelRuntimePresentationPolicy
 import com.flightalert.map.reference.labels.ReferencePathLabelPoint
 import com.flightalert.map.reference.labels.ReferenceScreenRect
 import com.flightalert.map.reference.labels.translateReferencePathCollisionShape
@@ -1536,7 +1537,11 @@ internal class ReferenceDictionaryOverlayRenderer(
             )
         }?.let { return it }
         partial_label_frame = null
-        if (!labels_enabled || viewport.zoom >= MIN_PATH_LABEL_ZOOM || tiles.isEmpty()) return null
+        if (
+            !labels_enabled ||
+            viewport.zoom >= ReferenceLabelRuntimePresentationPolicy.minimumPathLabelZoom ||
+            tiles.isEmpty()
+        ) return null
 
         // Freeze the first partial point-label plan so incoming tiles cannot make labels jump.
         val static_label_plan = prepare_retained_static_label_plan(
@@ -1740,6 +1745,5 @@ internal class ReferenceDictionaryOverlayRenderer(
         const val FALLBACK_TILE_PREFETCH_REQUESTS_PER_DRAW = 4
         const val RETAINED_FRAME_FADE_MS = 220f
         const val MAX_RETAINED_PADDING_LABELS = 96
-        const val MIN_PATH_LABEL_ZOOM = 10.0
     }
 }

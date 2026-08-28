@@ -15,6 +15,7 @@ import com.flightalert.map.reference.FontSlant
 import com.flightalert.map.reference.ReferencePresentationPolicy
 import com.flightalert.map.reference.SemanticSubtype
 import com.flightalert.map.reference.StyleSpec
+import com.flightalert.map.reference.borders.ReferenceBoundaryRuntimePresentationPolicy
 import com.flightalert.map.reference.labels.ReferenceLabelRuntimePresentationPolicy
 import com.flightalert.map.reference.labels.UNKNOWN_LOW_ZOOM_COUNTRY_RANK
 import com.flightalert.map.reference.labels.reference_low_zoom_country_rank
@@ -168,11 +169,14 @@ internal class ReferenceDictionaryTileDecoder {
                 }
 
                 is ReferenceDictionaryBinaryDrawModel.Outline -> {
-                    val resolved = model.resolvedStyle
                     val geometry = binary_geometry(
                         model.geometry,
                         request_is_relevant,
                     ) ?: return null
+                    val presentation = ReferenceBoundaryRuntimePresentationPolicy.presentation(
+                        model.subtype,
+                    )
+                    val resolved = presentation.resolved
                     boundaries += DictionaryLineRecord(
                         source_layer = "",
                         source_kind = binary_source_kind(model.subtype),
@@ -181,46 +185,31 @@ internal class ReferenceDictionaryTileDecoder {
                         layer_group = binary_layer_group(model.filterId),
                         filter_id = model.filterId,
                         geometry = geometry,
-                        visibility_rule = if (
-                            model.subtype == SemanticSubtype.STATE_PROVINCE_BOUNDARY
-                        ) {
-                            model.visibility.copy(full_alpha_zoom_centi = 700)
-                        } else {
-                            model.visibility
-                        },
-                        draw_order = if (
-                            model.subtype == SemanticSubtype.INTERNATIONAL_BOUNDARY
-                        ) {
-                            24
-                        } else {
-                            model.drawOrder
-                        },
+                        visibility_rule = presentation.visibilityRule,
+                        draw_order = presentation.drawOrder,
                         priority = model.priority,
                         source_feature_id = model.featureId,
                         dedupe_id = model.dedupeId,
                         posting_world_wrap = record.postingWorldWrap,
-                        style = boundary_display_style(
-                            model.subtype,
-                            DictionaryLineStyle(
-                                color = resolved.color_argb.toInt(),
-                                stroke_width_dp = model.style.line_width_milli_dp / 1_000f,
-                                halo_width_dp = resolved.line_halo_width_milli_dp / 1_000f,
-                                alpha = alpha_milli_to_byte(resolved.alpha_milli),
-                                halo_alpha = alpha_milli_to_byte(resolved.halo_alpha_milli),
-                                halo_color = resolved.halo_argb.toInt(),
-                                dash_pattern_dp = resolved.dash_milli_dp.map { it / 1_000f },
-                                dash_phase_dp = resolved.dash_phase_milli_dp / 1_000f,
-                                stroke_cap = if (resolved.line_cap == "butt") {
-                                    Paint.Cap.BUTT
-                                } else {
-                                    Paint.Cap.ROUND
-                                },
-                                stroke_join = if (resolved.line_join == "miter") {
-                                    Paint.Join.MITER
-                                } else {
-                                    Paint.Join.ROUND
-                                },
-                            ),
+                        style = DictionaryLineStyle(
+                            color = resolved.color_argb.toInt(),
+                            stroke_width_dp = presentation.style.line_width_milli_dp / 1_000f,
+                            halo_width_dp = resolved.line_halo_width_milli_dp / 1_000f,
+                            alpha = alpha_milli_to_byte(resolved.alpha_milli),
+                            halo_alpha = alpha_milli_to_byte(resolved.halo_alpha_milli),
+                            halo_color = resolved.halo_argb.toInt(),
+                            dash_pattern_dp = resolved.dash_milli_dp.map { it / 1_000f },
+                            dash_phase_dp = resolved.dash_phase_milli_dp / 1_000f,
+                            stroke_cap = if (resolved.line_cap == "butt") {
+                                Paint.Cap.BUTT
+                            } else {
+                                Paint.Cap.ROUND
+                            },
+                            stroke_join = if (resolved.line_join == "miter") {
+                                Paint.Join.MITER
+                            } else {
+                                Paint.Join.ROUND
+                            },
                         ),
                     )
                 }
@@ -234,33 +223,6 @@ internal class ReferenceDictionaryTileDecoder {
             boundaries = boundaries,
             labels = labels,
         )
-    }
-
-    // Keep the verified dictionary policy immutable; only its final on-screen treatment changes.
-    private fun boundary_display_style(
-        subtype: SemanticSubtype,
-        canonical_style: DictionaryLineStyle,
-    ): DictionaryLineStyle = when (subtype) {
-        SemanticSubtype.INTERNATIONAL_BOUNDARY -> canonical_style.copy(
-            color = Color.rgb(238, 242, 244),
-            stroke_width_dp = 1.55f,
-            halo_width_dp = 0.9f,
-            alpha = 230,
-            halo_alpha = 166,
-            dash_pattern_dp = emptyList(),
-        )
-
-        SemanticSubtype.STATE_PROVINCE_BOUNDARY -> canonical_style.copy(
-            color = Color.rgb(210, 218, 222),
-            stroke_width_dp = 0.75f,
-            halo_width_dp = 0.15f,
-            alpha = 120,
-            halo_alpha = 25,
-            dash_pattern_dp = listOf(0.9f, 2.7f),
-            stroke_cap = Paint.Cap.ROUND,
-        )
-
-        else -> canonical_style
     }
 
     private fun binary_geometry(

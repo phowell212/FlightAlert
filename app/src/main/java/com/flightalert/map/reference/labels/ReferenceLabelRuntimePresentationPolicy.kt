@@ -13,6 +13,7 @@ import com.flightalert.map.reference.SemanticSubtype
 
 internal object ReferenceLabelRuntimePresentationPolicy {
     // Precompute typography without changing package-bound visibility policy.
+    const val minimumPathLabelZoom = 7.5
     private const val FULL_ALPHA_MILLI = 1_000
     private const val HALO_WIDTH_MILLI_EM = 160
     private val stream_name_suffixes = arrayOf("Creek", "Brook", "Run", "Falls", "Branch")
@@ -267,7 +268,7 @@ internal object ReferenceLabelRuntimePresentationPolicy {
 
     private fun font_weight(subtype: SemanticSubtype): Int = when (subtype) {
         SemanticSubtype.CAPITAL_MAJOR_CITY -> 700
-        SemanticSubtype.COUNTRY_TERRITORY,
+        SemanticSubtype.COUNTRY_TERRITORY -> 650
         SemanticSubtype.CITY_TOWN -> 600
         SemanticSubtype.FIRST_ORDER_REGION -> 500
         SemanticSubtype.SECOND_LOCAL_REGION,
@@ -290,7 +291,8 @@ internal object ReferenceLabelRuntimePresentationPolicy {
         SemanticSubtype.LAKE_RESERVOIR,
         SemanticSubtype.RIVER,
         SemanticSubtype.STREAM_CREEK,
-        SemanticSubtype.UNSPECIFIED_WATERCOURSE -> true
+        SemanticSubtype.UNSPECIFIED_WATERCOURSE,
+        SemanticSubtype.PROTECTED_LAND -> true
         else -> false
     }
 
