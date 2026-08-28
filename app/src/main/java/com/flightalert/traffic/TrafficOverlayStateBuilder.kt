@@ -7,6 +7,7 @@
 
 package com.flightalert.traffic
 
+import com.flightalert.FlightAlertAppSettings
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftAppearance
 import com.flightalert.aircraft.SYMBOL_ACTIVE_MIN_PROGRESS
@@ -82,10 +83,16 @@ internal class TrafficOverlayStateBuilder(
     private var dense_symbol_cache_built_ms = 0L
     private var current_aircraft_source: List<Aircraft>? = null
     private var current_aircraft_generation = 0L
+    private var previous_motion_generation = 0L
+    private var previous_motion_viewport: Viewport? = null
+    private var previous_motion_states: Map<String, TrafficAircraftOverlayState> = emptyMap()
+    private var previous_motion_sample_ms = 0L
+    private val motion_handoffs = HashMap<String, MotionHandoff>()
 
     // Build the renderer snapshot from cached traffic so pan frames only cull and interpolate.
     fun traffic_overlay_state(frame: TrafficOverlayFrame): TrafficOverlayState {
-        observe_aircraft_generation(frame.cache.aircraft)
+        val aircraft_generation = observe_aircraft_generation(frame.cache.aircraft)
+        val now_ms = now_elapsed_ms()
         val interaction_active = dense_dot_symbol_interacting(frame.interaction, now_elapsed_ms())
         dense_dot_query_reusable_for_symbols = false
         val symbols_with_dots = should_include_aircraft_symbols_with_dot_batch(frame)
@@ -117,7 +124,7 @@ internal class TrafficOverlayStateBuilder(
         } else {
             emptyList()
         }
-        return traffic_overlay_state_from_entries(
+        val state = traffic_overlay_state_from_entries(
             frame = frame,
             aircraft = aircraft,
             dot_batch = dot_batch,
@@ -126,7 +133,119 @@ internal class TrafficOverlayStateBuilder(
             aircraft_translation_y = dense_symbol_overlay?.translation_y ?: 0f,
             interaction_active = interaction_active,
         )
+        return apply_motion_handoff(state, aircraft_generation, now_ms)
     }
+
+    private fun apply_motion_handoff(
+        state: TrafficOverlayState,
+        aircraft_generation: Long,
+        now_ms: Long,
+    ): TrafficOverlayState {
+        val supported =
+            state.viewport.zoom >= FlightAlertAppSettings.MapTuning.AIRCRAFT_MOTION_ALWAYS_ANIMATE_ZOOM &&
+                !state.interaction_active &&
+                state.dot_batch == null
+        if (!supported ||
+            (previous_motion_viewport != null && previous_motion_viewport != state.viewport)
+        ) {
+            clear_motion_handoff_state(aircraft_generation, state.viewport, now_ms)
+            return state
+        }
+
+        if (aircraft_generation != previous_motion_generation && previous_motion_states.isNotEmpty()) {
+            val next_handoffs = HashMap<String, MotionHandoff>()
+            for (item in state.aircraft) {
+                val previous = previous_motion_states[item.appearance_key] ?: continue
+                val previous_elapsed_sec = traffic_motion_elapsed_seconds(previous, now_ms)
+                var previous_x =
+                    previous.screen_point.x + previous.screen_velocity_x_px_per_sec * previous_elapsed_sec
+                var previous_y =
+                    previous.screen_point.y + previous.screen_velocity_y_px_per_sec * previous_elapsed_sec
+                motion_handoffs[item.appearance_key]?.let { handoff ->
+                    val remaining_delta =
+                        motion_handoff_remaining(handoff, now_ms) -
+                            motion_handoff_remaining(handoff, previous_motion_sample_ms)
+                    previous_x += handoff.offset_x * remaining_delta
+                    previous_y += handoff.offset_y * remaining_delta
+                }
+                val offset_x = previous_x - item.screen_point.x
+                val offset_y = previous_y - item.screen_point.y
+                if (offset_x.isFinite() && offset_y.isFinite() &&
+                    (offset_x != 0f || offset_y != 0f)
+                ) {
+                    next_handoffs[item.appearance_key] = MotionHandoff(offset_x, offset_y, now_ms)
+                }
+            }
+            motion_handoffs.clear()
+            motion_handoffs.putAll(next_handoffs)
+        }
+
+        if (motion_handoffs.isEmpty()) {
+            remember_motion_state(state, aircraft_generation, now_ms)
+            return state
+        }
+        val corrected = ArrayList<TrafficAircraftOverlayState>(state.aircraft.size)
+        val active_keys = HashSet<String>()
+        for (item in state.aircraft) {
+            val handoff = motion_handoffs[item.appearance_key]
+            if (handoff == null) {
+                corrected += item
+                continue
+            }
+            val remaining = motion_handoff_remaining(handoff, now_ms)
+            if (remaining <= 0f) {
+                corrected += item
+                continue
+            }
+            corrected += item.copy(
+                screen_point = ScreenPoint(
+                    item.screen_point.x + handoff.offset_x * remaining,
+                    item.screen_point.y + handoff.offset_y * remaining,
+                ),
+            )
+            active_keys += item.appearance_key
+        }
+        motion_handoffs.keys.retainAll(active_keys)
+        return state.copy(aircraft = corrected).also {
+            remember_motion_state(it, aircraft_generation, now_ms)
+        }
+    }
+
+    private fun motion_handoff_remaining(handoff: MotionHandoff, at_ms: Long): Float {
+        val progress =
+            ((at_ms - handoff.started_ms).coerceAtLeast(0L).toFloat() / MOTION_HANDOFF_DURATION_MS)
+                .coerceIn(0f, 1f)
+        return 1f - progress * progress * (3f - 2f * progress)
+    }
+
+    private fun remember_motion_state(
+        state: TrafficOverlayState,
+        aircraft_generation: Long,
+        now_ms: Long,
+    ) {
+        previous_motion_generation = aircraft_generation
+        previous_motion_viewport = state.viewport
+        previous_motion_states = state.aircraft.associateBy { it.appearance_key }
+        previous_motion_sample_ms = now_ms
+    }
+
+    private fun clear_motion_handoff_state(
+        aircraft_generation: Long,
+        viewport: Viewport,
+        now_ms: Long,
+    ) {
+        motion_handoffs.clear()
+        previous_motion_generation = aircraft_generation
+        previous_motion_viewport = viewport
+        previous_motion_states = emptyMap()
+        previous_motion_sample_ms = now_ms
+    }
+
+    private data class MotionHandoff(
+        val offset_x: Float,
+        val offset_y: Float,
+        val started_ms: Long,
+    )
 
     private fun traffic_overlay_state_from_entries(
         frame: TrafficOverlayFrame,
@@ -1273,5 +1392,6 @@ internal class TrafficOverlayStateBuilder(
         const val DENSE_SYMBOL_CACHE_IDLE_STALE_MS = 12_000L
         const val DENSE_SYMBOL_CACHE_INTERACTION_ZOOM_STEPS = 3.4
         const val MAX_ESTIMATION_SECONDS = 10.0 * 60.0
+        const val MOTION_HANDOFF_DURATION_MS = 750f
     }
 }
