@@ -29,6 +29,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
+import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.view.InputDevice
@@ -46,6 +47,7 @@ import androidx.core.graphics.withTranslation
 import androidx.core.net.toUri
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AlertAircraft
+import com.flightalert.aircraft.EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
 import com.flightalert.aircraft.ProjectedAlertPosition
 import com.flightalert.aircraft.TrafficDisplay
 import com.flightalert.aircraft.aircraft_color as resolve_aircraft_color
@@ -57,6 +59,9 @@ import com.flightalert.aircraft.to_track_point
 import com.flightalert.alerts.MonitoringNotificationHider
 import com.flightalert.alerts.PrioritySnapshotPayload
 import com.flightalert.alerts.prepare_priority_snapshot
+import com.flightalert.alerts.priority_snapshot_expiry_delay_ms
+import com.flightalert.alerts.should_publish_priority_snapshot
+import com.flightalert.alerts.should_refresh_priority_snapshot_before_expiry
 import com.flightalert.details.AircraftDetailsEffect
 import com.flightalert.details.AircraftDetailsPanelRenderer
 import com.flightalert.details.AircraftDetailsSession
@@ -366,17 +371,6 @@ class FlightMapView(
     private val aviation_prepare_executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "FlightAlertAviationPrepare").apply { isDaemon = true }
     }
-    private val priority_publish_executor = ThreadPoolExecutor(
-        1,
-        1,
-        0L,
-        TimeUnit.MILLISECONDS,
-        ArrayBlockingQueue(1),
-        { runnable ->
-            Thread(runnable, "FlightAlertPriorityPublish").apply { isDaemon = true }
-        },
-        ThreadPoolExecutor.DiscardOldestPolicy()
-    )
     private val flight_trace_client = FlightTraceClient(FlightAlertAppSettings.MapTuning.USER_AGENT)
     private val traffic_cache_policy = object : TrafficCachePolicy {
         override fun passes_aircraft_filters(
@@ -745,7 +739,10 @@ class FlightMapView(
     private var priority_notification_prepare_in_flight = false
     private var priority_notification_prepare_requested = false
     private var priority_notification_prepare_force = false
+    private var priority_notification_publishing_active = false
     private var last_priority_notification_snapshot_signature: String? = null
+    private var last_priority_notification_publish_elapsed_ms = 0L
+    private var last_priority_notification_expiry_elapsed_ms = 0L
     private var zoom_preference_dirty = false
 
 
@@ -815,6 +812,10 @@ class FlightMapView(
 
     fun start() {
         if (destroyed) return
+        last_priority_notification_snapshot_signature = null
+        last_priority_notification_publish_elapsed_ms = 0L
+        last_priority_notification_expiry_elapsed_ms = 0L
+        priority_notification_publishing_active = true
         start_location_updates()
         latest_location?.let { device_heading_provider.update_location(it) }
         device_heading_provider.start()
@@ -823,6 +824,10 @@ class FlightMapView(
     }
 
     fun stop() {
+        priority_notification_publishing_active = false
+        priority_notification_prepare_token++
+        priority_notification_prepare_requested = false
+        priority_notification_prepare_force = false
         removeCallbacks(ticker)
         removeCallbacks(map_interaction_settle_redraw)
         device_heading_provider.stop()
@@ -850,7 +855,6 @@ class FlightMapView(
         }
         aircraft_prepare_executor.shutdownNow()
         aviation_prepare_executor.shutdownNow()
-        priority_publish_executor.shutdownNow()
         network_io_executor.shutdownNow()
         details_io_executor.shutdownNow()
         priority_prepare_executor.shutdownNow()
@@ -3990,6 +3994,7 @@ class FlightMapView(
     }
 
     private fun publish_priority_notification_snapshot_if_due(now_elapsed_ms: Long) {
+        if (!priority_notification_publishing_active) return
         if (now_elapsed_ms - last_priority_notification_snapshot_check_ms < FlightAlertAppSettings.MapTuning.PRIORITY_NOTIFICATION_SNAPSHOT_CHECK_MS) return
         if (priority_notification_prepare_in_flight) return
         last_priority_notification_snapshot_check_ms = now_elapsed_ms
@@ -4001,6 +4006,7 @@ class FlightMapView(
     }
 
     private fun request_priority_notification_snapshot(force: Boolean) {
+        if (destroyed || !priority_notification_publishing_active) return
         priority_notification_prepare_token++
         priority_notification_prepare_requested = true
         priority_notification_prepare_force = priority_notification_prepare_force || force
@@ -4009,6 +4015,7 @@ class FlightMapView(
 
     private fun start_priority_notification_prepare_if_needed() {
         if (destroyed ||
+            !priority_notification_publishing_active ||
             priority_notification_prepare_in_flight ||
             !priority_notification_prepare_requested
         ) {
@@ -4039,7 +4046,7 @@ class FlightMapView(
             }
         } catch (_: RejectedExecutionException) {
             priority_notification_prepare_in_flight = false
-            priority_notification_prepare_requested = true
+            priority_notification_prepare_requested = priority_notification_publishing_active
         }
     }
 
@@ -4047,14 +4054,42 @@ class FlightMapView(
         payload: PrioritySnapshotPayload,
         force: Boolean
     ) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            post_if_alive { publish_priority_notification_payload(payload, force) }
+            return
+        }
+        if (destroyed || !priority_notification_publishing_active) return
+        val now_elapsed_ms = SystemClock.elapsedRealtime()
         val signature = payload.signature
-        if (!force && signature == last_priority_notification_snapshot_signature) return
-        if (signature.isEmpty() && last_priority_notification_snapshot_signature == null) return
-        last_priority_notification_snapshot_signature = signature
+        val refresh_before_expiry = signature.isNotEmpty() &&
+                last_priority_notification_expiry_elapsed_ms > 0L &&
+                should_refresh_priority_snapshot_before_expiry(
+                    now_elapsed_ms = now_elapsed_ms,
+                    last_expiry_elapsed_ms = last_priority_notification_expiry_elapsed_ms,
+                    refresh_lead_ms = FlightAlertAppSettings.MapTuning.PRIORITY_NOTIFICATION_SNAPSHOT_CHECK_MS
+                )
+        if (!should_publish_priority_snapshot(
+                signature = signature,
+                last_signature = last_priority_notification_snapshot_signature,
+                force = force,
+                now_elapsed_ms = now_elapsed_ms,
+                last_publish_elapsed_ms = last_priority_notification_publish_elapsed_ms,
+                refresh_interval_ms = AircraftAlertService.POLL_MS
+            ) && !refresh_before_expiry
+        ) {
+            return
+        }
+        val expiry_delay_ms = priority_snapshot_expiry_delay_ms(
+            contact_age_seconds = payload.contact_age_seconds,
+            elapsed_since_snapshot_ms = 0L,
+            max_contact_age_seconds = EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
+        )
         try {
-            priority_publish_executor.execute {
-                AircraftAlertService.publish_priority_snapshot(context, payload)
-            }
+            AircraftAlertService.publish_priority_snapshot(context, payload)
+            last_priority_notification_snapshot_signature = signature
+            last_priority_notification_publish_elapsed_ms = now_elapsed_ms
+            last_priority_notification_expiry_elapsed_ms =
+                expiry_delay_ms?.let { now_elapsed_ms + it } ?: 0L
         } catch (_: RuntimeException) {
         }
     }

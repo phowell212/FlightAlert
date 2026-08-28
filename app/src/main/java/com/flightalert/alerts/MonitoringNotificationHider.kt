@@ -5,6 +5,7 @@
 
 package com.flightalert.alerts
 
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -16,7 +17,6 @@ import android.service.notification.NotificationListenerService
 
 internal object MonitoringNotificationHider {
     private const val WATCHER_BOOT_TIMEOUT_MS = 30L * 1000L
-    private const val SERVICE_CLASS_NAME = "com.flightalert.MonitoringNotificationHiderService"
 
     // Keep notification-listener state shared across Android component rebinds.
     @JvmField
@@ -24,14 +24,8 @@ internal object MonitoringNotificationHider {
     internal var connected = false
 
     fun is_enabled(context: Context): Boolean {
-        val enabled = Settings.Secure.getString(
-            context.contentResolver,
-            "enabled_notification_listeners"
-        ) ?: return false
-        val expected = component_name(context)
-        return enabled.split(':').any { flattened ->
-            ComponentName.unflattenFromString(flattened) == expected
-        }
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        return manager.isNotificationListenerAccessGranted(component_name(context))
     }
 
     fun settings_intent(): Intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
@@ -52,12 +46,13 @@ internal object MonitoringNotificationHider {
     }
 
     fun request_rebind_if_enabled(context: Context) {
+        if (connected) return
         if (!is_enabled(context)) return
         runCatching { NotificationListenerService.requestRebind(component_name(context)) }
     }
 
     private fun component_name(context: Context): ComponentName {
-        return ComponentName(context, SERVICE_CLASS_NAME)
+        return ComponentName(context, MonitoringNotificationHiderService::class.java)
     }
 }
 

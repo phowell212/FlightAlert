@@ -2,12 +2,12 @@
     "FunctionName",
 )
 
-package com.flightalert
+package com.flightalert.alerts
 
 import android.app.Notification
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
-import com.flightalert.alerts.MonitoringNotificationHider
+import com.flightalert.FlightAlertAppSettings
 
 
 

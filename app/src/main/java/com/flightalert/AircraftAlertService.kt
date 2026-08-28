@@ -31,6 +31,7 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
+import android.os.SystemClock
 import com.flightalert.aircraft.ALERT_PROJECTION_MAX_SECONDS
 import com.flightalert.aircraft.EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
 import com.flightalert.aircraft.MAX_PROJECTABLE_ALERT_SPEED_MS
@@ -42,6 +43,9 @@ import com.flightalert.aircraft.projected_alert_position
 import com.flightalert.aircraft.should_show_persistent_priority_notification
 import com.flightalert.alerts.MonitoringNotificationHider
 import com.flightalert.alerts.PrioritySnapshotPayload
+import com.flightalert.alerts.fresh_priority_snapshot
+import com.flightalert.alerts.priority_snapshot_expiry_delay_ms
+import com.flightalert.alerts.should_apply_priority_snapshot_expiry
 import com.flightalert.map.Bounds
 import com.flightalert.map.bounds_around_location
 import com.flightalert.sources.AircraftFeedClient
@@ -59,6 +63,8 @@ class AircraftAlertService : Service(), LocationListener {
     private val executor = Executors.newSingleThreadExecutor()
     private val aircraft_feed_client = AircraftFeedClient(USER_AGENT)
     private val active_hazards = linkedMapOf<String, AlertAircraft>()
+    private val priority_snapshot_lock = Any()
+    private val priority_snapshot_expiry_handler by lazy { Handler(mainLooper) }
 
     // Apply alert-volume settings immediately to polling and notification state.
     private val preference_listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -74,13 +80,14 @@ class AircraftAlertService : Service(), LocationListener {
     private lateinit var prefs: SharedPreferences
     private var latest_location: Location? = null
     private var polling = false
+    @Volatile
     private var stopped = false
     private var foreground_active = false
     private var priority_notification_showing = false
     private var next_poll_delay_ms = POLL_MS
-
-    @Volatile
-    private var latest_priority_snapshot: List<AlertAircraft> = emptyList()
+    private var latest_priority_snapshot: CachedPrioritySnapshot? = null
+    private var priority_snapshot_generation = 0L
+    private var priority_snapshot_expiry_callback: Runnable? = null
 
 
     override fun onCreate() {
@@ -101,8 +108,12 @@ class AircraftAlertService : Service(), LocationListener {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            latest_priority_snapshot = priority_snapshot_from_intent(intent)
-            update_priority_notification(latest_priority_snapshot)
+            synchronized(priority_snapshot_lock) {
+                replace_priority_snapshot_locked(
+                    priority_aircraft = priority_snapshot_from_intent(intent),
+                    received_elapsed_ms = SystemClock.elapsedRealtime()
+                )
+            }
             return START_STICKY
         }
         if (!monitoring_enabled()) {
@@ -115,7 +126,12 @@ class AircraftAlertService : Service(), LocationListener {
 
     // Clear foreground state so no priority notification survives service shutdown.
     override fun onDestroy() {
-        stopped = true
+        synchronized(priority_snapshot_lock) {
+            stopped = true
+            priority_snapshot_generation++
+            latest_priority_snapshot = null
+            cancel_priority_snapshot_expiry_locked()
+        }
         if (::prefs.isInitialized) {
             prefs.unregisterOnSharedPreferenceChangeListener(preference_listener)
         }
@@ -202,7 +218,7 @@ class AircraftAlertService : Service(), LocationListener {
         val location = latest_location
         if (location == null) {
             start_location_updates()
-            update_priority_notification(latest_priority_snapshot)
+            reuse_cached_priority_snapshot()
             next_poll_delay_ms = POLL_MS
             schedule_poll(next_poll_delay_ms)
             return
@@ -213,31 +229,36 @@ class AircraftAlertService : Service(), LocationListener {
             try {
                 val poll = fetch_aircraft(location)
                 if (!poll.feed_available) {
-                    update_priority_notification(latest_priority_snapshot)
+                    reuse_cached_priority_snapshot()
                     next_poll_delay_ms = POLL_MS
                     return@execute
                 }
 
-                latest_priority_snapshot = emptyList()
-                // Notification membership comes only from classifier results.
-                val current_hazards = if (alerts_enabled()) {
-                    poll.aircraft.filter { it.is_hazard }.associateBy { it.icao24 }
-                } else {
-                    emptyMap()
+                synchronized(priority_snapshot_lock) {
+                    if (stopped) return@execute
+                    priority_snapshot_generation++
+                    latest_priority_snapshot = null
+                    cancel_priority_snapshot_expiry_locked()
+                    // Notification membership comes only from classifier results.
+                    val current_hazards = if (alerts_enabled()) {
+                        poll.aircraft.filter { it.is_hazard }.associateBy { it.icao24 }
+                    } else {
+                        emptyMap()
+                    }
+                    active_hazards.clear()
+                    active_hazards.putAll(current_hazards)
+                    val extreme_priority =
+                        if (alerts_enabled()) poll.aircraft.filter { it.is_extreme_priority } else emptyList()
+                    update_priority_notification(extreme_priority)
+                    next_poll_delay_ms = next_poll_delay_for(
+                        aircraft = poll.aircraft,
+                        has_hazard = current_hazards.isNotEmpty(),
+                        has_extreme_priority = extreme_priority.isNotEmpty(),
+                        predictive_delay_ms = poll.next_predictive_poll_delay_ms
+                    )
                 }
-                active_hazards.clear()
-                active_hazards.putAll(current_hazards)
-                val extreme_priority =
-                    if (alerts_enabled()) poll.aircraft.filter { it.is_extreme_priority } else emptyList()
-                update_priority_notification(extreme_priority)
-                next_poll_delay_ms = next_poll_delay_for(
-                    aircraft = poll.aircraft,
-                    has_hazard = current_hazards.isNotEmpty(),
-                    has_extreme_priority = extreme_priority.isNotEmpty(),
-                    predictive_delay_ms = poll.next_predictive_poll_delay_ms
-                )
             } catch (_: Exception) {
-                update_priority_notification(latest_priority_snapshot)
+                reuse_cached_priority_snapshot()
                 next_poll_delay_ms = POLL_MS
             } finally {
                 polling = false
@@ -419,6 +440,74 @@ class AircraftAlertService : Service(), LocationListener {
             notify_priority_fallback(manager, notification)
             priority_notification_showing = true
         }
+    }
+
+
+    private fun replace_priority_snapshot_locked(
+        priority_aircraft: List<AlertAircraft>,
+        received_elapsed_ms: Long
+    ) {
+        priority_snapshot_generation++
+        cancel_priority_snapshot_expiry_locked()
+        latest_priority_snapshot = CachedPrioritySnapshot(
+            aircraft = priority_aircraft,
+            received_elapsed_ms = received_elapsed_ms
+        )
+        update_cached_priority_snapshot_locked()
+    }
+
+
+    private fun reuse_cached_priority_snapshot() {
+        synchronized(priority_snapshot_lock) {
+            if (stopped) return
+            update_cached_priority_snapshot_locked()
+        }
+    }
+
+
+    private fun update_cached_priority_snapshot_locked() {
+        val snapshot = latest_priority_snapshot
+        val elapsed_since_snapshot_ms = snapshot?.let {
+            SystemClock.elapsedRealtime() - it.received_elapsed_ms
+        } ?: 0L
+        val fresh_aircraft = snapshot?.let {
+            fresh_priority_snapshot(
+                priority_aircraft = it.aircraft,
+                elapsed_since_snapshot_ms = elapsed_since_snapshot_ms,
+                max_contact_age_seconds = EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
+            )
+        }.orEmpty()
+        update_priority_notification(fresh_aircraft)
+        cancel_priority_snapshot_expiry_locked()
+        val expiry_delay_ms = snapshot?.let {
+            priority_snapshot_expiry_delay_ms(
+                priority_aircraft = it.aircraft,
+                elapsed_since_snapshot_ms = elapsed_since_snapshot_ms,
+                max_contact_age_seconds = EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
+            )
+        } ?: return
+        val scheduled_generation = priority_snapshot_generation
+        val callback = Runnable {
+            synchronized(priority_snapshot_lock) {
+                if (!should_apply_priority_snapshot_expiry(
+                        scheduled_generation = scheduled_generation,
+                        current_generation = priority_snapshot_generation,
+                        stopped = stopped
+                    )
+                ) {
+                    return@synchronized
+                }
+                update_cached_priority_snapshot_locked()
+            }
+        }
+        priority_snapshot_expiry_callback = callback
+        priority_snapshot_expiry_handler.postDelayed(callback, expiry_delay_ms)
+    }
+
+
+    private fun cancel_priority_snapshot_expiry_locked() {
+        priority_snapshot_expiry_callback?.let(priority_snapshot_expiry_handler::removeCallbacks)
+        priority_snapshot_expiry_callback = null
     }
 
     private fun priority_snapshot_from_intent(intent: Intent): List<AlertAircraft> {
@@ -754,6 +843,11 @@ class AircraftAlertService : Service(), LocationListener {
         val aircraft: List<AlertAircraft>,
         val feed_available: Boolean,
         val next_predictive_poll_delay_ms: Long? = null
+    )
+
+    private data class CachedPrioritySnapshot(
+        val aircraft: List<AlertAircraft>,
+        val received_elapsed_ms: Long
     )
 
     companion object {
