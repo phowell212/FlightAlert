@@ -91,6 +91,7 @@ internal fun should_publish_priority_snapshot(
     last_publish_elapsed_ms: Long,
     refresh_interval_ms: Long
 ): Boolean {
+    if (signature.isEmpty() && signature == last_signature) return false
     if (force || signature != last_signature) return true
     return signature.isNotEmpty() &&
             now_elapsed_ms - last_publish_elapsed_ms >= refresh_interval_ms.coerceAtLeast(0L)
