@@ -44,5 +44,4 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     //noinspection NewerVersionAvailable,UseTomlInstead
     implementation("com.github.luben:zstd-jni:1.5.7-11@aar")
-    testImplementation("junit:junit:4.13.2")
 }
