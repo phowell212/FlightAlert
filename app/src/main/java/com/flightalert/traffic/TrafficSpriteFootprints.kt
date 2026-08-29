@@ -319,7 +319,8 @@ private fun traffic_aircraft_painted_radius_px(
     val icon_scale = base_icon_scale * type_scale * enter_scale * geometry.icon_scale_multiplier
     val symbol_radius = dp(geometry.maximum_radius_dp) * icon_scale
     val shadow_radius = dp(
-        TrafficSpritePaintGeometry.shadow_radius_dp(shape_progress) + max(
+        TrafficSpritePaintGeometry.shadow_radius_dp(shape_progress) *
+            TrafficSpritePaintGeometry.shadow_radius_scale(item.symbol, shape_progress) + max(
             abs(TrafficSpritePaintGeometry.shadow_offset_x_dp(shape_progress)),
             abs(TrafficSpritePaintGeometry.shadow_offset_y_dp(shape_progress)),
         ),

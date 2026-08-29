@@ -42,11 +42,24 @@ internal object TrafficSpritePaintGeometry {
         AircraftSymbol.SURFACE -> surface
     }
 
-    fun shadow_offset_x_dp(shape_progress: Float): Float = 2f + shape_progress
+    fun shadow_offset_x_dp(shape_progress: Float): Float = 0f
 
-    fun shadow_offset_y_dp(shape_progress: Float): Float = 2.5f + 1.5f * shape_progress
+    fun shadow_offset_y_dp(shape_progress: Float): Float = 0f
+
+    fun rotorcraft_shadow_offset_x_dp(shape_progress: Float): Float = 2f + shape_progress
+
+    fun rotorcraft_shadow_offset_y_dp(shape_progress: Float): Float = 2.5f + 1.5f * shape_progress
 
     fun shadow_radius_dp(shape_progress: Float): Float = 5f + 11f * shape_progress
+
+    fun shadow_radius_scale(aircraft_symbol: AircraftSymbol, shape_progress: Float): Float {
+        if (aircraft_symbol == AircraftSymbol.ROTORCRAFT) return 1f
+        val progress = shape_progress.coerceIn(0f, 1f)
+        val base_radius_dp = shadow_radius_dp(progress)
+        val visible_radius_dp =
+            5f + (symbol(aircraft_symbol).maximum_radius_dp - 5f) * progress
+        return visible_radius_dp / base_radius_dp
+    }
 
     fun selection_ring_radius_dp(shape_progress: Float): Float =
         SELECTION_RING_BASE_RADIUS_DP + SELECTION_RING_SHAPE_RADIUS_DP * shape_progress

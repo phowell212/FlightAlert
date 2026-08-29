@@ -18,6 +18,13 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 
+private const val SURFACE_BODY_FULL_PROGRESS_CENTER_OFFSET_DP = 1.425f
+
+internal fun surface_body_center_offset_dp(progress: Float): Float =
+    smooth_step(0f, 1f, progress.coerceIn(0f, 1f)) *
+        SURFACE_BODY_FULL_PROGRESS_CENTER_OFFSET_DP
+
+
 object AircraftSymbolRenderer {
     // Reuse one path and point set to avoid per-frame allocations.
     private val path = Path()
@@ -225,8 +232,8 @@ object AircraftSymbolRenderer {
         dp: (Float) -> Float
     ) {
         val p = progress.coerceIn(0f, 1f)
-        val body = smooth_step(0f, 0.6f, p)
-        val gear = smooth_step(0.55f, 1f, p)
+        val restore_count = canvas.save()
+        canvas.translate(0f, dp(surface_body_center_offset_dp(p)))
         draw_morphed_polygon(
             canvas = canvas,
             target = SURFACE_POINTS,
@@ -235,17 +242,7 @@ object AircraftSymbolRenderer {
             stroke_paint = stroke_paint,
             dp = dp
         )
-        stroke_paint.strokeWidth = dp(2f)
-        canvas.drawLine(
-            -dp(5f + 9f * gear),
-            dp(8f + 10f * body),
-            dp(5f + 9f * gear),
-            dp(8f + 10f * body),
-            stroke_paint
-        )
-        canvas.drawCircle(-dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
-        canvas.drawCircle(dp(3f + 5f * gear), dp(8f + 10f * body), dp(2.2f * gear), stroke_paint)
-        stroke_paint.strokeWidth = dp(1.2f)
+        canvas.restoreToCount(restore_count)
     }
 
     private fun draw_morphed_polygon(

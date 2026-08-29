@@ -1059,7 +1059,11 @@ class TrafficOverlayRenderer(
                 canvas.drawCircle(
                     x + frame_style.shadow_offset_x_px * icon_scale,
                     y + frame_style.shadow_offset_y_px * icon_scale,
-                    frame_style.shadow_radius_px * icon_scale,
+                    frame_style.shadow_radius_px *
+                        TrafficSpritePaintGeometry.shadow_radius_scale(
+                            symbol,
+                            frame_style.shape_progress,
+                        ) * icon_scale,
                     paint
                 )
             }
@@ -1136,6 +1140,10 @@ class TrafficOverlayRenderer(
             mask_resolution_scale = mask_resolution_scale,
             shadow_offset_x_px = chrome.dp(TrafficSpritePaintGeometry.shadow_offset_x_dp(shape_progress)),
             shadow_offset_y_px = chrome.dp(TrafficSpritePaintGeometry.shadow_offset_y_dp(shape_progress)),
+            rotorcraft_shadow_offset_x_px =
+                chrome.dp(TrafficSpritePaintGeometry.rotorcraft_shadow_offset_x_dp(shape_progress)),
+            rotorcraft_shadow_offset_y_px =
+                chrome.dp(TrafficSpritePaintGeometry.rotorcraft_shadow_offset_y_dp(shape_progress)),
             shadow_radius_px = chrome.dp(TrafficSpritePaintGeometry.shadow_radius_dp(shape_progress)),
             masks = frame_symbol_masks
         )
@@ -1388,7 +1396,11 @@ class TrafficOverlayRenderer(
     ) {
         ensure_aircraft_symbol_batch_capacity(SYMBOL_BATCH_QUADS_PER_AIRCRAFT)
         val shadow_scale =
-            frame_style.shadow_radius_px * icon_scale / atlas.shadow_source_radius
+            frame_style.shadow_radius_px *
+                TrafficSpritePaintGeometry.shadow_radius_scale(
+                    symbol,
+                    frame_style.shape_progress,
+                ) * icon_scale / atlas.shadow_source_radius
         append_aircraft_symbol_batch_quad(
             atlas = atlas,
             cell_index = atlas.shadow_cell_index,
@@ -1457,8 +1469,8 @@ class TrafficOverlayRenderer(
             append_aircraft_symbol_batch_quad(
                 atlas = atlas,
                 cell_index = first_cell,
-                center_x = x + frame_style.shadow_offset_x_px * icon_scale * 0.42f,
-                center_y = y + frame_style.shadow_offset_y_px * icon_scale * 0.42f,
+                center_x = x + frame_style.rotorcraft_shadow_offset_x_px * icon_scale * 0.42f,
+                center_y = y + frame_style.rotorcraft_shadow_offset_y_px * icon_scale * 0.42f,
                 half_size = half_size,
                 rotation_cos = track_cos,
                 rotation_sin = track_sin,
@@ -1797,8 +1809,8 @@ class TrafficOverlayRenderer(
         rotorcraft_frame_geometry(frame_style.shape_progress)
         val previous_paint_style = paint.style
         canvas.withTranslation(
-            x + frame_style.shadow_offset_x_px * icon_scale * 0.42f,
-            y + frame_style.shadow_offset_y_px * icon_scale * 0.42f
+            x + frame_style.rotorcraft_shadow_offset_x_px * icon_scale * 0.42f,
+            y + frame_style.rotorcraft_shadow_offset_y_px * icon_scale * 0.42f
         ) {
             if (track_deg != null) rotate(track_deg.toFloat())
             scale(icon_scale, icon_scale)
@@ -2699,6 +2711,8 @@ class TrafficOverlayRenderer(
         val mask_resolution_scale: Float,
         val shadow_offset_x_px: Float,
         val shadow_offset_y_px: Float,
+        val rotorcraft_shadow_offset_x_px: Float,
+        val rotorcraft_shadow_offset_y_px: Float,
         val shadow_radius_px: Float,
         val masks: Array<AircraftSymbolMask?>
     )
