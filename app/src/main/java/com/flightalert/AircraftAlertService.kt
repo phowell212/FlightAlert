@@ -62,6 +62,45 @@ internal fun should_enter_monitoring_foreground_on_ordinary_start(
     priority_notification_showing: Boolean
 ): Boolean = !priority_notification_showing
 
+
+internal enum class PrioritySnapshotPublishAction {
+    CANCEL_WITHOUT_SERVICE,
+    START_FGS
+}
+
+
+internal fun priority_snapshot_publish_action(
+    alerts_enabled: Boolean,
+    priority_tracking_enabled: Boolean
+): PrioritySnapshotPublishAction =
+    if (alerts_enabled || priority_tracking_enabled) {
+        PrioritySnapshotPublishAction.START_FGS
+    } else {
+        PrioritySnapshotPublishAction.CANCEL_WITHOUT_SERVICE
+    }
+
+
+internal fun execute_priority_snapshot_publish_action(
+    action: PrioritySnapshotPublishAction,
+    cancel_priority_notification: (Int) -> Unit,
+    start_fgs: () -> Unit
+) {
+    when (action) {
+        PrioritySnapshotPublishAction.CANCEL_WITHOUT_SERVICE ->
+            cancel_priority_notification(
+                FlightAlertAppSettings.AlertService.PRIORITY_NOTIFICATION_ID
+            )
+
+        PrioritySnapshotPublishAction.START_FGS -> start_fgs()
+    }
+}
+
+
+internal fun should_fulfill_foreground_service_start_contract(
+    foreground_start_requested: Boolean,
+    foreground_active: Boolean
+): Boolean = foreground_start_requested && !foreground_active
+
 // Watches live ownship and aircraft only; no tracks are stored.
 class AircraftAlertService : Service(), LocationListener {
     private val executor = Executors.newSingleThreadExecutor()
@@ -107,6 +146,16 @@ class AircraftAlertService : Service(), LocationListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (should_fulfill_foreground_service_start_contract(
+                foreground_start_requested = intent?.getBooleanExtra(
+                    EXTRA_FOREGROUND_START_REQUESTED,
+                    false
+                ) == true,
+                foreground_active = foreground_active
+            )
+        ) {
+            enter_monitoring_foreground(require_monitoring_enabled = false)
+        }
         if (intent?.action == ACTION_PRIORITY_SNAPSHOT) {
             if (!monitoring_enabled()) {
                 stopSelf()
@@ -687,8 +736,8 @@ class AircraftAlertService : Service(), LocationListener {
         remove_foreground_notification()
     }
 
-    private fun enter_monitoring_foreground() {
-        if (!monitoring_enabled()) return
+    private fun enter_monitoring_foreground(require_monitoring_enabled: Boolean = true) {
+        if (require_monitoring_enabled && !monitoring_enabled()) return
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         val notification = build_notification(
             FlightAlertAppSettings.AlertService.MONITORING_CHANNEL_ID,
@@ -864,6 +913,8 @@ class AircraftAlertService : Service(), LocationListener {
 
         const val PRIORITY_CHANNEL_ID = "extreme_priority_aircraft"
         const val ACTION_PRIORITY_SNAPSHOT = "com.flightalert.service.ACTION_PRIORITY_SNAPSHOT"
+        const val EXTRA_FOREGROUND_START_REQUESTED =
+            "com.flightalert.service.EXTRA_FOREGROUND_START_REQUESTED"
         const val EXTRA_PRIORITY_ICAO = "com.flightalert.service.EXTRA_PRIORITY_ICAO"
         const val EXTRA_PRIORITY_CALLSIGN = "com.flightalert.service.EXTRA_PRIORITY_CALLSIGN"
         const val EXTRA_PRIORITY_REGISTRATION =
@@ -916,18 +967,40 @@ class AircraftAlertService : Service(), LocationListener {
         }
 
         fun publish_priority_snapshot(context: Context, payload: PrioritySnapshotPayload) {
-            val intent = Intent(context, AircraftAlertService::class.java).apply {
-                action = ACTION_PRIORITY_SNAPSHOT
-                putExtra(EXTRA_PRIORITY_ICAO, payload.icao)
-                putExtra(EXTRA_PRIORITY_CALLSIGN, payload.callsign)
-                putExtra(EXTRA_PRIORITY_REGISTRATION, payload.registration)
-                putExtra(EXTRA_PRIORITY_DISTANCE_FEET, payload.distance_feet)
-                putExtra(EXTRA_PRIORITY_ALTITUDE_FEET, payload.altitude_feet)
-                putExtra(EXTRA_PRIORITY_VERTICAL_FEET, payload.vertical_feet)
-                putExtra(EXTRA_PRIORITY_CONTACT_AGE_SECONDS, payload.contact_age_seconds)
-                putExtra(EXTRA_PRIORITY_ESTIMATED, payload.estimated)
-            }
-            start_service(context, intent)
+            val prefs = FlightAlertSettings.prefs(context)
+            val publish_action = priority_snapshot_publish_action(
+                alerts_enabled = prefs.getBoolean(
+                    FlightAlertSettings.KEY_ALERTS_ENABLED,
+                    true
+                ),
+                priority_tracking_enabled = prefs.getBoolean(
+                    FlightAlertSettings.KEY_PRIORITY_TRACKING_ENABLED,
+                    false
+                )
+            )
+            execute_priority_snapshot_publish_action(
+                action = publish_action,
+                cancel_priority_notification = { notification_id ->
+                    val manager = context.getSystemService(
+                        Context.NOTIFICATION_SERVICE
+                    ) as NotificationManager
+                    manager.cancel(notification_id)
+                },
+                start_fgs = {
+                    val intent = Intent(context, AircraftAlertService::class.java).apply {
+                        action = ACTION_PRIORITY_SNAPSHOT
+                        putExtra(EXTRA_PRIORITY_ICAO, payload.icao)
+                        putExtra(EXTRA_PRIORITY_CALLSIGN, payload.callsign)
+                        putExtra(EXTRA_PRIORITY_REGISTRATION, payload.registration)
+                        putExtra(EXTRA_PRIORITY_DISTANCE_FEET, payload.distance_feet)
+                        putExtra(EXTRA_PRIORITY_ALTITUDE_FEET, payload.altitude_feet)
+                        putExtra(EXTRA_PRIORITY_VERTICAL_FEET, payload.vertical_feet)
+                        putExtra(EXTRA_PRIORITY_CONTACT_AGE_SECONDS, payload.contact_age_seconds)
+                        putExtra(EXTRA_PRIORITY_ESTIMATED, payload.estimated)
+                    }
+                    start_service(context, intent)
+                }
+            )
         }
 
         fun stop(context: Context) {
@@ -937,6 +1010,7 @@ class AircraftAlertService : Service(), LocationListener {
         private fun start_service(context: Context, intent: Intent) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    intent.putExtra(EXTRA_FOREGROUND_START_REQUESTED, true)
                     context.startForegroundService(intent)
                 } else {
                     context.startService(intent)
