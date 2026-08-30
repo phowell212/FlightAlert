@@ -132,18 +132,17 @@ internal class AviationLayerInspector(
         style: AviationLayerInspectorStyle
     ): Float {
         var y = body.top + if (selection is AviationSelection.SpecialUse) dp(18f) else dp(22f)
-        sections(selection.kind).forEach { section ->
-            y = when (section) {
-                AviationInspectorContentSection.SELECTION_ROWS -> {
-                    if (selection is AviationSelection.SpecialUse) {
-                        draw_legacy_special_use_rows(canvas, body, y, presentation.rows, style)
-                    } else {
-                        draw_selection_rows(canvas, body, y, presentation.rows, style)
-                    }
-                }
-                AviationInspectorContentSection.PROVENANCE ->
-                    draw_provenance(canvas, body, y, presentation.provenance, accent, style)
-            }
+        val restricted = selection.kind == AviationLayerKind.RESTRICTED_AIRSPACES
+        if (!restricted) {
+            y = draw_provenance(canvas, body, y, presentation.provenance, accent, style)
+        }
+        y = if (selection is AviationSelection.SpecialUse) {
+            draw_legacy_special_use_rows(canvas, body, y, presentation.rows, style)
+        } else {
+            draw_selection_rows(canvas, body, y, presentation.rows, style)
+        }
+        if (restricted) {
+            y = draw_provenance(canvas, body, y, presentation.provenance, accent, style)
         }
         return y
     }

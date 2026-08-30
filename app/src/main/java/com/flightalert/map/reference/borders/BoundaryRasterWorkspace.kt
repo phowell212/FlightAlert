@@ -55,7 +55,6 @@ internal class BoundaryRasterWorkspace {
         batch.priority = record.priority
         batch.first_source_feature_id = record.source_feature_id
         batch.first_source_order = source_order
-        batch.boundaries = 0
         batches += batch
         return batch
     }

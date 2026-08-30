@@ -37,7 +37,9 @@ internal object ReferenceCatalogCodec {
             policy_require(actual == expected) {
                 "catalog subtype entries must be exact and strictly ID-sorted"
             }
-            expected to SubtypeCatalogCounts(reader.u64(), reader.u64(), reader.u64())
+            val distinct_feature_count = reader.u64()
+            repeat(2) { reader.u64() }
+            expected to SubtypeCatalogCounts(distinct_feature_count)
         }
         reader.finish()
         return DecodedCatalog(semantic, contract, policy, counts)

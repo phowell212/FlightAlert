@@ -48,7 +48,6 @@ class MapTileRenderer(
     private val dictionary_reference_renderer = ReferenceDictionaryOverlayRenderer(
         context = context,
         map_tile_disk_cache = map_tile_disk_cache,
-        paint = paint,
         text_paint = text_paint,
         dp = dp,
         sp = sp,
@@ -71,7 +70,7 @@ class MapTileRenderer(
         request_redraw = request_redraw,
         map_tile_disk_cache = map_tile_disk_cache,
     )
-    private val satellite_renderer = SatelliteMapTileRenderer(
+    private val satellite_renderer = SatelliteBaseTileRenderer(
         context = context,
         paint = paint,
         text_paint = text_paint,
@@ -152,11 +151,11 @@ class MapTileRenderer(
         canvas: Canvas,
         viewport: Viewport,
         state: MapTileRenderState
-    ): TileLayerDrawStats {
+    ): Boolean {
         if (!state.map_labels_enabled && !state.map_borders_enabled) {
-            return empty_reference_stats()
+            return false
         }
-        val dictionary_stats = dictionary_reference_renderer.draw(
+        return dictionary_reference_renderer.draw(
             canvas = canvas,
             viewport = viewport,
             labels_enabled = state.map_labels_enabled,
@@ -169,33 +168,6 @@ class MapTileRenderer(
             filter_state = state.reference_filter_state,
             interaction_active = state.reference_interaction_active,
             label_avoid_rects = state.reference_label_avoid_rects,
-        )
-        if (dictionary_stats.available) {
-            return TileLayerDrawStats(
-                visible = dictionary_stats.visible_tiles,
-                loaded = dictionary_stats.loaded_tiles,
-                requested = if (dictionary_stats.ready) {
-                    0
-                } else {
-                    maxOf(
-                        dictionary_stats.requested_tiles,
-                        dictionary_stats.visible_tiles - dictionary_stats.loaded_tiles
-                    )
-                },
-                fallback_drawn = 0,
-                fading = dictionary_stats.fading
-            )
-        }
-        return empty_reference_stats()
-    }
-
-    private fun empty_reference_stats(): TileLayerDrawStats {
-        return TileLayerDrawStats(
-            visible = 0,
-            loaded = 0,
-            requested = 0,
-            fallback_drawn = 0,
-            fading = false
         )
     }
 
@@ -212,6 +184,7 @@ class MapTileRenderer(
     fun shutdown() {
         street_renderer.shutdown()
         satellite_renderer.shutdown()
+        satellite_renderer.clear()
         dictionary_reference_renderer.close()
     }
 }

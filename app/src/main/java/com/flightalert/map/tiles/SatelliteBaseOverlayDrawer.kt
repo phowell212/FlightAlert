@@ -16,5 +16,5 @@ internal fun interface SatelliteBaseOverlayDrawer {
         canvas: Canvas,
         viewport: Viewport,
         state: MapTileRenderState
-    ): TileLayerDrawStats
+    ): Boolean
 }

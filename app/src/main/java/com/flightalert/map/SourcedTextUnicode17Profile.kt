@@ -11,8 +11,6 @@ package com.flightalert.map
 internal object SourcedTextUnicode17Profile {
     // Keep the Unicode 17.0.0 source-exact policy in generated code.
     // This frozen 1,718-interval profile uses no runtime JSON or platform script API.
-    const val profileSha256 =
-        "4df49aafa0b507ca5517277c5f3db7faf855196a4b3a2124f4fae4e1f386fbeb"
     const val intervalCount = 1_718
 
     private val intervalStarts = intArrayOf(

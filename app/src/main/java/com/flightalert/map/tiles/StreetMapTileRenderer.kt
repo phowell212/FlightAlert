@@ -159,13 +159,10 @@ internal class StreetMapTileRenderer(
             floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
         val tile_size_on_screen = (TILE_SIZE * tile_to_viewport_scale).toFloat()
-        var visible = 0
         var loaded = 0
         var requested = 0
-        var fallback_drawn = 0
 
         if (defer_until_exact_tiles_loaded) {
-            var exact_visible = 0
             var exact_loaded = 0
             var exact_requested = 0
             for (ty in first_tile_y..last_tile_y) {
@@ -173,7 +170,6 @@ internal class StreetMapTileRenderer(
                 for (tx_raw in first_tile_x..last_tile_x) {
                     val tx = ((tx_raw % max_tile) + max_tile) % max_tile
                     val key = "$cache_key/$tile_zoom/$tx/$ty"
-                    exact_visible++
                     if (memory_tile_bitmap(key) != null) {
                         exact_loaded++
                     } else {
@@ -194,10 +190,8 @@ internal class StreetMapTileRenderer(
             }
             if (exact_requested > 0) {
                 return TileLayerDrawStats(
-                    exact_visible,
-                    exact_loaded,
-                    exact_requested,
-                    fallback_drawn = 0,
+                    loaded = exact_loaded,
+                    requested = exact_requested,
                     fading = false
                 )
             }
@@ -217,7 +211,6 @@ internal class StreetMapTileRenderer(
                     screen_y + tile_size_on_screen
                 )
                 val bitmap = memory_tile_bitmap(key)
-                visible++
                 if (bitmap != null) {
                     loaded++
                     draw_tile_bitmap(canvas, bitmap, tile_destination, label_scale, label_alpha)
@@ -259,7 +252,6 @@ internal class StreetMapTileRenderer(
                                 cache_key,
                                 tile_destination
                             ))
-                    if (drew_fallback) fallback_drawn++
                     if (!drew_fallback && draw_unavailable_if_missing) {
                         draw_unavailable_tile(
                             canvas,
@@ -272,7 +264,7 @@ internal class StreetMapTileRenderer(
                 }
             }
         }
-        return TileLayerDrawStats(visible, loaded, requested, fallback_drawn, fading = false)
+        return TileLayerDrawStats(loaded, requested, fading = false)
     }
 
     fun clear() {

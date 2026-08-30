@@ -88,7 +88,6 @@ import com.flightalert.map.UnitSystem
 import com.flightalert.map.Viewport
 import com.flightalert.map.WorldPoint
 import com.flightalert.map.aviation_layers.AviationGeoBounds
-import com.flightalert.map.aviation_layers.AviationInspectorTapAction
 import com.flightalert.map.aviation_layers.AviationLayerClient
 import com.flightalert.map.aviation_layers.AviationLayerController
 import com.flightalert.map.aviation_layers.AviationLayerInspector
@@ -3182,7 +3181,7 @@ class FlightMapView(
                     key.kind,
                     x,
                     y,
-                ) == AviationInspectorTapAction.CLOSE
+                )
             ) {
                 clear_aviation_selection()
             }

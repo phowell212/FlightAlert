@@ -25,10 +25,8 @@ import com.flightalert.map.Viewport
 import com.flightalert.map.cache.MapTileDiskCache
 import com.flightalert.map.reference.ReferencePresentationPolicy
 import com.flightalert.map.reference.dictionary.DictionaryGeometry
-import com.flightalert.map.reference.dictionary.DictionaryLineRecord
 import com.flightalert.map.reference.dictionary.DictionaryLineStyle
 import com.flightalert.map.reference.dictionary.DictionaryRing
-import com.flightalert.map.reference.dictionary.DictionaryTileDrawRef
 import com.flightalert.map.reference.dictionary.ReferenceDictionaryLayerGroups
 import com.flightalert.map.reference.dictionary.outline_decode_profile
 import com.flightalert.map.reference.dictionary.ReferenceFilterMask
@@ -59,7 +57,6 @@ import kotlin.math.roundToInt
 internal class ReferenceBoundaryRenderer(
     context: Context,
     private val map_tile_disk_cache: MapTileDiskCache,
-    private val paint: Paint,
     private val boundary_density: Float,
     private val request_redraw: () -> Unit,
     private val tile_repository: ReferenceTileRepository,
@@ -68,8 +65,6 @@ internal class ReferenceBoundaryRenderer(
         context.cacheDir,
         REFERENCE_BOUNDARY_RASTER_CACHE_ROOT,
     )
-    private val boundary_record_refs = ArrayList<DictionaryLineRecordRef>(256)
-    private val boundary_occurrence_ids = HashSet<ReferenceBoundaryOccurrenceKey>(256)
     private val boundary_raster_cells = ArrayList<ReferenceBoundaryRasterCell>(40)
     private val boundary_raster_draw_cells = ArrayList<ReferenceBoundaryRasterCell>(40)
     private val boundary_raster_cell_window = BoundaryRasterCellWindow()
@@ -144,19 +139,6 @@ internal class ReferenceBoundaryRenderer(
         packageGeneration = packageGeneration,
     )
 
-    fun draw_records(
-        canvas: Canvas,
-        viewport: Viewport,
-        tiles: List<DictionaryTileDrawRef>,
-        groups: ReferenceDictionaryLayerGroups,
-        filterMask: ReferenceFilterMask,
-    ): Int {
-        collect_boundary_record_refs(viewport, tiles, groups, filterMask)
-        val drawn = draw_boundary_records(canvas, viewport, boundary_record_refs)
-        boundary_record_refs.clear()
-        return drawn
-    }
-
     override fun close() {
         lifecycle_lock.lock()
         try {
@@ -182,7 +164,7 @@ internal class ReferenceBoundaryRenderer(
         active_retained_frame: RetainedReferenceFrame?,
         now_ms: Long,
         freeze_active_band: Boolean = false,
-    ): BoundaryRasterDrawResult {
+    ) {
         val settings_key = boundary_raster_settings_key(groups, filter_mask)
         val desired_band = desired_boundary_raster_band(
             viewport = viewport,
@@ -225,11 +207,12 @@ internal class ReferenceBoundaryRenderer(
         }
         if (raster_work_suspended && continuity_blend >= 1f) {
             trim_boundary_raster_cache()
-            return draw_boundary_raster_safety_scene(
+            draw_boundary_raster_safety_scene(
                 canvas,
                 viewport,
                 requireNotNull(continuity_scene),
             )
+            return
         }
         val hold_continuity_while_loading = !interaction_active && continuity_blend >= 1f &&
             desired_band != active_before_promotion
@@ -340,7 +323,7 @@ internal class ReferenceBoundaryRenderer(
         }
         var draw_band = initial_draw_band
             ?: active_boundary_raster_band
-            ?: return BoundaryRasterDrawResult(0, false, requested)
+            ?: return
         if (active_boundary_raster_band != active_before_promotion) {
             draw_band = requireNotNull(active_boundary_raster_band)
             build_boundary_raster_cells(
@@ -402,19 +385,18 @@ internal class ReferenceBoundaryRenderer(
                 update_boundary_raster_safety_relevance()
             }
         }
-        val continuity_underlay = if (underlay_scene != null && underlay_blend > 0f) {
+        val continuity_underlay_drawn = underlay_scene != null && underlay_blend > 0f
+        val continuity_underlay_ready = if (continuity_underlay_drawn) {
             draw_boundary_raster_safety_scene(
                 canvas = canvas,
                 viewport = viewport,
-                scene = underlay_scene,
+                scene = requireNotNull(underlay_scene),
                 alpha = (255f * underlay_blend).roundToInt().coerceIn(0, 255),
             )
         } else {
-            null
+            false
         }
-        var boundaries_drawn = continuity_underlay?.boundaries ?: 0
-        var all_core_drawn = continuity_underlay?.ready ?: true
-        boundary_raster_paint.alpha = if (continuity_underlay != null) {
+        boundary_raster_paint.alpha = if (continuity_underlay_drawn) {
             (255f * (1f - underlay_blend)).roundToInt().coerceIn(0, 255)
         } else {
             255
@@ -423,24 +405,17 @@ internal class ReferenceBoundaryRenderer(
             val cell = boundary_raster_draw_cells[index]
             val key = draw_keys[index]
             val tile = boundary_raster_cache[key]
-            var fallback_available = continuity_underlay?.ready == true
+            var fallback_available = continuity_underlay_ready
             if (cell.coreVisible) {
                 if (tile != null) {
                     draw_boundary_raster(canvas, viewport, cell, tile)
-                    boundaries_drawn += tile.boundaries
                 } else if (!fallback_available) {
-                    val fallback_boundaries = draw_boundary_raster_fallback(
+                    fallback_available = draw_boundary_raster_fallback(
                         canvas,
                         viewport,
                         cell,
                         draw_band,
                     )
-                    if (fallback_boundaries >= 0) {
-                        boundaries_drawn += fallback_boundaries
-                        fallback_available = true
-                    } else {
-                        all_core_drawn = false
-                    }
                 }
             }
             if (!raster_work_suspended && tile == null &&
@@ -475,7 +450,6 @@ internal class ReferenceBoundaryRenderer(
                     ).coerceIn(0, BOUNDARY_RASTER_SAFETY_REQUESTS_PER_DRAW),
             )
         }
-        return BoundaryRasterDrawResult(boundaries_drawn, all_core_drawn, requested)
     }
 
     private fun desired_boundary_raster_band(
@@ -855,7 +829,7 @@ internal class ReferenceBoundaryRenderer(
         viewport: Viewport,
         scene: BoundaryRasterScene,
         alpha: Int = 255,
-    ): BoundaryRasterDrawResult {
+    ): Boolean {
         build_boundary_raster_cells(
             output = boundary_raster_safety_draw_cells,
             window = boundary_raster_safety_draw_cell_window,
@@ -868,17 +842,16 @@ internal class ReferenceBoundaryRenderer(
             boundary_raster_safety_draw_cells,
         )
         boundary_raster_paint.alpha = alpha
-        var boundaries = 0
         for (index in keys.indices) {
             val key = keys[index]
             if (key !in scene.keys) {
                 boundary_raster_paint.alpha = 255
-                return BoundaryRasterDrawResult(boundaries, false, 0)
+                return false
             }
             val tile = boundary_raster_cache[key]
             if (tile == null) {
                 boundary_raster_paint.alpha = 255
-                return BoundaryRasterDrawResult(boundaries, false, 0)
+                return false
             }
             draw_boundary_raster(
                 canvas = canvas,
@@ -886,10 +859,9 @@ internal class ReferenceBoundaryRenderer(
                 cell = boundary_raster_safety_draw_cells[index],
                 tile = tile,
             )
-            boundaries += tile.boundaries
         }
         boundary_raster_paint.alpha = 255
-        return BoundaryRasterDrawResult(boundaries, true, 0)
+        return true
     }
 
     private fun invalidate_boundary_raster_relevance() {
@@ -1164,7 +1136,6 @@ internal class ReferenceBoundaryRenderer(
                 key = key,
                 bitmap = bitmap,
                 gutterPixels = BOUNDARY_RASTER_GUTTER_PX,
-                boundaries = 0,
                 byteCount = bitmap.allocationByteCount.toLong(),
             )
         }
@@ -1232,6 +1203,7 @@ internal class ReferenceBoundaryRenderer(
         val clip_max_y = cell_min_y + cell_span + gutter_local
         var inspected_records = 0
         var accepted_record_order = 0
+        var has_geometry = false
         val keep_rendering = { boundary_raster_request_is_relevant(key) }
         for (source_tile in request.tiles) {
             val offset_x = (source_tile.drawX - source.originX) * DICTIONARY_EXTENT
@@ -1287,14 +1259,13 @@ internal class ReferenceBoundaryRenderer(
                     ) || appended
                     if (!keep_rendering()) return null
                 }
-                if (appended) batch.boundaries++
+                has_geometry = has_geometry || appended
             }
         }
         sort_boundary_raster_batches(workspace.batches)
 
         if (!boundary_raster_request_is_relevant(key)) return null
-        val boundaries = workspace.batches.sumOf { it.boundaries }
-        if (boundaries == 0) return empty_boundary_raster_tile(key)
+        if (!has_geometry) return empty_boundary_raster_tile(key)
         val bitmap_size = band.corePixels + BOUNDARY_RASTER_GUTTER_PX * 2
         val bitmap = createBitmap(bitmap_size, bitmap_size, Bitmap.Config.ARGB_8888)
         draw_boundary_batches(
@@ -1320,7 +1291,6 @@ internal class ReferenceBoundaryRenderer(
             key = key,
             bitmap = bitmap,
             gutterPixels = BOUNDARY_RASTER_GUTTER_PX,
-            boundaries = boundaries,
             byteCount = bitmap.allocationByteCount.toLong(),
         )
     }
@@ -1363,7 +1333,6 @@ internal class ReferenceBoundaryRenderer(
             key = key,
             bitmap = null,
             gutterPixels = BOUNDARY_RASTER_GUTTER_PX,
-            boundaries = 0,
             byteCount = bitmap_size.toLong() * bitmap_size * 4L,
         )
     }
@@ -1589,7 +1558,7 @@ internal class ReferenceBoundaryRenderer(
         viewport: Viewport,
         cell: ReferenceBoundaryRasterCell,
         active_band: ReferenceBoundaryRasterBand,
-    ): Int {
+    ): Boolean {
         val active_tile_scale = MAP_TILE_SIZE * 2.0.pow(viewport.zoom - cell.zoom)
         val child_left = cell.drawX * active_tile_scale -
             (viewport.center_x - viewport.width / 2.0)
@@ -1601,24 +1570,22 @@ internal class ReferenceBoundaryRenderer(
             (child_left + active_tile_scale).toFloat(),
             (child_top + active_tile_scale).toFloat(),
         )
-        val safety = draw_boundary_raster_scene_fallback(
+        if (draw_boundary_raster_scene_fallback(
             canvas,
             viewport,
             cell,
             child_clip,
             active_band,
             ready_boundary_raster_safety_scene,
-        )
-        if (safety >= 0) return safety
-        val resident = draw_boundary_raster_scene_fallback(
+        )) return true
+        if (draw_boundary_raster_scene_fallback(
             canvas,
             viewport,
             cell,
             child_clip,
             active_band,
             resident_boundary_raster_scene,
-        )
-        if (resident >= 0) return resident
+        )) return true
         return draw_boundary_raster_scene_fallback(
             canvas,
             viewport,
@@ -1636,14 +1603,14 @@ internal class ReferenceBoundaryRenderer(
         child_clip: RectF,
         active_band: ReferenceBoundaryRasterBand,
         scene: BoundaryRasterScene?,
-    ): Int {
-        val band = scene?.band ?: return -1
+    ): Boolean {
+        val band = scene?.band ?: return false
         if (!scene.matches_environment(
                 settingsKey = active_band.settingsKey,
                 packageGeneration = active_band.packageGeneration,
             ) ||
             band.rasterZoom > cell.zoom
-        ) return -1
+        ) return false
 
         val factor = 1 shl (cell.zoom - band.rasterZoom)
         val parent_draw_x = Math.floorDiv(cell.drawX, factor)
@@ -1651,8 +1618,8 @@ internal class ReferenceBoundaryRenderer(
         val parent_limit = 1 shl band.rasterZoom
         val parent_x = Math.floorMod(parent_draw_x, parent_limit)
         val key = ReferenceBoundaryRasterKey(band, parent_x, parent_y)
-        val tile = boundary_raster_cache[key] ?: return -1
-        if (key !in scene.keys) return -1
+        val tile = boundary_raster_cache[key] ?: return false
+        if (key !in scene.keys) return false
         draw_boundary_raster(
             canvas = canvas,
             viewport = viewport,
@@ -1667,7 +1634,7 @@ internal class ReferenceBoundaryRenderer(
             tile = tile,
             clip = child_clip,
         )
-        return tile.boundaries
+        return true
     }
 
     fun clear() {
@@ -1702,118 +1669,18 @@ internal class ReferenceBoundaryRenderer(
         }
     }
 
-    private fun collect_boundary_record_refs(
-        viewport: Viewport,
-        tiles: List<DictionaryTileDrawRef>,
-        groups: ReferenceDictionaryLayerGroups,
-        filter_mask: ReferenceFilterMask,
-        output: MutableList<DictionaryLineRecordRef> = boundary_record_refs,
-        occurrence_ids: MutableSet<ReferenceBoundaryOccurrenceKey> = boundary_occurrence_ids,
-        include_hidden: Boolean = false,
-    ) {
-        output.clear()
-        occurrence_ids.clear()
-        val current_centizoom = ReferencePresentationPolicy.centizoom(viewport.zoom)
-        for (tile in tiles) {
-            for (record in tile.tile.boundaries) {
-                if (!filter_mask.allows(record.filter_id, groups.enabled(record.layer_group))) {
-                    continue
-                }
-                val visibility_alpha_milli = record.visibility_rule?.let { rule ->
-                    ReferencePresentationPolicy.outline_alpha_milli(rule, current_centizoom)
-                } ?: ReferencePresentationPolicy.full_alpha_milli
-                if (!include_hidden && visibility_alpha_milli <= 0) continue
-                val rendered_world_copy = renderedWorldCopy(
-                    zoom = tile.tile.coordinate.z,
-                    requestedTileX = tile.tile.coordinate.x,
-                    drawTileX = tile.draw_x,
-                    postingWorldWrap = record.posting_world_wrap,
-                )
-                if (!admit(
-                        occurrence_ids,
-                        record.dedupe_id,
-                        rendered_world_copy,
-                    )
-                ) {
-                    continue
-                }
-                output += DictionaryLineRecordRef(
-                    tile = tile,
-                    record = record,
-                )
-            }
-        }
-        output.sortWith(
-            compareBy<DictionaryLineRecordRef> { it.record.draw_order }
-                .thenBy { it.record.priority }
-                .thenBy { it.record.source_feature_id },
-        )
-    }
-
-    private fun draw_boundary_records(
-        canvas: Canvas,
-        viewport: Viewport,
-        records: List<DictionaryLineRecordRef>,
-        target_paint: Paint = paint,
-        keep_drawing: (() -> Boolean)? = null,
-    ): Int {
-        val batches = prepare_boundary_batches(viewport, records, keep_drawing)
-        return draw_boundary_batches(
-            canvas = canvas,
-            viewport_zoom = viewport.zoom,
-            batches = batches,
-            target_paint = target_paint,
-            keep_drawing = keep_drawing,
-        )
-    }
-
-    private fun prepare_boundary_batches(
-        viewport: Viewport,
-        records: List<DictionaryLineRecordRef>,
-        keep_drawing: (() -> Boolean)? = null,
-    ): List<BoundaryPathBatch> {
-        val batches = LinkedHashMap<BoundaryPathBatchKey, BoundaryPathBatch>()
-        var record_index = 0
-        for (reference in records) {
-            if (record_index++ and 63 == 0 && keep_drawing?.invoke() == false) {
-                return emptyList()
-            }
-            val record = reference.record
-            val key = BoundaryPathBatchKey(
-                draw_order = record.draw_order,
-                priority = record.priority,
-                style = record.style,
-                visibility_rule = record.visibility_rule,
-            )
-            val batch = batches.getOrPut(key) {
-                BoundaryPathBatch(
-                    path = Path(),
-                    style = record.style,
-                    visibility_rule = record.visibility_rule,
-                )
-            }
-            var appended = false
-            for (ring in record.geometry.rings) {
-                appended = append_ring_path(batch.path, viewport, reference.tile, ring) || appended
-            }
-            if (appended) batch.boundaries++
-        }
-        return batches.values.toList()
-    }
-
     private fun draw_boundary_batches(
         canvas: Canvas,
         viewport_zoom: Double,
         batches: List<BoundaryPathBatch>,
-        target_paint: Paint = paint,
+        target_paint: Paint,
         draw_scale: Float = 1f,
         frame_alpha: Int = 255,
         keep_drawing: (() -> Boolean)? = null,
-    ): Int {
+    ) {
         val current_centizoom = ReferencePresentationPolicy.centizoom(viewport_zoom)
-        var boundaries_drawn = 0
         for (batch in batches) {
-            if (keep_drawing?.invoke() == false) return boundaries_drawn
+            if (keep_drawing?.invoke() == false) return
             val visibility_alpha_milli = batch.visibility_rule?.let { rule ->
                 ReferencePresentationPolicy.outline_alpha_milli(rule, current_centizoom)
             } ?: ReferencePresentationPolicy.full_alpha_milli
@@ -1826,16 +1693,14 @@ internal class ReferenceBoundaryRenderer(
                 draw_scale = draw_scale,
                 frame_alpha = frame_alpha,
             )
-            boundaries_drawn += batch.boundaries
         }
-        return boundaries_drawn
     }
 
     private fun draw_boundary_batch(
         canvas: Canvas,
         batch: BoundaryPathBatch,
         visibility_alpha_milli: Int,
-        target_paint: Paint = paint,
+        target_paint: Paint,
         draw_scale: Float = 1f,
         frame_alpha: Int = 255,
     ) {
@@ -1923,36 +1788,6 @@ internal class ReferenceBoundaryRenderer(
             Color.blue(color),
         )
     }
-
-    private fun append_ring_path(
-        target: Path,
-        viewport: Viewport,
-        tile: DictionaryTileDrawRef,
-        ring: DictionaryRing,
-    ): Boolean {
-        if (ring.point_count < 2) return false
-        val scale = 2.0.pow(viewport.zoom - tile.tile.coordinate.z)
-        val local_to_screen = (MAP_TILE_SIZE / DICTIONARY_EXTENT) * scale
-        val left_world = viewport.center_x - viewport.width / 2.0
-        val top_world = viewport.center_y - viewport.height / 2.0
-        val translate_x = tile.draw_x * MAP_TILE_SIZE * scale - left_world
-        val translate_y = tile.tile.coordinate.y * MAP_TILE_SIZE * scale - top_world
-        for (index in 0 until ring.point_count) {
-            val x = (translate_x + ring.points[index * 2] * local_to_screen).toFloat()
-            val y = (translate_y + ring.points[index * 2 + 1] * local_to_screen).toFloat()
-            if (index == 0) {
-                target.moveTo(x, y)
-            } else {
-                target.lineTo(x, y)
-            }
-        }
-        return true
-    }
-
-    private data class DictionaryLineRecordRef(
-        val tile: DictionaryTileDrawRef,
-        val record: DictionaryLineRecord,
-    )
 
     private inner class BoundaryRasterTask(
         private val key: ReferenceBoundaryRasterKey,

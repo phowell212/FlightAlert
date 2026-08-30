@@ -42,9 +42,7 @@ import com.flightalert.details.AircraftTelemetryFormatter
 import com.flightalert.details.ImpactProfile
 import com.flightalert.map.TileSource
 import com.flightalert.map.UnitSystem
-import com.flightalert.map.aviation_layers.action_for
 import com.flightalert.map.aviation_layers.scroll_from_drag
-import com.flightalert.map.aviation_layers.AviationInspectorTapAction
 import com.flightalert.map.aviation_layers.AviationLayerInspector
 import com.flightalert.map.aviation_layers.AviationLayerInspectorStyle
 import com.flightalert.map.aviation_layers.AviationLayerKind
@@ -213,12 +211,10 @@ internal class FlightMapPanelCoordinator(
         kind: AviationLayerKind,
         x: Float,
         y: Float,
-    ): AviationInspectorTapAction {
+    ): Boolean {
         val panel = aviation_details_panel_bounds(w, h, kind)
-        return action_for(
-            inside_panel = panel.contains(x, y),
-            inside_close_button = aviation_details_close_button_bounds(panel).contains(x, y),
-        )
+        return aviation_details_close_button_bounds(panel).contains(x, y) ||
+            !panel.contains(x, y)
     }
 
     fun settings_panel_hit_result(w: Float, h: Float, x: Float, y: Float): SettingsPanelHitResult? {

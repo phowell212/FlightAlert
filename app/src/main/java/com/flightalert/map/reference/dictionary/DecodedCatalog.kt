@@ -13,8 +13,6 @@ import com.flightalert.map.reference.SemanticSubtype
 
 data class SubtypeCatalogCounts(
     val distinct_feature_count: ULong,
-    val canonical_variant_count: ULong,
-    val posting_count: ULong,
 )
 
 internal data class DecodedCatalog(

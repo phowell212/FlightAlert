@@ -121,12 +121,12 @@ internal class SatelliteBaseTileRenderer(
                 now_ms = now_ms
             )
         ) {
-            val label_stats = overlay_drawer.draw(
+            val labels_fading = overlay_drawer.draw(
                 canvas = canvas,
                 viewport = viewport,
                 state = state
             )
-            if (label_stats.fading) request_redraw()
+            if (labels_fading) request_redraw()
             return last_frame_result
         }
 
@@ -177,12 +177,12 @@ internal class SatelliteBaseTileRenderer(
                 }
                 if (recorded) {
                     recorded_frame_result?.let { last_frame_result = it }
-                    val label_stats = overlay_drawer.draw(
+                    val labels_fading = overlay_drawer.draw(
                         canvas = canvas,
                         viewport = viewport,
                         state = state
                     )
-                    if (label_stats.fading) request_redraw()
+                    if (labels_fading) request_redraw()
                     return last_frame_result
                 }
             }
@@ -289,10 +289,8 @@ internal class SatelliteBaseTileRenderer(
                 )
             }
             TileLayerDrawStats(
-                visible = 0,
                 loaded = 0,
                 requested = 0,
-                fallback_drawn = 0,
                 fading = false
             )
         }
@@ -308,23 +306,17 @@ internal class SatelliteBaseTileRenderer(
             }
         }
 
-        val label_stats = if (draw_reference_layers) {
+        val labels_fading = if (draw_reference_layers) {
             overlay_drawer.draw(
                 canvas = canvas,
                 viewport = viewport,
                 state = state
             )
         } else {
-            TileLayerDrawStats(
-                visible = 0,
-                loaded = 0,
-                requested = 0,
-                fallback_drawn = 0,
-                fading = false
-            )
+            false
         }
 
-        if (lower_stats.fading || upper_stats.fading || label_stats.fading) {
+        if (lower_stats.fading || upper_stats.fading || labels_fading) {
             request_redraw()
         }
 
@@ -524,10 +516,8 @@ internal class SatelliteBaseTileRenderer(
             floor((top_world + viewport.height) * tile_world_scale / TILE_SIZE).toInt()
         val max_tile = 1 shl tile_zoom
 
-        var visible = 0
         var loaded = 0
         var requested = 0
-        var fallback_drawn = 0
         var fading = false
         val layer_visible = layer_alpha > MIN_LAYER_ALPHA
 
@@ -545,8 +535,6 @@ internal class SatelliteBaseTileRenderer(
                     screen_x + tile_size_on_screen,
                     screen_y + tile_size_on_screen
                 )
-                visible++
-
                 val bitmap = tile_bitmap(key)
                 if (bitmap != null) {
                     if (refresh_loaded_tile_request_generations) {
@@ -609,20 +597,17 @@ internal class SatelliteBaseTileRenderer(
                     )
 
                     if (layer_visible) {
-                        if (
-                            draw_satellite_fallback_tile(
-                                canvas = canvas,
-                                z = tile_zoom,
-                                x = tx,
-                                y = ty,
-                                state = state,
-                                destination = tile_destination,
-                                alpha = layer_alpha,
-                                allow_parent_fallback = allow_parent_fallback
-                            )
-                        ) {
-                            fallback_drawn++
-                        } else if (draw_unavailable_if_missing &&
+                        val drew_fallback = draw_satellite_fallback_tile(
+                            canvas = canvas,
+                            z = tile_zoom,
+                            x = tx,
+                            y = ty,
+                            state = state,
+                            destination = tile_destination,
+                            alpha = layer_alpha,
+                            allow_parent_fallback = allow_parent_fallback
+                        )
+                        if (!drew_fallback && draw_unavailable_if_missing &&
                             !retained_interim_intersects_destination(
                                 viewport,
                                 state.cache_key,
@@ -657,10 +642,8 @@ internal class SatelliteBaseTileRenderer(
         }
 
         return TileLayerDrawStats(
-            visible = visible,
             loaded = loaded,
             requested = requested,
-            fallback_drawn = fallback_drawn,
             fading = fading
         )
     }

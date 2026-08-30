@@ -78,7 +78,6 @@ internal class AircraftDetailsWarmCache(
 
     fun cache_details(
         key: String,
-        aircraft_current_key: String,
         details: AircraftDetails,
         still_loading: Boolean,
         now_elapsed_ms: Long
@@ -93,9 +92,6 @@ internal class AircraftDetailsWarmCache(
                 updated_elapsed_ms = now_elapsed_ms
             )
         entries[key] = entry
-        if (previous == null && aircraft_current_key != key) {
-            entries.remove(key)
-        }
         return entry
     }
 

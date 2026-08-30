@@ -100,7 +100,6 @@ internal class AircraftDetailsWarmRequester(
         val key = aircraft.appearance_key()
         val entry = warm_cache.cache_details(
             key = key,
-            aircraft_current_key = aircraft.appearance_key(),
             details = details,
             still_loading = still_loading,
             now_elapsed_ms = SystemClock.elapsedRealtime()
