@@ -76,6 +76,7 @@ class TrafficOverlayRenderer(
     private var rotorcraft_geometry: RotorcraftFrameGeometry? = null
     private var dot_outline_points = FloatArray(0)
     private var dot_outline_count = 0
+    private var visible_dot_points = FloatArray(0)
     private val dot_fill_points = Array(DOT_BATCH_GROUP_COUNT) { FloatArray(0) }
     private val dot_fill_counts = IntArray(DOT_BATCH_GROUP_COUNT)
     private val symbol_mask_paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -378,30 +379,86 @@ class TrafficOverlayRenderer(
         val transform_scale = batch.transform_scale.coerceAtLeast(0.001f)
         val repeat_spacing_px = batch.repeat_x_spacing * transform_scale
         val repeat_range = visible_repeat_range(batch, viewport, transform_scale, repeat_spacing_px)
+        val cull_to_viewport = canvas.isHardwareAccelerated &&
+                batch.repeat_x_spacing > 0f && batch.repeat_x_spacing.isFinite() &&
+                batch.transform_scale > 0f && batch.transform_scale.isFinite() &&
+                repeat_spacing_px > 0f && repeat_spacing_px.isFinite() &&
+                viewport.width > 0f && viewport.width.isFinite() &&
+                viewport.height > 0f && viewport.height.isFinite() &&
+                batch.translation_x.isFinite() && batch.translation_y.isFinite() &&
+                batch_radius_px >= 0f && batch_radius_px.isFinite() &&
+                outline_extra_px >= 0f && outline_extra_px.isFinite() &&
+                ((batch_radius_px * 2f + outline_extra_px) / transform_scale).isFinite() &&
+                (batch.translation_x + repeat_spacing_px * repeat_range.first).isFinite() &&
+                (batch.translation_x + repeat_spacing_px * repeat_range.last).isFinite()
+        // Keep the complete outer disc plus two physical pixels for antialiasing.
+        val cull_radius_px = batch_radius_px.toDouble() + outline_extra_px.toDouble() * 0.5 + 2.0
+        val min_y = Math.nextDown(((-cull_radius_px - batch.translation_y) / transform_scale).toFloat())
+        val max_y = Math.nextUp(((viewport.height.toDouble() + cull_radius_px - batch.translation_y) / transform_scale).toFloat())
         for (repeat in repeat_range.first..repeat_range.last) {
-            canvas.withTranslation(
-                batch.translation_x + repeat_spacing_px * repeat,
-                batch.translation_y
-            ) {
+            val translation_x = batch.translation_x + repeat_spacing_px * repeat
+            // Round the canonical bounds outward; retain original point coordinates.
+            val min_x = Math.nextDown(((-cull_radius_px - translation_x) / transform_scale).toFloat())
+            val max_x = Math.nextUp(((viewport.width.toDouble() + cull_radius_px - translation_x) / transform_scale).toFloat())
+            canvas.withTranslation(translation_x, batch.translation_y) {
                 scale(transform_scale, transform_scale)
                 paint.style = Paint.Style.STROKE
                 paint.strokeCap = Paint.Cap.ROUND
                 if (batch.outline_count > 0) {
                     paint.strokeWidth = (batch_radius_px * 2f + outline_extra_px) / transform_scale
                     paint.color = with_alpha(colors.scrim, (150 * dot_alpha).round_to_int())
-                    canvas.drawPoints(outline_draw_points, 0, batch.outline_count, paint)
+                    draw_viewport_dot_points(
+                        canvas, outline_draw_points, batch.outline_count, cull_to_viewport,
+                        min_x, min_y, max_x, max_y
+                    )
                 }
                 paint.strokeWidth = batch_radius_px * 2f / transform_scale
                 for (group in 0 until TRAFFIC_DOT_GROUP_COUNT) {
                     val count = batch.fill_counts[group]
                     if (count == 0) continue
                     paint.color = with_scaled_alpha(batch_dot_group_color(group, colors), dot_alpha)
-                    canvas.drawPoints(fill_draw_points[group], 0, count, paint)
+                    draw_viewport_dot_points(
+                        canvas, fill_draw_points[group], count, cull_to_viewport,
+                        min_x, min_y, max_x, max_y
+                    )
                 }
             }
             paint.strokeCap = old_cap
             paint.alpha = 255
         }
+    }
+
+    private fun draw_viewport_dot_points(
+        canvas: Canvas,
+        points: FloatArray,
+        count: Int,
+        cull_to_viewport: Boolean,
+        min_x: Float,
+        min_y: Float,
+        max_x: Float,
+        max_y: Float
+    ) {
+        if (!cull_to_viewport) {
+            canvas.drawPoints(points, 0, count, paint)
+            return
+        }
+        visible_dot_points = ensure_point_capacity(visible_dot_points, count)
+        var visible_count = 0
+        var index = 0
+        while (index < count) {
+            val x = points[index]
+            val y = points[index + 1]
+            if (!x.isFinite() || !y.isFinite()) {
+                canvas.drawPoints(points, 0, count, paint)
+                return
+            }
+            if (x >= min_x && x <= max_x && y >= min_y && y <= max_y) {
+                visible_dot_points[visible_count++] = x
+                visible_dot_points[visible_count++] = y
+            }
+            index += 2
+        }
+        if (visible_count > 0) canvas.drawPoints(visible_dot_points, 0, visible_count, paint)
     }
 
     private fun draw_selected_dot_overlay(
