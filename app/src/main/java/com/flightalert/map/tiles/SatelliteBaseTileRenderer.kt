@@ -113,6 +113,20 @@ internal class SatelliteBaseTileRenderer(
     ): MapTileAvailability {
         val now_ms = SystemClock.elapsedRealtime()
         observe_pan_cache_draw_zoom(viewport.zoom, now_ms)
+        if (state.interaction_active || state.reference_interaction_active) {
+            // Use one coarse grid while moving; restore the normal renderer after settling.
+            val result = draw_tiles_direct(
+                canvas = canvas,
+                viewport = viewport,
+                state = state,
+                style = style,
+                allow_speculative_requests = false,
+                include_retained_interim = false,
+                simplify_interaction = true,
+                now_ms = now_ms,
+            )
+            return result.availability
+        }
         val pan_cache_key = satellite_pan_cache_key(state, style)
         if (pan_compositor.draw_cached(
                 canvas = canvas,
@@ -210,16 +224,17 @@ internal class SatelliteBaseTileRenderer(
         draw_reference_layers: Boolean = true,
         include_retained_interim: Boolean = true,
         draw_lower_lod_pixels: Boolean = true,
+        simplify_interaction: Boolean = false,
         now_ms: Long = SystemClock.elapsedRealtime()
     ): SatelliteTileDrawResult {
         paint.style = Paint.Style.FILL
         paint.color = style.map_empty
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
 
-        val lod = satellite_lod_state(viewport)
+        val lod = satellite_lod_state(viewport, single_lod = simplify_interaction)
         val lower_lod_pixels_needed =
             draw_lower_lod_pixels &&
-                satellite_lower_lod_pixels_needed(viewport, state, now_ms)
+                (simplify_interaction || satellite_lower_lod_pixels_needed(viewport, state, now_ms))
 
         val request_frame = begin_tile_request_generation()
         val request_generation = request_frame.generation
@@ -259,7 +274,8 @@ internal class SatelliteBaseTileRenderer(
             loaded_interim_tiles = loaded_interim_tile_buffer,
             request_generation = request_generation,
             refresh_loaded_tile_request_generations = refresh_loaded_tile_request_generations,
-            allow_speculative_requests = allow_speculative_requests
+            allow_speculative_requests = allow_speculative_requests,
+            simplify_interaction = simplify_interaction,
         )
 
         val upper_stats = if (lod.has_upper_lod && lod.upper_lod_alpha > MIN_LAYER_ALPHA) {
@@ -333,14 +349,17 @@ internal class SatelliteBaseTileRenderer(
         )
     }
 
-    private fun satellite_lod_state(viewport: Viewport): SatelliteLodState {
+    private fun satellite_lod_state(
+        viewport: Viewport,
+        single_lod: Boolean = false,
+    ): SatelliteLodState {
         val lower_tile_zoom = floor(viewport.zoom)
             .toInt()
             .coerceIn(MIN_ZOOM, TileSource.SATELLITE.max_native_zoom)
         val upper_tile_zoom = (lower_tile_zoom + 1)
             .coerceAtMost(TileSource.SATELLITE.max_native_zoom)
         val zoom_fraction = (viewport.zoom - lower_tile_zoom).toFloat().coerceIn(0f, 1f)
-        val has_upper_lod = upper_tile_zoom > lower_tile_zoom
+        val has_upper_lod = !single_lod && upper_tile_zoom > lower_tile_zoom
         val upper_lod_alpha = if (has_upper_lod) {
             smooth_step(LOD_BLEND_START_FRACTION, LOD_BLEND_END_FRACTION, zoom_fraction)
         } else {
@@ -502,7 +521,8 @@ internal class SatelliteBaseTileRenderer(
         loaded_interim_tiles: MutableList<InterimRasterTile>,
         request_generation: Long,
         refresh_loaded_tile_request_generations: Boolean,
-        allow_speculative_requests: Boolean
+        allow_speculative_requests: Boolean,
+        simplify_interaction: Boolean = false,
     ): TileLayerDrawStats {
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
@@ -540,19 +560,21 @@ internal class SatelliteBaseTileRenderer(
                     if (refresh_loaded_tile_request_generations) {
                         mark_current_tile_request(key, request_generation)
                     }
-                    record_loaded_interim_tile(
-                        key = key,
-                        cache_key = state.cache_key,
-                        z = tile_zoom,
-                        x = tx,
-                        y = ty,
-                        bitmap = bitmap,
-                        now_ms = now_ms,
-                        loaded_interim_tiles = loaded_interim_tiles
-                    )
+                    if (!simplify_interaction) {
+                        record_loaded_interim_tile(
+                            key = key,
+                            cache_key = state.cache_key,
+                            z = tile_zoom,
+                            x = tx,
+                            y = ty,
+                            bitmap = bitmap,
+                            now_ms = now_ms,
+                            loaded_interim_tiles = loaded_interim_tiles
+                        )
+                    }
                     loaded++
                     if (layer_visible) {
-                        val load_alpha = satellite_tile_load_alpha(key, now_ms)
+                        val load_alpha = if (simplify_interaction) 1f else satellite_tile_load_alpha(key, now_ms)
                         val fallback_underlay_drawn =
                             if (load_alpha < 0.999f && layer_alpha >= 0.999f) {
                                 draw_satellite_fallback_tile(
@@ -608,11 +630,11 @@ internal class SatelliteBaseTileRenderer(
                             allow_parent_fallback = allow_parent_fallback
                         )
                         if (!drew_fallback && draw_unavailable_if_missing &&
-                            !retained_interim_intersects_destination(
+                            (simplify_interaction || !retained_interim_intersects_destination(
                                 viewport,
                                 state.cache_key,
                                 tile_destination
-                            )
+                            ))
                         ) {
                             draw_unavailable_tile(
                                 canvas,

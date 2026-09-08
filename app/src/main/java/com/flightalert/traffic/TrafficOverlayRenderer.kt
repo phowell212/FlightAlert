@@ -333,7 +333,7 @@ class TrafficOverlayRenderer(
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
         val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
-        if (draw_world_dot_mesh(canvas, batch, viewport, colors, dot_alpha, batch_radius_px)) {
+        if (draw_prepared_dot_mesh(canvas, batch, viewport, colors, dot_alpha, batch_radius_px)) {
             if (draw_selected_overlay) draw_selected_dot_overlay(canvas, batch, viewport, colors)
             return
         }
@@ -368,8 +368,8 @@ class TrafficOverlayRenderer(
         draw_selected_dot_overlay(canvas, batch, viewport, colors)
     }
 
-    // Low-zoom bulk traffic uses solid squares; selected traffic keeps its normal overlay.
-    private fun draw_world_dot_mesh(
+    // Prepared bulk traffic uses solid squares; selected traffic keeps its normal overlay.
+    private fun draw_prepared_dot_mesh(
         canvas: Canvas,
         batch: TrafficDotBatchOverlayState,
         viewport: Viewport,
@@ -379,9 +379,10 @@ class TrafficOverlayRenderer(
     ): Boolean {
         val scale = batch.transform_scale
         val spacing = batch.repeat_x_spacing * scale
-        if (!canvas.isHardwareAccelerated || batch.repeat_x_spacing <= 0f ||
+        val repeats_world = batch.repeat_x_spacing > 0f
+        if (!canvas.isHardwareAccelerated || batch.repeat_x_spacing < 0f ||
             !batch.repeat_x_spacing.isFinite() || scale <= 0f || !scale.isFinite() ||
-            spacing <= 0f || !spacing.isFinite() ||
+            (repeats_world && spacing <= 0f) || !spacing.isFinite() ||
             viewport.width <= 0f || !viewport.width.isFinite() ||
             viewport.height <= 0f || !viewport.height.isFinite() ||
             !batch.translation_x.isFinite() || !batch.translation_y.isFinite() ||
@@ -389,7 +390,11 @@ class TrafficOverlayRenderer(
         ) return false
         val radius = batch_radius_px / scale
         if (!radius.isFinite()) return false
-        val repeats = visible_repeat_range(batch, viewport, scale, spacing)
+        val repeats = if (repeats_world) {
+            visible_repeat_range(batch, viewport, scale, spacing)
+        } else {
+            0..0
+        }
         if (!(batch.translation_x + spacing * repeats.first).isFinite() ||
             !(batch.translation_x + spacing * repeats.last).isFinite()
         ) return false

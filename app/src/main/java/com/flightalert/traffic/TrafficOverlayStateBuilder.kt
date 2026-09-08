@@ -10,7 +10,6 @@ package com.flightalert.traffic
 import com.flightalert.FlightAlertAppSettings
 import com.flightalert.aircraft.Aircraft
 import com.flightalert.aircraft.AircraftAppearance
-import com.flightalert.aircraft.SYMBOL_ACTIVE_MIN_PROGRESS
 import com.flightalert.aircraft.SYMBOL_IDLE_MIN_PROGRESS
 import com.flightalert.aircraft.AircraftSymbolClassifier
 import com.flightalert.aircraft.aircraft_dot_scale
@@ -596,16 +595,11 @@ internal class TrafficOverlayStateBuilder(
         frame: TrafficOverlayFrame,
     ): Boolean {
         val now = now_elapsed_ms()
-        val interacting = dense_dot_symbol_interacting(frame.interaction, now)
+        if (dense_dot_symbol_interacting(frame.interaction, now)) return false
         val symbol_progress = symbol_progress(
             marker_dot_blend(frame.viewport)
         )
-        val min_symbol_progress = if (interacting) {
-            SYMBOL_ACTIVE_MIN_PROGRESS
-        } else {
-            SYMBOL_IDLE_MIN_PROGRESS
-        }
-        if (symbol_progress < min_symbol_progress) return false
+        if (symbol_progress < SYMBOL_IDLE_MIN_PROGRESS) return false
         return true
     }
 
