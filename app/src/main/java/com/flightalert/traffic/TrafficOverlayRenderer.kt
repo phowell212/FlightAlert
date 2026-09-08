@@ -333,6 +333,10 @@ class TrafficOverlayRenderer(
         val outline_extra_px = batch_dot_outline_extra_px(base_scale)
         val colors = style.visual_theme.colors
         val dot_alpha = alpha_multiplier.coerceIn(0f, 1f)
+        if (draw_world_dot_mesh(canvas, batch, viewport, colors, dot_alpha, batch_radius_px)) {
+            if (draw_selected_overlay) draw_selected_dot_overlay(canvas, batch, viewport, colors)
+            return
+        }
         if (draw_cached_prepared_aircraft_dot_batch(
                 canvas = canvas,
                 batch = batch,
@@ -363,6 +367,123 @@ class TrafficOverlayRenderer(
         if (!draw_selected_overlay) return
         draw_selected_dot_overlay(canvas, batch, viewport, colors)
     }
+
+    // Low-zoom bulk traffic uses solid squares; selected traffic keeps its normal overlay.
+    private fun draw_world_dot_mesh(
+        canvas: Canvas,
+        batch: TrafficDotBatchOverlayState,
+        viewport: Viewport,
+        colors: ThemeColors,
+        dot_alpha: Float,
+        batch_radius_px: Float,
+    ): Boolean {
+        val scale = batch.transform_scale
+        val spacing = batch.repeat_x_spacing * scale
+        if (!canvas.isHardwareAccelerated || batch.repeat_x_spacing <= 0f ||
+            !batch.repeat_x_spacing.isFinite() || scale <= 0f || !scale.isFinite() ||
+            spacing <= 0f || !spacing.isFinite() ||
+            viewport.width <= 0f || !viewport.width.isFinite() ||
+            viewport.height <= 0f || !viewport.height.isFinite() ||
+            !batch.translation_x.isFinite() || !batch.translation_y.isFinite() ||
+            batch_radius_px <= 0f || !batch_radius_px.isFinite() || !dot_alpha.isFinite()
+        ) return false
+        val radius = batch_radius_px / scale
+        if (!radius.isFinite()) return false
+        val repeats = visible_repeat_range(batch, viewport, scale, spacing)
+        if (!(batch.translation_x + spacing * repeats.first).isFinite() ||
+            !(batch.translation_x + spacing * repeats.last).isFinite()
+        ) return false
+        // Validate every pass before submitting anything, so malformed batches use the old route.
+        for (group in 0 until TRAFFIC_DOT_GROUP_COUNT) {
+            val points = batch.fill_points[group]
+            val count = batch.fill_counts[group]
+            if (count < 0 || count > points.size || count % 2 != 0) return false
+            for (index in 0 until count) if (!points[index].isFinite()) return false
+        }
+        val padding = batch_radius_px.toDouble() + 2.0
+        val min_y = (-padding - batch.translation_y) / scale
+        val max_y = (viewport.height.toDouble() + padding - batch.translation_y) / scale
+        val old_color = symbol_batch_paint.color
+        val old_shader = symbol_batch_paint.shader
+        val old_aa = symbol_batch_paint.isAntiAlias
+        symbol_batch_paint.color = Color.WHITE
+        symbol_batch_paint.shader = null
+        symbol_batch_paint.isAntiAlias = false
+        reset_aircraft_symbol_batch()
+        try {
+            for (repeat in repeats.first..repeats.last) {
+                val translation_x = batch.translation_x + spacing * repeat
+                val min_x = (-padding - translation_x) / scale
+                val max_x = (viewport.width.toDouble() + padding - translation_x) / scale
+                canvas.withTranslation(translation_x, batch.translation_y) {
+                    scale(scale, scale)
+                    // Repeat, group, and source order also define translucent overlap order.
+                    for (group in 0 until TRAFFIC_DOT_GROUP_COUNT) {
+                        val points = batch.fill_points[group]
+                        val count = batch.fill_counts[group]
+                        val color = with_scaled_alpha(batch_dot_group_color(group, colors), dot_alpha)
+                        var index = 0
+                        while (index < count) {
+                            val x = points[index]
+                            val y = points[index + 1]
+                            if (x >= min_x && x <= max_x && y >= min_y && y <= max_y) {
+                                if (symbol_batch_vertex_count + SYMBOL_BATCH_VERTICES_PER_QUAD > MAX_SYMBOL_BATCH_VERTICES) {
+                                    flush_solid_dot_batch(canvas)
+                                }
+                                append_solid_dot_quad(x, y, radius, color)
+                            }
+                            index += 2
+                        }
+                    }
+                    flush_solid_dot_batch(canvas)
+                }
+            }
+        } finally {
+            symbol_batch_paint.color = old_color
+            symbol_batch_paint.shader = old_shader
+            symbol_batch_paint.isAntiAlias = old_aa
+            reset_aircraft_symbol_batch()
+        }
+        return true
+    }
+
+    private fun append_solid_dot_quad(x: Float, y: Float, radius: Float, color: Int) {
+        ensure_aircraft_symbol_batch_capacity(1)
+        val base = symbol_batch_vertex_count
+        val offset = base * 2
+        symbol_batch_vertices[offset] = x - radius
+        symbol_batch_vertices[offset + 1] = y - radius
+        symbol_batch_vertices[offset + 2] = x + radius
+        symbol_batch_vertices[offset + 3] = y - radius
+        symbol_batch_vertices[offset + 4] = x + radius
+        symbol_batch_vertices[offset + 5] = y + radius
+        symbol_batch_vertices[offset + 6] = x - radius
+        symbol_batch_vertices[offset + 7] = y + radius
+        Arrays.fill(symbol_batch_colors, base, base + SYMBOL_BATCH_VERTICES_PER_QUAD, color)
+        symbol_batch_indices[symbol_batch_index_count++] = base.toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base + 1).toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base + 2).toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = base.toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base + 2).toShort()
+        symbol_batch_indices[symbol_batch_index_count++] = (base + 3).toShort()
+        symbol_batch_vertex_count += SYMBOL_BATCH_VERTICES_PER_QUAD
+    }
+
+    private fun flush_solid_dot_batch(canvas: Canvas) {
+        if (symbol_batch_vertex_count == 0) return
+        canvas.drawVertices(
+            Canvas.VertexMode.TRIANGLES,
+            symbol_batch_vertex_count * 2,
+            symbol_batch_vertices, 0,
+            null, 0,
+            symbol_batch_colors, 0,
+            symbol_batch_indices, 0,
+            symbol_batch_index_count,
+            symbol_batch_paint,
+        )
+        reset_aircraft_symbol_batch()
+    }
+
 
     private fun draw_dot_batch_points(
         canvas: Canvas,

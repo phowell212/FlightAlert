@@ -81,6 +81,7 @@ import com.flightalert.map.DeviceHeadingProvider
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapMeasurementFormatter
 import com.flightalert.map.MapProjection
+import com.flightalert.map.MapDetailDeferral
 import com.flightalert.map.ScaleLabel
 import com.flightalert.map.ScreenPoint
 import com.flightalert.map.TileSource
@@ -733,6 +734,8 @@ class FlightMapView(
     private var last_pinch_focus_x = 0f
     private var last_pinch_focus_y = 0f
     private var last_map_interaction_ms = 0L
+    private val map_detail_deferral = MapDetailDeferral()
+    private val map_detail_redraw = Runnable { postInvalidateOnAnimation() }
     private var last_priority_notification_snapshot_check_ms = 0L
     private var priority_notification_prepare_token = 0L
     private var priority_notification_prepare_in_flight = false
@@ -791,26 +794,11 @@ class FlightMapView(
         traffic_runtime.initialize_globe_source()
     }
 
-    fun defer_initial_satellite_map_until_reference_check_finishes() {
-        if (map_source != TileSource.SATELLITE || !map_borders_enabled) return
-        map_tile_renderer.prepare_reference_dictionary()
-        viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
-            override fun onPreDraw(): Boolean {
-                if (
-                    map_source != TileSource.SATELLITE ||
-                    !map_borders_enabled ||
-                    !map_tile_renderer.reference_package_check_pending()
-                ) {
-                    viewTreeObserver.removeOnPreDrawListener(this)
-                    return true
-                }
-                return latest_location == null
-            }
-        })
-    }
-
     fun start() {
         if (destroyed) return
+        val now_ms = SystemClock.elapsedRealtime()
+        map_detail_deferral.resume(now_ms)
+        schedule_map_detail_redraw(now_ms)
         last_priority_notification_snapshot_signature = null
         last_priority_notification_publish_elapsed_ms = 0L
         last_priority_notification_expiry_elapsed_ms = 0L
@@ -823,12 +811,18 @@ class FlightMapView(
     }
 
     fun stop() {
+        map_touch_active = false
+        pinch_in_progress = false
+        drag_started = false
+        drag_start_center = null
+        last_pinch_span = 0f
         priority_notification_publishing_active = false
         priority_notification_prepare_token++
         priority_notification_prepare_requested = false
         priority_notification_prepare_force = false
         removeCallbacks(ticker)
         removeCallbacks(map_interaction_settle_redraw)
+        removeCallbacks(map_detail_redraw)
         device_heading_provider.stop()
         persist_zoom_preference_if_dirty()
         if (location_permission_granted) {
@@ -1564,6 +1558,7 @@ class FlightMapView(
 
             MotionEvent.ACTION_UP -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
+                if (map_touch_active) defer_map_detail_for_interaction()
                 map_touch_active = false
                 val was_dragging = drag_started
                 val was_dragging_map = drag_started && !drag_blocked
@@ -1613,6 +1608,7 @@ class FlightMapView(
 
             MotionEvent.ACTION_CANCEL -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
+                if (map_touch_active) defer_map_detail_for_interaction()
                 map_touch_active = false
                 if (panel_coordinator.cancel_priority_adjust_hold()) postInvalidateOnAnimation()
                 panel_coordinator.cancel_map_label_text_slider_drag()
@@ -2070,6 +2066,10 @@ class FlightMapView(
         traffic_state: TrafficOverlayState,
         traffic_draw_elapsed_ms: Long,
     ): MapTileRenderState {
+        val defer_reference_detail = map_detail_deferral.deferred(
+            traffic_draw_elapsed_ms,
+            pinch_in_progress || drag_started || map_touch_active,
+        )
         return MapTileRenderState(
             map_source = map_source,
             map_labels_enabled = active_map_labels_enabled(),
@@ -2082,10 +2082,9 @@ class FlightMapView(
             map_label_transition_alpha = map_label_transition_alpha(traffic_draw_elapsed_ms),
             user_agent = FlightAlertAppSettings.MapTuning.USER_AGENT,
             interaction_active = map_tile_interaction_active(traffic_draw_elapsed_ms),
-            reference_interaction_active =
-                pinch_in_progress || drag_started || map_touch_active,
+            reference_interaction_active = defer_reference_detail,
             reference_filter_state = reference_filter_state,
-            reference_label_avoid_rects = reference_label_avoid_rects(
+            reference_label_avoid_rects = if (defer_reference_detail) emptyList() else reference_label_avoid_rects(
                 viewport,
                 traffic_state,
                 traffic_draw_elapsed_ms,
@@ -3530,8 +3529,19 @@ class FlightMapView(
     private fun mark_map_interaction() {
         val now = SystemClock.elapsedRealtime()
         last_map_interaction_ms = now
+        defer_map_detail_for_interaction(now)
         schedule_map_interaction_settle_redraw()
         traffic_runtime.note_map_interaction()
+    }
+
+    private fun defer_map_detail_for_interaction(now_ms: Long = SystemClock.elapsedRealtime()) {
+        map_detail_deferral.interact(now_ms)
+        schedule_map_detail_redraw(now_ms)
+    }
+
+    private fun schedule_map_detail_redraw(now_ms: Long) {
+        removeCallbacks(map_detail_redraw)
+        postDelayed(map_detail_redraw, map_detail_deferral.delay_ms(now_ms))
     }
 
     private fun schedule_map_interaction_settle_redraw() {

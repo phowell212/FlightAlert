@@ -66,7 +66,6 @@ import com.flightalert.map.reference.retained.reference_retained_label_transitio
 import com.flightalert.map.reference.retained.reference_retained_leaving_label_alpha
 import com.flightalert.map.reference.retained.reference_retained_repeating_world_width_px
 import com.flightalert.map.reference.retained.reference_retained_scene_should_stage
-import com.flightalert.map.reference.retained.reference_should_defer_target_work
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.locks.ReentrantLock
@@ -89,7 +88,6 @@ internal class ReferenceDictionaryOverlayRenderer(
     private val visible_tiles = ArrayList<VisibleDictionaryTile>(32)
     private val fallback_visible_tiles = ArrayList<VisibleDictionaryTile>(16)
     private val draw_tiles = ArrayList<DictionaryTileDrawRef>(32)
-    private val core_draw_tiles = ArrayList<DictionaryTileDrawRef>(16)
     private val fallback_draw_tiles = ArrayList<DictionaryTileDrawRef>(16)
     @Volatile
     private var closed = false
@@ -151,6 +149,12 @@ internal class ReferenceDictionaryOverlayRenderer(
         interaction_active: Boolean,
         label_avoid_rects: List<ReferenceScreenRect>,
     ): Boolean {
+        if (interaction_active) {
+            if (retained_renderer.interaction_started(true)) cancel_label_request()
+            retained_renderer.update_interaction_active(true)
+            return false
+        }
+        retained_renderer.update_interaction_active(false)
         if (!labels_enabled && !borders_enabled) {
             return false
         }
@@ -167,7 +171,6 @@ internal class ReferenceDictionaryOverlayRenderer(
             tile_zoom,
             package_info.zooms,
         )
-        val interaction_started = retained_renderer.interaction_started(interaction_active)
         val now_ms = SystemClock.elapsedRealtime()
         val options = RetainedReferenceOptions(
             labels_enabled = labels_enabled,
@@ -191,10 +194,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 interaction_active = interaction_active,
             )
         }
-        if (interaction_started) {
-            cancel_label_request()
-        }
-        retained_renderer.update_interaction_active(interaction_active)
         val groups = ReferenceDictionaryLayerGroups(
             places = place_labels_enabled,
             water = water_labels_enabled,
@@ -259,71 +258,11 @@ internal class ReferenceDictionaryOverlayRenderer(
                 return is_fading()
             }
         }
-        val retained_for_interaction = if (interaction_active && labels_enabled) {
-            retained_renderer.retained_frame_for_viewport(
-                viewport = viewport,
-                options = options,
-                target_tile_zoom = tile_zoom,
-                fallback_tile_zoom = fallback_zoom,
-                displayed_frame = displayed_retained_frame,
-                destination = retained_renderer.destination,
-            )
-        } else {
-            null
-        }
-        val compatible_active_boundary_band = borders_enabled &&
-            boundary_renderer.has_compatible_active_band(
-                groups = groups,
-                filterMask = filter_mask,
-                packageGeneration = tile_repository.package_generation(),
-            )
-        if (reference_should_defer_target_work(
-                interactionActive = interaction_active,
-                labelsEnabled = labels_enabled,
-                retainedLabelsAvailable = retained_for_interaction != null,
-                bordersEnabled = borders_enabled,
-                compatibleActiveBoundaryBand = compatible_active_boundary_band,
-            )
-        ) {
-            val generation = tile_repository.request_generation()
-            if (borders_enabled) {
-                boundary_renderer.draw(
-                    canvas = canvas,
-                    viewport = viewport,
-                    source_zoom = tile_zoom,
-                    groups = groups,
-                    filter_mask = filter_mask,
-                    interaction_active = true,
-                    tile_request_generation = generation,
-                    active_retained_frame = settled_target,
-                    freeze_active_band = true,
-                    now_ms = now_ms,
-                )
-            }
-            if (retained_for_interaction != null) {
-                draw_retained_frame_with_transition(
-                    canvas = canvas,
-                    viewport = viewport,
-                    frame = retained_for_interaction,
-                    now_ms = now_ms,
-                    destination = retained_renderer.destination,
-                )
-            }
-            return retained_for_interaction != null && is_fading()
-        }
-        val draw_viewport = if (interaction_active) {
-            viewport
-        } else {
-            reference_retained_frame_viewport(viewport, tile_zoom)
-        }
+        val draw_viewport = reference_retained_frame_viewport(viewport, tile_zoom)
         build_visible_tile_list(visible_tiles, draw_viewport, viewport, tile_zoom)
         if (visible_tiles.isEmpty()) return false
         val fallback_viewport = if (fallback_needs_build) {
-            if (interaction_active) {
-                viewport
-            } else {
-                reference_retained_frame_viewport(viewport, requireNotNull(fallback_zoom))
-            }
+            reference_retained_frame_viewport(viewport, requireNotNull(fallback_zoom))
         } else {
             null
         }
@@ -364,9 +303,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         }
 
         draw_tiles.clear()
-        core_draw_tiles.clear()
         var missing = 0
-        var core_missing = 0
         var padded_prefetch_requests = 0
         for (tile in visible_tiles) {
             val parsed = tile_repository.tile(tile)
@@ -377,11 +314,9 @@ internal class ReferenceDictionaryOverlayRenderer(
                     core_visible = tile.core_visible,
                 )
                 draw_tiles += reference
-                if (tile.core_visible) core_draw_tiles += reference
             } else {
                 missing++
                 if (tile.core_visible) {
-                    core_missing++
                     tile_repository.request_tile_if_needed(tile, generation)
                 } else if (padded_prefetch_requests < PADDED_TILE_PREFETCH_REQUESTS_PER_DRAW) {
                     val queued = tile_repository.request_tile_if_needed(tile, generation)
@@ -404,43 +339,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 active_retained_frame = settled_target,
                 now_ms = now_ms,
             )
-        }
-        val retained_drawn_for_interaction = if (interaction_active) {
-            draw_retained_frame_if_available(
-                canvas,
-                viewport,
-                options,
-                tile_zoom,
-                fallback_zoom,
-                now_ms,
-            )
-        } else {
-            null
-        }
-        if (interaction_active) {
-            if (retained_drawn_for_interaction == null) {
-                val direct_tiles = when {
-                    core_missing == 0 && core_draw_tiles.isNotEmpty() -> core_draw_tiles
-                    fallback_ready -> fallback_draw_tiles
-                    else -> emptyList()
-                }
-                if (direct_tiles.isNotEmpty()) {
-                    draw_reference_content(
-                        canvas = canvas,
-                        viewport = viewport,
-                        tiles = direct_tiles,
-                        labels_enabled = labels_enabled,
-                        label_text_scale = label_text_scale,
-                        place_labels_enabled = place_labels_enabled,
-                        water_labels_enabled = water_labels_enabled,
-                        region_labels_enabled = region_labels_enabled,
-                        public_lands_enabled = public_lands_enabled,
-                        filter_mask = filter_mask,
-                        label_avoid_rects = label_avoid_rects,
-                    )
-                }
-            }
-            return retained_drawn_for_interaction != null && is_fading()
         }
         if (!ready && !(fallback_needs_build && fallback_ready)) {
             val retained = draw_retained_frame_if_available(
@@ -485,19 +383,6 @@ internal class ReferenceDictionaryOverlayRenderer(
             if (retained != null) {
                 return is_fading()
             }
-            draw_reference_content(
-                canvas = canvas,
-                viewport = viewport,
-                tiles = fallback_draw_tiles,
-                labels_enabled = labels_enabled,
-                label_text_scale = label_text_scale,
-                place_labels_enabled = place_labels_enabled,
-                water_labels_enabled = water_labels_enabled,
-                region_labels_enabled = region_labels_enabled,
-                public_lands_enabled = public_lands_enabled,
-                filter_mask = filter_mask,
-                label_avoid_rects = label_avoid_rects,
-            )
             return false
         }
 
@@ -505,31 +390,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             return false
         }
 
-        if (!ready) {
-            val partial = partial_label_frame_for(
-                viewport = viewport,
-                tile_zoom = tile_zoom,
-                tiles = core_draw_tiles,
-                labels_enabled = labels_enabled,
-                label_text_scale = label_text_scale,
-                place_labels_enabled = place_labels_enabled,
-                water_labels_enabled = water_labels_enabled,
-                region_labels_enabled = region_labels_enabled,
-                public_lands_enabled = public_lands_enabled,
-                filter_mask = filter_mask,
-                label_avoid_rects = label_avoid_rects,
-                options = options,
-            )
-            partial?.let { frame ->
-                draw_retained_frame_with_transition(
-                    canvas,
-                    viewport,
-                    frame,
-                    now_ms,
-                )
-            }
-            return partial != null && is_fading()
-        }
+        if (!ready) return false
 
         val target = retained_renderer.target_frame()
         if (
@@ -636,36 +497,6 @@ internal class ReferenceDictionaryOverlayRenderer(
             return is_fading()
         }
 
-        partial_frame()?.takeIf { frame ->
-            frame.matches_exact(
-                viewport = viewport,
-                next_tile_zoom = tile_zoom,
-                next = options,
-                current_package_generation = tile_repository.package_generation(),
-            )
-        }?.let { partial ->
-            draw_retained_frame_with_transition(
-                canvas,
-                viewport,
-                partial,
-                now_ms,
-            )
-            return is_fading()
-        }
-
-        draw_reference_content(
-            canvas = canvas,
-            viewport = viewport,
-            tiles = draw_tiles,
-            labels_enabled = labels_enabled,
-            label_text_scale = label_text_scale,
-            place_labels_enabled = place_labels_enabled,
-            water_labels_enabled = water_labels_enabled,
-            region_labels_enabled = region_labels_enabled,
-            public_lands_enabled = public_lands_enabled,
-            filter_mask = filter_mask,
-            label_avoid_rects = label_avoid_rects,
-        )
         return false
     }
 
@@ -1522,38 +1353,6 @@ internal class ReferenceDictionaryOverlayRenderer(
                 left + tile_scale >= 0.0 &&
                 top <= viewport.height &&
                 top + tile_scale >= 0.0
-    }
-
-    private fun draw_reference_content(
-        canvas: Canvas,
-        viewport: Viewport,
-        tiles: List<DictionaryTileDrawRef>,
-        labels_enabled: Boolean,
-        label_text_scale: Float,
-        place_labels_enabled: Boolean,
-        water_labels_enabled: Boolean,
-        region_labels_enabled: Boolean,
-        public_lands_enabled: Boolean,
-        filter_mask: ReferenceFilterMask,
-        label_avoid_rects: List<ReferenceScreenRect>,
-    ) {
-        val groups = ReferenceDictionaryLayerGroups(
-            places = place_labels_enabled,
-            water = water_labels_enabled,
-            regions = region_labels_enabled,
-            public_lands = public_lands_enabled
-        )
-        if (labels_enabled) {
-            label_renderer.draw_labels(
-                canvas = canvas,
-                viewport = viewport,
-                tiles = tiles,
-                label_text_scale = label_text_scale,
-                groups = groups,
-                filter_mask = filter_mask,
-                label_avoid_rects = label_avoid_rects,
-            )
-        }
     }
 
     private companion object {

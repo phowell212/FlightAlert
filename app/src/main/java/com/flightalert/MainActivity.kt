@@ -16,6 +16,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import com.flightalert.sources.GlobeBinCraftAircraftSource
+import kotlin.math.abs
 
 
 class MainActivity : ComponentActivity() {
@@ -64,12 +65,11 @@ class MainActivity : ComponentActivity() {
 
         val view = FlightMapView(this, globe_source)
         view.keepScreenOn = true
-        configure_high_refresh_rate(view)
+        configure_map_frame_rate(view)
         flight_map_view = view
 
         setContentView(view)
-        view.defer_initial_satellite_map_until_reference_check_finishes()
-        view.post { configure_high_refresh_rate(view) }
+        view.post { configure_map_frame_rate(view) }
 
         // Put keyboard focus on FlightMapView so emulator keys and filter typing land in the map controller.
         view.requestFocus()
@@ -81,6 +81,7 @@ class MainActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         configure_system_bars()
         flight_map_view?.let { view ->
+            configure_map_frame_rate(view)
             view.requestLayout()
             view.postInvalidateOnAnimation()
         }
@@ -91,7 +92,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         configure_system_bars()
         request_location_permission_if_needed()
-        flight_map_view?.let { configure_high_refresh_rate(it) }
+        flight_map_view?.let { configure_map_frame_rate(it) }
         globe_bin_craft_aircraft_source?.start()
         flight_map_view?.start()
         update_alert_service()
@@ -127,20 +128,26 @@ class MainActivity : ComponentActivity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun configure_high_refresh_rate(view: FlightMapView? = null) {
+    private fun configure_map_frame_rate(view: FlightMapView? = null) {
         val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             display
         } else {
             windowManager.defaultDisplay
         } ?: return
-        val fastest_mode = display.supportedModes.maxByOrNull { it.refreshRate } ?: return
-        if (fastest_mode.refreshRate <= 0f) return
+        val current_mode = display.mode
+        // Favor a sustainable frame budget without changing the display's resolution.
+        val steady_mode = display.supportedModes
+            .filter {
+                it.physicalWidth == current_mode.physicalWidth &&
+                    it.physicalHeight == current_mode.physicalHeight && it.refreshRate > 0f
+            }
+            .minByOrNull { abs(it.refreshRate - 60f) } ?: return
         window.attributes = window.attributes.apply {
-            preferredDisplayModeId = fastest_mode.modeId
-            preferredRefreshRate = fastest_mode.refreshRate
+            preferredDisplayModeId = steady_mode.modeId
+            preferredRefreshRate = steady_mode.refreshRate
         }
         if (Build.VERSION.SDK_INT >= 35) {
-            view?.requestedFrameRate = fastest_mode.refreshRate
+            view?.requestedFrameRate = 60f
         }
     }
 
