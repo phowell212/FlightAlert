@@ -27,6 +27,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         val store: GlobeAircraftStore,
         val epoch_sec: Double,
         val partial_coverage: Boolean,
+        val source: FeedSource,
         val content_revision: Long = 0L
     )
 
@@ -37,7 +38,23 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
     private var decoded = ByteArray(DEFAULT_BUFFER_SIZE)
     private var cached_snapshot: Snapshot? = null
 
+    private val retry_after_ms = LongArray(ReadsbFeedProvider.entries.size)
+    internal var last_failure = FeedResult(FeedStatus.UNAVAILABLE,
+        FeedSource.ADSB_LOL_GLOBE, partial_coverage = true)
+        private set
+
     internal fun fetch(bounds: FeedBounds): Snapshot? {
+        for (provider in ReadsbFeedProvider.entries) {
+            if (android.os.SystemClock.elapsedRealtime() < retry_after_ms[provider.ordinal]) continue
+            val snapshot = fetch_provider(bounds, provider)
+            if (snapshot != null && !(snapshot.store.aircraft.isEmpty() && snapshot.partial_coverage)) {
+                return snapshot
+            }
+        }
+        return null
+    }
+
+    private fun fetch_provider(bounds: FeedBounds, provider: ReadsbFeedProvider): Snapshot? {
         var connection: HttpURLConnection? = null
         return try {
             val normalized = bounds.normalized()
@@ -45,7 +62,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 String.format(
                     Locale.US,
                     "%s/re-api/?binCraft&zstd&box=%.6f,%.6f,%.6f,%.6f",
-                    AirplanesLiveHttp.GLOBE_BASE_URL,
+                    provider.globe_base_url,
                     normalized.min_lat,
                     normalized.max_lat,
                     normalized.min_lon,
@@ -59,12 +76,18 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 AirplanesLiveHttp.apply_browser_headers(
                     connection = this,
                     app_user_agent = user_agent,
-                    referer = "${AirplanesLiveHttp.GLOBE_BASE_URL}/?nowebgl",
+                    referer = "${provider.globe_base_url}/?nowebgl",
                     accept = "*/*"
                 )
                 setRequestProperty("X-Requested-With", "XMLHttpRequest")
             }
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+            val code = connection.responseCode
+            if (code != HttpURLConnection.HTTP_OK ||
+                connection.getHeaderField("cf-mitigated").equals("challenge", ignoreCase = true)) {
+                last_failure = aircraft_feed_http_failure(provider.globe_source, code,
+                    connection.getHeaderField("cf-mitigated"))
+                retry_after_ms[provider.ordinal] = android.os.SystemClock.elapsedRealtime() +
+                    aircraft_feed_retry_delay_ms(last_failure, connection.getHeaderField("Retry-After"))
                 connection.errorStream?.close()
                 return null
             }
@@ -80,7 +103,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
             val previous_snapshot = cached_snapshot
             val previous_compressed = cached_compressed
             if (previous_snapshot != null && previous_compressed != null &&
-                cached_compressed_size == compressed_size
+                cached_compressed_size == compressed_size && previous_snapshot.source == provider.globe_source
             ) {
                 var index = 0
                 while (index < compressed_size &&
@@ -91,7 +114,13 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 if (index == compressed_size) return previous_snapshot
             }
             val decoded_size = decompress(compressed_size)
-            parse(decoded, decoded_size)?.let {
+            val parsed = requireNotNull(parse(decoded, decoded_size, provider.globe_source)) {
+                "Invalid binCraft response"
+            }
+            require(!(parsed.store.aircraft.isEmpty() && parsed.partial_coverage)) {
+                "Incomplete binCraft inventory"
+            }
+            parsed.let {
                 content_revision += 1L
                 it.copy(content_revision = content_revision).also { versioned ->
                     cached_compressed = incoming_compressed
@@ -102,6 +131,9 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 }
             }
         } catch (_: Exception) {
+            last_failure = FeedResult(FeedStatus.UNAVAILABLE, provider.globe_source,
+                failure_reason = "Connection or response unavailable")
+            retry_after_ms[provider.ordinal] = android.os.SystemClock.elapsedRealtime() + 2000L
             null
         } finally {
             connection?.disconnect()
@@ -185,7 +217,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         return buffer.copyOf(max(required_size, buffer.size * 2))
     }
 
-    private fun parse(bytes: ByteArray, byte_count: Int): Snapshot? {
+    private fun parse(bytes: ByteArray, byte_count: Int, source: FeedSource): Snapshot? {
         if (byte_count < HEADER_BYTES) return null
         val buffer = ByteBuffer.wrap(bytes, 0, byte_count).order(ByteOrder.LITTLE_ENDIAN)
         val now_sec = u32(buffer, 0) / 1000.0 + u32(buffer, 4) * 4294967.296
@@ -212,7 +244,8 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 stride,
                 bin_craft_version,
                 use_message_rate,
-                now_sec
+                now_sec,
+                source
             )
             if (item != null) {
                 val index = parsed.size
@@ -239,6 +272,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
                 maximum_alert_projection_band = maximum_alert_projection_band
             ),
             epoch_sec = now_sec,
+            source = source,
             partial_coverage = parsed.isEmpty() && (global_with_position > 0 || messages > 0 || message_rate > 0.0)
         )
     }
@@ -249,7 +283,8 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
         stride: Int,
         version: Int,
         use_message_rate: Boolean,
-        now_sec: Double
+        now_sec: Double,
+        source: FeedSource
     ): FeedAircraft? {
         val raw_hex = int(buffer, offset)
         val non_icao = raw_hex and (1 shl 24) != 0
@@ -402,7 +437,7 @@ internal class GlobeBinCraftClient(private val user_agent: String) {
             type_code = type_code,
             metadata = if (registration != null || type_code != null) {
                 AircraftMetadataSeed(
-                    source_name = FeedSource.AIRPLANES_LIVE_GLOBE.display_name,
+                    source_name = source.display_name,
                     registration = registration,
                     type_code = type_code
                 )

@@ -98,7 +98,8 @@ data class FeedResult(
     val content_revision: Long? = null,
     val globe_aircraft: List<FeedAircraft>? = null,
     val globe_motion_candidates: List<FeedAircraft>? = null,
-    val globe_default_summary: GlobeDefaultAircraftSummary? = null
+    val globe_default_summary: GlobeDefaultAircraftSummary? = null,
+    val failure_reason: String? = null
 )
 
 
@@ -110,11 +111,16 @@ enum class FeedStatus {
 
 
 enum class FeedSource(val display_name: String) {
+    ADSB_LOL("ADSB.lol"),
+    ADSB_LOL_GLOBE("ADSB.lol binCraft globe feed"),
     OPENSKY("OpenSky"),
     AIRPLANES_LIVE("Airplanes.Live"),
     AIRPLANES_LIVE_GLOBE("Airplanes.Live binCraft globe feed"),
     HYBRID("Hybrid feed"),
-    COMBINED("OpenSky + Airplanes.Live")
+    COMBINED("Combined aircraft feeds");
+
+    val is_globe: Boolean
+        get() = this == ADSB_LOL_GLOBE || this == AIRPLANES_LIVE_GLOBE
 }
 
 

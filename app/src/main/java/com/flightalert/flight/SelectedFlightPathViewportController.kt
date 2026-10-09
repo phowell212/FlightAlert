@@ -17,6 +17,7 @@ import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 
 
 internal class SelectedFlightPathViewportController(
@@ -73,7 +74,9 @@ internal class SelectedFlightPathViewportController(
         )
         return corners.all { point ->
             val world = MapProjection.lat_lon_to_world(point.lat, point.lon, viewport.zoom)
-            val sx = (world.x - viewport.center_x + viewport.width / 2.0).toFloat()
+            val span = 256 * 2.0.pow(viewport.zoom)
+            val dx = ((world.x - viewport.center_x + span / 2) % span + span) % span - span / 2
+            val sx = (dx + viewport.width / 2.0).toFloat()
             val sy = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
             usable.contains(sx, sy)
         }

@@ -518,13 +518,13 @@ class FlightTraceClient(private val user_agent: String) {
 
         val TRACE_PROVIDERS = listOf(
             TraceProvider(
+                name = "ADSB.lol",
+                base_url = "https://adsb.lol"
+            ),
+            TraceProvider(
                 name = "Airplanes.Live",
                 base_url = AirplanesLiveHttp.GLOBE_BASE_URL,
                 referer = "${AirplanesLiveHttp.GLOBE_BASE_URL}/"
-            ),
-            TraceProvider(
-                name = "ADSB.lol",
-                base_url = "https://adsb.lol"
             )
         )
     }

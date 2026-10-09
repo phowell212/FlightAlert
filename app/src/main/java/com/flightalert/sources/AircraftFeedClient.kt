@@ -120,14 +120,14 @@ private fun adsb_emitter_category(raw_category: String?): Int? {
 }
 
 class AircraftFeedClient(private val user_agent: String) {
-    private data class AirplanesLiveQuery(
+    private data class ReadsbPointQuery(
         val center_lat: Double,
         val center_lon: Double,
         val radius_nm: Double
     )
 
-    private data class AirplanesLiveQueryPlan(
-        val queries: List<AirplanesLiveQuery>,
+    private data class ReadsbQueryPlan(
+        val queries: List<ReadsbPointQuery>,
         val partial_coverage: Boolean
     )
 
@@ -139,11 +139,11 @@ class AircraftFeedClient(private val user_agent: String) {
         exact_search: String? = null
     ): FeedResult {
         val viewport_result = fetch_viewport_aircraft(bounds, own_lat, own_lon)
-        val search_result = fetch_airplanes_live_exact_search(exact_search, own_lat, own_lon)
+        val search_result = fetch_readsb_exact_search(exact_search, own_lat, own_lon)
         return merge_viewport_and_search(viewport_result, search_result)
     }
 
-    // Prefer Airplanes.Live coverage, then fall back to OpenSky only when the primary source is not usable.
+    // Use ADSB.lol first, retaining the other real providers when it is unavailable.
     private fun fetch_viewport_aircraft(
         bounds: FeedBounds,
         own_lat: Double,
@@ -171,24 +171,17 @@ class AircraftFeedClient(private val user_agent: String) {
         own_lon: Double
     ): FeedResult {
         val now = System.currentTimeMillis()
-        val airplanes_result = if (now >= airplanes_live_retry_after_ms) {
-            fetch_airplanes_live(bounds, own_lat, own_lon)
-        } else {
-            FeedResult(
-                FeedStatus.RATE_LIMITED,
-                FeedSource.AIRPLANES_LIVE,
-                http_code = HTTP_TOO_MANY_REQUESTS
-            )
-        }
-        if (airplanes_result.status == FeedStatus.OK) {
-            return airplanes_result
+        var provider_result = FeedResult(FeedStatus.UNAVAILABLE, FeedSource.ADSB_LOL)
+        for (provider in ReadsbFeedProvider.entries) {
+            provider_result = fetch_readsb_area(bounds, own_lat, own_lon, provider)
+            if (provider_result.status == FeedStatus.OK) return provider_result
         }
 
         val open_sky_result =
             if (now >= open_sky_retry_after_ms) fetch_open_sky(bounds, own_lat, own_lon) else null
         if (open_sky_result?.status == FeedStatus.OK) return open_sky_result
 
-        return open_sky_result ?: airplanes_result
+        return open_sky_result ?: provider_result
     }
 
     private fun merge_wrapped_viewport_results(
@@ -300,11 +293,12 @@ class AircraftFeedClient(private val user_agent: String) {
         }
     }
 
-    // Split large bounds into real point queries so Airplanes.Live can cover the visible area honestly.
-    private fun fetch_airplanes_live(
+    // Split large bounds into real point queries, preserving partial coverage at wide zoom.
+    private fun fetch_readsb_area(
         bounds: FeedBounds,
         own_lat: Double,
-        own_lon: Double
+        own_lon: Double,
+        provider: ReadsbFeedProvider
     ): FeedResult {
         val plan = airplanes_live_query_plan(bounds)
         val merged = linkedMapOf<String, FeedAircraft>()
@@ -312,7 +306,7 @@ class AircraftFeedClient(private val user_agent: String) {
         var saw_ok = false
         var saw_rate_limit = false
         var last_http_code: Int? = null
-        val query_results = fetch_airplanes_live_points(plan.queries, own_lat, own_lon)
+        val query_results = fetch_readsb_points(plan.queries, own_lat, own_lon, provider)
         val timed_out = query_results.size < plan.queries.size
 
         for (result in query_results) {
@@ -339,16 +333,17 @@ class AircraftFeedClient(private val user_agent: String) {
         return when {
             saw_ok -> FeedResult(
                 status = FeedStatus.OK,
-                source = FeedSource.AIRPLANES_LIVE,
+                source = provider.api_source,
                 aircraft = merged.values.sortedBy { it.distance_m },
                 epoch_sec = latest_epoch_sec,
                 query_count = plan.queries.size,
-                partial_coverage = plan.partial_coverage || timed_out
+                partial_coverage = plan.partial_coverage || timed_out ||
+                    query_results.any { it.status != FeedStatus.OK }
             )
 
             saw_rate_limit -> FeedResult(
                 status = FeedStatus.RATE_LIMITED,
-                source = FeedSource.AIRPLANES_LIVE,
+                source = provider.api_source,
                 http_code = last_http_code,
                 query_count = plan.queries.size,
                 partial_coverage = plan.partial_coverage
@@ -356,26 +351,29 @@ class AircraftFeedClient(private val user_agent: String) {
 
             else -> FeedResult(
                 status = FeedStatus.UNAVAILABLE,
-                source = FeedSource.AIRPLANES_LIVE,
+                source = provider.api_source,
                 http_code = last_http_code,
                 query_count = plan.queries.size,
-                partial_coverage = plan.partial_coverage || timed_out
+                partial_coverage = plan.partial_coverage || timed_out,
+                failure_reason = query_results.lastOrNull()?.failure_reason
             )
         }
     }
 
-    private fun fetch_airplanes_live_points(
-        queries: List<AirplanesLiveQuery>,
+    private fun fetch_readsb_points(
+        queries: List<ReadsbPointQuery>,
         own_lat: Double,
-        own_lon: Double
+        own_lon: Double,
+        provider: ReadsbFeedProvider
     ): List<FeedResult> {
-        return queries.map { query -> fetch_airplanes_live_point(query, own_lat, own_lon) }
+        return queries.map { query -> fetch_readsb_point(query, own_lat, own_lon, provider) }
     }
 
-    private fun fetch_airplanes_live_point(
-        query: AirplanesLiveQuery,
+    private fun fetch_readsb_point(
+        query: ReadsbPointQuery,
         own_lat: Double,
-        own_lon: Double
+        own_lon: Double,
+        provider: ReadsbFeedProvider
     ): FeedResult {
         val path = String.format(
             Locale.US,
@@ -384,66 +382,63 @@ class AircraftFeedClient(private val user_agent: String) {
             query.center_lon,
             query.radius_nm
         )
-        return fetch_airplanes_live_path(path, own_lat, own_lon)
+        return fetch_readsb_path(path, own_lat, own_lon, provider)
     }
 
-    private fun fetch_airplanes_live_exact_search(
+    private fun fetch_readsb_exact_search(
         search: String?,
         own_lat: Double,
         own_lon: Double
     ): FeedResult? {
         val path = airplanes_live_search_path(search) ?: return null
-        if (System.currentTimeMillis() < airplanes_live_retry_after_ms) {
-            return FeedResult(
-                FeedStatus.RATE_LIMITED,
-                FeedSource.AIRPLANES_LIVE,
-                http_code = HTTP_TOO_MANY_REQUESTS
-            )
+        var result: FeedResult? = null
+        for (provider in ReadsbFeedProvider.entries) {
+            result = fetch_readsb_path(path, own_lat, own_lon, provider)
+            if (result.status == FeedStatus.OK) return result
         }
-        return fetch_airplanes_live_path(path, own_lat, own_lon)
+        return result
     }
 
-    // All Airplanes.Live REST calls pass through the shared rate limiter and report failure instead of inventing data.
-    private fun fetch_airplanes_live_path(
+    // All callers share each provider's rate limit and blocked-response backoff.
+    private fun fetch_readsb_path(
         path: String,
         own_lat: Double,
-        own_lon: Double
+        own_lon: Double,
+        provider: ReadsbFeedProvider
     ): FeedResult {
         var connection: HttpURLConnection? = null
         return try {
-            AirplanesLiveHttp.wait_for_rest_api_slot()
-            val url = URL("${AirplanesLiveHttp.API_BASE_URL}/$path")
+            provider.await_api_slot()?.let { return it }
+            val url = URL("${provider.api_base_url}/$path")
             connection = open_connection(url)
             val code = connection.responseCode
-            if (code == HttpURLConnection.HTTP_OK) {
+            if (code == HttpURLConnection.HTTP_OK &&
+                !connection.getHeaderField("cf-mitigated").equals("challenge", ignoreCase = true)) {
                 val body = connection.inputStream.bufferedReader().use { it.readText() }
                 val json = JSONObject(body)
+                require(json.has("now") && (json.optJSONArray("ac") != null ||
+                    json.optJSONArray("aircraft") != null)) { "Invalid aircraft response" }
                 FeedResult(
                     status = FeedStatus.OK,
-                    source = FeedSource.AIRPLANES_LIVE,
-                    aircraft = parse_airplanes_live_aircraft(json, own_lat, own_lon),
+                    source = provider.api_source,
+                    aircraft = parse_readsb_aircraft(json, own_lat, own_lon),
                     epoch_sec = json.feed_json_finite_double_or_null("now")
                         ?.let { normalize_epoch_seconds(it) },
                     query_count = 1
                 )
             } else {
-                if (code == HTTP_TOO_MANY_REQUESTS) {
-                    val retry_seconds = connection.getHeaderField("Retry-After")?.toLongOrNull()
-                        ?: DEFAULT_AIRPLANES_LIVE_BACKOFF_SECONDS
-                    AirplanesLiveHttp.back_off_rest_api(retry_seconds)
-                    airplanes_live_retry_after_ms =
-                        System.currentTimeMillis() + retry_seconds * 1000L
-                }
+                val failure = aircraft_feed_http_failure(provider.api_source, code,
+                    connection.getHeaderField("cf-mitigated"))
+                provider.back_off_api(failure,
+                    aircraft_feed_retry_delay_ms(failure, connection.getHeaderField("Retry-After")))
                 connection.errorStream?.close()
-                FeedResult(
-                    status = if (code == HTTP_TOO_MANY_REQUESTS) FeedStatus.RATE_LIMITED else FeedStatus.UNAVAILABLE,
-                    source = FeedSource.AIRPLANES_LIVE,
-                    http_code = code,
-                    query_count = 1
-                )
+                failure
             }
         } catch (_: Exception) {
-            FeedResult(FeedStatus.UNAVAILABLE, FeedSource.AIRPLANES_LIVE, query_count = 1)
+            FeedResult(FeedStatus.UNAVAILABLE, provider.api_source,
+                failure_reason = "Connection or response unavailable").also {
+                provider.back_off_api(it, 2000L)
+            }
         } finally {
             connection?.disconnect()
         }
@@ -468,7 +463,7 @@ class AircraftFeedClient(private val user_agent: String) {
     }
 
     // Build a bounded grid of point queries; mark partial coverage when the viewport is too large for one pass.
-    private fun airplanes_live_query_plan(bounds: FeedBounds): AirplanesLiveQueryPlan {
+    private fun airplanes_live_query_plan(bounds: FeedBounds): ReadsbQueryPlan {
         val normalized = bounds.normalized()
         val center_lat = (normalized.min_lat + normalized.max_lat) / 2.0
         val center_lon = (normalized.min_lon + normalized.max_lon) / 2.0
@@ -486,7 +481,7 @@ class AircraftFeedClient(private val user_agent: String) {
             if (columns >= rows && columns > 1) columns-- else if (rows > 1) rows-- else break
         }
 
-        val queries = mutableListOf<AirplanesLiveQuery>()
+        val queries = mutableListOf<ReadsbPointQuery>()
         for (row in 0 until rows) {
             val min_lat = lerp(normalized.min_lat, normalized.max_lat, row.toDouble() / rows)
             val max_lat = lerp(normalized.min_lat, normalized.max_lat, (row + 1.0) / rows)
@@ -497,7 +492,7 @@ class AircraftFeedClient(private val user_agent: String) {
                 val cell = FeedBounds(min_lat, min_lon, max_lat, max_lon)
                 val cell_center_lat = (min_lat + max_lat) / 2.0
                 val cell_center_lon = (min_lon + max_lon) / 2.0
-                queries += AirplanesLiveQuery(
+                queries += ReadsbPointQuery(
                     center_lat = cell_center_lat,
                     center_lon = cell_center_lon,
                     radius_nm = radius_nm_for(cell, cell_center_lat, cell_center_lon)
@@ -507,9 +502,9 @@ class AircraftFeedClient(private val user_agent: String) {
             }
         }
 
-        return AirplanesLiveQueryPlan(
+        return ReadsbQueryPlan(
             queries = queries.ifEmpty {
-                listOf(AirplanesLiveQuery(center_lat, center_lon, MIN_AIRPLANES_RADIUS_NM))
+                listOf(ReadsbPointQuery(center_lat, center_lon, MIN_AIRPLANES_RADIUS_NM))
             },
             partial_coverage = rows < needed_rows || columns < needed_columns
         )
@@ -580,8 +575,8 @@ class AircraftFeedClient(private val user_agent: String) {
         return parsed.sortedBy { it.distance_m }
     }
 
-    // Translate Airplanes.Live objects into the app feed model without filling missing source fields.
-    private fun parse_airplanes_live_aircraft(
+    // Both public APIs return readsb objects; retain missing fields as unavailable.
+    private fun parse_readsb_aircraft(
         json: JSONObject,
         own_lat: Double,
         own_lon: Double
@@ -768,7 +763,5 @@ class AircraftFeedClient(private val user_agent: String) {
         @Volatile
         private var open_sky_retry_after_ms = 0L
 
-        @Volatile
-        private var airplanes_live_retry_after_ms = 0L
     }
 }

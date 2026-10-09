@@ -177,11 +177,18 @@ class SelectedFlightPathController(
         if (previous_flights_visible) previous_flight_points()?.let { points += it }
         projected_endpoint()?.let { points += it }
         if (points.size < 2) return null
+        // Exclude the largest empty longitude gap so date-line traces fit their real extent.
+        val longitudes = points.map { it.lon }.sorted()
+        val gap = longitudes.indices.maxBy { index ->
+            (if (index == longitudes.lastIndex) longitudes.first() + 360 else longitudes[index + 1]) - longitudes[index]
+        }
+        val min_lon = longitudes[(gap + 1) % longitudes.size]
+        val max_lon = longitudes[gap].let { if (it < min_lon) it + 360 else it }
         return Bounds(
             min_lat = points.minOf { it.lat },
-            min_lon = points.minOf { it.lon },
+            min_lon = min_lon,
             max_lat = points.maxOf { it.lat },
-            max_lon = points.maxOf { it.lon }
+            max_lon = max_lon
         )
     }
 

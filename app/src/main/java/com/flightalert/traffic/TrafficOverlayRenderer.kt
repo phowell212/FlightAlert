@@ -288,6 +288,15 @@ class TrafficOverlayRenderer(
         return drawn_count
     }
 
+    /** Reuse label placement when a host supplies its own accepted aircraft drawing path. */
+    fun draw_aircraft_labels(canvas: Canvas, state: TrafficOverlayState, style: TrafficOverlayStyle) {
+        val count = label_aircraft_count(marker_dot_blend(state.viewport), state.viewport.zoom)
+        for ((index, item) in state.aircraft.withIndex()) {
+            if (index >= count && item.aircraft.icao24 != state.selected_aircraft_id) continue
+            draw_aircraft_label(canvas, item.screen_point.x, item.screen_point.y, item, state, style)
+        }
+    }
+
     fun shutdown() {
         if (overlay_async_closed) return
         overlay_async_closed = true

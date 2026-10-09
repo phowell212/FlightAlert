@@ -255,12 +255,13 @@ internal class TrafficRuntimeCoordinator(
     fun publish_aircraft_feed_failure(result: FeedResult, fetch_token: Long): Boolean {
         if (!visible_aircraft_feed_controller.is_current_token(fetch_token)) return false
         aircraft_status = when {
-            result.source == FeedSource.AIRPLANES_LIVE_GLOBE && result.partial_coverage -> "binCraft aircraft feed loading"
+            result.source.is_globe && result.partial_coverage -> "binCraft aircraft feed loading"
+            result.failure_reason != null -> "${result.source.display_name} unavailable: ${result.failure_reason}"
             result.http_code != null -> "Aircraft feed unavailable: HTTP ${result.http_code}"
             result.status == FeedStatus.RATE_LIMITED -> "Aircraft feed rate limited"
             else -> "Aircraft feed unavailable"
         }
-        if (result.source == FeedSource.AIRPLANES_LIVE_GLOBE && result.partial_coverage) {
+        if (result.source.is_globe && result.partial_coverage) {
             visible_aircraft_feed_controller.schedule_hybrid_supplement_refresh()
         }
         return true
@@ -349,7 +350,7 @@ internal class TrafficRuntimeCoordinator(
         current: FeedResult,
     ): Boolean {
         val revision = current.content_revision ?: return false
-        return current.source == FeedSource.AIRPLANES_LIVE_GLOBE &&
+        return current.source.is_globe &&
                 previous?.source == current.source &&
                 previous.content_revision == revision
     }
@@ -816,7 +817,7 @@ internal class TrafficRuntimeCoordinator(
             val summary = result.globe_default_summary
             val own_lat = request.own_lat
             val own_lon = request.own_lon
-            result.source == FeedSource.AIRPLANES_LIVE_GLOBE &&
+            result.source.is_globe &&
                     feed_request?.feed_mode == AircraftFeedMode.BINCRAFT &&
                     is_normal_airborne_filter_mode(request.filters) &&
                     feed_request.search_query.isNullOrBlank() &&
@@ -1079,7 +1080,7 @@ internal class TrafficRuntimeCoordinator(
         is_cancelled: () -> Boolean
     ): List<Aircraft>? {
         val preserve_metadata =
-            result.source == FeedSource.AIRPLANES_LIVE_GLOBE && previous_by_key.isNotEmpty()
+            result.source.is_globe && previous_by_key.isNotEmpty()
         val mapped = ArrayList<Aircraft>(result.aircraft.size)
         result.aircraft.forEachIndexed { index, raw_aircraft ->
             if (index and AIRCRAFT_PREPARE_CANCELLATION_CHECK_MASK == 0 &&

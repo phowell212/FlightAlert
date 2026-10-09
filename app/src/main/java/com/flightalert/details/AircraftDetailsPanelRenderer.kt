@@ -720,7 +720,7 @@ class AircraftDetailsPanelRenderer(
     }
 
     // Limit the chart to the seven days represented by trace buckets.
-    private fun draw_usage_graph(
+    internal fun draw_usage_graph(
         canvas: Canvas,
         rect: RectF,
         stats: UsageStats,

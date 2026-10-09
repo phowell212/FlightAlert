@@ -11,6 +11,7 @@ import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import com.flightalert.aircraft.TrackPoint
 import com.flightalert.map.GeoPoint
 import com.flightalert.map.MapProjection
@@ -19,6 +20,8 @@ import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -30,6 +33,7 @@ class FlightPathRenderer(
     private val dp: (Float) -> Float,
     private val with_alpha: (Int, Int) -> Int
 ) {
+    private val drawn_bounds = RectF()
     fun draw_selected_path(
         canvas: Canvas,
         viewport: Viewport,
@@ -52,10 +56,10 @@ class FlightPathRenderer(
         stroke_paint.strokeJoin = Paint.Join.ROUND
         stroke_paint.strokeWidth = dp(5f)
         stroke_paint.color = with_alpha(style.path_shadow, 90)
-        canvas.drawPath(path, stroke_paint)
+        draw_wrapped_path(canvas, viewport)
         stroke_paint.strokeWidth = dp(2.4f)
         stroke_paint.color = style.accent_yellow
-        canvas.drawPath(path, stroke_paint)
+        draw_wrapped_path(canvas, viewport)
         draw_projection(canvas, viewport, state.projection, style)
         reset_stroke()
     }
@@ -76,10 +80,10 @@ class FlightPathRenderer(
         stroke_paint.pathEffect = DashPathEffect(floatArrayOf(dp(8f), dp(8f)), 0f)
         stroke_paint.strokeWidth = dp(4.2f)
         stroke_paint.color = with_alpha(style.path_shadow, 72)
-        canvas.drawPath(path, stroke_paint)
+        draw_wrapped_path(canvas, viewport)
         stroke_paint.strokeWidth = dp(1.9f)
         stroke_paint.color = with_alpha(style.accent_blue, 190)
-        canvas.drawPath(path, stroke_paint)
+        draw_wrapped_path(canvas, viewport)
         reset_stroke()
     }
 
@@ -109,7 +113,7 @@ class FlightPathRenderer(
             viewport.zoom
         )
         val world_span = TILE_SIZE * 2.0.pow(viewport.zoom)
-        val start_x = (start.x - viewport.center_x + viewport.width / 2.0).toFloat()
+        val start_x = wrapped_screen_x(start.x, viewport, world_span)
         var end_x = (end.x - viewport.center_x + viewport.width / 2.0).toFloat()
         while (end_x - start_x > world_span / 2.0) end_x -= world_span.toFloat()
         while (start_x - end_x > world_span / 2.0) end_x += world_span.toFloat()
@@ -125,7 +129,7 @@ class FlightPathRenderer(
         stroke_paint.pathEffect = DashPathEffect(floatArrayOf(dp(9f), dp(7f)), 0f)
         stroke_paint.strokeWidth = dp(2.2f)
         stroke_paint.color = with_alpha(style.accent_yellow, 185)
-        canvas.drawPath(path, stroke_paint)
+        draw_wrapped_path(canvas, viewport)
         stroke_paint.pathEffect = null
     }
 
@@ -152,10 +156,10 @@ class FlightPathRenderer(
         stroke_paint.pathEffect = DashPathEffect(floatArrayOf(dp(14f), dp(9f)), 0f)
         stroke_paint.strokeWidth = dp(4.4f)
         stroke_paint.color = with_alpha(style.path_shadow, 74)
-        canvas.drawPath(path, stroke_paint)
+        draw_wrapped_path(canvas, viewport)
         stroke_paint.strokeWidth = dp(2.0f)
         stroke_paint.color = with_alpha(style.accent_yellow, 185)
-        canvas.drawPath(path, stroke_paint)
+        draw_wrapped_path(canvas, viewport)
         reset_stroke()
     }
 
@@ -165,7 +169,7 @@ class FlightPathRenderer(
         for (index in 0..OCEANIC_CONNECT_CURVE_STEPS) {
             val point = great_circle_point(from, to, index.toDouble() / OCEANIC_CONNECT_CURVE_STEPS)
             val world = MapProjection.lat_lon_to_world(point.lat, point.lon, viewport.zoom)
-            var x = (world.x - viewport.center_x + viewport.width / 2.0).toFloat()
+            var x = wrapped_screen_x(world.x, viewport, world_span)
             val y = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
             previous_x?.let { last_x ->
                 val span = world_span.toFloat()
@@ -332,7 +336,7 @@ class FlightPathRenderer(
             var previous_screen_x: Float? = null
             segment.points.forEachIndexed { index, point ->
                 val world = MapProjection.lat_lon_to_world(point.lat, point.lon, viewport.zoom)
-                var sx = (world.x - viewport.center_x + viewport.width / 2.0).toFloat()
+                var sx = wrapped_screen_x(world.x, viewport, world_span)
                 val sy = (world.y - viewport.center_y + viewport.height / 2.0).toFloat()
                 previous_screen_x?.let { last_x ->
                     val span = world_span.toFloat()
@@ -355,6 +359,26 @@ class FlightPathRenderer(
         stroke_paint.strokeCap = Paint.Cap.BUTT
         stroke_paint.strokeJoin = Paint.Join.MITER
         stroke_paint.pathEffect = null
+    }
+
+    private fun wrapped_screen_x(world_x: Double, viewport: Viewport, world_span: Double): Float {
+        val delta = ((world_x - viewport.center_x + world_span / 2) % world_span + world_span) % world_span - world_span / 2
+        return (delta + viewport.width / 2.0).toFloat()
+    }
+
+    private fun draw_wrapped_path(canvas: Canvas, viewport: Viewport) {
+        path.computeBounds(drawn_bounds, true)
+        val padding = stroke_paint.strokeWidth / 2f + dp(2f)
+        if (drawn_bounds.bottom < -padding || drawn_bounds.top > viewport.height + padding) return
+        val span = TILE_SIZE * 2.0.pow(viewport.zoom)
+        val first = ceil((-padding - drawn_bounds.right) / span).toInt()
+        val last = floor((viewport.width + padding - drawn_bounds.left) / span).toInt()
+        for (copy in first..last) {
+            val save = canvas.save()
+            canvas.translate((copy * span).toFloat(), 0f)
+            canvas.drawPath(path, stroke_paint)
+            canvas.restoreToCount(save)
+        }
     }
 
     private companion object {

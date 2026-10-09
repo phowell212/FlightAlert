@@ -109,6 +109,10 @@ class AircraftAlertService : Service(), LocationListener {
             if (!monitoring_enabled()) {
                 stopSelf()
             } else {
+                synchronized(priority_snapshot_lock) {
+                    active_hazards.clear()
+                    replace_priority_snapshot_locked(emptyList(), SystemClock.elapsedRealtime())
+                }
                 poll_aircraft()
             }
         }
@@ -116,6 +120,7 @@ class AircraftAlertService : Service(), LocationListener {
     private lateinit var location_manager: LocationManager
     private lateinit var prefs: SharedPreferences
     private var latest_location: Location? = null
+    private var latest_altitude_location: Location? = null
     private var polling = false
     @Volatile
     private var stopped = false
@@ -134,7 +139,11 @@ class AircraftAlertService : Service(), LocationListener {
         prefs.registerOnSharedPreferenceChangeListener(preference_listener)
         ensure_channels()
         clear_legacy_notifications()
-        if (monitoring_enabled()) enter_monitoring_foreground()
+        if (!monitoring_enabled()) {
+            stopSelf()
+            return
+        }
+        enter_monitoring_foreground()
         start_location_updates()
         schedule_poll(1000L)
     }
@@ -193,20 +202,20 @@ class AircraftAlertService : Service(), LocationListener {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // Keep a recent altitude briefly when Android sends a new horizontal fix without altitude.
+    // Retain the altitude's original fix so horizontal updates cannot renew its freshness.
     override fun onLocationChanged(location: Location) {
-        val previous = latest_location
-        latest_location =
-            if (!location.hasAltitude() && previous?.hasAltitude() == true && location.time - previous.time < OWN_ALTITUDE_MAX_AGE_MS) {
-                Location(location).apply { altitude = previous.altitude }
-            } else {
-                location
-            }
+        if (location.hasAltitude() && location.altitude.isFinite() &&
+            should_use_location(location, latest_altitude_location)) {
+            latest_altitude_location = Location(location)
+        }
+        if (should_use_location(location, latest_location)) latest_location = Location(location)
     }
 
     override fun onProviderEnabled(provider: String) = start_location_updates()
 
-    override fun onProviderDisabled(provider: String) = Unit
+    override fun onProviderDisabled(provider: String) {
+        if (!location_manager.isLocationEnabled) stopSelf()
+    }
 
     // Check last-known providers before subscribing to GPS and network updates.
     private fun start_location_updates() {
@@ -214,9 +223,7 @@ class AircraftAlertService : Service(), LocationListener {
         try {
             location_manager.getProviders(true).forEach { provider ->
                 val last = location_manager.getLastKnownLocation(provider)
-                if (last != null && should_use_location(last, latest_location)) {
-                    latest_location = last
-                }
+                if (last != null) onLocationChanged(last)
             }
             if (location_manager.getProviders(true).contains(LocationManager.GPS_PROVIDER)) {
                 location_manager.requestLocationUpdates(
@@ -240,7 +247,6 @@ class AircraftAlertService : Service(), LocationListener {
 
     private fun should_use_location(candidate: Location, current: Location?): Boolean {
         if (current == null) return true
-        if (candidate.hasAltitude() && !current.hasAltitude()) return true
         return candidate.time > current.time
     }
 
@@ -256,13 +262,22 @@ class AircraftAlertService : Service(), LocationListener {
             stopSelf()
             return
         }
-        val location = latest_location
+        val location = latest_location?.takeIf(::location_is_fresh)
         if (location == null) {
             start_location_updates()
-            reuse_cached_priority_snapshot()
+            synchronized(priority_snapshot_lock) {
+                active_hazards.clear()
+                replace_priority_snapshot_locked(emptyList(), SystemClock.elapsedRealtime())
+            }
             next_poll_delay_ms = POLL_MS
             schedule_poll(next_poll_delay_ms)
             return
+        }
+        if (latest_altitude_location?.let(::location_is_fresh) != true) {
+            synchronized(priority_snapshot_lock) {
+                active_hazards.clear()
+                replace_priority_snapshot_locked(emptyList(), SystemClock.elapsedRealtime())
+            }
         }
 
         polling = true
@@ -277,9 +292,6 @@ class AircraftAlertService : Service(), LocationListener {
 
                 synchronized(priority_snapshot_lock) {
                     if (stopped) return@execute
-                    priority_snapshot_generation++
-                    latest_priority_snapshot = null
-                    cancel_priority_snapshot_expiry_locked()
                     // Notification membership comes only from classifier results.
                     val current_hazards = if (alerts_enabled()) {
                         poll.aircraft.filter { it.is_hazard }.associateBy { it.icao24 }
@@ -290,13 +302,16 @@ class AircraftAlertService : Service(), LocationListener {
                     active_hazards.putAll(current_hazards)
                     val extreme_priority =
                         if (alerts_enabled()) poll.aircraft.filter { it.is_extreme_priority } else emptyList()
-                    update_priority_notification(extreme_priority)
+                    replace_priority_snapshot_locked(extreme_priority, SystemClock.elapsedRealtime())
                     next_poll_delay_ms = next_poll_delay_for(
                         aircraft = poll.aircraft,
                         has_hazard = current_hazards.isNotEmpty(),
                         has_extreme_priority = extreme_priority.isNotEmpty(),
                         predictive_delay_ms = poll.next_predictive_poll_delay_ms
                     )
+                    ownship_expiry_delay_ms()?.let {
+                        next_poll_delay_ms = min(next_poll_delay_ms, it)
+                    }
                 }
             } catch (_: Exception) {
                 reuse_cached_priority_snapshot()
@@ -362,8 +377,6 @@ class AircraftAlertService : Service(), LocationListener {
             FlightAlertSettings.KEY_PRIORITY_RANGE_FEET,
             FlightAlertSettings.DEFAULT_PRIORITY_RANGE_FEET
         )
-        val own_altitude_feet =
-            if (location.hasAltitude()) meters_to_feet(location.altitude) else null
         val radius_feet =
             api_query_radius_feet(alert_distance_feet, priority_enabled, priority_range_feet)
         val radius_meters = max(feet_to_meters(radius_feet), feet_to_meters(MIN_QUERY_RADIUS_FEET))
@@ -374,8 +387,22 @@ class AircraftAlertService : Service(), LocationListener {
             location.longitude
         )
         if (result.status != FeedStatus.OK) return AlertPoll(emptyList(), feed_available = false)
-        val airborne_aircraft = result.aircraft.filter { it.on_ground != true }
         val now_epoch_sec = System.currentTimeMillis() / 1000.0
+        if (!monitoring_enabled() || !location_is_fresh(location)) {
+            return AlertPoll(emptyList(), feed_available = false)
+        }
+        val own_altitude_feet =
+            latest_altitude_location?.takeIf(::location_is_fresh)?.altitude?.let(::meters_to_feet)
+        val airborne_aircraft = result.aircraft.filter { item ->
+            val position_time = item.position_time_sec ?: item.last_contact_sec
+            val contact_time = item.last_contact_sec ?: item.position_time_sec
+            item.on_ground != true && item.lat.isFinite() && item.lat in -90.0..90.0 &&
+                    item.lon.isFinite() && item.lon in -180.0..180.0 &&
+                    position_time != null && position_time.isFinite() && position_time > 0.0 &&
+                    contact_time != null && contact_time.isFinite() && contact_time > 0.0 &&
+                    now_epoch_sec - position_time in 0.0..EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS &&
+                    now_epoch_sec - contact_time in 0.0..EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
+        }
         return AlertPoll(
             aircraft = airborne_aircraft
                 .mapNotNull {
@@ -511,22 +538,29 @@ class AircraftAlertService : Service(), LocationListener {
         val elapsed_since_snapshot_ms = snapshot?.let {
             SystemClock.elapsedRealtime() - it.received_elapsed_ms
         } ?: 0L
-        val fresh_aircraft = snapshot?.let {
+        val ownship_ready = monitoring_enabled() && latest_location?.let(::location_is_fresh) == true &&
+                latest_altitude_location?.let(::location_is_fresh) == true
+        val fresh_aircraft = snapshot?.takeIf { ownship_ready }?.let {
             fresh_priority_snapshot(
                 priority_aircraft = it.aircraft,
                 elapsed_since_snapshot_ms = elapsed_since_snapshot_ms,
                 max_contact_age_seconds = EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
             )
         }.orEmpty()
+        active_hazards.clear()
+        active_hazards.putAll(fresh_aircraft.associateBy { it.icao24 })
         update_priority_notification(fresh_aircraft)
         cancel_priority_snapshot_expiry_locked()
-        val expiry_delay_ms = snapshot?.let {
+        val snapshot_expiry_delay_ms = snapshot?.takeIf { ownship_ready }?.let {
             priority_snapshot_expiry_delay_ms(
                 priority_aircraft = it.aircraft,
                 elapsed_since_snapshot_ms = elapsed_since_snapshot_ms,
                 max_contact_age_seconds = EXTREME_PRIORITY_CONTACT_MAX_AGE_SECONDS
             )
         } ?: return
+        val expiry_delay_ms = ownship_expiry_delay_ms()?.let {
+            min(snapshot_expiry_delay_ms, it)
+        } ?: snapshot_expiry_delay_ms
         val scheduled_generation = priority_snapshot_generation
         val callback = Runnable {
             synchronized(priority_snapshot_lock) {
@@ -608,12 +642,10 @@ class AircraftAlertService : Service(), LocationListener {
         body: String,
         silent: Boolean = false
     ): Notification {
-        val pending_intent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or immutable_flag()
-        )
+        val pending_intent = packageManager.getLaunchIntentForPackage(packageName)?.let { launcher ->
+            PendingIntent.getActivity(this, 0, launcher,
+                PendingIntent.FLAG_UPDATE_CURRENT or immutable_flag())
+        }
         val builder = Notification.Builder(this, channel_id)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle(title)
@@ -759,7 +791,22 @@ class AircraftAlertService : Service(), LocationListener {
     }
 
     private fun monitoring_enabled(): Boolean {
-        return alerts_enabled() || priority_tracking_enabled()
+        return has_flight_location_permission() && location_manager.isLocationEnabled &&
+                (alerts_enabled() || priority_tracking_enabled())
+    }
+
+    private fun location_is_fresh(location: Location): Boolean {
+        val age_ms = System.currentTimeMillis() - location.time
+        return location.latitude.isFinite() && location.latitude in -90.0..90.0 &&
+                location.longitude.isFinite() && location.longitude in -180.0..180.0 &&
+                location.time > 0L && age_ms in 0L..OWN_ALTITUDE_MAX_AGE_MS
+    }
+
+    private fun ownship_expiry_delay_ms(): Long? {
+        val location = latest_location?.takeIf(::location_is_fresh) ?: return null
+        val altitude = latest_altitude_location?.takeIf(::location_is_fresh) ?: return null
+        return (min(location.time, altitude.time) + OWN_ALTITUDE_MAX_AGE_MS -
+                System.currentTimeMillis() + 1L).coerceAtLeast(1L)
     }
 
 
@@ -792,7 +839,7 @@ class AircraftAlertService : Service(), LocationListener {
             callsign = callsign,
             registration = registration,
             distance_meters = projected.distance_meters,
-            altitude_meters = projected.altitude_meters,
+            altitude_meters = projected.altitude_meters?.takeIf { it.isFinite() },
             last_contact_sec = last_contact_sec,
             position_time_sec = position_time_sec,
             own_altitude_feet = own_altitude_feet,
@@ -986,7 +1033,12 @@ class AircraftAlertService : Service(), LocationListener {
         }
 
         private fun start_service(context: Context, intent: Intent) {
-            context.startService(intent)
+            if (!context.has_flight_location_permission() ||
+                !context.getSystemService(LocationManager::class.java).isLocationEnabled) {
+                stop(context)
+                return
+            }
+            context.startForegroundService(intent)
         }
     }
 }

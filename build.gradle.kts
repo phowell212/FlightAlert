@@ -15,8 +15,12 @@ android {
         minSdk = 29
         //noinspection AndroidLintEditedTargetSdkVersion
         targetSdk = 37
-        versionCode = 12
-        versionName = "1.11"
+        versionCode = 13
+        versionName = "1.12"
+        manifestPlaceholders["launcherActivity"] = "com.flightalert.fundamentals.FundamentalsActivity"
+        manifestPlaceholders["applicationLabel"] = "@string/app_name"
+        manifestPlaceholders["fullAppServicesEnabled"] = "true"
+        manifestPlaceholders["shellProfileable"] = "false"
     }
 
     sourceSets {
@@ -30,6 +34,17 @@ android {
             optimization {
                 enable = true
             }
+        }
+        create("fundamentals") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".fundamentals"
+            versionNameSuffix = "-fundamentals"
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+            manifestPlaceholders["launcherActivity"] = "com.flightalert.fundamentals.FundamentalsActivity"
+            manifestPlaceholders["applicationLabel"] = "Flight Alert Fundamentals"
+            manifestPlaceholders["fullAppServicesEnabled"] = "true"
+            manifestPlaceholders["shellProfileable"] = "true"
         }
     }
 

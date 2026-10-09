@@ -1040,18 +1040,6 @@ class FlightMapPanelRenderer(
         chrome.draw_choice_button(canvas, rect, "$label $suffix", enabled)
     }
 
-    private fun impact_methodology_items(): List<Pair<String, String>> {
-        return listOf(
-            "Trace first" to "Only real trace points from the aircraft source are used. App-session dots are never stored as a path.",
-            "Aircraft profile" to "Live web/feed type is tried first, then registry/API metadata. Known ICAO types use a type benchmark; otherwise class benchmarks are used.",
-            "Phase model" to "Observed legs are split into ground, climb, cruise, descent, low-level, or time-only using trace altitude, speed, and timestamps.",
-            "Carbon math" to "CO2 range = profile gal/hr x phase multiplier x trace hours x EIA kg CO2/gal. Jet fuel uses 9.75; avgas uses 8.31.",
-            "Score" to "0-100 is log-scaled kg CO2/hr. When a phase trace exists it scores observed intensity; otherwise it scores the profile rate.",
-            "Full flight" to "Shown only when real origin, destination, and trace progress are credible enough to route-scale the observed estimate.",
-            "Not claimed" to "No exact fuel flow, payload, passenger count, SAF blend, contrails, NOx, noise, or per-passenger allocation is inferred."
-        )
-    }
-
     private fun draw_methodology_column(
         canvas: Canvas,
         rect: RectF,
@@ -1590,7 +1578,19 @@ class FlightMapPanelRenderer(
 
     private fun sp(value: Float): Float = chrome.sp(value)
 
-    private companion object {
-        const val PRIORITY_PANEL_ROWS = 5
+    companion object {
+        private const val PRIORITY_PANEL_ROWS = 5
+        internal fun impact_methodology_items(): List<Pair<String, String>> {
+            return listOf(
+                "Trace first" to "Only real trace points from the aircraft source are used. App-session dots are never stored as a path.",
+                "Aircraft profile" to "Live web/feed type is tried first, then registry/API metadata. Known ICAO types use a type benchmark; otherwise class benchmarks are used.",
+                "Phase model" to "Observed legs are split into ground, climb, cruise, descent, low-level, or time-only using trace altitude, speed, and timestamps.",
+                "Carbon math" to "CO2 range = profile gal/hr x phase multiplier x trace hours x EIA kg CO2/gal. Jet fuel uses 9.75; avgas uses 8.31.",
+                "Score" to "0-100 is log-scaled kg CO2/hr. When a phase trace exists it scores observed intensity; otherwise it scores the profile rate.",
+                "Full flight" to "Shown only when real origin, destination, and trace progress are credible enough to route-scale the observed estimate.",
+                "Not claimed" to "No exact fuel flow, payload, passenger count, SAF blend, contrails, NOx, noise, or per-passenger allocation is inferred."
+            )
+        }
+
     }
 }

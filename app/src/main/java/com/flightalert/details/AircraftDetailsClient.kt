@@ -619,7 +619,7 @@ class AircraftDetailsClient(private val user_agent: String) {
     }
 
     private fun fetch_airplanes_live_rest_metadata(hex: String): AirplanesLiveMetadata? {
-        AirplanesLiveHttp.wait_for_rest_api_slot()
+        com.flightalert.sources.ReadsbFeedProvider.AIRPLANES_LIVE.await_api_slot()?.let { return null }
         val json = fetch_json("${AirplanesLiveHttp.API_BASE_URL}/hex/$hex", browser_headers = true)
             ?: return null
         val aircraft = json.optJSONArray("aircraft") ?: json.optJSONArray("ac") ?: return null
@@ -870,15 +870,20 @@ class AircraftDetailsClient(private val user_agent: String) {
                     setRequestProperty("Accept", "application/json,text/plain,*/*")
                 }
             }
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                if (connection.responseCode == DETAILS_HTTP_TOO_MANY_REQUESTS && safe_url.host.equals(
+            val code = connection.responseCode
+            if (code != HttpURLConnection.HTTP_OK ||
+                connection.getHeaderField("cf-mitigated").equals("challenge", ignoreCase = true)) {
+                if (safe_url.host.equals(
                         "api.airplanes.live",
                         ignoreCase = true
                     )
                 ) {
-                    AirplanesLiveHttp.back_off_rest_api(
-                        connection.getHeaderField("Retry-After")?.toLongOrNull()
-                    )
+                    val failure = com.flightalert.sources.aircraft_feed_http_failure(
+                        com.flightalert.sources.FeedSource.AIRPLANES_LIVE, code,
+                        connection.getHeaderField("cf-mitigated"))
+                    com.flightalert.sources.ReadsbFeedProvider.AIRPLANES_LIVE.back_off_api(
+                        failure, com.flightalert.sources.aircraft_feed_retry_delay_ms(
+                            failure, connection.getHeaderField("Retry-After")))
                 }
                 connection.errorStream?.close()
                 return null

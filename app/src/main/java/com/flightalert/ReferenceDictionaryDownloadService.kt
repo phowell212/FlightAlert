@@ -14,6 +14,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.os.IBinder
@@ -27,6 +28,15 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 class ReferenceDictionaryDownloadService : Service() {
+    internal enum class Phase { MISSING, PREPARING, DOWNLOADING, PAUSED, STOPPED, ERROR, TIMEOUT, READY }
+    internal data class DownloadState(
+        val phase: Phase,
+        val downloaded: Long,
+        val total: Long,
+        val bytes_per_second: Float?,
+        val message: String,
+    )
+
     private val state_lock = Any()
     private val executor = Executors.newSingleThreadExecutor()
     private var active_downloader: ReferenceDictionaryDownloader? = null
@@ -38,9 +48,14 @@ class ReferenceDictionaryDownloadService : Service() {
     private var rate_baseline_elapsed_ms = 0L
     private var smoothed_download_rate_bytes_per_second: Double? = null
     private var latest_start_id = 0
+    private var latest_downloaded = 0L
+    private var latest_total = 0L
 
     override fun onCreate() {
         super.onCreate()
+        service_alive = true
+        latest_downloaded = preferences().getLong(KEY_DOWNLOADED, 0L)
+        latest_total = preferences().getLong(KEY_TOTAL, 0L)
         notification_manager().createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
@@ -82,7 +97,7 @@ class ReferenceDictionaryDownloadService : Service() {
             }
             else -> {
                 if (explicitly_paused) {
-                    stop_with_notification(paused_notification(), cancel_download = true)
+                    stop_with_notification(paused_notification(), true, Phase.PAUSED)
                 } else {
                     start_download()
                 }
@@ -92,17 +107,19 @@ class ReferenceDictionaryDownloadService : Service() {
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
-        stop_with_notification(timeout_notification(), cancel_download = true)
+        stop_with_notification(timeout_notification(), true, Phase.TIMEOUT)
     }
 
     override fun onDestroy() {
         val downloader_to_cancel = synchronized(state_lock) {
+            if (download_running) publish_state(Phase.STOPPED)
             download_generation += 1L
             download_running = false
             active_downloader.also { active_downloader = null }
         }
         downloader_to_cancel?.cancel()
         foreground_active = false
+        service_alive = false
         executor.shutdownNow()
         super.onDestroy()
     }
@@ -120,6 +137,7 @@ class ReferenceDictionaryDownloadService : Service() {
             download_generation += 1L
             download_generation
         }
+        publish_state(Phase.PREPARING)
         executor.execute {
             val downloader = ReferenceDictionaryDownloader(this)
             val run_is_current = synchronized(state_lock) {
@@ -132,14 +150,18 @@ class ReferenceDictionaryDownloadService : Service() {
             }
             if (!run_is_current) return@execute
             try {
-                val completed = downloader.download { downloaded, total ->
-                    update_progress(generation, downloaded, total)
+                val completed = synchronized(download_lock) {
+                    if (synchronized(state_lock) { generation != download_generation || !download_running }) return@execute
+                    downloader.download { downloaded, total ->
+                        update_progress(generation, downloaded, total)
+                    }
                 }
                 post_result(generation) {
                     if (completed) {
-                        stop_with_notification(completed_notification(), cancel_download = false)
+                        stop_with_notification(completed_notification(), false, Phase.READY)
                     } else {
-                        stop_with_notification(error_notification("Download was interrupted"), false)
+                        stop_with_notification(error_notification("Download was interrupted"), false,
+                            Phase.STOPPED, "Download was interrupted")
                     }
                 }
             } catch (exception: IOException) {
@@ -147,11 +169,20 @@ class ReferenceDictionaryDownloadService : Service() {
                     stop_with_notification(
                         error_notification(exception.message ?: "Download failed"),
                         cancel_download = false,
+                        phase = Phase.ERROR,
+                        message = exception.message ?: "Download failed",
                     )
                 }
             } finally {
                 synchronized(state_lock) {
                     if (active_downloader === downloader) active_downloader = null
+                }
+                mainExecutor.execute {
+                    synchronized(state_lock) {
+                        if (generation != download_generation && !download_running && !foreground_active) {
+                            stopSelfResult(latest_start_id)
+                        }
+                    }
                 }
             }
         }
@@ -161,6 +192,8 @@ class ReferenceDictionaryDownloadService : Service() {
         val now = SystemClock.elapsedRealtime()
         val bytes_per_second = synchronized(state_lock) {
             if (generation != download_generation || !download_running) return
+            latest_downloaded = downloaded
+            latest_total = total
             if (now - last_progress_update_ms < PROGRESS_UPDATE_INTERVAL_MS) return
             last_progress_update_ms = now
             update_download_rate(downloaded, now)
@@ -168,6 +201,7 @@ class ReferenceDictionaryDownloadService : Service() {
         mainExecutor.execute {
             synchronized(state_lock) {
                 if (generation != download_generation || !download_running) return@execute
+                publish_state(Phase.DOWNLOADING)
                 notification_manager().notify(
                     NOTIFICATION_ID,
                     downloading_notification(downloaded, total, bytes_per_second),
@@ -220,20 +254,37 @@ class ReferenceDictionaryDownloadService : Service() {
         preferences().edit(commit = true) {
             putBoolean(KEY_EXPLICITLY_PAUSED, true)
         }
-        stop_with_notification(paused_notification(), cancel_download = true)
+        stop_with_notification(paused_notification(), true, Phase.PAUSED)
     }
 
-    private fun stop_with_notification(notification: Notification, cancel_download: Boolean) {
+    private fun stop_with_notification(
+        notification: Notification,
+        cancel_download: Boolean,
+        phase: Phase,
+        message: String = "",
+    ) {
         val downloader_to_cancel = synchronized(state_lock) {
             download_generation += 1L
             download_running = false
             active_downloader.also { active_downloader = null }
         }
         if (cancel_download) downloader_to_cancel?.cancel()
+        publish_state(phase, message)
         notification_manager().notify(NOTIFICATION_ID, notification)
         if (foreground_active) stopForeground(STOP_FOREGROUND_DETACH)
         foreground_active = false
-        stopSelfResult(latest_start_id)
+        // Resume queues on this executor until cancelled workers release the shared staging files.
+        if (!cancel_download || downloader_to_cancel == null || phase == Phase.TIMEOUT) stopSelfResult(latest_start_id)
+    }
+
+    private fun publish_state(phase: Phase, message: String = "") {
+        preferences().edit(commit = true) {
+            putString(KEY_STATE, phase.name)
+            putLong(KEY_DOWNLOADED, latest_downloaded)
+            putLong(KEY_TOTAL, latest_total)
+            putFloat(KEY_RATE, smoothed_download_rate_bytes_per_second?.toFloat() ?: -1f)
+            putString(KEY_MESSAGE, message.take(MAX_ERROR_TEXT_LENGTH))
+        }
     }
 
     private fun downloading_notification(
@@ -336,7 +387,7 @@ class ReferenceDictionaryDownloadService : Service() {
     private fun open_app_action(): PendingIntent = PendingIntent.getActivity(
         this,
         OPEN_APP_REQUEST_CODE,
-        Intent(this, MainActivity::class.java).apply {
+        requireNotNull(packageManager.getLaunchIntentForPackage(packageName)).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         },
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
@@ -383,6 +434,13 @@ class ReferenceDictionaryDownloadService : Service() {
         private const val MAX_ERROR_TEXT_LENGTH = 120
         private const val PREFERENCES_NAME = "reference_dictionary_download"
         private const val KEY_EXPLICITLY_PAUSED = "explicitly_paused"
+        private const val KEY_STATE = "state"
+        private const val KEY_DOWNLOADED = "downloaded"
+        private const val KEY_TOTAL = "total"
+        private const val KEY_RATE = "rate"
+        private const val KEY_MESSAGE = "message"
+        @Volatile private var service_alive = false
+        private val download_lock = Any()
         private const val ACTION_PAUSE =
             "com.flightalert.map.reference.dictionary.action.PAUSE"
         private const val ACTION_RESUME =
@@ -391,15 +449,41 @@ class ReferenceDictionaryDownloadService : Service() {
         private const val RESUME_REQUEST_CODE = 2202
         private const val OPEN_APP_REQUEST_CODE = 2203
 
-        fun start_if_missing(context: Context) {
+        internal fun preferences(context: Context): SharedPreferences =
+            context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+        internal fun state(context: Context): DownloadState {
+            val prefs = preferences(context)
+            var phase = Phase.entries.firstOrNull { it.name == prefs.getString(KEY_STATE, null) }
+                ?: Phase.MISSING
+            if (prefs.getBoolean(KEY_EXPLICITLY_PAUSED, false)) phase = Phase.PAUSED
+            else if (!service_alive && (phase == Phase.PREPARING || phase == Phase.DOWNLOADING)) phase = Phase.STOPPED
+            return DownloadState(phase, prefs.getLong(KEY_DOWNLOADED, 0L), prefs.getLong(KEY_TOTAL, 0L),
+                prefs.getFloat(KEY_RATE, -1f).takeIf { it.isFinite() && it >= 0f },
+                prefs.getString(KEY_MESSAGE, "") ?: "")
+        }
+
+        internal fun pause(context: Context) = send_action(context, ACTION_PAUSE)
+        internal fun resume(context: Context) = send_action(context, ACTION_RESUME)
+
+        private fun send_action(context: Context, action: String) {
             val app_context = context.applicationContext
-            val package_available = ReferenceDictionaryPackage.package_candidates(app_context).any {
+            app_context.startForegroundService(
+                Intent(app_context, ReferenceDictionaryDownloadService::class.java).setAction(action),
+            )
+        }
+
+        internal fun is_available(context: Context): Boolean =
+            ReferenceDictionaryPackage.package_candidates(context.applicationContext).any {
                 val opened = ReferenceDictionaryPackage.open_if_available(it) ?: return@any false
                 opened.use { reference_package ->
                     reference_package.reference_class_catalog.status == CatalogControlStatus.AVAILABLE
                 }
             }
-            if (package_available) return
+
+        fun start_if_missing(context: Context) {
+            val app_context = context.applicationContext
+            if (is_available(app_context)) return
             if (
                 app_context.getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
                     .getBoolean(KEY_EXPLICITLY_PAUSED, false)

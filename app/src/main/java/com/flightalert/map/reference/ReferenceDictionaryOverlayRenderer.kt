@@ -174,7 +174,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         val now_ms = SystemClock.elapsedRealtime()
         val options = RetainedReferenceOptions(
             labels_enabled = labels_enabled,
-            borders_enabled = borders_enabled,
+            // Retained frames contain labels only; borders draw independently below.
+            borders_enabled = false,
             place_labels_enabled = place_labels_enabled,
             water_labels_enabled = water_labels_enabled,
             region_labels_enabled = region_labels_enabled,

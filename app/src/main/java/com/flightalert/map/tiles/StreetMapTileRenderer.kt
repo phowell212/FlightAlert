@@ -42,6 +42,8 @@ internal class StreetMapTileRenderer(
     private val report_failure: (MapTileFailureKind) -> Unit,
     private val request_redraw: () -> Unit,
     private val map_tile_disk_cache: MapTileDiskCache,
+    // The fundamentals build also uses this single-layer raster path for imagery.
+    private val tile_source: TileSource = TileSource.STREET,
 ) {
     private val tile_cache = LinkedHashMap<String, Bitmap>(MAX_MEMORY_TILES, 0.75f, true)
     private val label_tile_cache = LinkedHashMap<String, Bitmap>(MAX_LABEL_MEMORY_TILES, 0.75f, true)
@@ -92,7 +94,7 @@ internal class StreetMapTileRenderer(
         canvas.drawRect(0f, 0f, viewport.width, viewport.height, paint)
 
         val request_generation = tile_request_generation.incrementAndGet()
-        val base_cache_key = TileSource.STREET.cache_key(labels_enabled = state.map_labels_enabled)
+        val base_cache_key = tile_source.cache_key(labels_enabled = state.map_labels_enabled)
         val base_stats = draw_tile_grid(
             canvas = canvas,
             viewport = viewport,
@@ -100,14 +102,14 @@ internal class StreetMapTileRenderer(
             style = style,
             cache_key = base_cache_key,
             tile_url = { z, x, y ->
-                TileSource.STREET.tile_url(z, x, y, labels_enabled = state.map_labels_enabled)
+                tile_source.tile_url(z, x, y, labels_enabled = state.map_labels_enabled)
             },
             label_scale = 1f,
             draw_unavailable_if_missing = true,
             request_generation = request_generation
         )
         if (
-            state.map_labels_enabled &&
+            tile_source == TileSource.STREET && state.map_labels_enabled &&
             state.map_label_transition_alpha > MIN_LABEL_TRANSITION_ALPHA &&
             base_stats.requested == 0 &&
             state.map_label_text_scale > 1.01f
@@ -148,7 +150,7 @@ internal class StreetMapTileRenderer(
     ): TileLayerDrawStats {
         val left_world = viewport.center_x - viewport.width / 2.0
         val top_world = viewport.center_y - viewport.height / 2.0
-        val tile_zoom = viewport.zoom.toInt().coerceIn(MIN_ZOOM, TileSource.STREET.max_native_zoom)
+        val tile_zoom = viewport.zoom.toInt().coerceIn(MIN_ZOOM, tile_source.max_native_zoom)
         val tile_to_viewport_scale = 2.0.pow(viewport.zoom - tile_zoom)
         val tile_world_scale = 1.0 / tile_to_viewport_scale
         val first_tile_x = floor(left_world * tile_world_scale / TILE_SIZE).toInt()
@@ -627,7 +629,7 @@ internal class StreetMapTileRenderer(
         destination: RectF
     ): Boolean {
         val max_depth =
-            (TileSource.STREET.max_native_zoom - z).coerceAtMost(STREET_CHILD_FALLBACK_DEPTH)
+            (tile_source.max_native_zoom - z).coerceAtMost(STREET_CHILD_FALLBACK_DEPTH)
         if (max_depth <= 0) return false
         for (depth in 1..max_depth) {
             val scale = 1 shl depth

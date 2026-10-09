@@ -58,11 +58,9 @@ class AircraftTrafficFeed(
                     search_query,
                     selected_aircraft_key
                 )
-                    ?: FeedResult(
-                        status = FeedStatus.UNAVAILABLE,
-                        source = FeedSource.AIRPLANES_LIVE_GLOBE,
-                        partial_coverage = true
-                    )
+                    ?: globe_source?.unavailable_result()
+                    ?: FeedResult(FeedStatus.UNAVAILABLE, FeedSource.ADSB_LOL_GLOBE,
+                        partial_coverage = true)
             }
 
             AircraftFeedMode.API -> {

@@ -62,6 +62,12 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
     private var latest_query: GlobeQuery? = null
 
     @Volatile
+    private var last_failure = FeedResult(FeedStatus.UNAVAILABLE,
+        FeedSource.ADSB_LOL_GLOBE, partial_coverage = true)
+
+    fun unavailable_result(): FeedResult = last_failure
+
+    @Volatile
     private var extraction_paused_until_elapsed_ms = 0L
 
     @Volatile
@@ -155,7 +161,7 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         )
         val result = FeedResult(
             status = FeedStatus.OK,
-            source = FeedSource.AIRPLANES_LIVE_GLOBE,
+            source = snapshot.source,
             aircraft = queried.aircraft,
             epoch_sec = snapshot.epoch_sec,
             query_count = 0,
@@ -255,7 +261,9 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
                         return@post
                     }
                     if (snapshot == null || (snapshot.store.aircraft.isEmpty() && snapshot.partial_coverage)) {
-                        schedule_fetch(STARTUP_RETRY_MS)
+                        last_failure = inventory_client.last_failure
+                        on_snapshot_updated?.invoke()
+                        schedule_fetch(2000L)
                         return@post
                     }
                     val received_elapsed_ms = SystemClock.elapsedRealtime()
@@ -274,7 +282,8 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
                         received_elapsed_ms = received_elapsed_ms,
                         partial_coverage = snapshot.partial_coverage,
                         viewport_generation = viewport.generation,
-                        content_revision = snapshot.content_revision
+                        content_revision = snapshot.content_revision,
+                        source = snapshot.source
                     )
                     latest_query = null
                     latest = next
@@ -308,7 +317,8 @@ class GlobeBinCraftAircraftSource(user_agent: String) {
         val received_elapsed_ms: Long,
         val partial_coverage: Boolean,
         val viewport_generation: Long,
-        val content_revision: Long
+        val content_revision: Long,
+        val source: FeedSource
     )
 
     private data class GlobeQuery(
