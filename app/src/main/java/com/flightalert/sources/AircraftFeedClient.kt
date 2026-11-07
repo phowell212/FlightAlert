@@ -131,6 +131,25 @@ class AircraftFeedClient(private val user_agent: String) {
         val partial_coverage: Boolean
     )
 
+    /** One bounded public API request for foreground globe-outage recovery. */
+    internal fun fetch_adsb_lol_point(
+        center_lat: Double,
+        center_lon: Double,
+        radius_nm: Int,
+        own_lat: Double,
+        own_lon: Double
+    ): FeedResult {
+        if (!center_lat.isFinite() || center_lat !in -90.0..90.0 ||
+            !center_lon.isFinite() || center_lon !in -180.0..180.0 ||
+            radius_nm !in 1..250 || !own_lat.isFinite() || own_lat !in -90.0..90.0 ||
+            !own_lon.isFinite() || own_lon !in -180.0..180.0) {
+            return FeedResult(FeedStatus.UNAVAILABLE, FeedSource.ADSB_LOL,
+                partial_coverage = true, failure_reason = "Invalid recovery point query")
+        }
+        return fetch_readsb_point(ReadsbPointQuery(center_lat, center_lon, radius_nm.toDouble()),
+            own_lat, own_lon, ReadsbFeedProvider.ADSB_LOL).copy(partial_coverage = true)
+    }
+
 
     fun fetch_aircraft(
         bounds: FeedBounds,

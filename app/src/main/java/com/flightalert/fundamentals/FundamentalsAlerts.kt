@@ -104,6 +104,8 @@ class FundamentalsAlerts(context: Context, private val onChanged: () -> Unit) {
         val state = settings()
         if (evaluation.configuration != null && evaluation.configuration != state) return
         current = evaluation
+        // Unknown foreground coverage must not clear the service's independent fresh REST results.
+        if (!evaluation.volumeAvailable || evaluation.unknownKeys.isNotEmpty()) return
         if (!context.has_flight_location_permission() ||
             !context.getSystemService(LocationManager::class.java).isLocationEnabled) return
         val nowEpochSec = System.currentTimeMillis() / 1000.0

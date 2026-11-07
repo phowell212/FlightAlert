@@ -417,8 +417,8 @@ internal class ReferenceRetainedRenderer(
             !frame.is_drawable()
         ) return false
         retained_frame_destination(frame, viewport, destination)
-        return reference_retained_covers_viewport(destination, viewport) &&
-            frame.has_visible_content(viewport, destination)
+        // Keep visible labels while uncovered edges are prepared independently.
+        return frame.has_visible_content(viewport, destination)
     }
 
     fun retained_fallback_needs_build(

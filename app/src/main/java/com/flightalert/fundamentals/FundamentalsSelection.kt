@@ -244,7 +244,8 @@ internal class FundamentalsSelection(
     fun labelText(aircraft: Aircraft) = formatter.aircraft_label_detail(aircraft)
 
     fun trafficPanel(aircraft: Aircraft?, filtered: Boolean, stats: FilterStats, status: String) =
-        trafficPanel.panel_state(TrafficDisplay(aircraft, false), theme().colors.muted,
+        trafficPanel.panel_state(TrafficDisplay(paths.selected_aircraft_snapshot ?: aircraft,
+            paths.selected_aircraft_snapshot != null), theme().colors.muted,
             theme().colors.accent_blue, theme().colors.muted, filtered, stats, status,
             aircraft?.last_contact_sec ?: aircraft?.position_time_sec)
 

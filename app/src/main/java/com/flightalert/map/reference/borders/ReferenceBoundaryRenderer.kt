@@ -461,13 +461,15 @@ internal class ReferenceBoundaryRenderer(
     ): ReferenceBoundaryRasterBand {
         val active = active_boundary_raster_band
         val current_package_generation = tile_repository.package_generation()
-        if (freeze_active_band && reference_boundary_raster_band_is_compatible(
+        if (freeze_active_band && active != null && !reference_boundary_raster_band_transition(
                 active = active,
+                viewportZoom = viewport.zoom,
+                sourceZoom = source_zoom,
                 settingsKey = settings_key,
                 packageGeneration = current_package_generation,
             )
         ) {
-            return requireNotNull(active)
+            return active
         }
         val exact = reference_boundary_raster_band(
             viewportZoom = viewport.zoom,
@@ -484,7 +486,7 @@ internal class ReferenceBoundaryRenderer(
             pending_boundary_raster_band = target
             return target
         }
-        if (!interaction_active) {
+        if (!interaction_active && !freeze_active_band) {
             pending_boundary_raster_band = exact.takeUnless { it == active }
             return exact
         }

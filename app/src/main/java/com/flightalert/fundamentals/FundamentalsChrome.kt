@@ -1,11 +1,16 @@
 package com.flightalert.fundamentals
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.RippleDrawable
 import android.view.Gravity
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
@@ -13,8 +18,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.flightalert.FlightAlertSettings
+import com.flightalert.details.*
 import com.flightalert.map.ScaleLabel
 import com.flightalert.map.reference.labels.ReferenceScreenRect
+import com.flightalert.ui.*
 
 internal data class FundamentalsReadout(
     val location: String, val traffic: String, val trafficReady: Boolean, val partial: Boolean,
@@ -23,7 +30,7 @@ internal data class FundamentalsReadout(
     val scale: ScaleLabel, val selected: Boolean, val aircraft: FundamentalsAircraftDetail?,
     val selection: FundamentalsSelectionReadout, val attribution: String,
     val aviation: com.flightalert.map.aviation_layers.AviationSelectionPresentation?, val mapStatus: String,
-    val trafficPanel: com.flightalert.ui.TrafficPanelState,
+    val trafficPanel: TrafficPanelState,
     val monitoringRequested: Boolean,
 )
 
@@ -42,160 +49,151 @@ internal class FundamentalsChrome(
 ) : FrameLayout(context) {
     private val theme = FlightAlertSettings.read_visual_theme(context)
     private val colors = theme.colors
-    private fun dp(n: Float) = (n * resources.displayMetrics.density).toInt()
-    private fun alpha(color: Int, alpha: Int) = (color and 0xffffff) or (alpha shl 24)
-    private fun text(size: Float, color: Int = colors.text, bold: Boolean = false) = TextView(context).apply {
-        textSize = size
-        setTextColor(color)
-        typeface = Typeface.create(theme.style.font_family, if (bold) Typeface.BOLD else Typeface.NORMAL)
-        includeFontPadding = false
-    }
     private val ui = FundamentalsUiStyle(context, theme)
-    private fun controlBackground() = ui.choiceBackground()
+    private fun dp(n: Float) = ui.dp(n)
+    private fun text(size: Float, bold: Boolean = false) = TextView(context).apply {
+        textSize = size; setTextColor(colors.text); includeFontPadding = false
+        typeface = Typeface.create(theme.style.font_family, if (bold) Typeface.BOLD else Typeface.NORMAL)
+    }
+    private fun action(label: String, description: String, run: () -> Unit) = Button(context).apply {
+        ui.button(this); text = label; contentDescription = description
+        setOnClickListener { run() }
+    }
     private var headerSubtitle = "Live map · Alerts off"
     private var headerTraffic = "CONNECTING" to colors.accent_yellow
     private var headerScale = ScaleLabel(0f, "")
+    private var statusText = ""
     private val top = object : View(context) {
+        override fun getAccessibilityClassName(): CharSequence = Button::class.java.name
         override fun onDraw(canvas: Canvas) {
-            ui.renderer.draw_top_status(canvas, android.graphics.RectF(0f, 0f, width.toFloat(), height.toFloat()),
+            ui.renderer.draw_top_status(canvas, RectF(0f, 0f, width.toFloat(), height.toFloat()),
                 headerSubtitle, headerTraffic, headerScale, ui.style)
         }
-    }.apply { isClickable = true }
+    }.apply { isFocusable = true; setOnClickListener { showMapStatus() } }
     private var filtersActive = false
+    private var historyVisible = false
     private lateinit var filterButton: Button
-    private val controls = LinearLayout(context)
-    private val info = ScrollView(context).apply {
-        isFillViewport = true
-        background = ui.panel(colors.panel, theme.style.info_panel_alpha)
-        isClickable = true
+    private lateinit var pathButton: Button
+    private lateinit var historyButton: Button
+    private lateinit var clearPathButton: Button
+    private val controls = object : FrameLayout(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val available = MeasureSpec.getSize(widthMeasureSpec)
+            val gap = dp(if (compactHud) 6f else 10f)
+            var x = 0; var rows = 1
+            for (index in 0 until childCount) {
+                val child = getChildAt(index)
+                if (child.visibility == GONE) continue
+                val childWidth = (if (compactHud) dp(44f) else child.layoutParams.width).coerceAtMost(available)
+                if (x > 0 && x + childWidth > available) { x = 0; rows++ }
+                child.measure(MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(dp(48f), MeasureSpec.EXACTLY))
+                x += childWidth + gap
+            }
+            setMeasuredDimension(available, rows * dp(48f) + (rows - 1) * gap)
+        }
+        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+            val gap = dp(if (compactHud) 6f else 10f)
+            var x = 0; var y = height - dp(48f)
+            for (index in 0 until childCount) {
+                val child = getChildAt(index)
+                if (child.visibility == GONE) continue
+                if (x > 0 && x + child.measuredWidth > width) { x = 0; y -= dp(48f) + gap }
+                child.layout(x, y, x + child.measuredWidth, y + child.measuredHeight)
+                x += child.measuredWidth + gap
+            }
+        }
     }
-    private val body = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16f), dp(10f), dp(16f), dp(12f))
+    private val summaryPaint = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create(theme.style.font_family, Typeface.NORMAL)
     }
-    private val heading = text(14f, colors.accent_green, true)
-    private val title = text(24f, bold = true).apply {
+    private val summaryRenderer = TrafficPanelRenderer(summaryPaint, Paint(Paint.ANTI_ALIAS_FLAG),
+        object : TrafficPanelChrome {
+            override fun dp(value: Float) = value * resources.displayMetrics.density
+            override fun sp(value: Float) = value * resources.displayMetrics.scaledDensity
+            override fun ellipsize(value: String, max_width: Float) = android.text.TextUtils.ellipsize(
+                value, summaryPaint, max_width.coerceAtLeast(0f), android.text.TextUtils.TruncateAt.END).toString()
+            override fun draw_panel_surface(canvas: Canvas, rect: RectF, fill: Int, alpha: Int) =
+                ui.renderer.draw_panel_surface(canvas, rect, fill, alpha, ui.style)
+        }, ui::alpha)
+    private var trafficPanel: TrafficPanelState? = null
+    private val info = object : View(context) {
+        private val taps = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(event: MotionEvent) = true
+            override fun onSingleTapUp(event: MotionEvent) = performClick()
+        })
+        override fun onTouchEvent(event: MotionEvent): Boolean =
+            if (isClickable) taps.onTouchEvent(event) else super.onTouchEvent(event)
+        override fun performClick(): Boolean = super.performClick()
+        override fun getAccessibilityClassName(): CharSequence =
+            if (isClickable) Button::class.java.name else super.getAccessibilityClassName()
+        override fun onDraw(canvas: Canvas) {
+            trafficPanel?.let {
+                summaryRenderer.draw_panel(canvas, RectF(0f, 0f, width.toFloat(), height.toFloat()),
+                    wide, TrafficPanelStyle(theme), it)
+            }
+        }
+    }.apply {
+        isFocusable = true
+        setOnClickListener { if (selected) map.openDetails() else map.openNearestDetails() }
+    }
+    private val modalTitle = text(22f, true).apply {
         maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-        setAutoSizeTextTypeUniformWithConfiguration(14, 24, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+        setAutoSizeTextTypeUniformWithConfiguration(12, 22, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
     }
-    private val model = text(13f, bold = true).apply {
-        gravity = Gravity.END; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-        setAutoSizeTextTypeUniformWithConfiguration(10, 13, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
-    }
-    private val distance = text(24f, bold = true).apply {
-        gravity = Gravity.END; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-        setAutoSizeTextTypeUniformWithConfiguration(14, 24, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
-    }
-    private val titleRow = object : LinearLayout(context) {
-        override fun getAccessibilityClassName(): CharSequence = if (isClickable) Button::class.java.name else super.getAccessibilityClassName()
-    }.apply { gravity = Gravity.CENTER_VERTICAL }
-    private val identity = text(11f, colors.muted)
-    private val facts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-    private val values = mutableListOf<TextView>()
-    private val close = Button(context).apply {
-        text = "×"
-        textSize = 22f
-        setTextColor(colors.text)
-        contentDescription = "Close aircraft details"
-        setPadding(0, 0, 0, 0)
-        minimumWidth = 0
-        minimumHeight = 0
-        background = controlBackground()
-        setOnClickListener { map.closeAircraftPanel() }
-    }
-    private val health = text(10f, colors.muted).apply { setPadding(0, dp(8f), 0, 0) }
-    private val attribution = text(9f, colors.muted).apply { setPadding(0, dp(8f), 0, 0) }
-    private val aircraftActions = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+    private val usage = action("Usage", "Open aircraft usage", map::openUsage)
+    private val close = action("Close", "Close aircraft details", map::closeAircraftPanel)
+    private val impact = action("Environmental impact", "Open aircraft impact", map::openImpact)
     private val richerDetails = FundamentalsDetailsView(context, map)
-    private val traceStatus = text(10f, colors.muted)
-    private val actionButtons = mutableMapOf<String, Button>()
-    private var detailPage = com.flightalert.details.AircraftDetailsPage.CLOSED
+    private val detailScroll = ScrollView(context).apply { isFillViewport = false; addView(richerDetails) }
+    private val modal = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL; background = ui.panel()
+        setPadding(dp(18f), dp(14f), dp(18f), dp(16f)); isClickable = true
+    }
+    private val overlay = FrameLayout(context).apply { visibility = GONE; isClickable = true }
+    private var detailPage = AircraftDetailsPage.CLOSED
     private var selected = false
-    private var inspector = false
     private var selectedKey: String? = null
     private var inspectorTitle: String? = null
     private var wide = false
+    private var compactHud = false
 
     init {
         setBackgroundColor(colors.system_bar)
-        addView(map)
-        addView(top)
-        fun icon(description: String, width: Float, draw: (Canvas, android.graphics.RectF) -> Unit,
-                 action: () -> Unit): Button = Button(context).apply {
+        addView(map); addView(top)
+        fun icon(description: String, width: Float, draw: (Canvas, RectF) -> Unit,
+                 run: () -> Unit): Button = Button(context).apply {
             text = ""; contentDescription = description
             minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
-            background = RippleDrawable(ColorStateList.valueOf(alpha(colors.accent_blue, 48)),
+            background = RippleDrawable(ColorStateList.valueOf(ui.alpha(colors.accent_blue, 48)),
                 ui.drawing { canvas, rect -> rect.inset(0f, dp(2f).toFloat()); draw(canvas, rect) }, null)
-            setPadding(0, 0, 0, 0)
-            setOnClickListener { action() }
-            controls.addView(this, LinearLayout.LayoutParams(dp(width), -1).apply {
-                if (controls.childCount > 0) leftMargin = dp(10f)
-            })
+            setPadding(0, 0, 0, 0); setOnClickListener { run() }
+            controls.addView(this, LayoutParams(dp(width), dp(48f)))
         }
         icon("Open app settings", 84f,
             { canvas, rect -> ui.renderer.draw_settings_button(canvas, rect, ui.style) }, onSettings)
         filterButton = icon("Open map controls", 84f,
             { canvas, rect -> ui.renderer.draw_filters_button(canvas, rect, filtersActive, ui.style) }, onMap)
+        pathButton = icon("Show flight path", 44f,
+            { canvas, rect -> ui.renderer.draw_flight_path_button(canvas, rect, "Path", colors.accent_yellow, ui.style) }, map::showPath)
         icon("My location: recenter map or enable location", 44f,
             { canvas, rect -> ui.renderer.draw_recenter_button(canvas, rect, ui.style) }, onRecenter)
-        addView(controls)
-
-        val headingRow = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
-        headingRow.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
-        headingRow.addView(model, LinearLayout.LayoutParams(0, -2, .8f))
-        headingRow.addView(close, LinearLayout.LayoutParams(dp(48f), dp(48f)))
-        body.addView(headingRow)
-        titleRow.addView(title, LinearLayout.LayoutParams(0, -2, .62f))
-        titleRow.addView(distance, LinearLayout.LayoutParams(0, -2, .38f).apply { leftMargin = dp(12f) })
-        titleRow.contentDescription = "Open nearest aircraft details"
-        titleRow.setOnClickListener { if (!selected && !inspector) map.openNearestDetails() }
-        body.addView(titleRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10f); bottomMargin = dp(8f) })
-        body.addView(identity)
-        listOf("ALTITUDE", "SPEED", "DISTANCE", "POSITION AGE").chunked(2).forEach { labels ->
-            val row = LinearLayout(context)
-            labels.forEach { label ->
-                val cell = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(0, dp(12f), dp(8f), dp(8f))
-                }
-                cell.addView(text(10f, colors.muted, true).apply { text = label })
-                cell.addView(text(18f, bold = true).also { values.add(it) })
-                row.addView(cell, LinearLayout.LayoutParams(0, -2, 1f))
-            }
-            facts.addView(row)
-            facts.addView(View(context).apply { setBackgroundColor(alpha(colors.panel_stroke, theme.style.divider_alpha)) },
-                LinearLayout.LayoutParams(-1, dp(1f)))
-        }
-        fun aircraftAction(name: String, description: String, action: () -> Unit) = Button(context).apply {
-            ui.button(this)
-            text = name; contentDescription = description; textSize = 11f
-            minimumWidth = 0; minimumHeight = 0
-            setPadding(dp(3f), 0, dp(3f), 0); background = controlBackground()
-            setOnClickListener { action() }; actionButtons[name] = this
-        }
-        fun aircraftActionRow(vararg actions: Button) {
-            val row = LinearLayout(context)
-            for (action in actions) row.addView(action, LinearLayout.LayoutParams(0, dp(42f), 1f).apply {
-                leftMargin = if (row.childCount == 0) 0 else dp(5f)
-            })
-            aircraftActions.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5f) })
-        }
-        aircraftActionRow(aircraftAction("Details", "Open aircraft details", map::openDetails),
-            aircraftAction("Path", "Show flight path", map::showPath),
-            aircraftAction("History", "Toggle previous flights", map::toggleHistory))
-        aircraftActionRow(aircraftAction("Usage", "Open aircraft usage", map::openUsage),
-            aircraftAction("Impact", "Open aircraft impact", map::openImpact),
-            aircraftAction("Photos", "Open aircraft photo gallery", map::openPhotos))
-        aircraftActionRow(aircraftAction("Fit path", "Fit sourced flight path", map::fitSelectedPath),
-            aircraftAction("Clear path", "Clear visible flight path", map::clearPath))
-        aircraftActions.addView(traceStatus)
-        body.addView(aircraftActions)
-        body.addView(facts)
-        body.addView(richerDetails)
-        body.addView(health)
-        body.addView(attribution)
-        info.addView(body)
-        addView(info)
+        historyButton = icon("Toggle previous flights", 44f,
+            { canvas, rect -> ui.renderer.draw_flight_path_button(canvas, rect, "History",
+                if (historyVisible) colors.accent_green else colors.accent_blue, ui.style) }, map::toggleHistory)
+        clearPathButton = icon("Clear visible flight path", 44f,
+            { canvas, rect -> ui.renderer.draw_flight_path_button(canvas, rect, "Clear", colors.danger, ui.style) }, map::clearPath)
+        pathButton.visibility = GONE; historyButton.visibility = GONE; clearPathButton.visibility = GONE
+        addView(controls); addView(info)
+        val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+        header.addView(modalTitle, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(10f) })
+        header.addView(usage, LinearLayout.LayoutParams(dp(76f), dp(44f)).apply { rightMargin = dp(10f) })
+        header.addView(close, LinearLayout.LayoutParams(dp(76f), dp(44f)))
+        modal.addView(header, LinearLayout.LayoutParams(-1, -2))
+        modal.addView(detailScroll, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(8f); bottomMargin = dp(8f) })
+        modal.addView(impact, LinearLayout.LayoutParams(-1, dp(44f)))
+        overlay.addView(modal, LayoutParams(-1, -1, Gravity.CENTER))
+        addView(overlay)
     }
 
     fun show(readout: FundamentalsReadout) {
@@ -210,85 +208,110 @@ internal class FundamentalsChrome(
         val traffic = status to if (readout.trafficReady && !readout.partial) colors.accent_green else colors.accent_yellow
         if (headerSubtitle != subtitle || headerTraffic != traffic || headerScale != readout.scale) {
             headerSubtitle = subtitle; headerTraffic = traffic; headerScale = readout.scale
-            top.contentDescription = "Flight Alert. $subtitle. $status. Map scale: ${readout.scale.label}"
+            top.contentDescription = "Flight Alert. $subtitle. $status. Map scale: ${readout.scale.label}. Open map status and sources"
             top.invalidate()
         }
+        statusText = "${readout.visible} aircraft · ${readout.extent}\n${readout.location}\n${readout.traffic}\n${readout.tiles}\n${readout.dictionary}\n${readout.mapStatus}" +
+            (if (readout.selected) "\n${readout.selection.pathStatus}" else "") +
+            "\n\n${readout.attribution}\nAircraft feeds: ADSB.lol · Airplanes.Live\nReferences: © OpenStreetMap contributors"
         val active = com.flightalert.traffic.aircraft_filters_active(map.aircraftFilters())
         if (filtersActive != active) { filtersActive = active; filterButton.background.invalidateSelf() }
-        val aircraft = readout.aircraft
+        if (trafficPanel != readout.trafficPanel) {
+            trafficPanel = readout.trafficPanel
+            info.contentDescription = when (val content = readout.trafficPanel.content) {
+                is TrafficPanelAircraftState -> "${readout.trafficPanel.title}. ${content.callsign}. ${content.model_label}. ${content.distance_label}. " +
+                    content.wide_rows.joinToString(". ") { "${it.label}: ${it.value}" } + ". Open aircraft details"
+                is TrafficPanelEmptyState -> "${content.headline}. ${content.message}. ${content.data_time_label.orEmpty()}"
+            }
+            info.isClickable = readout.trafficPanel.content is TrafficPanelAircraftState
+            info.invalidate()
+        }
+        val selection = readout.selection
+        pathButton.visibility = if (readout.selected) VISIBLE else GONE
+        pathButton.isEnabled = !selection.pathStatus.startsWith("Loading")
+        pathButton.alpha = if (pathButton.isEnabled) 1f else .45f
+        pathButton.contentDescription = (if (selection.pathVisible) "Fit sourced flight path" else "Show flight path") + ". ${selection.pathStatus}"
+        pathButton.tooltipText = selection.pathStatus
+        historyButton.visibility = if (selection.pathVisible && selection.historyAvailable) VISIBLE else GONE
+        if (historyVisible != selection.historyVisible) {
+            historyVisible = selection.historyVisible; historyButton.background.invalidateSelf()
+        }
+        historyButton.contentDescription = if (historyVisible) "Hide previous flights" else "Show previous flights"
+        clearPathButton.visibility = if (selection.pathVisible) VISIBLE else GONE
         val aviation = readout.aviation
-        val nearest = readout.trafficPanel.content as? com.flightalert.ui.TrafficPanelAircraftState
-        heading.update(if (aviation != null) "AVIATION FEATURE" else if (readout.selected) "SELECTED AIRCRAFT" else readout.trafficPanel.title)
-        heading.setTextColor(if (aviation != null || readout.selected) colors.accent_blue else readout.trafficPanel.title_color)
-        title.update(aviation?.title ?: aircraft?.callsign ?: if (readout.selected) "Aircraft unavailable" else nearest?.callsign ?:
-            (readout.trafficPanel.content as? com.flightalert.ui.TrafficPanelEmptyState)?.headline ?: "Aircraft feed")
-        model.update(nearest?.model_label ?: "")
-        model.visibility = if (!readout.selected && aviation == null && nearest?.model_label != null) VISIBLE else GONE
-        distance.update(if (readout.selected) aircraft?.distance ?: "Unavailable" else nearest?.distance_label ?: "")
-        distance.setTextColor(if (readout.selected) colors.muted else nearest?.distance_color ?: colors.muted)
-        distance.visibility = if (aviation == null && (aircraft != null || nearest != null)) VISIBLE else GONE
-        identity.update(aviation?.subtitle ?: aircraft?.identity ?: "")
-        identity.visibility = if (readout.selected || aviation != null) VISIBLE else GONE
-        titleRow.isClickable = !readout.selected && aviation == null && nearest != null
-        titleRow.contentDescription = if (titleRow.isClickable) "Open nearest aircraft details" else null
-        facts.visibility = if (aircraft == null || readout.selection.page.is_open) GONE else VISIBLE
-        aircraftActions.visibility = if (readout.selected) VISIBLE else GONE
-        traceStatus.update(readout.selection.pathStatus)
-        actionButtons.getValue("Path").isEnabled = !readout.selection.pathStatus.startsWith("Loading")
-        actionButtons.getValue("History").isEnabled = readout.selection.pathVisible && readout.selection.historyAvailable
-        actionButtons.getValue("History").text = if (readout.selection.historyVisible) "Hide history" else "History"
-        actionButtons.getValue("Photos").isEnabled = readout.selection.photosAvailable
-        actionButtons.getValue("Fit path").visibility = if (readout.selection.pathVisible) VISIBLE else GONE
-        actionButtons.getValue("Clear path").visibility = if (readout.selection.pathVisible) VISIBLE else GONE
-        richerDetails.show(readout.selection)
-        if (aviation != null) richerDetails.showAviation(aviation)
-        else if (!readout.selected) richerDetails.showTraffic(readout.trafficPanel, wide)
-        close.visibility = if (readout.selected || aviation != null) VISIBLE else GONE
-        close.contentDescription = if (aviation != null) "Close aviation details" else "Close aircraft details"
-        if (aircraft != null) listOf(aircraft.altitude, aircraft.speed, aircraft.distance, aircraft.age)
-            .forEachIndexed { index, value -> values[index].update(value) }
-        health.update("${readout.visible} aircraft · ${readout.extent}\n${readout.location}\n${readout.traffic} · ${readout.tiles}\n${readout.dictionary}\n${readout.mapStatus}")
-        attribution.update("${readout.attribution}\nAircraft feeds: ADSB.lol · Airplanes.Live\nReferences: © OpenStreetMap contributors")
-        if (selected != readout.selected || detailPage != readout.selection.page || selectedKey != readout.selection.aircraftKey || inspectorTitle != aviation?.title) {
-            selected = readout.selected; detailPage = readout.selection.page
-            selectedKey = readout.selection.aircraftKey; inspectorTitle = aviation?.title; inspector = aviation != null
-            info.scrollTo(0, 0); requestLayout()
+        val modalOpen = selection.page.is_open || aviation != null
+        val main = selection.page == AircraftDetailsPage.MAIN && aviation == null
+        overlay.visibility = if (modalOpen) VISIBLE else GONE
+        usage.visibility = if (main && readout.selected) VISIBLE else GONE
+        impact.visibility = if (main && readout.selected) VISIBLE else GONE
+        val secondary = aviation == null && selection.page.is_open && !main &&
+            selection.page.overlay !is AircraftDetailsOverlay.PHOTO_EVIDENCE
+        close.update(if (secondary) "Back" else "Close")
+        close.contentDescription = when {
+            aviation != null -> "Close aviation details"
+            secondary -> "Back to aircraft details"
+            selection.page.overlay is AircraftDetailsOverlay.PHOTO_EVIDENCE -> "Close photo evidence"
+            else -> "Close aircraft details"
+        }
+        modalTitle.update(aviation?.title ?: when (val content = selection.content) {
+            is AircraftDetailsMainState -> content.title
+            is AircraftUsagePanelState -> "Flight usage"
+            is AircraftImpactPanelState -> "Environmental impact"
+            is AircraftPhotoGalleryPanelState -> "Aircraft photos"
+            is AircraftPhotoEvidencePanelState -> "Photo evidence"
+            null -> "Aircraft details"
+        })
+        if (aviation != null) richerDetails.showAviation(aviation) else richerDetails.show(selection)
+        listOf(map, top, info, controls).forEach {
+            it.importantForAccessibility = if (modalOpen) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        }
+        if (selected != readout.selected || detailPage != selection.page || selectedKey != selection.aircraftKey || inspectorTitle != aviation?.title) {
+            selected = readout.selected; detailPage = selection.page
+            selectedKey = selection.aircraftKey; inspectorTitle = aviation?.title
+            detailScroll.scrollTo(0, 0); requestLayout()
         }
     }
 
+    private fun showMapStatus() {
+        val content = text(12f).apply { text = statusText; setPadding(dp(18f), dp(12f), dp(18f), dp(12f)) }
+        val scroll = ScrollView(context).apply { addView(content) }
+        val dialog = AlertDialog.Builder(context).setTitle("Map status and sources").setView(scroll)
+            .setPositiveButton("Close", null).create()
+        dialog.show(); ui.dialog(dialog)
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val w = MeasureSpec.getSize(widthMeasureSpec)
-        val h = MeasureSpec.getSize(heightMeasureSpec)
+        val w = MeasureSpec.getSize(widthMeasureSpec); val h = MeasureSpec.getSize(heightMeasureSpec)
         setMeasuredDimension(w, h)
         val innerW = (w - paddingLeft - paddingRight).coerceAtLeast(1)
         val innerH = (h - paddingTop - paddingBottom).coerceAtLeast(1)
         fun exact(n: Int) = MeasureSpec.makeMeasureSpec(n.coerceAtLeast(1), MeasureSpec.EXACTLY)
-        val gap = dp(12f)
-        // A side card needs enough room for both the map controls and readable text.
-        val layoutWide = innerW > innerH * 1.15f && innerW >= dp(680f)
-        if (wide != layoutWide) {
-            title.setAutoSizeTextTypeUniformWithConfiguration(14, if (layoutWide) 30 else 24, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
-            distance.setAutoSizeTextTypeUniformWithConfiguration(14, if (layoutWide) 26 else 24, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
-        }
+        val layoutWide = innerW > innerH * 1.15f && innerW >= dp(520f)
+        if (wide != layoutWide) info.invalidate()
         wide = layoutWide
+        compactHud = !wide && innerH < dp(400f)
+        val gap = dp(if (compactHud) 6f else 12f)
         val infoW = if (wide) minOf(dp(360f), maxOf(dp(300f), (innerW * .32f).toInt())) else innerW - 2 * gap
         val mapHudW = if (wide) innerW - infoW - 3 * gap else innerW - 2 * gap
         map.measure(exact(innerW), exact(innerH))
         top.measure(exact(minOf(dp(620f), mapHudW)), exact(dp(66f)))
-        controls.measure(MeasureSpec.makeMeasureSpec(mapHudW, MeasureSpec.AT_MOST), exact(dp(48f)))
-        val cardH = if (wide) innerH - 2 * gap else minOf(
-            dp(if (detailPage.is_open || inspector) 500f else if (selected) 380f else 176f),
-            (innerH - top.measuredHeight - dp(136f)).coerceAtLeast(dp(96f)))
-        richerDetails.setCompact(!wide)
+        controls.measure(exact(mapHudW), exact(dp(48f)))
+        val cardH = if (wide) innerH - 2 * gap else dp(176f)
         info.measure(exact(infoW), exact(cardH))
+        if (overlay.visibility != GONE) {
+            val modalWide = innerW > innerH * 1.15f
+            richerDetails.setCompact(!modalWide)
+            val params = modal.layoutParams as LayoutParams
+            params.width = if (modalWide) minOf(dp(800f), innerW - dp(28f)) else innerW - dp(28f)
+            params.height = minOf(innerH - dp(28f), dp(if (modalWide) 390f else 720f))
+            overlay.measure(exact(innerW), exact(innerH))
+        }
     }
 
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
-        val left = paddingLeft
-        val topEdge = paddingTop
-        val right = width - paddingRight
-        val bottom = height - paddingBottom
-        val gap = dp(12f)
+        val left = paddingLeft; val topEdge = paddingTop
+        val right = width - paddingRight; val bottom = height - paddingBottom
+        val gap = dp(if (compactHud) 6f else 12f)
         map.layout(left, topEdge, right, bottom)
         top.layout(left + gap, topEdge + gap, left + gap + top.measuredWidth, topEdge + gap + top.measuredHeight)
         val infoLeft = if (wide) right - gap - info.measuredWidth else left + gap
@@ -296,7 +319,7 @@ internal class FundamentalsChrome(
         info.layout(infoLeft, infoTop, infoLeft + info.measuredWidth, infoTop + info.measuredHeight)
         val controlsBottom = if (wide) bottom - gap else infoTop - gap
         controls.layout(left + gap, controlsBottom - controls.measuredHeight, left + gap + controls.measuredWidth, controlsBottom)
-        // Recenter targets the open map area, as in the full app.
+        if (overlay.visibility != GONE) overlay.layout(left, topEdge, right, bottom)
         val openRight = if (wide) info.left - gap else right
         map.setMapFocus((left + openRight) / 2f - left, (top.bottom + controls.top) / 2f - topEdge)
         map.setLabelAvoidance(listOf(top, info, controls).map {

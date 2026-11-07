@@ -840,7 +840,8 @@ internal class AviationLayerRenderer(
         label_rects: MutableList<RectF>,
         style: AviationLayerStyle
     ) {
-        if (viewport.zoom < AVIATION_AIRPORT_LABEL_MIN_ZOOM) return
+        val opacity = airport_label_zoom_opacity(viewport.zoom)
+        if (opacity <= 0f) return
         val visible = airports
             .mapNotNull { airport ->
                 project_aviation_point_to_screen(
@@ -894,11 +895,13 @@ internal class AviationLayerRenderer(
             if (label_rects.any { RectF.intersects(padded, it) }) return@forEach
             label_rects += padded
             paint.style = Paint.Style.FILL
-            paint.color = with_alpha(style.panel, 165)
+            paint.color = with_alpha(style.panel, (165 * opacity).toInt())
             canvas.drawRoundRect(rect, dp(4f), dp(4f), paint)
             paint.color = color
+            paint.alpha = (paint.alpha * opacity).toInt()
             canvas.drawCircle(point.x, point.y, dp(3f), paint)
-            draw_sourced_map_label(canvas, label, rect.left + dp(5f), anchor_baseline)
+            paint.color = color
+            draw_sourced_map_label(canvas, label, rect.left + dp(5f), anchor_baseline, opacity)
             interaction_coordinator.accept_airport_marker(
                 airport,
                 point,
@@ -949,7 +952,10 @@ internal class AviationLayerRenderer(
         label: PreparedSourcedMapLabel,
         x: Float,
         anchor_baseline: Float,
+        opacity: Float = 1f,
     ) {
+        val original_alpha = text_paint.alpha
+        text_paint.alpha = (original_alpha * opacity).toInt()
         fun draw(line: PreparedSourcedMapLabelLine) {
             text_paint.textSize = line.text_size
             text_paint.textSkewX = if (line.force_italic) {
@@ -963,6 +969,7 @@ internal class AviationLayerRenderer(
         label.english?.let(::draw)
         text_paint.textSize = label.primary.first().text_size
         text_paint.textSkewX = 0f
+        text_paint.alpha = original_alpha
     }
 
     private fun draw_selected_airport(
@@ -971,7 +978,8 @@ internal class AviationLayerRenderer(
         airport: AviationAirportFeature,
         style: AviationLayerStyle
     ) {
-        if (viewport.zoom < AVIATION_AIRPORT_LABEL_MIN_ZOOM) return
+        val opacity = airport_label_zoom_opacity(viewport.zoom)
+        if (opacity <= 0f) return
         val point = project_aviation_point_to_screen(
             AviationLayerPoint(airport.lat, airport.lon),
             viewport,
@@ -982,9 +990,10 @@ internal class AviationLayerRenderer(
         stroke_paint.strokeWidth = dp(2.4f)
         stroke_paint.color = with_alpha(
             if (airport.military) style.military_gray else style.accent_yellow,
-            255
+            (255 * opacity).toInt()
         )
         canvas.drawCircle(point.x, point.y, dp(8f), stroke_paint)
+        stroke_paint.alpha = 255
     }
 
     private fun ring_to_screen_points(

@@ -27,6 +27,7 @@ internal class FundamentalsReferences(
     private val prefs = FlightAlertSettings.prefs(context)
     private val node = RenderNode("fundamentals-dictionary")
     private var recordedViewport: Viewport? = null
+    private var recordedInteraction = false
     private var dirty = true
     private var closed = false
     private var borders = true
@@ -127,15 +128,16 @@ internal class FundamentalsReferences(
     }
 
     /** Aircraft-only frames replay the same display list without planning the map again. */
-    fun draw(canvas: Canvas, viewport: Viewport): Boolean {
+    fun draw(canvas: Canvas, viewport: Viewport, interacting: Boolean): Boolean {
         if (!borders && !labels) return false
-        if (!canvas.isHardwareAccelerated) return drawReferences(canvas, viewport)
-        if (dirty || recordedViewport != viewport || !node.hasDisplayList()) {
+        if (!canvas.isHardwareAccelerated) return drawReferences(canvas, viewport, interacting)
+        if (dirty || recordedViewport != viewport || recordedInteraction != interacting || !node.hasDisplayList()) {
             node.setPosition(0, 0, viewport.width.toInt(), viewport.height.toInt())
             val recording = node.beginRecording()
             try {
-                dirty = drawReferences(recording, viewport)
+                dirty = drawReferences(recording, viewport, interacting)
                 recordedViewport = viewport
+                recordedInteraction = interacting
             } finally {
                 node.endRecording()
             }
@@ -144,7 +146,7 @@ internal class FundamentalsReferences(
         return dirty
     }
 
-    private fun drawReferences(canvas: Canvas, viewport: Viewport): Boolean = renderer.draw(
+    private fun drawReferences(canvas: Canvas, viewport: Viewport, interacting: Boolean): Boolean = renderer.draw(
         canvas = canvas, viewport = viewport,
         labels_enabled = labels, borders_enabled = borders, label_text_scale = labelTextScale,
         place_labels_enabled = true, water_labels_enabled = true,
@@ -152,6 +154,7 @@ internal class FundamentalsReferences(
         filter_state = filters,
         // This is a standalone overlay: it must remain visible during pan and pinch.
         interaction_active = false, label_avoid_rects = avoidance,
+        camera_motion_active = interacting,
     )
 
     fun close() {

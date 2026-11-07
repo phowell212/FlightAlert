@@ -1,6 +1,7 @@
 package com.flightalert.map.reference.labels
 
 import kotlin.math.hypot
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -134,7 +135,7 @@ import kotlin.math.min
         repeatDistancePx: Double,
         singleWaterLabelPerFeature: Boolean,
     ): Boolean {
-        if (!candidate.waterLine) return false
+        if (!candidate.waterLine || (!singleWaterLabelPerFeature && repeatDistancePx == 0.0)) return false
         return accepted.any { other ->
             other.waterLine &&
                 other.featureId == candidate.featureId &&
@@ -190,6 +191,8 @@ import kotlin.math.min
         var index = 0
         while (index < path.points.lastIndex) {
             if (
+                !segmentBoundsAreSeparated(path.points[index], path.points[index + 1],
+                    box.left, box.top, box.right, box.bottom, path.radiusPx) &&
                 segmentRectDistance(path.points[index], path.points[index + 1], box) <=
                 path.radiusPx
             ) {
@@ -212,6 +215,14 @@ import kotlin.math.min
             var secondIndex = 0
             while (secondIndex < second.points.lastIndex) {
                 if (
+                    !segmentBoundsAreSeparated(
+                        first.points[firstIndex], first.points[firstIndex + 1],
+                        min(second.points[secondIndex].x, second.points[secondIndex + 1].x),
+                        min(second.points[secondIndex].y, second.points[secondIndex + 1].y),
+                        max(second.points[secondIndex].x, second.points[secondIndex + 1].x),
+                        max(second.points[secondIndex].y, second.points[secondIndex + 1].y),
+                        combinedRadius,
+                    ) &&
                     segmentDistance(
                         first.points[firstIndex],
                         first.points[firstIndex + 1],
@@ -226,6 +237,27 @@ import kotlin.math.min
             firstIndex++
         }
         return false
+    }
+
+    private fun segmentBoundsAreSeparated(
+        start: ReferencePathLabelPoint,
+        end: ReferencePathLabelPoint,
+        left: Double,
+        top: Double,
+        right: Double,
+        bottom: Double,
+        radius: Double,
+    ): Boolean {
+        val magnitude = max(
+            max(max(abs(start.x), abs(start.y)), max(abs(end.x), abs(end.y))),
+            max(max(abs(left), abs(top)), max(abs(right), abs(bottom))),
+        )
+        // Preserve the exact solver's conservative result when cross products can overflow.
+        if (magnitude > 3e153 || !magnitude.isFinite()) return false
+        // Near touching, rounding uncertainty falls through to the exact distance check.
+        val padding = radius + Math.ulp(magnitude) * 16.0
+        return max(start.x, end.x) + padding < left || min(start.x, end.x) - padding > right ||
+            max(start.y, end.y) + padding < top || min(start.y, end.y) - padding > bottom
     }
 
     private fun touchesOrOverlaps(

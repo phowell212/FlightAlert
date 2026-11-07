@@ -35,6 +35,7 @@ import com.flightalert.flight.SelectedFlightPathViewportController
 import com.flightalert.traffic.*
 import com.flightalert.map.MapMeasurementFormatter
 import com.flightalert.map.UnitSystem
+import com.flightalert.map.Viewport
 import com.flightalert.map.reference.labels.ReferenceScreenRect
 import com.flightalert.map.MapProjection
 import com.flightalert.map.TileSource
@@ -73,14 +74,26 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private val source = GlobeBinCraftAircraftSource(FlightAlertAppSettings.App.USER_AGENT)
-    private val mapper = AircraftTrafficFeed(AircraftFeedClient(FlightAlertAppSettings.App.USER_AGENT), source)
+    private val feedClient = AircraftFeedClient(FlightAlertAppSettings.App.USER_AGENT)
+    private val mapper = AircraftTrafficFeed(feedClient, source)
+    private val fallback = FundamentalsTrafficFallback(
+        fetch = { query, ownLat, ownLon -> feedClient.fetch_adsb_lol_point(
+            query.centerLat, query.centerLon, query.radiusNm, ownLat, ownLon) },
+        post = { callback -> handler.post { callback() } }, onChanged = { refresh() })
+    private var sourceUpdateVersion = 0L
     private val disk = MapTileDiskCache(context.cacheDir, MAP_TILE_DISK_CACHE_MAX_BYTES,
         TileSource.entries.flatMap { listOf("${it.cache_key(false)}_tiles", "${it.cache_key(true)}_tiles") }.toSet() + REFERENCE_BOUNDARY_RASTER_CACHE_ROOT)
     private val tilePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val aircraftRenderer = FundamentalsAircraftRenderer(density).apply { theme = visualTheme }
-    private val references = FundamentalsReferences(context, disk) {
-        if (active) { publishReadout(); invalidate() }
+    private var publishedDictionaryStatus: String? = null
+    private var publishedViewport: Viewport? = null
+    private val references: FundamentalsReferences = FundamentalsReferences(context, disk) {
+        if (active) {
+            if (references.status() != publishedDictionaryStatus ||
+                camera.viewport(width.toFloat(), height.toFloat()) != publishedViewport) publishReadout()
+            invalidate()
+        }
     }
     private val aviation = FundamentalsAviation(context) { if (active) { publishReadout(); invalidate() } }
     private var tileMessage = "Map loading"
@@ -180,14 +193,15 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
     init {
         contentDescription = "Live aircraft map. Drag to pan, pinch to zoom, tap a dot for details."
         isFocusable = true
-        source.on_snapshot_updated = { refresh() }
+        source.on_snapshot_updated = { sourceUpdateVersion++; refresh() }
         source.set_enabled(true)
     }
 
     fun start() {
         if (active) return
         active = true
-        alerts.accept(alerts.evaluate(reports, ownship.takeIf { locationUsable }, trafficReady,
+        fallback.start()
+        alerts.accept(alerts.evaluate(reports, ownship.takeIf { locationUsable }, trafficReady && !partial,
             System.currentTimeMillis() / 1000.0))
         selection.start()
         aviation.start()
@@ -200,6 +214,7 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
 
     fun stop() {
         active = false
+        fallback.stop()
         selection.stop()
         aviation.stop()
         prefs.edit().putFloat(FlightAlertSettings.KEY_ZOOM, camera.viewport(width.toFloat(), height.toFloat()).zoom.toFloat()).apply()
@@ -213,6 +228,7 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
         stop()
         source.on_snapshot_updated = null
         source.destroy()
+        fallback.close()
         worker.shutdownNow()
         tiles.shutdown()
         aircraftRenderer.destroy()
@@ -232,7 +248,7 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
         headingProvider.update_location(location)
         locationMessage = "Location acquired"
         if (active) source.start()
-        refresh()
+        refresh(allowFallbackDrift = followLocation)
         invalidate()
     }
 
@@ -401,12 +417,18 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
     }
 
     /** Snapshot query, mapping, and spherical projection stay off the drawing thread. */
-    private fun refresh() {
+    private fun refresh(allowFallbackDrift: Boolean = false) {
         val location = ownship ?: return
-        if (!active || preparing || width == 0 || height == 0) return
+        if (!active || width == 0 || height == 0) return
+        val bounds = camera.bounds(width.toFloat() + 160 * density, height.toFloat() + 160 * density)
+        val viewport = camera.viewport(width.toFloat(), height.toFloat())
+        val center = MapProjection.world_to_lat_lon(viewport.center_x, viewport.center_y, viewport.zoom)
+        val query = fallback.setQuery(FundamentalsTrafficQuery.fromBounds(bounds, center.lat, center.lon),
+            location.latitude, location.longitude, allowFallbackDrift)
+        if (preparing) return
         preparing = true
         val requestGeneration = generation
-        val bounds = camera.bounds(width.toFloat() + 160 * density, height.toFloat() + 160 * density)
+        val requestSourceVersion = sourceUpdateVersion
         val requestedSelection = selectedKey
         val requestedFilters = filters
         val requestedTheme = visualTheme
@@ -418,8 +440,13 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
             bounds_around_location(location, radius).let { FeedBounds(it.min_lat, it.min_lon, it.max_lat, it.max_lon) }
         } else null
         worker.execute {
-            val result = source.latest_snapshot(listOf(bounds), safetyBounds,
+            val worldResult = source.latest_snapshot(listOf(bounds), safetyBounds,
                 location.latitude, location.longitude, null, requestedSelection) ?: source.unavailable_result()
+            val recovery = if (worldResult.status == FeedStatus.OK) {
+                fallback.worldAvailable()
+                null
+            } else fallback.latestOrRequest(query, worldResult.failure_reason != null)
+            val result = recovery?.result ?: worldResult
             val now = System.currentTimeMillis() / 1000.0
             val epoch = SystemClock.elapsedRealtime()
             // Reports outside the viewport can project into it, especially at close zoom.
@@ -454,7 +481,9 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
             }?.aircraft
             handler.post {
                 preparing = false
-                if (active && requestGeneration == generation) {
+                if (active && requestGeneration == generation &&
+                    (worldResult.status == FeedStatus.OK || requestSourceVersion == sourceUpdateVersion) &&
+                    (recovery == null || fallback.isCurrent(recovery))) {
                     nodes = prepared
                     reports = all
                     alerts.accept(alertEvaluation)
@@ -469,9 +498,11 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
                     trafficUnavailable = result.failure_reason != null && result.status != FeedStatus.OK
                     partial = result?.partial_coverage == true
                     trafficMessage = when {
+                        recovery != null -> "Live ADSB.lol local API recovery · ${recovery.query.radiusNm} nm · partial area" +
+                            (if (fallback.isUpdatingArea(recovery)) " · updating area" else "") + " · world feed unavailable"
                         result.status != FeedStatus.OK ->
-                            "${result.source.display_name} unavailable" +
-                                (result.failure_reason?.let { ": $it" } ?: " / connecting")
+                            "World feed unavailable" + (result.failure_reason?.let { ": $it" } ?: " / connecting") +
+                                " · waiting for local API recovery"
                         result.partial_coverage -> "Live feed · ${result.source.display_name} · partial coverage"
                         else -> "Live feed · ${result.source.display_name}"
                     }
@@ -495,7 +526,7 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
         val world = 256.0 * factor
         val own = MapProjection.lat_lon_to_world(location.latitude, location.longitude, viewport.zoom)
         val ownshipViewport = viewport.copy(center_x = own.x - wrapped(own.x - viewport.center_x, world))
-        val referencesAnimating = references.draw(canvas, viewport)
+        val referencesAnimating = references.draw(canvas, viewport, interacting)
         val aviationAnimating = aviation.draw(canvas, viewport, labelAvoidance, interacting)
         val alertSettings = alertSettingsSnapshot
         if (if (alertSettings.priorityEnabled) alertSettings.ringVisible else rangeVisible) {
@@ -680,14 +711,17 @@ internal class FundamentalsMapView(context: Context, private val onMonitoringCha
             val distance = if (reportedDistance.isFinite()) measurements.format_distance(reportedDistance) else "Unavailable"
             FundamentalsAircraftDetail(it.callsign_label, it.icao24.uppercase(Locale.US), altitude, speed, distance, age)
         }
+        val dictionaryStatus = references.status()
+        publishedDictionaryStatus = dictionaryStatus
+        publishedViewport = viewport
         onReadout(FundamentalsReadout(locationStatus, trafficMessage, trafficReady, partial, trafficUnavailable,
-            visibleCount, extent, tileMessage, references.status(),
+            visibleCount, extent, tileMessage, dictionaryStatus,
             measurements.current_map_scale(40 * density, center.lat, viewport.zoom),
             selectedKey != null, detail, selection.readout(), mapSource.attribution_text(tileState.map_labels_enabled),
             aviation.inspector(), "${aviation.status()}\n$filterMessage\n${alerts.evaluation().status}\n$monitoringMessage\n$downloadStatus" +
                 (if (rangeVisible) "\nHorizontal range preview: ${measurements.format_distance(rangeFeet() / 3.28084)}" else ""),
             selection.trafficPanel(nearestAircraft, aircraft_filters_active(filters), filterStats, trafficMessage).let {
-                if (nearestAircraft != null && !nearestFromGlobalSummary && is_normal_airborne_filter_mode(filters))
+                if (selectedKey == null && nearestAircraft != null && !nearestFromGlobalSummary && is_normal_airborne_filter_mode(filters))
                     it.copy(title = "NEAREST MAPPED TRAFFIC") else it
             }, alerts.settings().let { it.alertsEnabled || it.priorityEnabled }))
     }

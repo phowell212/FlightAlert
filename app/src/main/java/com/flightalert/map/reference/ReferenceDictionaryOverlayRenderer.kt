@@ -43,7 +43,6 @@ import com.flightalert.map.reference.labels.ReferenceScreenRect
 import com.flightalert.map.reference.labels.translateReferencePathCollisionShape
 import com.flightalert.map.reference.retained.PreparedRetainedLabelFrame
 import com.flightalert.map.reference.retained.PreparedRetainedStaticLabelPlan
-import com.flightalert.map.reference.retained.RETAINED_FRAME_HISTORY_LIMIT
 import com.flightalert.map.reference.retained.ReferenceRetainedBitmapCompletion
 import com.flightalert.map.reference.retained.ReferenceRetainedBitmapCoordinator
 import com.flightalert.map.reference.retained.ReferenceRetainedDestination
@@ -65,7 +64,11 @@ import com.flightalert.map.reference.retained.reference_retained_label_intersect
 import com.flightalert.map.reference.retained.reference_retained_label_transition
 import com.flightalert.map.reference.retained.reference_retained_leaving_label_alpha
 import com.flightalert.map.reference.retained.reference_retained_repeating_world_width_px
+import com.flightalert.map.reference.retained.reference_retained_covers_viewport
+import com.flightalert.map.reference.retained.reference_retained_project_labels
+import com.flightalert.map.reference.retained.reference_retained_request_covers_motion
 import com.flightalert.map.reference.retained.reference_retained_scene_should_stage
+import com.flightalert.map.reference.retained.reference_should_defer_target_work
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.locks.ReentrantLock
@@ -124,7 +127,8 @@ internal class ReferenceDictionaryOverlayRenderer(
         > {}
     private val retained_static_label_plans =
         ReferenceRetainedSceneHistory<PreparedRetainedStaticLabelPlan>(
-            RETAINED_FRAME_HISTORY_LIMIT,
+            // Prepared geometry pins decoded tiles; drawable frames keep their own history.
+            1,
         )
     @Volatile
     private var requested_retained_static_label_key: RetainedStaticLabelPlanKey? = null
@@ -134,6 +138,17 @@ internal class ReferenceDictionaryOverlayRenderer(
     private var partial_label_frame: RetainedReferenceFrame? = null
     private var retained_fade: RetainedReferenceFade? = null
     private var displayed_retained_frame: RetainedReferenceFrame? = null
+    private var current_label_avoid_rects: List<ReferenceScreenRect> = emptyList()
+    private data class ProjectedLabels(
+        val source: List<DictionaryLabelCandidate>,
+        val viewport: Viewport,
+        val scale: Double,
+        val x: Double,
+        val y: Double,
+        val avoidance: List<ReferenceScreenRect>,
+        val labels: List<DictionaryLabelCandidate>,
+    )
+    private val projected_labels = ArrayList<ProjectedLabels>(2)
 
     fun draw(
         canvas: Canvas,
@@ -148,6 +163,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         filter_state: FilterState,
         interaction_active: Boolean,
         label_avoid_rects: List<ReferenceScreenRect>,
+        camera_motion_active: Boolean = false,
     ): Boolean {
         if (interaction_active) {
             if (retained_renderer.interaction_started(true)) cancel_label_request()
@@ -155,6 +171,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             return false
         }
         retained_renderer.update_interaction_active(false)
+        current_label_avoid_rects = label_avoid_rects
         if (!labels_enabled && !borders_enabled) {
             return false
         }
@@ -202,6 +219,41 @@ internal class ReferenceDictionaryOverlayRenderer(
             public_lands = public_lands_enabled,
         )
         val settled_target = retained_renderer.target_frame()
+        if (camera_motion_active) {
+            val motion_frame = retained_renderer.retained_frame_for_viewport(
+                viewport, options, tile_zoom, fallback_zoom,
+                displayed_retained_frame, retained_renderer.destination,
+            )
+            val covered_labels = motion_frame != null &&
+                motion_frame.matches_label_avoidance(label_avoid_rects) &&
+                reference_retained_covers_viewport(retained_renderer.destination, viewport) &&
+                !reference_retained_scene_should_stage(
+                    retained_renderer.destination, viewport,
+                    reference_retained_repeating_world_width_px(viewport, tile_zoom),
+                )
+            if (reference_should_defer_target_work(
+                    interactionActive = true,
+                    labelsEnabled = labels_enabled,
+                    retainedLabelsAvailable = covered_labels,
+                    bordersEnabled = borders_enabled,
+                    compatibleActiveBoundaryBand = boundary_renderer.has_compatible_active_band(
+                        groups, filter_mask, tile_repository.package_generation(),
+                    ),
+                )
+            ) {
+                if (borders_enabled) boundary_renderer.draw(
+                    canvas = canvas, viewport = viewport, source_zoom = tile_zoom,
+                    groups = groups, filter_mask = filter_mask, interaction_active = false,
+                    freeze_active_band = true,
+                    tile_request_generation = tile_repository.request_generation(),
+                    active_retained_frame = motion_frame, now_ms = now_ms,
+                )
+                if (motion_frame != null) draw_retained_frame_with_transition(
+                    canvas, viewport, motion_frame, now_ms, retained_renderer.destination,
+                )
+                return is_fading()
+            }
+        }
         val fallback_needs_build = retained_renderer.retained_fallback_needs_build(
             viewport = viewport,
             options = options,
@@ -244,6 +296,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                         groups = groups,
                         filter_mask = filter_mask,
                         interaction_active = false,
+                        freeze_active_band = camera_motion_active,
                         tile_request_generation = tile_repository.request_generation(),
                         active_retained_frame = settled_target,
                         now_ms = now_ms,
@@ -336,6 +389,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 groups = groups,
                 filter_mask = filter_mask,
                 interaction_active = interaction_active,
+                freeze_active_band = camera_motion_active,
                 tile_request_generation = generation,
                 active_retained_frame = settled_target,
                 now_ms = now_ms,
@@ -372,6 +426,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                 label_avoid_rects = label_avoid_rects,
                 options = options,
                 package_generation_snapshot = tile_repository.package_generation(),
+                reuse_pending_frame = camera_motion_active,
             )
             val retained = draw_retained_frame_if_available(
                 canvas,
@@ -431,6 +486,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     label_avoid_rects = label_avoid_rects,
                     options = options,
                     package_generation_snapshot = tile_repository.package_generation(),
+                    reuse_pending_frame = camera_motion_active,
                 )
             } else if (
                 reference_retained_scene_should_stage(retained_renderer.destination, viewport) &&
@@ -457,6 +513,7 @@ internal class ReferenceDictionaryOverlayRenderer(
                     label_avoid_rects = label_avoid_rects,
                     options = options,
                     package_generation_snapshot = tile_repository.package_generation(),
+                    reuse_pending_frame = camera_motion_active,
                 )
             }
             draw_retained_frame_with_transition(
@@ -484,6 +541,7 @@ internal class ReferenceDictionaryOverlayRenderer(
             label_avoid_rects = label_avoid_rects,
             options = options,
             package_generation_snapshot = tile_repository.package_generation(),
+            reuse_pending_frame = camera_motion_active,
         )
         val retained = draw_retained_frame_if_available(
             canvas = canvas,
@@ -537,6 +595,7 @@ internal class ReferenceDictionaryOverlayRenderer(
         partial_label_frame = null
         retained_fade = null
         displayed_retained_frame = null
+        projected_labels.clear()
         synchronized(retained_static_label_plans) {
             retained_static_label_plans.clear()
         }
@@ -581,9 +640,16 @@ internal class ReferenceDictionaryOverlayRenderer(
         label_avoid_rects: List<ReferenceScreenRect>,
         options: RetainedReferenceOptions,
         package_generation_snapshot: Long,
+        reuse_pending_frame: Boolean = false,
     ) {
         if (!labels_enabled || retained_label_executor.isShutdown) return
         retained_label_coordinator.currentKey()?.let { current_key ->
+            if (reuse_pending_frame && reference_retained_request_covers_motion(
+                    key = current_key, role = role, viewport = viewport, tileZoom = tile_zoom,
+                    options = options, packageGeneration = package_generation_snapshot,
+                    avoidRects = label_avoid_rects,
+                )
+            ) return
             if (retained_label_request_matches(
                     key = current_key,
                     role = role,
@@ -1150,27 +1216,59 @@ internal class ReferenceDictionaryOverlayRenderer(
         fully_visible: BooleanArray? = null,
     ) {
         val zoom_scale = (destination.right - destination.left) / frame.width
-        for (index in labels.indices.reversed()) {
-            val candidate = labels[index]
+        val reprojected = kotlin.math.abs(zoom_scale - 1.0) > 0.000_001
+        val draw_labels = if (reprojected) {
+            projected_labels.firstOrNull {
+                it.source === labels && it.viewport == viewport && it.scale == zoom_scale &&
+                    it.x == destination.left && it.y == destination.top &&
+                    it.avoidance == current_label_avoid_rects
+            }?.labels ?: reference_retained_project_labels(
+                labels, zoom_scale, destination.left, destination.top, viewport, current_label_avoid_rects,
+            ).also {
+                if (projected_labels.size == 2) projected_labels.removeAt(0)
+                projected_labels += ProjectedLabels(
+                    labels, viewport, zoom_scale, destination.left, destination.top, current_label_avoid_rects, it,
+                )
+            }
+        } else labels
+        var source_index = labels.lastIndex
+        for (index in draw_labels.indices.reversed()) {
+            val candidate = draw_labels[index]
+            if (reprojected) {
+                while (source_index >= 0 &&
+                    labels[source_index].occurrenceId != candidate.occurrenceId
+                ) source_index--
+            } else source_index = index
+            val draw_scale = if (reprojected) 1.0 else zoom_scale
+            val draw_x = if (reprojected) 0.0 else destination.left
+            val draw_y = if (reprojected) 0.0 else destination.top
             if (!reference_retained_label_intersects_viewport(
                     collision_shape = candidate.collisionShape,
                     anchor = candidate.anchor,
-                    zoom_scale = zoom_scale,
-                    translate_x = destination.left,
-                    translate_y = destination.top,
+                    zoom_scale = draw_scale,
+                    translate_x = draw_x,
+                    translate_y = draw_y,
                     viewport_width = viewport.width.toDouble(),
                     viewport_height = viewport.height.toDouble(),
                 )
             ) {
                 continue
             }
+            if (!reprojected && current_label_avoid_rects.any { rect ->
+                    reference_retained_label_intersects_viewport(
+                        candidate.collisionShape, candidate.anchor, draw_scale,
+                        draw_x - rect.left, draw_y - rect.top,
+                        rect.right - rect.left, rect.bottom - rect.top,
+                    )
+                }
+            ) continue
             label_renderer.draw_label_candidate(
                 canvas = canvas,
                 candidate = candidate,
-                zoom_scale = zoom_scale,
-                translate_x = destination.left,
-                translate_y = destination.top,
-                frame_alpha = if (fully_visible?.get(index) == true) 255 else alpha,
+                zoom_scale = draw_scale,
+                translate_x = draw_x,
+                translate_y = draw_y,
+                frame_alpha = if (source_index >= 0 && fully_visible?.get(source_index) == true) 255 else alpha,
             )
         }
     }
